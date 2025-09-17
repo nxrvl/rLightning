@@ -1,0 +1,23 @@
+# rLightning Default Configuration
+
+[server]
+host = "127.0.0.1"
+port = 6379
+workers = 4  # Number of worker threads
+
+[storage]
+max_memory_mb = 128  # Maximum memory usage in MB
+eviction_policy = "lru"  # Options: lru, lfu, random, none
+default_ttl_seconds = 0  # 0 means no expiration
+
+[keys]
+max_key_size = 1024  # Maximum size of keys in bytes
+max_value_size = 5242880  # Maximum size of values in bytes (5MB)
+
+[security]
+require_auth = false
+password = ""  # Set this if require_auth is true
+
+[logging]
+level = "debug"  # Options: trace, debug, info, warn, error
+file = ""  # Empty means log to stdout 

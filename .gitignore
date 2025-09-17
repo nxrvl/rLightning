@@ -1,0 +1,9 @@
+.vscode/
+
+target/
+.DS_Store
+.idea/
+.claude/
+html/
+CLAUDE.md
+RELEASE_SETUP.md

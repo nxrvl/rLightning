@@ -1,0 +1,33 @@
+services:
+  rlightning:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rlightning:latest
+    container_name: rlightning
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    volumes:
+      # Optional volume for data persistence if implemented
+      - rlightning_data:/data
+      # Mount the test configuration file
+      - ./test-config.toml:/etc/rlightning/config.toml
+    command:
+      [
+        "rlightning",
+        "--config",
+        "/etc/rlightning/config.toml",
+        "--master-password",
+        "test_password",
+      ]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "6379"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  rlightning_data:
+    driver: local

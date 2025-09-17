@@ -1,0 +1,16 @@
+[server]
+host = "0.0.0.0"
+port = 6379
+workers = 2 # Limit to 2 worker threads for benchmarking
+
+[storage]
+max_memory_mb = 100 # 100MB limit to match Redis configuration
+eviction_policy = "lru" # Matching Redis LRU eviction
+default_ttl_seconds = 0  # 0 means no expiration
+
+[keys]
+max_key_size = 1024  # Maximum size of keys in bytes
+max_value_size = 104857600  # 100MB max value size
+
+[logging]
+level = "warn" # Only log warnings and errors during benchmarks 
