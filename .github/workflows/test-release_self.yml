@@ -1,4 +1,4 @@
-name: Test Release Build
+name: Test Release Build Self-Hosted Runner
 
 on:
   pull_request:

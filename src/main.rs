@@ -1,14 +1,17 @@
+use std::env;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::sync::Arc;
-use std::env;
+use std::time::Duration;
 
 use clap::Parser;
+use figment::{
+    Error as FigmentError, Figment,
+    providers::{Env, Format, Serialized, Toml},
+};
 use serde::Deserialize;
-use tracing::{info, error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
-use figment::{Figment, providers::{Format, Toml, Env, Serialized}, Error as FigmentError};
 
 // Use jemalloc as the global allocator for better memory management
 #[global_allocator]
@@ -18,22 +21,26 @@ mod command;
 mod networking;
 mod persistence;
 mod replication;
-mod storage;
 mod security;
+mod storage;
 mod utils;
 
 use crate::networking::server::Server;
-use crate::persistence::config::{PersistenceConfig, PersistenceMode, AofSyncPolicy};
 use crate::persistence::PersistenceManager;
-use crate::replication::config::ReplicationConfig;
+use crate::persistence::config::{AofSyncPolicy, PersistenceConfig, PersistenceMode};
 use crate::replication::ReplicationManager;
+use crate::replication::config::ReplicationConfig;
 use crate::security::{SecurityConfig, SecurityManager};
-use crate::storage::engine::{EvictionPolicy, StorageEngine, StorageConfig};
+use crate::storage::engine::{EvictionPolicy, StorageConfig, StorageEngine};
 
 // --- Command Line Arguments ---
 
 #[derive(Parser, Debug)]
-#[clap(name = "rLightning", version, about = "A Redis-compatible in-memory key-value store")]
+#[clap(
+    name = "rLightning",
+    version,
+    about = "A Redis-compatible in-memory key-value store"
+)]
 struct Args {
     /// Path to configuration file
     #[clap(short, long, value_name = "FILE")]
@@ -233,8 +240,7 @@ impl Default for LoggingSettings {
 // --- Configuration Loading Function ---
 
 fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
-    let mut figment = Figment::new()
-        .merge(Serialized::defaults(AppSettings::default()));
+    let mut figment = Figment::new().merge(Serialized::defaults(AppSettings::default()));
 
     // Load settings from config file if specified
     let mut require_auth_in_config = false;
@@ -247,7 +253,7 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
                 eprintln!("DEBUG: Found require_auth = true in config file");
             }
         }
-        
+
         // Now merge the config file
         figment = figment.merge(Toml::file(config_path));
     }
@@ -257,47 +263,69 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
 
     // Check if settings were loaded correctly from the config file
     if let Ok(settings) = figment.extract::<AppSettings>() {
-        eprintln!("DEBUG: Settings after config file: require_auth = {}", settings.security.require_auth);
+        eprintln!(
+            "DEBUG: Settings after config file: require_auth = {}",
+            settings.security.require_auth
+        );
     }
 
     // Merge command-line arguments (overriding file and env)
     // Create a temporary struct with only the fields present in Args
     #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct CliOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] server: Option<ServerOverrides>,
-        #[serde(skip_serializing_if = "Option::is_none")] storage: Option<StorageOverrides>,
-        #[serde(skip_serializing_if = "Option::is_none")] security: Option<SecurityOverrides>,
-        #[serde(skip_serializing_if = "Option::is_none")] persistence: Option<PersistenceOverrides>,
-        #[serde(skip_serializing_if = "Option::is_none")] replication: Option<ReplicationOverrides>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server: Option<ServerOverrides>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage: Option<StorageOverrides>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        security: Option<SecurityOverrides>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        persistence: Option<PersistenceOverrides>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replication: Option<ReplicationOverrides>,
     }
     #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct ServerOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] host: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")] port: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
     }
-     #[derive(Deserialize, Debug, Default, serde::Serialize)]
+    #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct StorageOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] max_memory_mb: Option<usize>,
-        #[serde(skip_serializing_if = "Option::is_none")] eviction_policy: Option<EvictionPolicy>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_memory_mb: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eviction_policy: Option<EvictionPolicy>,
     }
-     #[derive(Deserialize, Debug, Default, serde::Serialize)]
+    #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct PersistenceOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] mode: Option<PersistenceMode>,
-        #[serde(skip_serializing_if = "Option::is_none")] rdb_path: Option<PathBuf>,
-        #[serde(skip_serializing_if = "Option::is_none")] aof_path: Option<PathBuf>,
-        #[serde(skip_serializing_if = "Option::is_none")] aof_sync_policy: Option<AofSyncPolicy>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<PersistenceMode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rdb_path: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aof_path: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aof_sync_policy: Option<AofSyncPolicy>,
     }
-     #[derive(Deserialize, Debug, Default, serde::Serialize)]
+    #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct ReplicationOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] master_host: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")] master_port: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")] master_password: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")] accept_replicas: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        master_host: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        master_port: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        master_password: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        accept_replicas: Option<bool>,
     }
     #[derive(Deserialize, Debug, Default, serde::Serialize)]
     struct SecurityOverrides {
-        #[serde(skip_serializing_if = "Option::is_none")] require_auth: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")] password: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        require_auth: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     }
 
     let cli_overrides = CliOverrides {
@@ -333,15 +361,18 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
 
     // Extract the final configuration
     let mut settings = figment.extract::<AppSettings>()?;
-    
+
     // Now override the require_auth field directly
     if require_auth_in_config {
         eprintln!("DEBUG: Setting require_auth = true directly in the final settings");
         settings.security.require_auth = true;
     }
-    
-    eprintln!("DEBUG: Final settings: require_auth = {}", settings.security.require_auth);
-    
+
+    eprintln!(
+        "DEBUG: Final settings: require_auth = {}",
+        settings.security.require_auth
+    );
+
     Ok(settings)
 }
 
@@ -352,12 +383,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber (before parsing args to potentially use RUST_LOG)
     // First try RUST_LOG env var, then fall back to config file, then default to info
     let default_level = EnvFilter::new("info");
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or(default_level);
-    
-    fmt::Subscriber::builder()
-        .with_env_filter(filter)
-        .init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or(default_level);
+
+    fmt::Subscriber::builder().with_env_filter(filter).init();
 
     // Parse command line arguments
     let args = Args::parse();
@@ -370,7 +398,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(Box::<dyn std::error::Error>::from(e));
         }
     };
-    
+
     // Update the tracing filter based on the loaded configuration if RUST_LOG isn't set
     if env::var("RUST_LOG").is_err() {
         // Create a new filter based on the config file
@@ -380,9 +408,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Apply the new filter - this is a bit tricky since we can't replace the global subscriber
             // Instead, we'll log what's happening and set the env var for future log calls
             info!("Setting log level to '{}' from configuration", log_level);
-            std::env::set_var("RUST_LOG", log_level);
+            unsafe {
+                std::env::set_var("RUST_LOG", log_level);
+            }
         } else {
-            warn!("Invalid log level '{}' in configuration, using default", log_level);
+            warn!(
+                "Invalid log level '{}' in configuration, using default",
+                log_level
+            );
         }
     }
 
@@ -398,7 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => {
                 let err = std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
-                    format!("Could not resolve address: {}", addr_str)
+                    format!("Could not resolve address: {}", addr_str),
                 );
                 return Err(Box::<dyn std::error::Error>::from(err));
             }
@@ -434,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize persistence manager with the configured settings
     let persistence = PersistenceManager::new(Arc::clone(&storage), persistence_config);
-    
+
     // Create replication configuration
     let replication_config = ReplicationConfig {
         master_host: settings.replication.master_host.clone(),
@@ -446,10 +479,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_replicas_to_write: settings.replication.min_replicas_to_write,
         min_replicas_max_lag: Duration::from_secs(settings.replication.min_replicas_max_lag_secs),
     };
-    
+
     // Initialize replication manager
     let replication = ReplicationManager::new(Arc::clone(&storage), replication_config);
-    
+
     // Create security configuration
     let security_config = SecurityConfig {
         require_auth: settings.security.require_auth,
@@ -463,19 +496,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize replication if needed
     if let Err(e) = replication.init().await {
         error!("Failed to initialize replication: {}", e);
-        return Err(Box::<dyn std::error::Error>::from(
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Replication initialization error: {}", e)
-            )
-        ));
+        return Err(Box::<dyn std::error::Error>::from(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Replication initialization error: {}", e),
+        )));
     }
 
     // Initialize the server with replication support
     let server = Server::new(addr, Arc::clone(&storage))
         .with_persistence(Arc::new(persistence), settings.persistence.aof_sync_policy)
         .with_security(security);
-    
+
     // Start the server (this will block until shutdown)
     if let Err(e) = server.start().await {
         error!("Server error: {}", e);
@@ -483,4 +514,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-} 
+}

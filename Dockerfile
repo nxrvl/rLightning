@@ -72,9 +72,7 @@ ENV RLIGHTNING_BIND=0.0.0.0
 LABEL org.opencontainers.image.title="rLightning" \
     org.opencontainers.image.description="High-performance Redis-compatible in-memory key-value store" \
     org.opencontainers.image.version="${VERSION}" \
-    org.opencontainers.image.revision="${COMMIT}" \
     org.opencontainers.image.created="${BUILD_DATE}" \
-    org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY:-rlightning/rlightning}" \
     org.opencontainers.image.licenses="MIT"
 
 # Set the default command
