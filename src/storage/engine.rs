@@ -903,6 +903,15 @@ impl StorageEngine {
     }
 }
 
+/// Backwards-compatible helper for constructing storage engines using the legacy `Storage` name.
+pub struct Storage;
+
+impl Storage {
+    pub fn new(config: StorageConfig) -> Arc<StorageEngine> {
+        StorageEngine::new(config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

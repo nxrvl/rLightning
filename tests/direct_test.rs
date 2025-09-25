@@ -18,7 +18,7 @@ async fn test_large_json_set() {
     // Create storage engine and server
     let storage = Arc::new(StorageEngine::new(config));
     // Using the default buffer size since with_buffer_size is marked with #[allow(dead_code)]
-    let server = Server::new(addr, Arc::clone(&storage));
+    let server = Server::new_with_storage(addr, Arc::clone(&storage));
     
     // Start server in a background task
     let _server_handle = tokio::spawn(async move {

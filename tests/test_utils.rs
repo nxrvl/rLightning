@@ -47,7 +47,7 @@ pub async fn setup_test_server_with_optional_security(
     let storage = Arc::new(StorageEngine::new(storage_config));
     let _command_handler = Arc::new(CommandHandler::new(Arc::clone(&storage)));
 
-    let mut server_builder = Server::new(addr, Arc::clone(&storage))
+    let mut server_builder = Server::new_with_storage(addr, Arc::clone(&storage))
         .with_connection_limit(100)
         .with_buffer_size(1024 * 1024); // Use 1MB buffer size for tests (up from 1KB)
 

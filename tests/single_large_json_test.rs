@@ -17,7 +17,7 @@ async fn test_large_json_set_and_get() {
     
     // Create storage engine and server
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage));
+    let server = Server::new_with_storage(addr, Arc::clone(&storage));
     
     // Start server in a background task
     let _server_handle = tokio::spawn(async move {

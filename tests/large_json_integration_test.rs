@@ -13,7 +13,7 @@ async fn test_large_json_through_resp() {
     // Use a unique port number to avoid conflicts with other tests
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18100));
     let storage = std::sync::Arc::new(StorageEngine::new(config.clone()));
-    let server = Server::new(addr, std::sync::Arc::clone(&storage));
+    let server = Server::new_with_storage(addr, std::sync::Arc::clone(&storage));
     
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -94,7 +94,7 @@ async fn test_json_with_control_chars() {
     // Use a unique port number
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18200));
     let storage = std::sync::Arc::new(StorageEngine::new(config.clone()));
-    let server = Server::new(addr, std::sync::Arc::clone(&storage));
+    let server = Server::new_with_storage(addr, std::sync::Arc::clone(&storage));
     
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -159,7 +159,7 @@ async fn test_error_reproduction() {
     let mut config = StorageConfig::default();
     config.max_value_size = 1 * 1024 * 1024; // 1MB
     let storage = std::sync::Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, std::sync::Arc::clone(&storage));
+    let server = Server::new_with_storage(addr, std::sync::Arc::clone(&storage));
     
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;

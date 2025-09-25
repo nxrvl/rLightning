@@ -18,7 +18,7 @@ async fn test_concurrent_access() -> Result<(), Box<dyn std::error::Error + Send
     config.max_memory = 512; // Increase memory limit for stress test
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {
@@ -266,7 +266,7 @@ async fn test_simple_throughput() -> Result<(), Box<dyn std::error::Error + Send
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {

@@ -7,15 +7,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-use crate::command::Command;
 use crate::command::handler::CommandHandler;
 use crate::command::parser;
+use crate::command::Command;
 use crate::networking::error::NetworkError;
 use crate::networking::resp::{RespCommand, RespValue};
-use crate::persistence::PersistenceManager;
 use crate::persistence::config::AofSyncPolicy;
+use crate::persistence::PersistenceManager;
 use crate::security::SecurityManager;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageConfig, StorageEngine};
 use crate::utils::logging;
 
 /// The Redis-compatible server
@@ -30,9 +30,15 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new server
-    pub fn new(addr: SocketAddr, storage: Arc<StorageEngine>) -> Self {
-        let command_handler = Arc::new(CommandHandler::new(Arc::clone(&storage)));
+    /// Create a new server with an in-memory storage engine using default configuration
+    pub fn new(addr: SocketAddr) -> Self {
+        let storage = StorageEngine::new(StorageConfig::default());
+        Self::new_with_storage(addr, storage)
+    }
+
+    /// Create a new server with the provided storage engine
+    pub fn new_with_storage(addr: SocketAddr, storage: Arc<StorageEngine>) -> Self {
+        let command_handler = Arc::new(CommandHandler::new(storage));
 
         Server {
             addr,
@@ -129,6 +135,11 @@ impl Server {
         }
     }
 
+    /// Convenience method matching earlier API that consumed self
+    pub async fn run(self) -> Result<(), NetworkError> {
+        self.start().await
+    }
+
     /// Handle a client connection
     async fn handle_client(
         mut socket: TcpStream,
@@ -147,7 +158,7 @@ impl Server {
         // Create a buffer for reading client data with increased capacity for large JSON values
         let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut response_buffer = Vec::with_capacity(buffer_size);
-        let mut partial_command_buffer: Vec<u8> = Vec::new(); // For reassembling partial large commands
+        let mut partial_command_buffer: Option<BytesMut> = None;
 
         // CRITICAL FIX: Use stateful parser to prevent data/command confusion
         use crate::networking::resp_parser_state::StatefulRespParser;
@@ -190,18 +201,18 @@ impl Server {
 
             // Process complete RESP messages from the buffer directly
             while !buffer.is_empty() {
-                // If we have leftover data from previous read, prepend it to the buffer
-                if !partial_command_buffer.is_empty() {
-                    let mut combined =
-                        BytesMut::with_capacity(partial_command_buffer.len() + buffer.len());
-                    combined.extend_from_slice(&partial_command_buffer);
-                    combined.extend_from_slice(&buffer);
-                    buffer = combined;
-                    partial_command_buffer.clear();
-                    debug!(client_addr = %client_addr_str, combined_buffer = buffer.len(), "Combined partial buffer with new data");
+                if let Some(mut partial) = partial_command_buffer.take() {
+                    debug!(
+                        client_addr = %client_addr_str,
+                        prev_len = partial.len(),
+                        new_len = buffer.len(),
+                        "Reassembling partial command buffer"
+                    );
+                    partial.extend_from_slice(&buffer);
+                    buffer = partial;
                 }
-
                 // Try the fast path for common commands first
+                let fast_path_snapshot = buffer.clone();
                 match RespValue::try_parse_common_command(&mut buffer) {
                     Ok(Some(resp_cmd)) => {
                         debug!(client_addr = %client_addr_str, command = ?resp_cmd, "Fast path command");
@@ -281,6 +292,7 @@ impl Server {
                     }
                     Ok(None) => {
                         // Fast path didn't match, try regular parsing
+                        let standard_snapshot = buffer.clone();
                         match RespValue::parse(&mut buffer) {
                             Ok(Some(value)) => {
                                 debug!(client_addr = %client_addr_str, value = ?value, "Received RESP value");
@@ -396,14 +408,33 @@ impl Server {
                                 }
                             }
                             Ok(None) => {
-                                debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message, waiting for more data");
-                                // Save the partial data for the next iteration
-                                partial_command_buffer.extend_from_slice(&buffer);
+                                debug!(
+                                    client_addr = %client_addr_str,
+                                    buffer_len = standard_snapshot.len(),
+                                    "Incomplete RESP message, waiting for more data"
+                                );
+                                partial_command_buffer = Some(standard_snapshot);
                                 buffer.clear();
-                                debug!(client_addr = %client_addr_str, partial_buffer_len = partial_command_buffer.len(), "Saved partial command data");
                                 break;
                             }
                             Err(e) => {
+                                buffer = standard_snapshot;
+
+                                // If we encountered apparent corruption but the original snapshot
+                                // still began with a valid RESP type marker, treat this as an
+                                // incomplete message and wait for more data instead of returning
+                                // an error (large bulk strings stream in chunks and can leave the
+                                // working buffer positioned at the payload).
+                                if matches!(buffer.first().copied(), Some(b'$' | b'*')) {
+                                    debug!(
+                                        client_addr = %client_addr_str,
+                                        "Treating RESP parse error as incomplete payload"
+                                    );
+                                    partial_command_buffer = Some(buffer.clone());
+                                    buffer.clear();
+                                    break;
+                                }
+
                                 error!(client_addr = %client_addr_str, error = ?e, "RESP protocol error");
 
                                 // Create a more detailed error message based on the type of error
@@ -445,8 +476,12 @@ impl Server {
                         error!(client_addr = %client_addr_str, error = ?e, "Fast path error");
                         // If it's just incomplete data, save for next iteration instead of returning error
                         if let RespError::Incomplete = e {
-                            debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message in fast path, waiting for more data");
-                            partial_command_buffer.extend_from_slice(&buffer);
+                            debug!(
+                                client_addr = %client_addr_str,
+                                buffer_len = fast_path_snapshot.len(),
+                                "Incomplete RESP message in fast path, waiting for more data"
+                            );
+                            partial_command_buffer = Some(fast_path_snapshot);
                             buffer.clear();
                             break;
                         } else {

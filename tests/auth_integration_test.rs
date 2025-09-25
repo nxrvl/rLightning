@@ -40,7 +40,7 @@ pub mod auth_integration_tests {
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
         let storage = Arc::new(StorageEngine::new(storage_config));
         
-        let mut server_builder = Server::new(addr, Arc::clone(&storage))
+        let mut server_builder = Server::new_with_storage(addr, Arc::clone(&storage))
             .with_connection_limit(100)
             .with_buffer_size(1024 * 1024); // Use 1MB buffer size for tests (up from 1KB)
 

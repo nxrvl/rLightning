@@ -16,7 +16,7 @@ async fn test_redis_advanced_compatibility() -> Result<(), Box<dyn std::error::E
     config.max_value_size = 1 * 1024 * 1024; // 1MB
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {

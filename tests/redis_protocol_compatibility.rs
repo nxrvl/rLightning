@@ -16,7 +16,7 @@ async fn test_resp_protocol_compatibility() -> Result<(), Box<dyn std::error::Er
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {

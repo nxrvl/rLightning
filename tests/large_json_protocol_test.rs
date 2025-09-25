@@ -16,7 +16,7 @@ async fn test_large_json_protocol_handling() -> Result<(), Box<dyn std::error::E
     config.max_value_size = 20 * 1024 * 1024; // 20MB
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {

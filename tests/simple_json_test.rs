@@ -19,7 +19,7 @@ async fn test_simple_json() {
     
     let storage = StorageEngine::new(config);
     let addr: SocketAddr = "127.0.0.1:18000".parse().unwrap();
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     tokio::spawn(async move {
         server.start().await.unwrap();

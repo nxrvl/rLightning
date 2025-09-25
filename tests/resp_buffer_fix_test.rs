@@ -12,7 +12,7 @@ async fn test_set_get_problematic_data() {
     // Start the server
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
-    let server = Server::new("127.0.0.1:0".parse().unwrap(), storage);
+    let server = Server::new_with_storage("127.0.0.1:0".parse().unwrap(), storage);
     
     // Start server in background task
     let server_task = tokio::spawn(async move {

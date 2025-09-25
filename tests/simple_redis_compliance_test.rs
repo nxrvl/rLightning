@@ -15,7 +15,7 @@ async fn test_redis_protocol_compliance() -> Result<(), Box<dyn std::error::Erro
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     // Start server in background
     tokio::spawn(async move {
@@ -136,7 +136,7 @@ async fn test_redis_command_aliases() -> Result<(), Box<dyn std::error::Error + 
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
     
-    let server = Server::new(addr, storage);
+    let server = Server::new_with_storage(addr, storage);
     
     tokio::spawn(async move {
         if let Err(e) = server.start().await {
