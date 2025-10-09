@@ -467,8 +467,10 @@ impl Server {
 
                                 Self::send_error(&mut socket, error_msg, &client_addr_str).await?;
 
-                                // Don't terminate the connection, just continue processing
-                                continue;
+                                // Clear buffer to prevent infinite loop on protocol errors
+                                // The client sent invalid RESP data, so we discard it
+                                buffer.clear();
+                                break;
                             }
                         }
                     }
@@ -508,9 +510,9 @@ impl Server {
                             }
 
                             Self::send_error(&mut socket, error_msg, &client_addr_str).await?;
-                            // Clear buffer to start fresh after error
+                            // Clear buffer to prevent infinite loop on protocol errors
                             buffer.clear();
-                            continue;
+                            break;
                         }
                     }
                 }
