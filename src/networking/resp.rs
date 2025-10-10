@@ -60,30 +60,18 @@ impl RespValue {
             '$' => parse_bulk_string(buffer),
             '*' => parse_array(buffer),
             _ => {
-                // CRITICAL: Do not attempt recovery for non-RESP data
-                // This prevents data corruption by treating stored values as commands
+                // Invalid RESP protocol marker
+                // Note: We don't try to guess if it's "data" vs "command" - just report the error
                 let preview = if buffer.len() >= 20 {
                     String::from_utf8_lossy(&buffer[0..20])
                 } else {
                     String::from_utf8_lossy(buffer)
                 };
-                
-                // Check if this looks like stored data (common patterns)
-                let data_patterns = ["B64JSON:", "{", "[", "HTTP/", "<"];
-                let looks_like_data = data_patterns.iter().any(|&pattern| {
-                    preview.starts_with(pattern)
-                });
-                
-                if looks_like_data {
-                    warn!("Attempting to parse stored data as RESP command: {}", preview);
-                    Err(RespError::InvalidFormatDetails(format!(
-                        "Data corruption detected: stored data interpreted as command. Preview: {}", preview
-                    )))
-                } else {
-                    Err(RespError::InvalidFormatDetails(format!(
-                        "Invalid RESP command format, starts with: {}", preview
-                    )))
-                }
+
+                warn!("Invalid RESP protocol marker, expected +/-/:/$/* but got '{}'", first_byte);
+                Err(RespError::InvalidFormatDetails(format!(
+                    "Invalid RESP command format, starts with: {}", preview
+                )))
             },
         }
     }
@@ -626,19 +614,61 @@ mod tests {
     }
     
     #[test]
-    fn test_reject_data_as_commands() {
-        // Test that data patterns are rejected as commands
+    fn test_reject_invalid_resp_markers() {
+        // Test that non-RESP protocol markers are rejected
+        // These would only appear if there's a protocol error or data corruption
         let test_patterns = [
-            "B64JSON:W3data",
-            "{\"json\": \"data\"}",
-            "HTTP/1.1 200 OK",
-            "<html>content</html>",
+            "B64JSON:W3data",      // Starts with 'B'
+            "b64:encoded_data",    // Starts with 'b'
+            "{\"json\": \"data\"}",  // Starts with '{'
+            "HTTP/1.1 200 OK",     // Starts with 'H'
+            "<html>content</html>", // Starts with '<'
+            "plain text",          // Starts with 'p'
         ];
-        
+
         for pattern in &test_patterns {
             let mut buffer = BytesMut::from(pattern.as_bytes());
             let result = RespValue::parse(&mut buffer);
-            assert!(result.is_err(), "Should reject data pattern '{}' as command", pattern);
+            assert!(result.is_err(), "Should reject invalid RESP marker in pattern '{}'", pattern);
+
+            // Verify error message indicates invalid format
+            if let Err(e) = result {
+                let error_str = e.to_string();
+                assert!(error_str.contains("Invalid RESP") || error_str.contains("format"),
+                    "Error should mention invalid format: {}", error_str);
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_resp_data_with_special_content() {
+        // Test that data containing "b64:", "{", etc. works fine when properly formatted as RESP
+        let test_data = vec![
+            "b64:W3siaWQiOiAxLCAi",
+            "B64JSON:encoded_data",
+            "{\"key\": \"value\"}",
+        ];
+
+        for data in &test_data {
+            // Create a proper RESP bulk string containing this data
+            let data_bytes = data.as_bytes();
+            let mut buffer = BytesMut::new();
+            buffer.extend_from_slice(b"$");
+            buffer.extend_from_slice(data_bytes.len().to_string().as_bytes());
+            buffer.extend_from_slice(b"\r\n");
+            buffer.extend_from_slice(data_bytes);
+            buffer.extend_from_slice(b"\r\n");
+
+            // This should parse successfully
+            let result = RespValue::parse(&mut buffer);
+            assert!(result.is_ok(), "Should parse properly formatted RESP data: {}", data);
+
+            if let Ok(Some(RespValue::BulkString(Some(retrieved_data)))) = result {
+                assert_eq!(retrieved_data, data_bytes,
+                    "Retrieved data should match original for: {}", data);
+            } else {
+                panic!("Expected BulkString for data: {}", data);
+            }
         }
     }
     

@@ -860,25 +860,25 @@ mod tests {
     async fn test_b64json_specific_case() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // This is the EXACT pattern that was causing "Invalid RESP format, starts with: B64JSON:W3"
         let b64json_data = "B64JSON:W3siaWQiOiAxLCJuYW1lIjoiRXhhbXBsZSIsImFjdGl2ZSI6dHJ1ZX0=";
-        
+
         // SET the problematic data
         let set_args = vec![
             b"test_b64json_key".to_vec(),
             b64json_data.as_bytes().to_vec(),
         ];
-        
+
         let set_result = set(&engine, &set_args).await;
         assert!(set_result.is_ok(), "SET with B64JSON data should succeed: {:?}", set_result);
         assert_eq!(set_result.unwrap(), RespValue::SimpleString("OK".to_string()));
-        
+
         // GET the data back
         let get_args = vec![b"test_b64json_key".to_vec()];
         let get_result = get(&engine, &get_args).await;
         assert!(get_result.is_ok(), "GET with B64JSON data should succeed: {:?}", get_result);
-        
+
         // Verify we get back exactly the same data
         if let Ok(RespValue::BulkString(Some(retrieved_data))) = get_result {
             let retrieved_str = String::from_utf8_lossy(&retrieved_data);
@@ -888,5 +888,83 @@ mod tests {
         } else {
             panic!("Expected BulkString response for B64JSON data");
         }
+    }
+
+    #[tokio::test]
+    async fn test_b64_prefix_variations() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Test various b64: prefixed patterns that were causing errors
+        let test_cases = vec![
+            ("b64:W3siaWQiOiAxLCAi", "The exact error pattern from logs"),
+            ("b64:encoded_data_here", "Generic b64 prefix"),
+            ("b64:SGVsbG8gV29ybGQh", "Base64 encoded 'Hello World!'"),
+            ("b64:", "Edge case: just the prefix"),
+            ("b64:123", "Short encoded data"),
+        ];
+
+        for (data, description) in test_cases {
+            let key = format!("test_b64_{}", data.len()).into_bytes();
+
+            // SET the data
+            let set_args = vec![key.clone(), data.as_bytes().to_vec()];
+            let set_result = set(&engine, &set_args).await;
+            assert!(set_result.is_ok(), "SET should succeed for: {} - {:?}", description, set_result);
+            assert_eq!(set_result.unwrap(), RespValue::SimpleString("OK".to_string()));
+
+            // GET the data back
+            let get_args = vec![key.clone()];
+            let get_result = get(&engine, &get_args).await;
+            assert!(get_result.is_ok(), "GET should succeed for: {} - {:?}", description, get_result);
+
+            // Verify exact match
+            if let Ok(RespValue::BulkString(Some(retrieved_data))) = get_result {
+                let retrieved_str = String::from_utf8_lossy(&retrieved_data);
+                assert_eq!(retrieved_str, data,
+                    "Data mismatch for {}: expected '{}', got '{}'", description, data, retrieved_str);
+                println!("✅ Test passed for: {}", description);
+            } else {
+                panic!("Expected BulkString response for: {}", description);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_operations_with_special_data() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Simulate the real-world scenario: multiple SET/GET operations with b64 data
+        let operations = vec![
+            ("user:123", "b64:userdata1"),
+            ("session:abc", "b64:sessioninfo2"),
+            ("cache:xyz", "b64:cachedvalue3"),
+        ];
+
+        // Perform all SETs
+        for (key, value) in &operations {
+            let set_args = vec![key.as_bytes().to_vec(), value.as_bytes().to_vec()];
+            let result = set(&engine, &set_args).await;
+            assert!(result.is_ok(), "SET failed for key {}: {:?}", key, result);
+        }
+
+        // Perform all GETs and verify
+        for (key, expected_value) in &operations {
+            let get_args = vec![key.as_bytes().to_vec()];
+            let result = get(&engine, &get_args).await;
+            assert!(result.is_ok(), "GET failed for key {}: {:?}", key, result);
+
+            if let Ok(RespValue::BulkString(Some(data))) = result {
+                let retrieved = String::from_utf8_lossy(&data);
+                assert_eq!(retrieved, *expected_value,
+                    "Data mismatch for key {}: expected '{}', got '{}'",
+                    key, expected_value, retrieved);
+            } else {
+                panic!("Expected BulkString for key {}", key);
+            }
+        }
+
+        println!("✅ All {} operations succeeded", operations.len() * 2);
     }
 } 

@@ -436,8 +436,12 @@ impl Server {
 
                                 Self::send_error(&mut socket, error_msg, &client_addr_str).await?;
 
-                                // Don't terminate the connection, just continue processing
-                                continue;
+                                // CRITICAL FIX: Clear buffers to prevent infinite error loop
+                                // When we can't parse the data, we must discard it and wait for new data
+                                buffer.clear();
+                                partial_command_buffer.clear();
+                                debug!(client_addr = %client_addr_str, "Cleared buffers after protocol error");
+                                break; // Exit inner loop and wait for fresh data from client
                             }
                         }
                     }
@@ -473,9 +477,11 @@ impl Server {
                             }
 
                             Self::send_error(&mut socket, error_msg, &client_addr_str).await?;
-                            // Clear buffer to start fresh after error
+                            // CRITICAL FIX: Clear both buffers to prevent infinite error loop
                             buffer.clear();
-                            continue;
+                            partial_command_buffer.clear();
+                            debug!(client_addr = %client_addr_str, "Cleared buffers after fast path protocol error");
+                            break; // Exit inner loop and wait for fresh data from client
                         }
                     }
                 }

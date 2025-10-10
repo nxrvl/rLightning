@@ -1,7 +1,8 @@
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::server::Server;
-use rlightning::storage::engine::Storage;
+use rlightning::storage::engine::StorageEngine;
 use std::time::Duration;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -20,17 +21,21 @@ async fn send_and_recv(
 
 #[tokio::test]
 async fn test_server_handles_json_like_data() {
+    // Create storage and server
+    let storage = StorageEngine::new(Default::default());
+    let addr = "127.0.0.1:16380".parse().unwrap();
+    let server = Server::new(addr, storage);
+
     // Start server
-    let server_handle = tokio::spawn(async {
-        let server = Server::new("127.0.0.1:0".parse().unwrap());
-        server.run().await
+    let server_handle = tokio::spawn(async move {
+        server.start().await
     });
 
     // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Connect to server
-    let mut stream = TcpStream::connect("127.0.0.1:6379")
+    let mut stream = TcpStream::connect("127.0.0.1:16380")
         .await
         .expect("Failed to connect to server");
 
@@ -98,7 +103,7 @@ async fn test_server_handles_invalid_commands_gracefully() {
     // This would normally require a running server instance
     // For unit testing, we'll test the command processing directly
 
-    let storage = Storage::new(Default::default());
+    let storage = StorageEngine::new(Default::default());
     let handler = CommandHandler::new(storage);
 
     // Test that invalid data is rejected as a command
@@ -208,9 +213,11 @@ fn test_resp_error_messages() {
 
     match RespValue::parse(&mut buffer) {
         Err(RespError::InvalidFormatDetails(msg)) => {
+            // After our fix, it should mention "Invalid RESP command format"
             assert!(
-                msg.contains("Data corruption detected"),
-                "Error message should indicate data corruption"
+                msg.contains("Invalid RESP command format"),
+                "Error message should indicate invalid RESP format: {}",
+                msg
             );
             assert!(
                 msg.contains("B64JSON"),
