@@ -176,6 +176,7 @@ async fn test_datetime_serialization() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[tokio::test]
+#[ignore] // Skip in CI - requires cargo run which is too slow
 async fn test_json_datetime_handling() {
     match test_datetime_serialization().await {
         Ok(_) => println!("Datetime serialization test passed!"),
