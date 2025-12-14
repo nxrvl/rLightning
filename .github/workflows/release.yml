@@ -11,7 +11,26 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-tests"
+
+      - name: Run all tests
+        run: cargo test --all-features --verbose
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,6 +39,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Notify release start
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            🚀 **Release Build Started - ${{ github.ref_name }}**
+
+            **Repository:** ${{ github.repository }}
+            **Version:** ${{ github.ref_name }}
+            **Commit:** `${{ github.sha }}`
+
+            ✅ All tests passed
+            🔨 Building Docker images for platforms: linux/amd64, linux/arm64, linux/arm/v7
+
+            [View Build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -64,6 +101,23 @@ jobs:
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.meta.outputs.created }}
 
+      - name: Notify build failure
+        if: failure()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **Docker Build Failed - ${{ github.ref_name }}**
+
+            **Repository:** ${{ github.repository }}
+            **Version:** ${{ github.ref_name }}
+
+            Build failed during Docker image creation.
+
+            [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
   create-release:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -96,3 +150,28 @@ jobs:
 
             ## What's Changed
             See the full changelog below.
+
+      - name: Notify release success
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            🎉 **Release Published - ${{ github.ref_name }}**
+
+            **Repository:** ${{ github.repository }}
+            **Version:** ${{ github.ref_name }}
+
+            **Docker Images Available:**
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            **Supported Platforms:**
+            • linux/amd64
+            • linux/arm64
+            • linux/arm/v7
+
+            [Release Notes](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }})
+            [Docker Hub](https://hub.docker.com/r/${{ env.IMAGE_NAME }})
