@@ -10,17 +10,17 @@ async fn start_server() -> std::process::Child {
         .args(["run", "--bin", "rlightning", "--", "--port", "7379"])
         .spawn()
         .expect("Failed to start rLightning server");
-    
-    // Wait a bit for the server to start
-    time::sleep(Duration::from_secs(3)).await;
-    
+
+    // Wait a bit for the server to start (longer in CI environments)
+    time::sleep(Duration::from_secs(5)).await;
+
     server
 }
 
 // Utility function to connect to our Redis-compatible server with retries
 async fn connect_to_server_with_retry(max_retries: usize) -> Result<Connection, RedisError> {
     let client = Client::open("redis://127.0.0.1:7379")?;
-    
+
     let mut retries = 0;
     while retries < max_retries {
         match client.get_connection() {
@@ -31,7 +31,7 @@ async fn connect_to_server_with_retry(max_retries: usize) -> Result<Connection, 
                     return Err(e);
                 }
                 retries += 1;
-                time::sleep(Duration::from_millis(500)).await;
+                time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
@@ -47,9 +47,9 @@ async fn connect_to_server_with_retry(max_retries: usize) -> Result<Connection, 
 async fn test_datetime_serialization() -> Result<(), Box<dyn std::error::Error>> {
     // Start the server
     let mut server = start_server().await;
-    
-    // Connect to the server with retries
-    let mut conn = connect_to_server_with_retry(10).await?;
+
+    // Connect to the server with retries (more attempts for CI environments)
+    let mut conn = connect_to_server_with_retry(20).await?;
     
     println!("Connected to server successfully");
     
