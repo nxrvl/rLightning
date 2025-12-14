@@ -47,22 +47,57 @@ jobs:
             **Commit:** `${{ github.sha }}`
 
             ✅ All tests passed
-            🔨 Building Docker images in parallel for: linux/amd64, linux/arm64, linux/arm/v7
+            🔨 Pre-building dependencies cache...
 
             [View Build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-  build-images:
+  prebuild-deps:
     needs: notify-start
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build and cache dependencies
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: builder
+          platforms: linux/amd64
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps,mode=max
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+
+  build-images:
+    needs: prebuild-deps
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
-          - linux/arm/v7
+        include:
+          - platform: linux/amd64
+            platform_tag: amd64
+          - platform: linux/arm64
+            platform_tag: arm64
+          - platform: linux/arm/v7
+            platform_tag: armv7
 
     steps:
       - name: Checkout repository
@@ -87,22 +122,26 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}}-${{ matrix.platform_tag }}
+            type=semver,pattern={{major}}.{{minor}}-${{ matrix.platform_tag }}
 
-      - name: Build and push by digest
+      - name: Build and push platform image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform }}
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform }},mode=max
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform_tag }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform_tag }},mode=max
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -117,6 +156,25 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
+
+      - name: Notify platform build complete
+        if: success()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ✅ **Platform Build Complete - ${{ matrix.platform }}**
+
+            **Version:** ${{ github.ref_name }}
+            **Image:** `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}`
+
+            This platform-specific image is now available on Docker Hub!
+
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}
+            ```
 
   create-manifest:
     needs: build-images
