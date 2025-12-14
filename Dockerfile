@@ -1,3 +1,18 @@
+# Stage 1: Plan dependencies with cargo-chef
+FROM rust:slim AS planner
+
+WORKDIR /usr/src/rlightning
+
+# Install cargo-chef
+RUN cargo install cargo-chef --locked
+
+# Copy all source to generate recipe
+COPY . .
+
+# Generate dependency recipe
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 2: Build dependencies (this layer will be cached!)
 FROM rust:slim AS builder
 
 # Build arguments for versioning
@@ -20,25 +35,19 @@ RUN echo "Building rLightning ${VERSION} (${COMMIT}) on ${BUILDPLATFORM} for ${T
 
 WORKDIR /usr/src/rlightning
 
-# Copy the dependencies and build them first
-COPY Cargo.toml Cargo.lock ./
+# Install cargo-chef
+RUN cargo install cargo-chef --locked
 
-# Create a dummy main.rs and bench files structure to build dependencies
-RUN mkdir -p src benches && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "fn main() {}" > benches/storage_bench.rs && \
-    echo "fn main() {}" > benches/protocol_bench.rs && \
-    echo "fn main() {}" > benches/throughput_bench.rs && \
-    echo "fn main() {}" > benches/redis_comparison_bench.rs && \
-    echo "fn main() {}" > benches/auth_bench.rs && \
-    echo "fn main() {}" > benches/replication_bench.rs && \
-    cargo build --release && \
-    rm -rf src benches
+# Copy dependency recipe from planner
+COPY --from=planner /usr/src/rlightning/recipe.json recipe.json
+
+# Build dependencies - this is the cached layer that saves time!
+RUN cargo chef cook --release --recipe-path recipe.json
 
 # Now copy the actual source code
 COPY . .
 
-# Build the final binary
+# Build the final binary (only rebuilds changed code, not dependencies)
 RUN cargo build --release
 
 # Create a lean runtime image
