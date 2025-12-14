@@ -9,13 +9,14 @@ use rlightning::networking::server::Server;
 use rlightning::storage::engine::{StorageEngine, StorageConfig};
 
 // Helper function to start a server and return its address and a connected client
-async fn setup_server_client() -> (SocketAddr, Client) {
+async fn setup_server_client(port_offset: u16) -> (SocketAddr, Client) {
     // Create a storage engine
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
-    
-    // Use a fixed port for testing (this might fail if port is in use)
-    let addr: SocketAddr = "127.0.0.1:17000".parse().unwrap();
+
+    // Use a unique port for each test
+    let port = 17000 + port_offset;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     
     // Create a server
     let server = Server::new(addr, storage);
@@ -103,7 +104,7 @@ fn create_large_json() -> Value {
 
 #[tokio::test]
 async fn test_large_json_integration() {
-    let (addr, mut client) = setup_server_client().await;
+    let (addr, mut client) = setup_server_client(0).await;
     
     // Create a large JSON document
     let large_json = create_large_json();
@@ -165,7 +166,7 @@ async fn test_large_json_integration() {
 
 #[tokio::test]
 async fn test_json_path_operations() {
-    let (addr, mut client) = setup_server_client().await;
+    let (addr, mut client) = setup_server_client(1).await;
     
     let key = "test_path_ops";
     let json_data = json!({
@@ -211,7 +212,7 @@ async fn test_json_path_operations() {
 
 #[tokio::test]
 async fn test_json_error_handling() {
-    let (addr, mut client) = setup_server_client().await;
+    let (addr, mut client) = setup_server_client(2).await;
     
     // Test setting invalid JSON
     let invalid_json = r#"{"incomplete": true, "missing_end":"#;
