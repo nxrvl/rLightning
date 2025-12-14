@@ -400,13 +400,39 @@ fn read_line(buffer: &mut BytesMut) -> Result<Option<String>, RespError> {
 /// stored data as RESP commands. The fix is to NOT parse stored data at all.
 /// FIXED: Proper bulk string parsing without data corruption
 fn parse_bulk_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
-    let length_str = read_line(buffer)?;
-    if length_str.is_none() {
+    // CRITICAL FIX: We need to check if we have all the data BEFORE consuming the length line
+    // First, peek at the length line without consuming it
+    if buffer.len() < 2 {
         return Ok(None);
     }
 
-    let length = length_str.unwrap().parse::<i64>()?;
+    // Find the CRLF for the length line
+    let cr_positions = memchr_iter(b'\r', buffer);
+    let mut length_line_end = None;
+    for pos in cr_positions {
+        if pos + 1 < buffer.len() && buffer[pos + 1] == b'\n' {
+            length_line_end = Some(pos);
+            break;
+        }
+    }
+
+    if length_line_end.is_none() {
+        return Ok(None); // Don't have complete length line yet
+    }
+
+    let length_line_end = length_line_end.unwrap();
+
+    // Parse the length WITHOUT consuming from buffer
+    if length_line_end < 1 {
+        return Err(RespError::InvalidFormat);
+    }
+
+    let length_str = str::from_utf8(&buffer[1..length_line_end])?;
+    let length = length_str.parse::<i64>()?;
+
     if length == -1 {
+        // Null bulk string - consume the length line and return
+        buffer.advance(length_line_end + 2);
         return Ok(Some(RespValue::BulkString(None)));
     }
 
@@ -415,9 +441,12 @@ fn parse_bulk_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespErr
     }
 
     let length = length as usize;
-    
-    // Check if we have enough data including CRLF
-    if buffer.len() < length + 2 {
+
+    // Now check if we have ALL the data we need:
+    // length_line + CRLF + data + CRLF
+    let total_needed = length_line_end + 2 + length + 2;
+    if buffer.len() < total_needed {
+        // Don't have all the data yet - return without modifying buffer
         return Ok(None);
     }
     
@@ -425,27 +454,27 @@ fn parse_bulk_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespErr
     if length > 512 * 1024 * 1024 { // 512MB limit
         return Err(RespError::ValueTooLarge(format!("Bulk string exceeds 512MB limit: {} bytes", length)));
     }
-    
+
     // Log large operations for debugging
     if length > 1024 * 1024 { // 1MB+
         debug!("Parsing large bulk string: {} MB", length / (1024 * 1024));
     }
 
+    // Now we know we have all the data - consume the length line
+    buffer.advance(length_line_end + 2);
+
     // Extract data using zero-copy split
     let data = buffer.split_to(length).to_vec();
-    
+
     // CRITICAL FIX: Strict CRLF validation without "recovery" that corrupts data
-    if buffer.len() < 2 {
-        return Ok(None);
-    }
-    
+    // We already checked we have these bytes above
     if buffer[0] != b'\r' || buffer[1] != b'\n' {
         let actual = format!("{:?}", &buffer[0..2.min(buffer.len())]);
         return Err(RespError::InvalidFormatDetails(format!(
             "Invalid CRLF after bulk string: expected [13, 10], got {}", actual
         )));
     }
-    
+
     // Consume the CRLF
     buffer.advance(2);
 
