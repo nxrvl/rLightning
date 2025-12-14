@@ -8,6 +8,91 @@ use tracing::{debug, warn};
 //     enhanced_json_arrappend, enhanced_json_arrtrim
 // };
 
+/// Extract a value from JSON at the specified path
+/// Supports Redis-compatible path syntax:
+/// - `.` or `$` - root (return whole document)
+/// - `.field` - get field from object
+/// - `.field.nested` - navigate nested fields
+/// - `.field[0]` - array index access
+///
+/// Uses serde_json's pointer() for optimal performance
+fn extract_json_at_path<'a>(value: &'a Value, path: &str) -> Result<&'a Value, CommandError> {
+    // Handle root paths
+    if path == "." || path == "$" || path.is_empty() {
+        return Ok(value);
+    }
+
+    // Convert Redis path to JSON Pointer format
+    let json_pointer = convert_redis_path_to_pointer(path)?;
+
+    // Use serde_json's efficient pointer lookup
+    value.pointer(&json_pointer)
+        .ok_or_else(|| CommandError::InvalidArgument(format!("Path not found: {}", path)))
+}
+
+/// Convert Redis JSON path syntax to JSON Pointer (RFC 6901)
+/// - `.field` -> `/field`
+/// - `.field.nested` -> `/field/nested`
+/// - `.field[0]` -> `/field/0`
+/// - `$` or `$.field` -> `/field`
+fn convert_redis_path_to_pointer(path: &str) -> Result<String, CommandError> {
+    let path = path.trim();
+
+    // Handle root
+    if path == "." || path == "$" {
+        return Ok(String::new());
+    }
+
+    // Remove leading `.` or `$`
+    let path = if path.starts_with('.') {
+        &path[1..]
+    } else if path.starts_with("$.") {
+        &path[2..]
+    } else if path.starts_with('$') {
+        &path[1..]
+    } else {
+        path
+    };
+
+    // Convert to JSON Pointer format
+    // Replace `.` with `/` and handle array indices
+    let mut pointer = String::with_capacity(path.len() + 10);
+    let mut chars = path.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                pointer.push('/');
+            },
+            '[' => {
+                // Array index: field[0] -> /field/0
+                pointer.push('/');
+                // Collect digits
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch.is_ascii_digit() {
+                        pointer.push(chars.next().unwrap());
+                    } else if next_ch == ']' {
+                        chars.next(); // consume ']'
+                        break;
+                    } else {
+                        return Err(CommandError::InvalidArgument(
+                            format!("Invalid array index in path: {}", path)
+                        ));
+                    }
+                }
+            },
+            _ => {
+                if pointer.is_empty() || pointer.ends_with('/') {
+                    pointer.push('/');
+                }
+                pointer.push(ch);
+            }
+        }
+    }
+
+    Ok(pointer)
+}
+
 /// Redis JSON.GET command - Get a JSON value at a specific path
 /// Also handles the GET_JSON alias used by some clients
 pub async fn json_get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -30,33 +115,29 @@ pub async fn json_get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             // Try to parse as JSON
             match String::from_utf8(data) {
                 Ok(json_str) => {
-                    // Transform datetime strings
-                    let processed_str = transform_datetime_strings(json_str);
-                    Ok(RespValue::BulkString(Some(processed_str.into_bytes())))
+                    // Parse JSON value
+                    match serde_json::from_str::<Value>(&json_str) {
+                        Ok(mut json_value) => {
+                            // Apply datetime transformation
+                            json_value = crate::utils::datetime::process_json_for_serialization(json_value);
+
+                            // Extract value at path
+                            let result_value = extract_json_at_path(&json_value, &path)?;
+
+                            // Serialize result
+                            match serde_json::to_string(&result_value) {
+                                Ok(result_str) => Ok(RespValue::BulkString(Some(result_str.into_bytes()))),
+                                Err(_) => Err(CommandError::InvalidArgument("JSON serialization failed".to_string()))
+                            }
+                        },
+                        Err(_) => Err(CommandError::WrongType)
+                    }
                 },
                 Err(_) => Err(CommandError::WrongType)
             }
         },
         None => Ok(RespValue::BulkString(None))
     }
-}
-
-/// Helper function to transform datetime strings in the JSON output
-/// This version has the debug print statements removed for production use
-fn transform_datetime_strings(json_str: String) -> String {
-    // Parse the JSON string
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json_str) {
-        // Process the value to convert all datetime strings to ISO-8601 format
-        value = crate::utils::datetime::process_json_for_serialization(value);
-        
-        // Serialize it back to a string
-        if let Ok(processed_str) = serde_json::to_string(&value) {
-            return processed_str;
-        }
-    }
-    
-    // If parsing fails, return the original string
-    json_str
 }
 
 /// Redis JSON.SET command - Set a JSON value at a specific path
