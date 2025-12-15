@@ -81,23 +81,26 @@ impl Client {
         Err("Failed to get response after retries".into())
     }
     
-    /// Helper method to read a response
-    async fn read_response(&mut self) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
+    /// Helper method to read a response from the server
+    /// This can be used to read messages in pub/sub mode
+    #[allow(dead_code)]
+    pub async fn read_response(&mut self) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
         loop {
+            // First, try to parse a complete response from what's already in the buffer
+            if let Some(value) = RespValue::parse(&mut self.buffer)? {
+                return Ok(value);
+            }
+
+            // Need more data - read from the stream
             let n = self.stream.read_buf(&mut self.buffer).await?;
             if n == 0 {
-                // Connection closed - try to parse what we have
+                // Connection closed - try to parse what we have one more time
                 if !self.buffer.is_empty() {
                     if let Some(value) = RespValue::parse(&mut self.buffer)? {
                         return Ok(value);
                     }
                 }
                 return Err("Connection closed by server".into());
-            }
-
-            // Try to parse a complete response
-            if let Some(value) = RespValue::parse(&mut self.buffer)? {
-                return Ok(value);
             }
         }
     }
