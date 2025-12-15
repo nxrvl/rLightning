@@ -334,6 +334,183 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 }
 
+/// Helper function to get a set from storage
+async fn get_set(engine: &StorageEngine, key: &[u8]) -> Result<HashSet<Vec<u8>>, CommandError> {
+    match engine.get(key).await? {
+        Some(data) => {
+            bincode::deserialize::<HashSet<Vec<u8>>>(&data)
+                .map_err(|_| CommandError::WrongType)
+        },
+        None => Ok(HashSet::new()),
+    }
+}
+
+/// Redis SINTER command - Return the intersection of multiple sets
+pub async fn sinter(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.is_empty() {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    // Get the first set
+    let mut result = get_set(engine, &args[0]).await?;
+
+    // Intersect with remaining sets
+    for key in &args[1..] {
+        let other_set = get_set(engine, key).await?;
+        result = result.intersection(&other_set).cloned().collect();
+    }
+
+    // Convert to array of bulk strings
+    let members: Vec<RespValue> = result
+        .into_iter()
+        .map(|m| RespValue::BulkString(Some(m)))
+        .collect();
+
+    Ok(RespValue::Array(Some(members)))
+}
+
+/// Redis SINTERSTORE command - Store intersection of sets in destination key
+pub async fn sinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let destination = &args[0];
+    let keys = &args[1..];
+
+    // Get the first set
+    let mut result = get_set(engine, &keys[0]).await?;
+
+    // Intersect with remaining sets
+    for key in &keys[1..] {
+        let other_set = get_set(engine, key).await?;
+        result = result.intersection(&other_set).cloned().collect();
+    }
+
+    let count = result.len() as i64;
+
+    // Store the result (or delete if empty)
+    if result.is_empty() {
+        let _ = engine.del(destination).await;
+    } else {
+        let serialized = bincode::serialize(&result)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+    }
+
+    Ok(RespValue::Integer(count))
+}
+
+/// Redis SUNION command - Return the union of multiple sets
+pub async fn sunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.is_empty() {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let mut result = HashSet::new();
+
+    // Union all sets
+    for key in args {
+        let set = get_set(engine, key).await?;
+        result = result.union(&set).cloned().collect();
+    }
+
+    // Convert to array of bulk strings
+    let members: Vec<RespValue> = result
+        .into_iter()
+        .map(|m| RespValue::BulkString(Some(m)))
+        .collect();
+
+    Ok(RespValue::Array(Some(members)))
+}
+
+/// Redis SUNIONSTORE command - Store union of sets in destination key
+pub async fn sunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let destination = &args[0];
+    let keys = &args[1..];
+
+    let mut result = HashSet::new();
+
+    // Union all sets
+    for key in keys {
+        let set = get_set(engine, key).await?;
+        result = result.union(&set).cloned().collect();
+    }
+
+    let count = result.len() as i64;
+
+    // Store the result (or delete if empty)
+    if result.is_empty() {
+        let _ = engine.del(destination).await;
+    } else {
+        let serialized = bincode::serialize(&result)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+    }
+
+    Ok(RespValue::Integer(count))
+}
+
+/// Redis SDIFF command - Return the difference between the first set and all subsequent sets
+pub async fn sdiff(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.is_empty() {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    // Get the first set
+    let mut result = get_set(engine, &args[0]).await?;
+
+    // Subtract remaining sets
+    for key in &args[1..] {
+        let other_set = get_set(engine, key).await?;
+        result = result.difference(&other_set).cloned().collect();
+    }
+
+    // Convert to array of bulk strings
+    let members: Vec<RespValue> = result
+        .into_iter()
+        .map(|m| RespValue::BulkString(Some(m)))
+        .collect();
+
+    Ok(RespValue::Array(Some(members)))
+}
+
+/// Redis SDIFFSTORE command - Store difference of sets in destination key
+pub async fn sdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let destination = &args[0];
+    let keys = &args[1..];
+
+    // Get the first set
+    let mut result = get_set(engine, &keys[0]).await?;
+
+    // Subtract remaining sets
+    for key in &keys[1..] {
+        let other_set = get_set(engine, key).await?;
+        result = result.difference(&other_set).cloned().collect();
+    }
+
+    let count = result.len() as i64;
+
+    // Store the result (or delete if empty)
+    if result.is_empty() {
+        let _ = engine.del(destination).await;
+    } else {
+        let serialized = bincode::serialize(&result)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+    }
+
+    Ok(RespValue::Integer(count))
+}
+
 /// Redis SRANDMEMBER command - Get random member(s) from a set without removing them
 pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {

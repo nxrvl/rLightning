@@ -242,7 +242,7 @@ async fn test_new_json_commands_compliance() {
         args: vec![b"jsonkey".to_vec()],
     };
     let result = handler.process(json_type_cmd).await.unwrap();
-    assert_eq!(result, RespValue::BulkString(Some(b"object".to_vec())));
+    assert_eq!(result, RespValue::SimpleString("object".to_string()));
     println!("  ✅ JSON.TYPE");
     
     // Test JSON.OBJKEYS

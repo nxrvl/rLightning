@@ -13,13 +13,13 @@ pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr
 pub use crate::command::types::hash::{hset, hget, hgetall, hdel, hexists, hmset, hkeys, hvals, hlen, hmget, hincrby, hincrbyfloat, hsetnx, hstrlen};
 
 // Set commands
-pub use crate::command::types::set::{sadd, srem, smembers, sismember, scard, spop, srandmember};
+pub use crate::command::types::set::{sadd, srem, smembers, sismember, scard, spop, srandmember, sinter, sinterstore, sunion, sunionstore, sdiff, sdiffstore};
 
 // Sorted Set commands
 pub use crate::command::types::sorted_set::{zadd, zrem, zscore, zrange, zcard, zcount, zrank, zrevrange, zincrby};
 
 // JSON commands
-pub use crate::command::types::json::{json_get, json_set, json_type, json_arrappend, json_arrtrim, json_resp, json_del, json_objkeys, json_objlen, json_arrlen, json_numincrby};
+pub use crate::command::types::json::{json_get, json_set, json_type, json_arrappend, json_arrtrim, json_resp, json_del, json_objkeys, json_objlen, json_arrlen, json_numincrby, json_mget, json_arrindex};
 
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, scan, dbsize, randomkey};

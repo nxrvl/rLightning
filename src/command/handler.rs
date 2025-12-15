@@ -96,7 +96,13 @@ impl CommandHandler {
             "scard" => commands::scard(&self.storage, &command.args).await,
             "spop" => commands::spop(&self.storage, &command.args).await,
             "srandmember" => commands::srandmember(&self.storage, &command.args).await,
-            
+            "sinter" => commands::sinter(&self.storage, &command.args).await,
+            "sinterstore" => commands::sinterstore(&self.storage, &command.args).await,
+            "sunion" => commands::sunion(&self.storage, &command.args).await,
+            "sunionstore" => commands::sunionstore(&self.storage, &command.args).await,
+            "sdiff" => commands::sdiff(&self.storage, &command.args).await,
+            "sdiffstore" => commands::sdiffstore(&self.storage, &command.args).await,
+
             // Sorted Set commands
             "zadd" => commands::zadd(&self.storage, &command.args).await,
             "zrange" => commands::zrange(&self.storage, &command.args).await,
@@ -120,7 +126,9 @@ impl CommandHandler {
             "json.objlen" | "jsonobjlen" => commands::json_objlen(&self.storage, &command.args).await,
             "json.arrlen" | "jsonarrlen" => commands::json_arrlen(&self.storage, &command.args).await,
             "json.numincrby" | "jsonnumincrby" => commands::json_numincrby(&self.storage, &command.args).await,
-            
+            "json.mget" | "jsonmget" => commands::json_mget(&self.storage, &command.args).await,
+            "json.arrindex" | "jsonarrindex" => commands::json_arrindex(&self.storage, &command.args).await,
+
             // Server commands
             "info" => commands::info(&self.storage, &command.args).await,
             "auth" => commands::auth(&self.storage, &command.args).await,

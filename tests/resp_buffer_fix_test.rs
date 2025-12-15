@@ -9,23 +9,24 @@ use rlightning::networking::resp::RespValue;
 /// Test the critical buffer separation fixes
 #[tokio::test]
 async fn test_set_get_problematic_data() {
-    // Start the server
+    // Start the server on a specific port
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
-    let server = Server::new("127.0.0.1:0".parse().unwrap(), storage);
-    
+    let addr = "127.0.0.1:16398".parse().unwrap();
+    let server = Server::new(addr, storage);
+
     // Start server in background task
     let server_task = tokio::spawn(async move {
         if let Err(e) = server.start().await {
             eprintln!("Server error: {}", e);
         }
     });
-    
+
     // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     // Connect to server
-    let mut stream = TcpStream::connect("127.0.0.1:6379").await
+    let mut stream = TcpStream::connect("127.0.0.1:16398").await
         .expect("Failed to connect to server");
     
     // Test 1: SET with B64JSON prefix data

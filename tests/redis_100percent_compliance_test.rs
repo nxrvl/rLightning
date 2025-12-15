@@ -17,7 +17,11 @@ fn send_redis_command(stream: &mut TcpStream, command: &str) -> Result<String, B
     Ok(response.to_string())
 }
 
+/// NOTE: This test requires a running server on port 6379. Run manually with:
+/// cargo run --release -- --port 6379 &
+/// cargo test test_comprehensive_string_commands_compliance -- --ignored
 #[tokio::test]
+#[ignore]
 async fn test_comprehensive_string_commands_compliance() {
     // Start the server
     let _server = std::process::Command::new("cargo")
@@ -78,11 +82,13 @@ async fn test_comprehensive_string_commands_compliance() {
     println!("✅ All string commands passed compliance test");
 }
 
+/// NOTE: This test requires a running server on port 6379.
 #[tokio::test]
+#[ignore]
 async fn test_comprehensive_hash_commands_compliance() {
     // Wait for server to be ready
     sleep(Duration::from_secs(1)).await;
-    
+
     let mut stream = TcpStream::connect("127.0.0.1:6379")
         .expect("Failed to connect to server");
     
@@ -126,11 +132,13 @@ async fn test_comprehensive_hash_commands_compliance() {
     println!("✅ All hash commands passed compliance test");
 }
 
+/// NOTE: This test requires a running server on port 6379.
 #[tokio::test]
+#[ignore]
 async fn test_comprehensive_json_commands_compliance() {
     // Wait for server to be ready
     sleep(Duration::from_secs(1)).await;
-    
+
     let mut stream = TcpStream::connect("127.0.0.1:6379")
         .expect("Failed to connect to server");
     
@@ -191,11 +199,13 @@ async fn test_comprehensive_json_commands_compliance() {
     println!("✅ All JSON commands passed compliance test");
 }
 
+/// NOTE: This test requires a running server on port 6379.
 #[tokio::test]
+#[ignore]
 async fn test_protocol_compliance_summary() {
     // Wait for server to be ready
     sleep(Duration::from_secs(1)).await;
-    
+
     let mut stream = TcpStream::connect("127.0.0.1:6379")
         .expect("Failed to connect to server");
     

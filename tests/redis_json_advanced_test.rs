@@ -9,6 +9,7 @@ use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 /// Comprehensive tests for Redis JSON commands with complex nested structures,
 /// path navigation, array operations, and error cases.
+/// Supports Redis-compatible JSONPath syntax (name.first, .name.first, $.name.first).
 #[tokio::test]
 async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set up server with a unique port
@@ -105,10 +106,46 @@ async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Se
         panic!("Expected BulkString response for JSON.GET address.home.zipcode");
     }
     
-    // Note: Array element indexing is not fully implemented in the JSON commands yet
-    println!("Skipping array index path tests as they're not fully implemented yet");
-    
-    // Instead test getting the whole arrays and objects
+    // Test array index paths
+    println!("Testing array index paths");
+
+    // Get first tag using array index
+    let result = client.send_command_str("JSON.GET", &["complex", "tags[0]"]).await?;
+    if let RespValue::BulkString(Some(bytes)) = result {
+        let value = String::from_utf8(bytes)?;
+        assert_eq!(value, r#""developer""#, "First tag should be developer");
+    } else {
+        panic!("Expected BulkString response for JSON.GET tags[0]");
+    }
+
+    // Get second tag
+    let result = client.send_command_str("JSON.GET", &["complex", "tags[1]"]).await?;
+    if let RespValue::BulkString(Some(bytes)) = result {
+        let value = String::from_utf8(bytes)?;
+        assert_eq!(value, r#""rust""#, "Second tag should be rust");
+    } else {
+        panic!("Expected BulkString response for JSON.GET tags[1]");
+    }
+
+    // Get first project name
+    let result = client.send_command_str("JSON.GET", &["complex", "projects[0].name"]).await?;
+    if let RespValue::BulkString(Some(bytes)) = result {
+        let value = String::from_utf8(bytes)?;
+        assert_eq!(value, r#""Project 1""#, "First project name should be Project 1");
+    } else {
+        panic!("Expected BulkString response for JSON.GET projects[0].name");
+    }
+
+    // Get second project priority
+    let result = client.send_command_str("JSON.GET", &["complex", "projects[1].priority"]).await?;
+    if let RespValue::BulkString(Some(bytes)) = result {
+        let value = String::from_utf8(bytes)?;
+        assert_eq!(value, "2", "Second project priority should be 2");
+    } else {
+        panic!("Expected BulkString response for JSON.GET projects[1].priority");
+    }
+
+    // Test getting the whole arrays and objects
     let result = client.send_command_str("JSON.GET", &["complex", "tags"]).await?;
     if let RespValue::BulkString(Some(bytes)) = result {
         let value = String::from_utf8(bytes)?;
@@ -116,7 +153,7 @@ async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Se
     } else {
         panic!("Expected BulkString response for JSON.GET tags");
     }
-    
+
     let result = client.send_command_str("JSON.GET", &["complex", "projects"]).await?;
     if let RespValue::BulkString(Some(bytes)) = result {
         let value = String::from_utf8(bytes)?;
@@ -124,17 +161,38 @@ async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Se
     } else {
         panic!("Expected BulkString response for JSON.GET projects");
     }
-    
-    // JSON.MGET may not be implemented yet, so skip this test
-    println!("Skipping JSON.MGET test as it may not be implemented yet");
-    
-    // Instead fetch each path individually
+
+    // Test JSON.MGET - get multiple keys at once
+    println!("Testing JSON.MGET");
+
+    // First create another JSON document
+    let another_json = r#"{"name": {"first": "Jane", "last": "Smith"}, "age": 25}"#;
+    let result = client.send_command_str("JSON.SET", &["another", ".", another_json]).await?;
+    assert_eq!(result, RespValue::SimpleString("OK".to_string()), "JSON.SET should return OK");
+
+    // Now test JSON.MGET with two keys
+    let result = client.send_command_str("JSON.MGET", &["complex", "another", "name.first"]).await?;
+    if let RespValue::Array(Some(arr)) = result {
+        assert_eq!(arr.len(), 2, "JSON.MGET should return 2 results");
+        if let RespValue::BulkString(Some(bytes)) = &arr[0] {
+            let value = String::from_utf8(bytes.clone())?;
+            assert_eq!(value, r#""John""#, "First key name.first should be John");
+        }
+        if let RespValue::BulkString(Some(bytes)) = &arr[1] {
+            let value = String::from_utf8(bytes.clone())?;
+            assert_eq!(value, r#""Jane""#, "Second key name.first should be Jane");
+        }
+    } else {
+        panic!("Expected Array response for JSON.MGET");
+    }
+
+    // Also fetch individual paths for verification
     let result = client.send_command_str("JSON.GET", &["complex", "age"]).await?;
     if let RespValue::BulkString(Some(bytes)) = result {
         let value = String::from_utf8(bytes)?;
         assert_eq!(value, "30", "Age should be 30");
     }
-    
+
     let result = client.send_command_str("JSON.GET", &["complex", "name.first"]).await?;
     if let RespValue::BulkString(Some(bytes)) = result {
         let value = String::from_utf8(bytes)?;
