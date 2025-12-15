@@ -69,7 +69,13 @@ jobs:
             **Commit:** `${{ github.sha }}`
 
             ✅ All tests passed
-            🔨 Pre-building dependencies cache...
+            🔨 Starting Docker builds...
+
+            **Build stages:**
+            1️⃣ Pre-build dependencies cache
+            2️⃣ Build platform images (amd64, arm64, armv7)
+            3️⃣ Create multi-arch manifest
+            4️⃣ Create GitHub release
 
             [View Build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
@@ -105,6 +111,33 @@ jobs:
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
 
+      - name: Notify prebuild complete
+        if: success()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ✅ **Dependencies Cached - ${{ github.ref_name }}**
+
+            Build cache updated successfully.
+            Starting platform builds...
+
+      - name: Notify prebuild failure
+        if: failure()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **Dependencies Cache Failed - ${{ github.ref_name }}**
+
+            Failed to build dependencies cache.
+
+            [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
   build-images:
     needs: prebuild-deps
     runs-on: ubuntu-latest
@@ -112,6 +145,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
@@ -124,6 +158,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Notify platform build start
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            🔨 **Building ${{ matrix.platform_tag }}** - ${{ github.ref_name }}
+
+            Platform: `${{ matrix.platform }}`
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -163,7 +208,6 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -174,7 +218,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ strategy.job-index }}
+          name: digests-${{ matrix.platform_tag }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -187,16 +231,27 @@ jobs:
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ✅ **Platform Build Complete - ${{ matrix.platform }}**
+            ✅ **${{ matrix.platform_tag }} Build Complete** - ${{ github.ref_name }}
 
-            **Version:** ${{ github.ref_name }}
             **Image:** `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}`
-
-            This platform-specific image is now available on Docker Hub!
 
             ```bash
             docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}
             ```
+
+      - name: Notify platform build failure
+        if: failure()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **${{ matrix.platform_tag }} Build Failed** - ${{ github.ref_name }}
+
+            Platform `${{ matrix.platform }}` failed to build.
+
+            [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   create-manifest:
     needs: build-images
@@ -206,6 +261,17 @@ jobs:
       packages: write
 
     steps:
+      - name: Notify manifest creation start
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            🔗 **Creating Multi-Arch Manifest** - ${{ github.ref_name }}
+
+            Combining platform images into unified manifest...
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -232,7 +298,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
@@ -244,7 +310,23 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
-      - name: Notify build failure
+      - name: Notify manifest complete
+        if: success()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ✅ **Multi-Arch Manifest Created** - ${{ github.ref_name }}
+
+            **Tags pushed:**
+            • `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`
+            • `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest`
+
+            Creating GitHub release...
+
+      - name: Notify manifest failure
         if: failure()
         uses: appleboy/telegram-action@v1.0.0
         with:
@@ -252,12 +334,9 @@ jobs:
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ❌ **Docker Build Failed - ${{ github.ref_name }}**
+            ❌ **Manifest Creation Failed** - ${{ github.ref_name }}
 
-            **Repository:** ${{ github.repository }}
-            **Version:** ${{ github.ref_name }}
-
-            Build failed during Docker image creation.
+            Failed to create multi-arch manifest.
 
             [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
@@ -295,6 +374,7 @@ jobs:
             See the full changelog below.
 
       - name: Notify release success
+        if: success()
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
@@ -318,3 +398,17 @@ jobs:
 
             [Release Notes](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }})
             [Docker Hub](https://hub.docker.com/r/${{ env.IMAGE_NAME }})
+
+      - name: Notify release failure
+        if: failure()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **GitHub Release Failed** - ${{ github.ref_name }}
+
+            Docker images are available but GitHub release creation failed.
+
+            [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
