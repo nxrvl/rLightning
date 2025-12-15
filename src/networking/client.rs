@@ -23,7 +23,7 @@ impl Client {
         
         Ok(Self {
             stream,
-            buffer: BytesMut::with_capacity(1024 * 1024), // 1MB buffer
+            buffer: BytesMut::with_capacity(64 * 1024 * 1024), // 64MB buffer for large JSON values
         })
     }
     
@@ -49,45 +49,35 @@ impl Client {
     /// Send a command with raw byte arguments
     /// Takes a vector of command arguments, each convertible to byte slices
     #[allow(dead_code)]
-    pub async fn send_command_raw<B>(&mut self, args: Vec<B>) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> 
+    pub async fn send_command_raw<B>(&mut self, args: Vec<B>) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>>
     where B: AsRef<[u8]> {
         // Convert the command to a RESP array
         let mut items = Vec::with_capacity(args.len());
-        
-        println!("Client preparing to send command:");
-        for (i, arg) in args.iter().enumerate() {
+
+        for arg in args.iter() {
             let arg_bytes = arg.as_ref();
-            let arg_str = String::from_utf8_lossy(arg_bytes);
-            println!("  Arg {}: \"{}\" (bytes: {:?})", i, arg_str, arg_bytes);
             items.push(RespValue::BulkString(Some(arg_bytes.to_vec())));
         }
-        
+
         let cmd = RespValue::Array(Some(items));
-        println!("Command as RESP: {:?}", cmd);
         let cmd_bytes = cmd.serialize()?;
-        println!("Serialized command bytes: {:?}", cmd_bytes);
-        
+
         // Send the command
         self.stream.write_all(&cmd_bytes).await?;
-        
+
         // Read the response with timeout and retries
         for attempt in 1..=3 {
-            if attempt > 1 {
-                println!("Retry attempt {} for response", attempt);
-            }
-            
-            match timeout(Duration::from_secs(3), self.read_response()).await {
+            match timeout(Duration::from_secs(30), self.read_response()).await {
                 Ok(result) => return result,
                 Err(e) => {
                     if attempt == 3 {
                         return Err(format!("Timeout waiting for response: {}", e).into());
                     }
-                    println!("Timeout waiting for response, retrying...");
                     // Continue to next attempt
                 }
             }
         }
-        
+
         Err("Failed to get response after retries".into())
     }
     
@@ -96,25 +86,17 @@ impl Client {
         loop {
             let n = self.stream.read_buf(&mut self.buffer).await?;
             if n == 0 {
-                // For connection closed errors during tests, let's try to handle them better
-                // For client-side tests, we'll assume this means the expected error response
-                // was received but the server closed the connection
+                // Connection closed - try to parse what we have
                 if !self.buffer.is_empty() {
-                    // Try to parse what we have
-                    println!("Connection closed but buffer has data, trying to parse: {:?}", self.buffer);
                     if let Some(value) = RespValue::parse(&mut self.buffer)? {
                         return Ok(value);
                     }
                 }
                 return Err("Connection closed by server".into());
             }
-            
-            println!("Received {} bytes from server", n);
-            println!("Buffer contents: {:?}", self.buffer);
-            
+
             // Try to parse a complete response
             if let Some(value) = RespValue::parse(&mut self.buffer)? {
-                println!("Parsed response: {:?}", value);
                 return Ok(value);
             }
         }

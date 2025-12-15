@@ -27,7 +27,29 @@ jobs:
           shared-key: "release-tests"
 
       - name: Run all tests
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features
+
+  notify-test-failure:
+    needs: test
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Notify test failure
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **Release Tests Failed - ${{ github.ref_name }}**
+
+            **Repository:** ${{ github.repository }}
+            **Version:** ${{ github.ref_name }}
+            **Commit:** `${{ github.sha }}`
+
+            Tests failed. Release build aborted.
+
+            [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   notify-start:
     needs: test

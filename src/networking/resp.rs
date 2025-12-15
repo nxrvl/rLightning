@@ -481,10 +481,103 @@ fn parse_bulk_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespErr
     Ok(Some(RespValue::BulkString(Some(data))))
 }
 
+/// Calculate the size of a complete RESP value without consuming the buffer
+/// Returns None if data is incomplete, Some(size) if complete
+fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
+    if buffer.is_empty() {
+        return None;
+    }
+
+    match buffer[0] {
+        b'+' | b'-' | b':' => {
+            // Simple string, error, or integer - find CRLF
+            for i in 1..buffer.len() {
+                if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
+                    return Some(i + 2);
+                }
+            }
+            None
+        }
+        b'$' => {
+            // Bulk string - find length line first
+            let mut crlf_pos = None;
+            for i in 1..buffer.len() {
+                if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
+                    crlf_pos = Some(i);
+                    break;
+                }
+            }
+
+            let crlf_pos = crlf_pos?;
+            let length_str = std::str::from_utf8(&buffer[1..crlf_pos]).ok()?;
+            let length = length_str.parse::<i64>().ok()?;
+
+            if length == -1 {
+                return Some(crlf_pos + 2); // $-1\r\n
+            }
+
+            if length < 0 {
+                return None;
+            }
+
+            let total_size = crlf_pos + 2 + length as usize + 2;
+            if buffer.len() >= total_size {
+                Some(total_size)
+            } else {
+                None
+            }
+        }
+        b'*' => {
+            // Array - find length line first
+            let mut crlf_pos = None;
+            for i in 1..buffer.len() {
+                if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
+                    crlf_pos = Some(i);
+                    break;
+                }
+            }
+
+            let crlf_pos = crlf_pos?;
+            let length_str = std::str::from_utf8(&buffer[1..crlf_pos]).ok()?;
+            let count = length_str.parse::<i64>().ok()?;
+
+            if count == -1 {
+                return Some(crlf_pos + 2); // *-1\r\n
+            }
+
+            if count < 0 || count > 1_000_000 {
+                return None;
+            }
+
+            // Calculate size of all elements
+            let mut offset = crlf_pos + 2;
+            for _ in 0..count {
+                if offset >= buffer.len() {
+                    return None;
+                }
+                let elem_size = calculate_resp_size(&buffer[offset..])?;
+                offset += elem_size;
+            }
+
+            Some(offset)
+        }
+        _ => None,
+    }
+}
+
 /// Optimized array parsing with capacity pre-allocation
+/// CRITICAL FIX: Check that ALL data is available BEFORE consuming any of the buffer
 fn parse_array(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // First, check if we have all the data we need WITHOUT consuming the buffer
+    let total_size = match calculate_resp_size(buffer) {
+        Some(size) => size,
+        None => return Ok(None), // Incomplete data, wait for more
+    };
+
+    // Now we know we have all data - safe to consume
     let length_str = read_line(buffer)?;
     if length_str.is_none() {
+        // This shouldn't happen since we checked above, but handle it anyway
         return Ok(None);
     }
 
@@ -492,21 +585,30 @@ fn parse_array(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
     if length == -1 {
         return Ok(Some(RespValue::Array(None)));
     }
-    
+
     // Safety check for large arrays
     if length > 1_000_000 {
         return Err(RespError::ValueTooLarge(format!("Array length exceeds 1,000,000 limit: {}", length)));
     }
 
+    // Log large array parsing
+    if length > 10000 {
+        debug!("Parsing large array with {} elements, total size {} bytes", length, total_size);
+    }
+
     // Pre-allocate the vector with the known capacity
     let mut values = Vec::with_capacity(length as usize);
-    
-    // Parse each array element
+
+    // Parse each array element - we know all data is available
     for _ in 0..length {
         // Try to parse the next value
         match RespValue::parse(buffer)? {
             Some(value) => values.push(value),
-            None => return Ok(None),
+            None => {
+                // This shouldn't happen since we pre-calculated the size
+                warn!("Unexpected incomplete data in array parsing");
+                return Ok(None);
+            }
         }
     }
 

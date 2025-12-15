@@ -41,7 +41,7 @@ impl Server {
             security: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
-            buffer_size: 1024 * 1024,                          // 1MB buffer size
+            buffer_size: 64 * 1024 * 1024,                     // 64MB buffer size for large JSON values
         }
     }
 
