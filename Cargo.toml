@@ -1,6 +1,6 @@
 [package]
 name = "rlightning"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2024"
 description = "Redis-compatible in-memory key-value store focused on session management and caching"
 authors = ["Altista Tech"]
