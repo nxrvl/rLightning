@@ -392,7 +392,10 @@ async fn run_core_redis_tests(client: &mut Client) -> Result<(), Box<dyn std::er
 }
 
 /// Main compatibility test that tries Docker first, falls back to local
+/// NOTE: This test is ignored in CI as it builds Docker images which takes too long.
+/// Run manually with: cargo test test_redis_compatibility -- --ignored
 #[tokio::test]
+#[ignore]
 async fn test_redis_compatibility() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // First try the original comprehensive local test
     let local_result = run_local_compatibility_test().await;
