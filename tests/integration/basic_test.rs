@@ -8,8 +8,8 @@ use crate::test_utils::{setup_test_server, create_client};
 /// Basic integration test for key-value operations
 #[tokio::test]
 async fn test_basic_operations() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Set up server with a unique port offset
-    let addr = setup_test_server(1).await?;
+    // Set up server with a unique port offset (use high numbers to avoid conflicts)
+    let addr = setup_test_server(901).await?;
     
     // Connect client
     let mut client = create_client(addr).await?;
@@ -53,8 +53,8 @@ async fn test_basic_operations() -> Result<(), Box<dyn std::error::Error + Send 
 /// Test for TTL-related commands
 #[tokio::test]
 async fn test_ttl_commands() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Set up server with a unique port offset
-    let addr = setup_test_server(2).await?;
+    // Set up server with a unique port offset (use high numbers to avoid conflicts)
+    let addr = setup_test_server(902).await?;
     
     // Connect client
     let mut client = create_client(addr).await?;
@@ -105,8 +105,8 @@ async fn test_ttl_commands() -> Result<(), Box<dyn std::error::Error + Send + Sy
 /// Test deletion and existence checking
 #[tokio::test]
 async fn test_del_exists() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Set up server with a unique port offset
-    let addr = setup_test_server(20).await?;
+    // Set up server with a unique port offset (use high numbers to avoid conflicts)
+    let addr = setup_test_server(920).await?;
     
     // Connect client
     let mut client = create_client(addr).await?;

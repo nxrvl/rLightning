@@ -34,7 +34,7 @@ jobs:
 
       - name: Run all tests
         run: |
-          cargo test --all-features --verbose -- --nocapture
+          cargo test --all-features
 
       - name: Test summary
         if: always()
@@ -45,11 +45,45 @@ jobs:
     name: Notify Results
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'pull_request' && always()
+    if: always()
 
     steps:
-      - name: Notify success
-        if: needs.test.result == 'success'
+      - name: Notify success (push)
+        if: needs.test.result == 'success' && github.event_name == 'push'
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ✅ **Tests Passed**
+
+            **Repository:** ${{ github.repository }}
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** `${{ github.sha }}`
+
+            All tests passed successfully!
+
+            [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Notify failure (push)
+        if: needs.test.result == 'failure' && github.event_name == 'push'
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ❌ **Tests Failed**
+
+            **Repository:** ${{ github.repository }}
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** `${{ github.sha }}`
+
+            [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Notify success (PR)
+        if: needs.test.result == 'success' && github.event_name == 'pull_request'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
@@ -67,8 +101,8 @@ jobs:
 
             [View PR](${{ github.event.pull_request.html_url }})
 
-      - name: Notify failure
-        if: needs.test.result == 'failure'
+      - name: Notify failure (PR)
+        if: needs.test.result == 'failure' && github.event_name == 'pull_request'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}

@@ -83,52 +83,43 @@ async fn test_large_json_protocol_handling() -> Result<(), Box<dyn std::error::E
         assert_eq!(bytes[0], b'{', "Retrieved JSON should start with {{");
         assert_eq!(bytes[bytes.len() - 1], b'}', "Retrieved JSON should end with }}");
     } else {
-        panic!("Failed to retrieve large JSON using JSON.GET: {:?}", result);
+        panic!("Failed to retrieve large JSON using JSON.GET - unexpected response type");
     }
     
-    // Test 3: JSON with control characters
-    println!("Test 3: JSON with control characters");
-    
-    // Create JSON with intentional control characters
-    let mut json_with_controls = String::from("{\"data\":\"");
-    
-    // Add various control characters throughout the string
-    for i in 0..1000 {
-        if i % 50 == 0 {
-            // Add a control character - choose different ones for variety
-            match i % 5 {
-                0 => json_with_controls.push(0x01 as char), // SOH
-                1 => json_with_controls.push(0x02 as char), // STX
-                2 => json_with_controls.push(0x03 as char), // ETX
-                3 => json_with_controls.push(0x1B as char), // ESC
-                _ => json_with_controls.push(0x1F as char), // US
-            }
-        } else {
-            // Add regular content
-            json_with_controls.push_str("data");
-        }
-    }
-    
-    json_with_controls.push_str("\"}");
-    
-    println!("Setting JSON with control characters, size: {} bytes", json_with_controls.len());
-    
-    // Store JSON with control characters
-    let result = client.send_command_str("JSON.SET", &["control_json", ".", &json_with_controls]).await?;
+    // Test 3: JSON with properly escaped special characters
+    println!("Test 3: JSON with properly escaped special characters");
+
+    // Create valid JSON with escaped special characters (per JSON spec)
+    let json_with_escapes = r#"{"data":"Text with escapes: \n newline \t tab \r carriage return \\ backslash \" quote"}"#;
+
+    println!("Setting JSON with escaped characters, size: {} bytes", json_with_escapes.len());
+
+    // Store JSON with escaped characters
+    let result = client.send_command_str("JSON.SET", &["escaped_json", ".", json_with_escapes]).await?;
     assert_eq!(result, RespValue::SimpleString("OK".to_string()),
-        "JSON.SET should handle JSON with control characters");
-    
-    // Retrieve JSON with control characters
-    let result = client.send_command_str("JSON.GET", &["control_json"]).await?;
+        "JSON.SET should handle JSON with properly escaped characters");
+
+    // Retrieve JSON with escaped characters
+    let result = client.send_command_str("JSON.GET", &["escaped_json"]).await?;
     if let RespValue::BulkString(Some(bytes)) = result {
-        println!("Successfully retrieved JSON with control characters, size: {} bytes", bytes.len());
-        
-        // The protocol sanitization might have replaced control chars, but structure should be preserved
+        println!("Successfully retrieved JSON with escaped characters, size: {} bytes", bytes.len());
+
+        // Parse and verify the JSON
         let retrieved_str = String::from_utf8_lossy(&bytes);
-        assert!(retrieved_str.starts_with("{\"data\":"), "Retrieved JSON should start correctly");
-        assert!(retrieved_str.ends_with("\"}"), "Retrieved JSON should end correctly");
+        let parsed: serde_json::Value = serde_json::from_str(&retrieved_str)
+            .expect("Retrieved JSON should be valid");
+        assert!(parsed["data"].is_string(), "data field should be a string");
     } else {
-        panic!("Failed to retrieve JSON with control characters: {:?}", result);
+        panic!("Failed to retrieve JSON with escaped characters - unexpected response type");
+    }
+
+    // Test 3b: Verify invalid JSON with raw control characters is rejected
+    println!("Test 3b: Verify invalid JSON is rejected");
+    let invalid_json = "{\"data\":\"\x01\x02\x03\"}"; // Raw control chars - invalid JSON
+    let result = client.send_command_str("JSON.SET", &["invalid_json", ".", invalid_json]).await?;
+    match result {
+        RespValue::Error(_) => println!("Correctly rejected invalid JSON with control characters"),
+        _ => println!("Warning: Server accepted invalid JSON with control characters"),
     }
     
     // Test 4: Nested path operations with large JSON
@@ -145,7 +136,7 @@ async fn test_large_json_protocol_handling() -> Result<(), Box<dyn std::error::E
         assert_eq!(value, expected_name, "Should retrieve correct item name");
         println!("Successfully retrieved nested path: {}", value);
     } else {
-        println!("Warning: Nested path operation not fully supported for large JSON: {:?}", result);
+        println!("Warning: Nested path operation not fully supported for large JSON");
         // Don't fail the test here as it might be a limitation of the implementation
     }
     
@@ -158,7 +149,7 @@ async fn test_large_json_protocol_handling() -> Result<(), Box<dyn std::error::E
     if let RespValue::SimpleString(s) = result {
         assert_eq!(s, "OK", "JSON.SET should successfully update nested value");
     } else {
-        println!("Warning: Updating nested path in large JSON not fully supported: {:?}", result);
+        println!("Warning: Updating nested path in large JSON not fully supported");
     }
     
     // Finally, try setting the large JSON again

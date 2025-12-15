@@ -18,7 +18,7 @@ async fn test_large_json_set_get() {
     };
     
     let store = StorageEngine::new(storage_config);
-    let server_addr: SocketAddr = "127.0.0.1:17001".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:17100".parse().unwrap();
     let server = Server::new(server_addr, store);
     
     tokio::spawn(async move {
@@ -38,17 +38,21 @@ async fn test_large_json_set_get() {
     for i in 0..100 {
         json_data.push_str(&format!("  \"field_{}\": \"This is test data for field {}. Adding some text to make it larger.\",\n", i, i));
     }
-    
+
     // Add nested objects with different structures
     json_data.push_str("  \"nested\": {\n");
     for i in 0..30 {
         json_data.push_str(&format!("    \"nested_field_{}\": {},\n", i, i * 10));
     }
-    
+
     // Add array with various elements
     json_data.push_str("    \"array\": [");
     for i in 0..20 {
-        json_data.push_str(&format!("{}, ", i));
+        if i < 19 {
+            json_data.push_str(&format!("{}, ", i));
+        } else {
+            json_data.push_str(&format!("{}", i));
+        }
     }
     json_data.push_str("]\n  },\n");
     
@@ -123,7 +127,7 @@ async fn test_python_redis_client_format() {
     };
     
     let store = StorageEngine::new(storage_config);
-    let server_addr: SocketAddr = "127.0.0.1:17002".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:17101".parse().unwrap();
     let server = Server::new(server_addr, store);
     
     tokio::spawn(async move {
@@ -223,7 +227,7 @@ async fn test_json_special_characters() {
     };
     
     let store = StorageEngine::new(storage_config);
-    let server_addr: SocketAddr = "127.0.0.1:17003".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:17102".parse().unwrap();
     let server = Server::new(server_addr, store);
     
     tokio::spawn(async move {

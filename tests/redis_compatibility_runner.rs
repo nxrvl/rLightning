@@ -5,7 +5,10 @@ mod test_runner {
     use std::thread;
 
     /// Run all Redis compatibility tests in sequence
+    /// NOTE: This test is ignored by default as it runs cargo test internally
+    /// and can cause port conflicts. Run manually with: cargo test --test lib redis_compatibility_runner -- --ignored
     #[test]
+    #[ignore]
     fn run_all_redis_compatibility_tests() {
         // List of all compatibility test files
         let test_files = [
