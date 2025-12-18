@@ -20,6 +20,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 mod command;
 mod networking;
 mod persistence;
+mod pubsub;
 mod replication;
 mod security;
 mod storage;

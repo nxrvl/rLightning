@@ -1,0 +1,47 @@
+# Docker ignore file for documentation site builds
+
+# Git
+.git
+.gitignore
+.github
+
+# Build artifacts
+target/
+site/site/
+*.rdb
+*.aof
+
+# Rust specific
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+tests/
+benches/
+
+# Source code (not needed for docs)
+src/
+
+# Cargo files (not needed for docs)
+Cargo.lock
+Cargo.toml
+
+# Config files
+config/
+*.toml
+!site/mkdocs.toml
+
+# Other dockerfiles
+Dockerfile
+!Dockerfile.site
