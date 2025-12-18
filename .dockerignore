@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation site
+site/
+Dockerfile.site
+docker-compose.docs.yml
+.dockerignore.site
+
+# Beads workflow
+.beads/
+
+# Misc
+*.md
+!README.md
+scripts/

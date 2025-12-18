@@ -25,6 +25,9 @@ pub enum NetworkError {
 
     #[error("Client disconnected unexpectedly")]
     ClientDisconnected,
+
+    #[error("Connection closed by request")]
+    ConnectionClosed,
     
     #[error("Could not resolve address: {0}")]
     AddressResolution(String),

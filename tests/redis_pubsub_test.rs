@@ -89,29 +89,35 @@ async fn test_redis_pubsub() -> Result<(), Box<dyn std::error::Error + Send + Sy
             // After subscribing to channel1, publishing a message to channel1 should return 1 (the number of subscribers)
             assert_eq!(receivers, 1, "PUBLISH should return 1 (number of clients that received the message)");
             
-            // Now unsubscribe the client using the same client connection that subscribed
-            // This is not the standard Redis way, as subscribers typically use a dedicated connection,
-            // but it allows us to test subscription without access to the private read_response method
+            // The subscriber will receive the published message first
+            // Let's read it before unsubscribing
+            let message_result = subscriber.read_response().await?;
+            if let RespValue::Array(Some(msg)) = message_result {
+                // Should be a message: ["message", "channel1", "Hello, PubSub!"]
+                if let RespValue::BulkString(Some(msg_type)) = &msg[0] {
+                    let msg_type_str = std::str::from_utf8(msg_type)?;
+                    assert_eq!(msg_type_str, "message", "Should receive a message");
+                }
+            }
+
+            // Now unsubscribe the client
             let unsubscribe_result = subscriber.send_command_str("UNSUBSCRIBE", &["channel1"]).await?;
             if let RespValue::Array(Some(response)) = unsubscribe_result {
                 assert_eq!(response.len(), 3, "UNSUBSCRIBE response should have 3 elements");
-                
-                // First element should be "unsubscribe" or something similar indicating unsubscribe type
-                // Second element should be the channel name
-                // Third element should be the count of subscribed channels (0)
-                
+
+                // First element should be "unsubscribe"
                 if let RespValue::BulkString(Some(msg_type)) = &response[0] {
                     let msg_type_str = std::str::from_utf8(msg_type)?;
-                    assert!(msg_type_str.contains("unsubscribe"), 
+                    assert!(msg_type_str.contains("unsubscribe"),
                             "First element should be 'unsubscribe', got: {}", msg_type_str);
                 }
-                
+
                 if let RespValue::BulkString(Some(channel)) = &response[1] {
                     let channel_str = std::str::from_utf8(channel)?;
                     assert_eq!(channel_str, "channel1", "Second element should be the channel name");
                 }
-                
-                assert!(matches!(response[2], RespValue::Integer(0)), 
+
+                assert!(matches!(response[2], RespValue::Integer(0)),
                         "Third element should be the count of subscribed channels (0)");
             }
         },
@@ -178,27 +184,37 @@ async fn test_redis_pubsub() -> Result<(), Box<dyn std::error::Error + Send + Sy
     
     if let RespValue::Integer(receivers) = publish_result {
         assert_eq!(receivers, 1, "PUBLISH should return 1 (number of subscribers)");
-        
+
+        // The pattern subscriber will receive the published message first
+        let message_result = pattern_subscriber.read_response().await?;
+        if let RespValue::Array(Some(msg)) = message_result {
+            // Should be a pmessage: ["pmessage", "channel*", "channel2", "Hello, Pattern!"]
+            if let RespValue::BulkString(Some(msg_type)) = &msg[0] {
+                let msg_type_str = std::str::from_utf8(msg_type)?;
+                assert_eq!(msg_type_str, "pmessage", "Should receive a pmessage");
+            }
+        }
+
         // Now unsubscribe from the pattern
         let punsubscribe_result = pattern_subscriber.send_command_str("PUNSUBSCRIBE", &["channel*"]).await?;
         if let RespValue::Array(Some(response)) = punsubscribe_result {
             assert_eq!(response.len(), 3, "PUNSUBSCRIBE response should have 3 elements");
-            
-            // First element should be "punsubscribe" or similar
+
+            // First element should be "punsubscribe"
             if let RespValue::BulkString(Some(msg_type)) = &response[0] {
                 let msg_type_str = std::str::from_utf8(msg_type)?;
-                assert!(msg_type_str.contains("unsubscribe") || msg_type_str.contains("punsubscribe"), 
+                assert!(msg_type_str.contains("unsubscribe") || msg_type_str.contains("punsubscribe"),
                        "First element should indicate pattern unsubscribe");
             }
-            
+
             // Second element should be the pattern
             if let RespValue::BulkString(Some(pattern)) = &response[1] {
                 let pattern_str = std::str::from_utf8(pattern)?;
                 assert_eq!(pattern_str, "channel*", "Second element should be the pattern");
             }
-            
+
             // Third element should be the count of subscribed patterns (0)
-            assert!(matches!(response[2], RespValue::Integer(0)), 
+            assert!(matches!(response[2], RespValue::Integer(0)),
                    "Third element should be the count of subscribed patterns (0)");
         }
     } else if let RespValue::Error(err) = &publish_result {
@@ -216,10 +232,12 @@ async fn test_redis_pubsub() -> Result<(), Box<dyn std::error::Error + Send + Sy
     
     // Create a subscriber for PUBSUB testing
     let mut pubsub_subscriber = Client::connect(addr).await?;
-    
-    // Subscribe to channels
+
+    // Subscribe to channels (sends two responses - one for each channel)
     pubsub_subscriber.send_command_str("SUBSCRIBE", &["test1", "test2"]).await?;
-    
+    // Read the second subscription confirmation
+    let _ = pubsub_subscriber.read_response().await?;
+
     // Test PUBSUB CHANNELS command
     let channels_result = publisher.send_command_str("PUBSUB", &["CHANNELS"]).await?;
     match channels_result {
