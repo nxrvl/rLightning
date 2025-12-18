@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "rlightning"
-version = "1.0.6"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64",
