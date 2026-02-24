@@ -873,6 +873,22 @@ impl StorageEngine {
         }
     }
     
+    /// Get the stored data type for a key without legacy heuristic detection.
+    /// Returns the raw data_type field from StorageItem, which is authoritative
+    /// for keys created with the current storage format.
+    pub async fn get_raw_data_type(&self, key: &[u8]) -> StorageResult<String> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok("none".to_string());
+            }
+            Ok(entry.value().data_type.as_str().to_string())
+        } else {
+            Ok("none".to_string())
+        }
+    }
+
     /// Get the current number of keys (O(1) operation for DBSIZE)
     pub fn get_key_count(&self) -> u64 {
         self.key_count.load(Ordering::Relaxed)

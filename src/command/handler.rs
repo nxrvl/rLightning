@@ -83,6 +83,15 @@ impl CommandHandler {
             "lcs" => commands::lcs(&self.storage, &command.args).await,
             "substr" => commands::substr(&self.storage, &command.args).await,
 
+            // Bitmap commands
+            "setbit" => commands::setbit(&self.storage, &command.args).await,
+            "getbit" => commands::getbit(&self.storage, &command.args).await,
+            "bitcount" => commands::bitcount(&self.storage, &command.args).await,
+            "bitpos" => commands::bitpos(&self.storage, &command.args).await,
+            "bitop" => commands::bitop(&self.storage, &command.args).await,
+            "bitfield" => commands::bitfield(&self.storage, &command.args).await,
+            "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
+
             // List commands
             "lpush" => commands::lpush(&self.storage, &command.args).await,
             "rpush" => commands::rpush(&self.storage, &command.args).await,
