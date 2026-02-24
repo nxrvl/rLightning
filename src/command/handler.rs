@@ -200,7 +200,9 @@ impl CommandHandler {
             "hincrbyfloat" => commands::hincrbyfloat(&self.storage, &command.args).await,
             "hsetnx" => commands::hsetnx(&self.storage, &command.args).await,
             "hstrlen" => commands::hstrlen(&self.storage, &command.args).await,
-            
+            "hrandfield" => commands::hrandfield(&self.storage, &command.args).await,
+            "hscan" => commands::hscan(&self.storage, &command.args).await,
+
             // Set commands
             "sadd" => commands::sadd(&self.storage, &command.args).await,
             "srem" => commands::srem(&self.storage, &command.args).await,
@@ -215,6 +217,10 @@ impl CommandHandler {
             "sunionstore" => commands::sunionstore(&self.storage, &command.args).await,
             "sdiff" => commands::sdiff(&self.storage, &command.args).await,
             "sdiffstore" => commands::sdiffstore(&self.storage, &command.args).await,
+            "smove" => commands::smove(&self.storage, &command.args).await,
+            "sintercard" => commands::sintercard(&self.storage, &command.args).await,
+            "smismember" => commands::smismember(&self.storage, &command.args).await,
+            "sscan" => commands::sscan(&self.storage, &command.args).await,
 
             // Sorted Set commands
             "zadd" => commands::zadd(&self.storage, &command.args).await,
