@@ -143,27 +143,27 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/types/sorted_set.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement ZRANGEBYSCORE / ZREVRANGEBYSCORE (range by score with LIMIT)
-- [ ] Implement ZRANGEBYLEX / ZREVRANGEBYLEX (range by lexicographic order)
-- [ ] Implement ZREMRANGEBYRANK (remove by rank range)
-- [ ] Implement ZREMRANGEBYSCORE (remove by score range)
-- [ ] Implement ZREMRANGEBYLEX (remove by lex range)
-- [ ] Implement ZLEXCOUNT (count by lex range)
-- [ ] Implement ZREVRANK (reverse rank)
-- [ ] Implement ZINTERSTORE / ZUNIONSTORE (store intersection/union with AGGREGATE and WEIGHTS)
-- [ ] Implement ZINTER / ZUNION / ZDIFF (without storing)
-- [ ] Implement ZDIFFSTORE (store difference)
-- [ ] Implement ZPOPMIN / ZPOPMAX (pop lowest/highest scored members)
-- [ ] Implement BZPOPMIN / BZPOPMAX (blocking pop - reuse blocking infra from Task 5)
-- [ ] Implement ZRANDMEMBER (random member)
-- [ ] Implement ZMSCORE (multiple member scores)
-- [ ] Implement ZMPOP / BZMPOP (pop from multiple sorted sets)
-- [ ] Implement ZRANGESTORE (store range result)
-- [ ] Implement ZSCAN (incrementally iterate sorted set members)
-- [ ] Implement unified ZRANGE with REV, BYSCORE, BYLEX, LIMIT options (Redis 6.2+)
-- [ ] Write tests for each new command including edge cases
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement ZRANGEBYSCORE / ZREVRANGEBYSCORE (range by score with LIMIT)
+- [x] Implement ZRANGEBYLEX / ZREVRANGEBYLEX (range by lexicographic order)
+- [x] Implement ZREMRANGEBYRANK (remove by rank range)
+- [x] Implement ZREMRANGEBYSCORE (remove by score range)
+- [x] Implement ZREMRANGEBYLEX (remove by lex range)
+- [x] Implement ZLEXCOUNT (count by lex range)
+- [x] Implement ZREVRANK (reverse rank)
+- [x] Implement ZINTERSTORE / ZUNIONSTORE (store intersection/union with AGGREGATE and WEIGHTS)
+- [x] Implement ZINTER / ZUNION / ZDIFF (without storing)
+- [x] Implement ZDIFFSTORE (store difference)
+- [x] Implement ZPOPMIN / ZPOPMAX (pop lowest/highest scored members)
+- [x] Implement BZPOPMIN / BZPOPMAX (blocking pop - reuse blocking infra from Task 5)
+- [x] Implement ZRANDMEMBER (random member)
+- [x] Implement ZMSCORE (multiple member scores)
+- [x] Implement ZMPOP / BZMPOP (pop from multiple sorted sets)
+- [x] Implement ZRANGESTORE (store range result)
+- [x] Implement ZSCAN (incrementally iterate sorted set members)
+- [x] Implement unified ZRANGE with REV, BYSCORE, BYLEX, LIMIT options (Redis 6.2+)
+- [x] Write tests for each new command including edge cases
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 8: HyperLogLog Commands
 
