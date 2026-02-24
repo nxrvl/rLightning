@@ -10,3 +10,8 @@ RELEASE_SETUP.md
 test-config.toml
 AGENTS.md
 .beads/
+
+# ralphex progress logs
+.ralphex/progress/
+.serena/
+docs/
