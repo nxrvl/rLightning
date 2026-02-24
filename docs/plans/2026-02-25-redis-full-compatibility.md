@@ -127,15 +127,15 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/types/hash.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement SMOVE (move member between sets)
-- [ ] Implement SINTERCARD (intersection cardinality with LIMIT)
-- [ ] Implement SMISMEMBER (check multiple members at once)
-- [ ] Implement SSCAN (incrementally iterate set members)
-- [ ] Implement HRANDFIELD (random field with optional count and WITHVALUES)
-- [ ] Implement HSCAN (incrementally iterate hash fields)
-- [ ] Write tests for each new command
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement SMOVE (move member between sets)
+- [x] Implement SINTERCARD (intersection cardinality with LIMIT)
+- [x] Implement SMISMEMBER (check multiple members at once)
+- [x] Implement SSCAN (incrementally iterate set members)
+- [x] Implement HRANDFIELD (random field with optional count and WITHVALUES)
+- [x] Implement HSCAN (incrementally iterate hash fields)
+- [x] Write tests for each new command
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 7: Missing Sorted Set Commands
 

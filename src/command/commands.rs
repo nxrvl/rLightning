@@ -13,10 +13,10 @@ pub use crate::command::types::blocking::BlockingManager;
 pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr, incrby, decrby, incrbyfloat, append, strlen, getrange, setrange, getset, setnx, setex, pexpire, pttl, getex, getdel, psetex, lcs, substr};
 
 // Hash commands
-pub use crate::command::types::hash::{hset, hget, hgetall, hdel, hexists, hmset, hkeys, hvals, hlen, hmget, hincrby, hincrbyfloat, hsetnx, hstrlen};
+pub use crate::command::types::hash::{hset, hget, hgetall, hdel, hexists, hmset, hkeys, hvals, hlen, hmget, hincrby, hincrbyfloat, hsetnx, hstrlen, hrandfield, hscan};
 
 // Set commands
-pub use crate::command::types::set::{sadd, srem, smembers, sismember, scard, spop, srandmember, sinter, sinterstore, sunion, sunionstore, sdiff, sdiffstore};
+pub use crate::command::types::set::{sadd, srem, smembers, sismember, scard, spop, srandmember, sinter, sinterstore, sunion, sunionstore, sdiff, sdiffstore, smove, sintercard, smismember, sscan};
 
 // Sorted Set commands
 pub use crate::command::types::sorted_set::{zadd, zrem, zscore, zrange, zcard, zcount, zrank, zrevrange, zincrby};

@@ -434,12 +434,210 @@ pub async fn hstrlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     }
 }
 
+fn glob_match(pattern: &str, input: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let inp: Vec<char> = input.chars().collect();
+    let (plen, ilen) = (pat.len(), inp.len());
+    let (mut pi, mut ii) = (0, 0);
+    let (mut star_p, mut star_i) = (usize::MAX, 0);
+    while ii < ilen {
+        if pi < plen && (pat[pi] == '?' || pat[pi] == inp[ii]) {
+            pi += 1;
+            ii += 1;
+        } else if pi < plen && pat[pi] == '*' {
+            star_p = pi;
+            star_i = ii;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            pi = star_p + 1;
+            star_i += 1;
+            ii = star_i;
+        } else {
+            return false;
+        }
+    }
+    while pi < plen && pat[pi] == '*' {
+        pi += 1;
+    }
+    pi == plen
+}
+
+/// Redis HRANDFIELD command - Get random fields from a hash
+pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.is_empty() || args.len() > 3 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let key = &args[0];
+    let key_prefix = [key.as_slice(), b":"].concat();
+
+    // Collect all fields and values
+    let all_keys = engine.all_keys().await?;
+    let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for full_key in &all_keys {
+        if full_key.starts_with(&key_prefix) {
+            let field = full_key[key_prefix.len()..].to_vec();
+            if let Some(value) = engine.get(full_key).await? {
+                fields.push((field, value));
+            }
+        }
+    }
+
+    if fields.is_empty() {
+        if args.len() >= 2 {
+            return Ok(RespValue::Array(Some(vec![])));
+        } else {
+            return Ok(RespValue::BulkString(None));
+        }
+    }
+
+    if args.len() == 1 {
+        // No count: return single random field name
+        let idx = fastrand::usize(0..fields.len());
+        return Ok(RespValue::BulkString(Some(fields[idx].0.clone())));
+    }
+
+    let count_val = String::from_utf8_lossy(&args[1]).parse::<i64>().map_err(|_| {
+        CommandError::NotANumber
+    })?;
+
+    let with_values = if args.len() == 3 {
+        let opt = String::from_utf8_lossy(&args[2]).to_uppercase();
+        if opt == "WITHVALUES" {
+            true
+        } else {
+            return Err(CommandError::InvalidArgument(format!("Unsupported option: {}", opt)));
+        }
+    } else {
+        false
+    };
+
+    let mut result: Vec<RespValue> = Vec::new();
+
+    if count_val >= 0 {
+        // Positive count: return up to count unique fields
+        let actual_count = std::cmp::min(count_val as usize, fields.len());
+        // Use Fisher-Yates partial shuffle for uniqueness
+        let mut indices: Vec<usize> = (0..fields.len()).collect();
+        for i in 0..actual_count {
+            let j = fastrand::usize(i..indices.len());
+            indices.swap(i, j);
+        }
+        for i in 0..actual_count {
+            let idx = indices[i];
+            result.push(RespValue::BulkString(Some(fields[idx].0.clone())));
+            if with_values {
+                result.push(RespValue::BulkString(Some(fields[idx].1.clone())));
+            }
+        }
+    } else {
+        // Negative count: return |count| fields, may repeat
+        let actual_count = (-count_val) as usize;
+        for _ in 0..actual_count {
+            let idx = fastrand::usize(0..fields.len());
+            result.push(RespValue::BulkString(Some(fields[idx].0.clone())));
+            if with_values {
+                result.push(RespValue::BulkString(Some(fields[idx].1.clone())));
+            }
+        }
+    }
+
+    Ok(RespValue::Array(Some(result)))
+}
+
+/// Redis HSCAN command - Incrementally iterate hash fields
+pub async fn hscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let key = &args[0];
+    let cursor_str = String::from_utf8_lossy(&args[1]);
+    let cursor = cursor_str.parse::<u64>().map_err(|_| {
+        CommandError::InvalidArgument("Cursor value must be an integer".to_string())
+    })?;
+
+    // Parse optional MATCH and COUNT
+    let mut pattern = String::from("*");
+    let mut count: usize = 10;
+    let mut i = 2;
+    while i < args.len() {
+        let opt = String::from_utf8_lossy(&args[i]).to_uppercase();
+        match opt.as_str() {
+            "MATCH" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
+                pattern = String::from_utf8_lossy(&args[i + 1]).to_string();
+                i += 2;
+            }
+            "COUNT" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
+                count = String::from_utf8_lossy(&args[i + 1]).parse::<usize>().map_err(|_| {
+                    CommandError::InvalidArgument("COUNT must be a positive integer".to_string())
+                })?;
+                i += 2;
+            }
+            _ => {
+                return Err(CommandError::InvalidArgument(format!(
+                    "Unsupported HSCAN option: {}",
+                    opt
+                )));
+            }
+        }
+    }
+
+    let key_prefix = [key.as_slice(), b":"].concat();
+    let all_keys = engine.all_keys().await?;
+
+    // Collect field-value pairs
+    let mut field_values: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for full_key in &all_keys {
+        if full_key.starts_with(&key_prefix) {
+            let field = full_key[key_prefix.len()..].to_vec();
+            let field_str = String::from_utf8_lossy(&field);
+            if pattern == "*" || glob_match(&pattern, &field_str) {
+                if let Some(value) = engine.get(full_key).await? {
+                    field_values.push((field, value));
+                }
+            }
+        }
+    }
+
+    // Sort for deterministic cursor behavior
+    field_values.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total = field_values.len();
+    let start = if cursor == 0 || cursor as usize >= total {
+        0
+    } else {
+        cursor as usize
+    };
+
+    let end = (start + count).min(total);
+    let next_cursor = if end >= total { 0 } else { end as u64 };
+
+    let mut result_items: Vec<RespValue> = Vec::new();
+    for (field, value) in &field_values[start..end] {
+        result_items.push(RespValue::BulkString(Some(field.clone())));
+        result_items.push(RespValue::BulkString(Some(value.clone())));
+    }
+
+    Ok(RespValue::Array(Some(vec![
+        RespValue::BulkString(Some(next_cursor.to_string().into_bytes())),
+        RespValue::Array(Some(result_items)),
+    ])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::engine::StorageConfig;
+    use std::collections::HashSet;
     use std::sync::Arc;
-    
+
     #[tokio::test]
     async fn test_hash_commands() {
         let config = StorageConfig::default();
@@ -627,9 +825,214 @@ mod tests {
         let hget_args = vec![b"multi_hash".to_vec(), b"field1".to_vec()];
         let result = hget(&engine, &hget_args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"updated1".to_vec())));
-        
+
         let hget_args = vec![b"multi_hash".to_vec(), b"field4".to_vec()];
         let result = hget(&engine, &hget_args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value4".to_vec())));
     }
-} 
+
+    #[tokio::test]
+    async fn test_hrandfield_basic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Set up a hash with 3 fields
+        hset(&engine, &[
+            b"myhash".to_vec(),
+            b"f1".to_vec(), b"v1".to_vec(),
+            b"f2".to_vec(), b"v2".to_vec(),
+            b"f3".to_vec(), b"v3".to_vec(),
+        ]).await.unwrap();
+
+        // HRANDFIELD with no count - returns single field name
+        let result = hrandfield(&engine, &[b"myhash".to_vec()]).await.unwrap();
+        if let RespValue::BulkString(Some(field)) = result {
+            let s = String::from_utf8_lossy(&field);
+            assert!(s == "f1" || s == "f2" || s == "f3", "Got unexpected field: {}", s);
+        } else {
+            panic!("Expected BulkString");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hrandfield_positive_count() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        hset(&engine, &[
+            b"myhash2".to_vec(),
+            b"f1".to_vec(), b"v1".to_vec(),
+            b"f2".to_vec(), b"v2".to_vec(),
+            b"f3".to_vec(), b"v3".to_vec(),
+        ]).await.unwrap();
+
+        // HRANDFIELD with positive count 2 - returns 2 unique fields
+        let result = hrandfield(&engine, &[b"myhash2".to_vec(), b"2".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 2);
+            // Verify all items are valid field names
+            let mut seen = HashSet::new();
+            for item in &items {
+                if let RespValue::BulkString(Some(field)) = item {
+                    let s = String::from_utf8_lossy(field).to_string();
+                    assert!(s == "f1" || s == "f2" || s == "f3");
+                    seen.insert(s);
+                }
+            }
+            assert_eq!(seen.len(), 2, "Should return 2 unique fields");
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hrandfield_with_values() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        hset(&engine, &[
+            b"myhash3".to_vec(),
+            b"f1".to_vec(), b"v1".to_vec(),
+            b"f2".to_vec(), b"v2".to_vec(),
+        ]).await.unwrap();
+
+        // HRANDFIELD count 2 WITHVALUES - returns field-value pairs
+        let result = hrandfield(&engine, &[
+            b"myhash3".to_vec(), b"2".to_vec(), b"WITHVALUES".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 4); // 2 fields * 2 (field + value)
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hrandfield_negative_count() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        hset(&engine, &[
+            b"myhash4".to_vec(),
+            b"f1".to_vec(), b"v1".to_vec(),
+        ]).await.unwrap();
+
+        // Negative count: can return repeats
+        let result = hrandfield(&engine, &[b"myhash4".to_vec(), b"-5".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 5); // Returns 5 items (all f1 since only 1 field)
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hrandfield_empty_hash() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // No count on nonexistent key
+        let result = hrandfield(&engine, &[b"nokey".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // With count on nonexistent key
+        let result = hrandfield(&engine, &[b"nokey".to_vec(), b"3".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Array(Some(vec![])));
+    }
+
+    #[tokio::test]
+    async fn test_hscan_basic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        hset(&engine, &[
+            b"scanhash".to_vec(),
+            b"name".to_vec(), b"Alice".to_vec(),
+            b"age".to_vec(), b"30".to_vec(),
+            b"city".to_vec(), b"NYC".to_vec(),
+        ]).await.unwrap();
+
+        // HSCAN cursor 0
+        let result = hscan(&engine, &[b"scanhash".to_vec(), b"0".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 2); // cursor + array
+            if let RespValue::BulkString(Some(cursor)) = &items[0] {
+                assert_eq!(cursor, b"0"); // All 3 fields fit in default count
+            }
+            if let RespValue::Array(Some(fv_pairs)) = &items[1] {
+                assert_eq!(fv_pairs.len(), 6); // 3 fields * 2
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hscan_with_match() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        hset(&engine, &[
+            b"scanhash2".to_vec(),
+            b"name".to_vec(), b"Bob".to_vec(),
+            b"nickname".to_vec(), b"Bobby".to_vec(),
+            b"age".to_vec(), b"25".to_vec(),
+        ]).await.unwrap();
+
+        // HSCAN with MATCH n*
+        let result = hscan(&engine, &[
+            b"scanhash2".to_vec(), b"0".to_vec(),
+            b"MATCH".to_vec(), b"n*".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            if let RespValue::Array(Some(fv_pairs)) = &items[1] {
+                // Should match "name" and "nickname"
+                assert_eq!(fv_pairs.len(), 4); // 2 matched fields * 2
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hscan_nonexistent_key() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let result = hscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            if let RespValue::BulkString(Some(cursor)) = &items[0] {
+                assert_eq!(cursor, b"0");
+            }
+            if let RespValue::Array(Some(fv_pairs)) = &items[1] {
+                assert!(fv_pairs.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hscan_with_count() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Add many fields
+        for i in 0..15 {
+            hset(&engine, &[
+                b"bighash".to_vec(),
+                format!("field{:02}", i).into_bytes(),
+                format!("value{}", i).into_bytes(),
+            ]).await.unwrap();
+        }
+
+        // HSCAN with COUNT 5
+        let result = hscan(&engine, &[
+            b"bighash".to_vec(), b"0".to_vec(),
+            b"COUNT".to_vec(), b"5".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            if let RespValue::BulkString(Some(cursor)) = &items[0] {
+                let cursor_val: u64 = String::from_utf8_lossy(cursor).parse().unwrap();
+                assert!(cursor_val > 0, "Cursor should be non-zero for partial scan");
+            }
+            if let RespValue::Array(Some(fv_pairs)) = &items[1] {
+                assert_eq!(fv_pairs.len(), 10); // 5 fields * 2 (field + value)
+            }
+        }
+    }
+}
