@@ -21,8 +21,11 @@ pub use crate::command::types::sorted_set::{zadd, zrem, zscore, zrange, zcard, z
 // JSON commands
 pub use crate::command::types::json::{json_get, json_set, json_type, json_arrappend, json_arrtrim, json_resp, json_del, json_objkeys, json_objlen, json_arrlen, json_numincrby, json_mget, json_arrindex};
 
+// Key commands
+pub use crate::command::types::key::{copy, move_cmd, unlink, touch, expireat, pexpireat, expiretime, pexpiretime, object, dump, restore, sort, sort_ro, wait_cmd, waitaof, select, scan_with_type};
+
 // Server commands
-pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, scan, dbsize, randomkey};
+pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 
 // Alias for type_command as get_type
 pub use type_command as get_type;

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, BinaryHeap};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::RwLock;
@@ -10,6 +10,9 @@ use dashmap::DashMap;
 use crate::storage::error::StorageError;
 use crate::storage::item::{StorageItem, RedisDataType};
 use crate::networking::resp::RespCommand;
+
+/// Number of databases supported (Redis default is 16)
+pub const NUM_DATABASES: usize = 16;
 
 /// Result type for storage operations
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -128,11 +131,18 @@ pub struct StorageEngine {
     expiration_queue: RwLock<BinaryHeap<ExpirationEntry>>,
     /// Pattern index for common prefixes (optimizes KEYS command)
     prefix_index: RwLock<HashMap<String, Vec<Vec<u8>>>>,
+    /// Additional databases (1-15) for multi-database support (SELECT/MOVE)
+    extra_dbs: Vec<DashMap<Vec<u8>, StorageItem>>,
 }
 
 impl StorageEngine {
     /// Create a new storage engine with the given configuration
     pub fn new(config: StorageConfig) -> Arc<Self> {
+        let mut extra_dbs = Vec::with_capacity(NUM_DATABASES - 1);
+        for _ in 0..(NUM_DATABASES - 1) {
+            extra_dbs.push(DashMap::with_capacity(64));
+        }
+
         let engine = Arc::new(Self {
             data: DashMap::with_capacity(1024), // Starting with a reasonable capacity
             config,
@@ -142,6 +152,7 @@ impl StorageEngine {
             key_count: AtomicU64::new(0),
             expiration_queue: RwLock::new(BinaryHeap::new()),
             prefix_index: RwLock::new(HashMap::new()),
+            extra_dbs,
         });
         
         // Start the expiration task
@@ -873,33 +884,314 @@ impl StorageEngine {
         if self.key_count.load(Ordering::Relaxed) == 0 {
             return Ok(None);
         }
-        
+
         // Use reservoir sampling to get a random non-expired key efficiently
-        // This avoids the O(n) scan of keys("*") 
+        // This avoids the O(n) scan of keys("*")
         let mut random_key = None;
         let mut count = 0;
         let max_samples = 100; // Limit sampling to avoid long iterations
-        
+
         for entry in self.data.iter() {
             // Skip expired keys
             if entry.value().is_expired() {
                 continue;
             }
-            
+
             count += 1;
-            
+
             // Reservoir sampling algorithm: probability of selection is 1/count
             if fastrand::f32() < 1.0 / count as f32 {
                 random_key = Some(entry.key().clone());
             }
-            
+
             // Break early for large datasets to maintain O(1) average performance
             if count >= max_samples {
                 break;
             }
         }
-        
+
         Ok(random_key)
+    }
+
+    /// Get a reference to a specific database (0 = primary, 1-15 = extra)
+    pub fn get_db(&self, index: usize) -> Option<&DashMap<Vec<u8>, StorageItem>> {
+        if index == 0 {
+            Some(&self.data)
+        } else if index < NUM_DATABASES {
+            Some(&self.extra_dbs[index - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Touch a key (update its last access time). Returns true if the key exists.
+    pub async fn touch(&self, key: &[u8]) -> StorageResult<bool> {
+        if let Some(mut entry) = self.data.get_mut(key) {
+            let item = entry.value_mut();
+            if item.is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(false);
+            }
+            item.touch();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Set expiration using an absolute Unix timestamp (seconds since epoch)
+    pub async fn expire_at(&self, key: &[u8], unix_timestamp: i64) -> StorageResult<bool> {
+        let now_system = SystemTime::now();
+        let now_unix = now_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+
+        if unix_timestamp <= now_unix {
+            // Timestamp is in the past - delete the key
+            return self.del(key).await;
+        }
+
+        let duration_from_now = Duration::from_secs((unix_timestamp - now_unix) as u64);
+        self.expire(key, Some(duration_from_now)).await
+    }
+
+    /// Set expiration using an absolute Unix timestamp in milliseconds
+    pub async fn pexpire_at(&self, key: &[u8], unix_timestamp_ms: i64) -> StorageResult<bool> {
+        let now_system = SystemTime::now();
+        let now_unix_ms = now_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+
+        if unix_timestamp_ms <= now_unix_ms {
+            // Timestamp is in the past - delete the key
+            return self.del(key).await;
+        }
+
+        let duration_from_now = Duration::from_millis((unix_timestamp_ms - now_unix_ms) as u64);
+        self.expire(key, Some(duration_from_now)).await
+    }
+
+    /// Get the absolute Unix timestamp (seconds) when a key will expire
+    pub async fn expiretime(&self, key: &[u8]) -> StorageResult<Option<i64>> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(None);
+            }
+            if let Some(expires_at) = entry.value().expires_at {
+                let now = Instant::now();
+                if expires_at <= now {
+                    return Ok(None);
+                }
+                let remaining = expires_at - now;
+                let now_system = SystemTime::now();
+                let expire_system = now_system + remaining;
+                let unix_ts = expire_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                Ok(Some(unix_ts))
+            } else {
+                // Key exists but has no expiration: return -1 (handled by caller)
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the absolute Unix timestamp (milliseconds) when a key will expire
+    pub async fn pexpiretime(&self, key: &[u8]) -> StorageResult<Option<i64>> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(None);
+            }
+            if let Some(expires_at) = entry.value().expires_at {
+                let now = Instant::now();
+                if expires_at <= now {
+                    return Ok(None);
+                }
+                let remaining = expires_at - now;
+                let now_system = SystemTime::now();
+                let expire_system = now_system + remaining;
+                let unix_ms = expire_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                Ok(Some(unix_ms))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Copy a key to a new destination key. Optionally replace existing destination.
+    pub async fn copy_key(&self, src: &[u8], dst: Vec<u8>, replace: bool) -> StorageResult<bool> {
+        // Get the source item
+        let src_item = if let Some(entry) = self.data.get(src) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(src).await;
+                return Ok(false);
+            }
+            entry.value().clone()
+        } else {
+            return Ok(false);
+        };
+
+        // Check if destination exists
+        if !replace && self.data.contains_key(&dst) {
+            if let Some(entry) = self.data.get(&dst) {
+                if !entry.value().is_expired() {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Store the copy
+        let is_new_key = !self.data.contains_key(&dst);
+        let old_size = if let Some(entry) = self.data.get(&dst) {
+            Self::calculate_size(&dst, &entry.value)
+        } else {
+            0
+        };
+
+        let required_size = Self::calculate_size(&dst, &src_item.value);
+        self.maybe_evict(required_size).await?;
+
+        if old_size > 0 {
+            self.current_memory.fetch_sub(old_size as u64, Ordering::Relaxed);
+        }
+        self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
+
+        // Clone with fresh timestamps but same TTL
+        let mut new_item = StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
+        if let Some(expires_at) = src_item.expires_at {
+            let now = Instant::now();
+            if expires_at > now {
+                let remaining = expires_at - now;
+                new_item.expire(remaining);
+                self.add_to_expiration_queue(dst.clone(), Instant::now() + remaining).await;
+            }
+        }
+
+        self.data.insert(dst.clone(), new_item);
+
+        if is_new_key {
+            self.update_prefix_indices(&dst, true).await;
+            self.key_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.increment_write_counters().await;
+        Ok(true)
+    }
+
+    /// Move a key from the current database (0) to another database
+    pub async fn move_key(&self, key: &[u8], dst_db: usize) -> StorageResult<bool> {
+        if dst_db == 0 || dst_db >= NUM_DATABASES {
+            return Ok(false);
+        }
+
+        let dst = &self.extra_dbs[dst_db - 1];
+
+        // Check if key exists in destination
+        if dst.contains_key(key) {
+            return Ok(false);
+        }
+
+        // Get the source item
+        let src_item = if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(false);
+            }
+            entry.value().clone()
+        } else {
+            return Ok(false);
+        };
+
+        // Insert into destination database
+        dst.insert(key.to_vec(), src_item);
+
+        // Remove from source database
+        self.del(key).await?;
+
+        Ok(true)
+    }
+
+    /// Get a raw StorageItem reference for OBJECT/DUMP commands
+    pub async fn get_item(&self, key: &[u8]) -> StorageResult<Option<StorageItem>> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(None);
+            }
+            Ok(Some(entry.value().clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the idle time (seconds since last access) for a key
+    pub async fn get_idle_time(&self, key: &[u8]) -> StorageResult<Option<u64>> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(None);
+            }
+            let idle = entry.value().last_accessed.elapsed().as_secs();
+            Ok(Some(idle))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the encoding type string for a key (for OBJECT ENCODING)
+    pub async fn get_encoding(&self, key: &[u8]) -> StorageResult<Option<String>> {
+        if let Some(entry) = self.data.get(key) {
+            if entry.value().is_expired() {
+                drop(entry);
+                self.remove_expired_key(key).await;
+                return Ok(None);
+            }
+            let encoding = match &entry.value().data_type {
+                RedisDataType::String => {
+                    // Check if it's an integer
+                    if let Ok(s) = std::str::from_utf8(&entry.value().value) {
+                        if s.parse::<i64>().is_ok() {
+                            "int"
+                        } else if entry.value().value.len() <= 44 {
+                            "embstr"
+                        } else {
+                            "raw"
+                        }
+                    } else {
+                        "raw"
+                    }
+                }
+                RedisDataType::List => "listpack",
+                RedisDataType::Set => "listpack",
+                RedisDataType::Hash => "listpack",
+                RedisDataType::ZSet => "listpack",
+            };
+            Ok(Some(encoding.to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Restore a key from a serialized value (for RESTORE command)
+    pub async fn restore_key(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType, ttl: Option<Duration>, replace: bool) -> StorageResult<bool> {
+        // Check if key exists
+        if self.data.contains_key(&key) {
+            if !replace {
+                return Err(StorageError::KeyExists);
+            }
+            // Remove old key
+            self.del(&key).await?;
+        }
+
+        self.set_with_type(key, value, data_type, ttl).await?;
+        Ok(true)
     }
 }
 

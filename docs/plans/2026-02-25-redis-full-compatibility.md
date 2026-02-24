@@ -47,21 +47,21 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/storage/engine.rs`
 - Create: `src/command/types/key.rs` (consolidate key commands)
 
-- [ ] Implement COPY (copy key to destination)
-- [ ] Implement MOVE (move key between databases - requires multi-db support)
-- [ ] Implement UNLINK (async DELETE)
-- [ ] Implement TOUCH (update last access time)
-- [ ] Implement EXPIREAT / PEXPIREAT (absolute timestamp expiration)
-- [ ] Implement EXPIRETIME / PEXPIRETIME (get expiration as timestamp)
-- [ ] Implement OBJECT subcommands (REFCOUNT, ENCODING, IDLETIME, FREQ, HELP)
-- [ ] Implement DUMP / RESTORE (serialize/deserialize key values)
-- [ ] Implement SORT / SORT_RO (sort lists, sets, sorted sets with BY/GET/STORE)
-- [ ] Implement WAIT / WAITAOF (wait for replication/AOF acknowledgements)
-- [ ] Implement SELECT (database selection - requires multi-database support in engine)
-- [ ] Implement SCAN improvements (TYPE filter, MATCH pattern enhancements)
-- [ ] Write tests for each new command
-- [ ] Write Redis compatibility test comparing behavior with real Redis (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement COPY (copy key to destination)
+- [x] Implement MOVE (move key between databases - requires multi-db support)
+- [x] Implement UNLINK (async DELETE)
+- [x] Implement TOUCH (update last access time)
+- [x] Implement EXPIREAT / PEXPIREAT (absolute timestamp expiration)
+- [x] Implement EXPIRETIME / PEXPIRETIME (get expiration as timestamp)
+- [x] Implement OBJECT subcommands (REFCOUNT, ENCODING, IDLETIME, FREQ, HELP)
+- [x] Implement DUMP / RESTORE (serialize/deserialize key values)
+- [x] Implement SORT / SORT_RO (sort lists, sets, sorted sets with BY/GET/STORE)
+- [x] Implement WAIT / WAITAOF (wait for replication/AOF acknowledgements)
+- [x] Implement SELECT (database selection - requires multi-database support in engine)
+- [x] Implement SCAN improvements (TYPE filter, MATCH pattern enhancements)
+- [x] Write tests for each new command
+- [x] Write Redis compatibility test comparing behavior with real Redis (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 3: Missing String Commands
 
