@@ -85,17 +85,17 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Create: `src/command/types/bitmap.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Add bitmap data representation in storage engine (use string values with bit operations)
-- [ ] Implement SETBIT (set bit at offset)
-- [ ] Implement GETBIT (get bit at offset)
-- [ ] Implement BITCOUNT (count set bits in range)
-- [ ] Implement BITPOS (find first set/unset bit)
-- [ ] Implement BITOP (AND, OR, XOR, NOT between keys)
-- [ ] Implement BITFIELD (atomic read/write/increment of bitfield values)
-- [ ] Implement BITFIELD_RO (read-only BITFIELD)
-- [ ] Write tests for all bitmap commands with edge cases
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Add bitmap data representation in storage engine (use string values with bit operations)
+- [x] Implement SETBIT (set bit at offset)
+- [x] Implement GETBIT (get bit at offset)
+- [x] Implement BITCOUNT (count set bits in range)
+- [x] Implement BITPOS (find first set/unset bit)
+- [x] Implement BITOP (AND, OR, XOR, NOT between keys)
+- [x] Implement BITFIELD (atomic read/write/increment of bitfield values)
+- [x] Implement BITFIELD_RO (read-only BITFIELD)
+- [x] Write tests for all bitmap commands with edge cases
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 5: Missing List Commands + Blocking Operations
 

@@ -24,6 +24,9 @@ pub use crate::command::types::json::{json_get, json_set, json_type, json_arrapp
 // Key commands
 pub use crate::command::types::key::{copy, move_cmd, unlink, touch, expireat, pexpireat, expiretime, pexpiretime, object, dump, restore, sort, sort_ro, wait_cmd, waitaof, select, scan_with_type};
 
+// Bitmap commands
+pub use crate::command::types::bitmap::{setbit, getbit, bitcount, bitpos, bitop, bitfield, bitfield_ro};
+
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 
