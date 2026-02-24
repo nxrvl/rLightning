@@ -104,21 +104,21 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/handler.rs`
 - Modify: `src/networking/mod.rs` (blocking connection support)
 
-- [ ] Implement LPUSHX / RPUSHX (push only if list exists)
-- [ ] Implement LINSERT (insert before/after pivot element)
-- [ ] Implement LSET (set element at index)
-- [ ] Implement LPOS (find element position)
-- [ ] Implement LMOVE (atomically move element between lists)
-- [ ] Implement LMPOP (pop from multiple lists)
-- [ ] Build blocking command infrastructure: per-key wait queues, timeout handling, client wakeup mechanism
-- [ ] Implement BLPOP (blocking left pop with timeout)
-- [ ] Implement BRPOP (blocking right pop with timeout)
-- [ ] Implement BLMOVE (blocking list move)
-- [ ] Implement BLMPOP (blocking pop from multiple lists)
-- [ ] Write tests for all non-blocking list commands
-- [ ] Write tests for blocking commands with timeout, multi-key, and concurrent client scenarios
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement LPUSHX / RPUSHX (push only if list exists)
+- [x] Implement LINSERT (insert before/after pivot element)
+- [x] Implement LSET (set element at index)
+- [x] Implement LPOS (find element position)
+- [x] Implement LMOVE (atomically move element between lists)
+- [x] Implement LMPOP (pop from multiple lists)
+- [x] Build blocking command infrastructure: per-key wait queues, timeout handling, client wakeup mechanism
+- [x] Implement BLPOP (blocking left pop with timeout)
+- [x] Implement BRPOP (blocking right pop with timeout)
+- [x] Implement BLMOVE (blocking list move)
+- [x] Implement BLMPOP (blocking pop from multiple lists)
+- [x] Write tests for all non-blocking list commands
+- [x] Write tests for blocking commands with timeout, multi-key, and concurrent client scenarios
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 6: Missing Set & Hash Commands
 
