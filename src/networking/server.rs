@@ -14,7 +14,7 @@ use crate::command::types::pubsub::{
     self as pubsub_commands, subscription_message_to_resp, ClientId,
 };
 use crate::networking::error::NetworkError;
-use crate::networking::resp::{RespCommand, RespValue};
+use crate::networking::resp::{ProtocolVersion, RespCommand, RespValue};
 use crate::persistence::PersistenceManager;
 use crate::persistence::config::AofSyncPolicy;
 use crate::pubsub::PubSubManager;
@@ -173,6 +173,9 @@ impl Server {
         // Track if we're in subscription mode
         let mut in_subscription_mode = false;
 
+        // Track the per-connection protocol version (RESP2 by default)
+        let mut _protocol_version = ProtocolVersion::RESP2;
+
         loop {
             // In subscription mode, we need to handle both:
             // 1. Incoming commands from the client
@@ -284,6 +287,17 @@ impl Server {
                             };
 
                             let cmd_lower = cmd.name.to_lowercase();
+
+                            // Check for HELLO command (protocol negotiation)
+                            if cmd_lower == "hello" {
+                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version);
+                                _protocol_version = new_version;
+                                if let Ok(bytes) = response.serialize() {
+                                    response_buffer.extend_from_slice(&bytes);
+                                }
+                                commands_processed += 1;
+                                continue;
+                            }
 
                             // Check for pub/sub commands
                             match cmd_lower.as_str() {
@@ -433,6 +447,17 @@ impl Server {
                                             debug!(client_addr = %client_addr_str, command = ?cmd, "Processing command");
 
                                             let cmd_lower = cmd.name.to_lowercase();
+
+                                            // Check for HELLO command (protocol negotiation)
+                                            if cmd_lower == "hello" {
+                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version);
+                                                _protocol_version = new_version;
+                                                if let Ok(bytes) = response.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                                commands_processed += 1;
+                                                continue;
+                                            }
 
                                             // Check for pub/sub commands
                                             match cmd_lower.as_str() {
@@ -963,5 +988,83 @@ impl Server {
                 Err(NetworkError::Serialization(e.to_string()))
             }
         }
+    }
+
+    /// Handle the HELLO command for RESP3 protocol negotiation.
+    /// Returns the HELLO response and optionally the new protocol version.
+    fn handle_hello_command(args: &[Vec<u8>], current_version: ProtocolVersion) -> (RespValue, ProtocolVersion) {
+        // HELLO [protover [AUTH username password] [SETNAME clientname]]
+        let mut new_version = current_version;
+
+        if !args.is_empty() {
+            let proto_str = String::from_utf8_lossy(&args[0]);
+            match proto_str.as_ref() {
+                "2" => new_version = ProtocolVersion::RESP2,
+                "3" => new_version = ProtocolVersion::RESP3,
+                _ => {
+                    return (
+                        RespValue::Error(format!("NOPROTO unsupported protocol version: {}", proto_str)),
+                        current_version,
+                    );
+                }
+            }
+        }
+
+        // Build the HELLO response as key-value pairs
+        // Redis returns a map with server info
+        let server_name = "rLightning";
+        let version = env!("CARGO_PKG_VERSION");
+        let proto = match new_version {
+            ProtocolVersion::RESP2 => 2,
+            ProtocolVersion::RESP3 => 3,
+        };
+
+        // For RESP2, we return an array of alternating keys and values
+        // For RESP3, we return a Map type
+        let pairs: Vec<(RespValue, RespValue)> = vec![
+            (
+                RespValue::BulkString(Some(b"server".to_vec())),
+                RespValue::BulkString(Some(server_name.as_bytes().to_vec())),
+            ),
+            (
+                RespValue::BulkString(Some(b"version".to_vec())),
+                RespValue::BulkString(Some(version.as_bytes().to_vec())),
+            ),
+            (
+                RespValue::BulkString(Some(b"proto".to_vec())),
+                RespValue::Integer(proto),
+            ),
+            (
+                RespValue::BulkString(Some(b"id".to_vec())),
+                RespValue::Integer(1),
+            ),
+            (
+                RespValue::BulkString(Some(b"mode".to_vec())),
+                RespValue::BulkString(Some(b"standalone".to_vec())),
+            ),
+            (
+                RespValue::BulkString(Some(b"role".to_vec())),
+                RespValue::BulkString(Some(b"master".to_vec())),
+            ),
+            (
+                RespValue::BulkString(Some(b"modules".to_vec())),
+                RespValue::Array(Some(vec![])),
+            ),
+        ];
+
+        let response = match new_version {
+            ProtocolVersion::RESP3 => RespValue::Map(pairs),
+            ProtocolVersion::RESP2 => {
+                // Flatten to array of alternating key/value pairs
+                let mut flat = Vec::with_capacity(pairs.len() * 2);
+                for (k, v) in pairs {
+                    flat.push(k);
+                    flat.push(v);
+                }
+                RespValue::Array(Some(flat))
+            }
+        };
+
+        (response, new_version)
     }
 }
