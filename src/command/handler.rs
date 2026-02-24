@@ -77,7 +77,12 @@ impl CommandHandler {
             "getrange" => commands::getrange(&self.storage, &command.args).await,
             "setrange" => commands::setrange(&self.storage, &command.args).await,
             "getset" => commands::getset(&self.storage, &command.args).await,
-            
+            "getex" => commands::getex(&self.storage, &command.args).await,
+            "getdel" => commands::getdel(&self.storage, &command.args).await,
+            "psetex" => commands::psetex(&self.storage, &command.args).await,
+            "lcs" => commands::lcs(&self.storage, &command.args).await,
+            "substr" => commands::substr(&self.storage, &command.args).await,
+
             // List commands
             "lpush" => commands::lpush(&self.storage, &command.args).await,
             "rpush" => commands::rpush(&self.storage, &command.args).await,
