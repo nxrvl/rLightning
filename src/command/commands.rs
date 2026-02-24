@@ -7,7 +7,7 @@ use crate::command::utils::parse_ttl;
 pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim};
 
 // String commands
-pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr, incrby, decrby, incrbyfloat, append, strlen, getrange, setrange, getset, setnx, setex, pexpire, pttl};
+pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr, incrby, decrby, incrbyfloat, append, strlen, getrange, setrange, getset, setnx, setex, pexpire, pttl, getex, getdel, psetex, lcs, substr};
 
 // Hash commands
 pub use crate::command::types::hash::{hset, hget, hgetall, hdel, hexists, hmset, hkeys, hvals, hlen, hmget, hincrby, hincrbyfloat, hsetnx, hstrlen};

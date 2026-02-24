@@ -69,14 +69,14 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/types/string.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement GETEX (GET with expiration options: EX, PX, EXAT, PXAT, PERSIST)
-- [ ] Implement GETDEL (GET and DELETE atomically)
-- [ ] Implement PSETEX (SET with millisecond expiration)
-- [ ] Implement LCS (Longest Common Subsequence between two strings)
-- [ ] Implement SUBSTR (deprecated alias for GETRANGE)
-- [ ] Write tests for each new command
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement GETEX (GET with expiration options: EX, PX, EXAT, PXAT, PERSIST)
+- [x] Implement GETDEL (GET and DELETE atomically)
+- [x] Implement PSETEX (SET with millisecond expiration)
+- [x] Implement LCS (Longest Common Subsequence between two strings)
+- [x] Implement SUBSTR (deprecated alias for GETRANGE)
+- [x] Write tests for each new command
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 4: Bitmap Commands
 
