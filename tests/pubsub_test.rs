@@ -190,20 +190,29 @@ mod tests {
     fn test_pubsub_channels() {
         let port = 16379;
 
-        // Connect and subscribe to create active channels
+        // Connect and subscribe to create active channels (one at a time to avoid
+        // BufReader buffering issues where multiple responses arrive in one TCP packet)
         let mut subscriber = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         subscriber.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
 
-        let resp = "*3\r\n$9\r\nSUBSCRIBE\r\n$6\r\nchan:a\r\n$6\r\nchan:b\r\n";
+        // Subscribe to first channel and consume confirmation
+        let resp = "*2\r\n$9\r\nSUBSCRIBE\r\n$6\r\nchan:a\r\n";
         subscriber.write_all(resp.as_bytes()).unwrap();
         subscriber.flush().unwrap();
+        let _ = read_resp_array(&mut subscriber);
 
-        // Consume subscription confirmations
+        // Subscribe to second channel and consume confirmation
+        let resp = "*2\r\n$9\r\nSUBSCRIBE\r\n$6\r\nchan:b\r\n";
+        subscriber.write_all(resp.as_bytes()).unwrap();
+        subscriber.flush().unwrap();
         let _ = read_resp_array(&mut subscriber);
-        let _ = read_resp_array(&mut subscriber);
+
+        // Allow subscriptions to register
+        std::thread::sleep(Duration::from_millis(200));
 
         // Query active channels
         let mut query = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        query.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let resp = "*2\r\n$6\r\nPUBSUB\r\n$8\r\nCHANNELS\r\n";
         query.write_all(resp.as_bytes()).unwrap();
         query.flush().unwrap();
