@@ -227,7 +227,7 @@ async fn test_protocol_compliance_summary() {
         ("MGET", "*2\r\n$4\r\nMGET\r\n$4\r\ntest\r\n"),
         ("MSET", "*3\r\n$4\r\nMSET\r\n$5\r\ntest2\r\n$6\r\nvalue2\r\n"),
         ("GETRANGE", "*4\r\n$8\r\nGETRANGE\r\n$4\r\ntest\r\n$1\r\n0\r\n$1\r\n2\r\n"),
-        ("SETRANGE", "*4\r\n$8\r\nSETRANGE\r\n$4\r\ntest\r\n$1\r\n0\r\n$3\r\nbest\r\n"),
+        ("SETRANGE", "*4\r\n$8\r\nSETRANGE\r\n$4\r\ntest\r\n$1\r\n0\r\n$4\r\nbest\r\n"),
     ];
     
     println!("📝 String Commands:");
@@ -271,7 +271,7 @@ async fn test_protocol_compliance_summary() {
     
     // JSON commands
     let json_commands = vec![
-        ("JSON.SET", "*4\r\n$8\r\nJSON.SET\r\n$4\r\njson\r\n$1\r\n$\r\n$13\r\n{\"key\":\"value\"}\r\n"),
+        ("JSON.SET", "*4\r\n$8\r\nJSON.SET\r\n$4\r\njson\r\n$1\r\n$\r\n$15\r\n{\"key\":\"value\"}\r\n"),
         ("JSON.GET", "*2\r\n$8\r\nJSON.GET\r\n$4\r\njson\r\n"),
         ("JSON.TYPE", "*2\r\n$9\r\nJSON.TYPE\r\n$4\r\njson\r\n"),
         ("JSON.OBJKEYS", "*2\r\n$12\r\nJSON.OBJKEYS\r\n$4\r\njson\r\n"),
