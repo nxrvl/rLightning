@@ -1,4 +1,5 @@
 pub mod hash;
+pub mod key;
 pub mod list;
 pub mod pubsub;
 pub mod set;

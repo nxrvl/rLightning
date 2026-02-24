@@ -28,11 +28,27 @@ impl CommandHandler {
             "ttl" => commands::ttl(&self.storage, &command.args).await,
             "pttl" => commands::pttl(&self.storage, &command.args).await,
             "persist" => commands::persist(&self.storage, &command.args).await,
-            
+            "expireat" => commands::expireat(&self.storage, &command.args).await,
+            "pexpireat" => commands::pexpireat(&self.storage, &command.args).await,
+            "expiretime" => commands::expiretime(&self.storage, &command.args).await,
+            "pexpiretime" => commands::pexpiretime(&self.storage, &command.args).await,
+
             // Basic key operations
             "del" => commands::del(&self.storage, &command.args).await,
+            "unlink" => commands::unlink(&self.storage, &command.args).await,
             "exists" => commands::exists(&self.storage, &command.args).await,
             "type" => commands::get_type(&self.storage, &command.args).await,
+            "copy" => commands::copy(&self.storage, &command.args).await,
+            "move" => commands::move_cmd(&self.storage, &command.args).await,
+            "touch" => commands::touch(&self.storage, &command.args).await,
+            "object" => commands::object(&self.storage, &command.args).await,
+            "dump" => commands::dump(&self.storage, &command.args).await,
+            "restore" => commands::restore(&self.storage, &command.args).await,
+            "sort" => commands::sort(&self.storage, &command.args).await,
+            "sort_ro" => commands::sort_ro(&self.storage, &command.args).await,
+            "wait" => commands::wait_cmd(&self.storage, &command.args).await,
+            "waitaof" => commands::waitaof(&self.storage, &command.args).await,
+            "select" => commands::select(&self.storage, &command.args).await,
             
             // Server commands
             "ping" => {
@@ -138,7 +154,7 @@ impl CommandHandler {
             "flushall" => commands::flushall(&self.storage, &command.args).await,
             "flushdb" => commands::flushdb(&self.storage, &command.args).await,
             "monitor" => commands::monitor(&self.storage, &command.args).await,
-            "scan" => commands::scan(&self.storage, &command.args).await,
+            "scan" => commands::scan_with_type(&self.storage, &command.args).await,
             "dbsize" => commands::dbsize(&self.storage, &command.args).await,
             "randomkey" => commands::randomkey(&self.storage, &command.args).await,
             
