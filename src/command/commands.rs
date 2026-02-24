@@ -4,7 +4,10 @@ use crate::storage::engine::StorageEngine;
 use crate::command::utils::parse_ttl;
 
 // List commands
-pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim};
+pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lpos, lmove, lmpop, blpop, brpop, blmove, blmpop};
+
+// Blocking infrastructure
+pub use crate::command::types::blocking::BlockingManager;
 
 // String commands
 pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr, incrby, decrby, incrbyfloat, append, strlen, getrange, setrange, getset, setnx, setex, pexpire, pttl, getex, getdel, psetex, lcs, substr};

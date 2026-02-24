@@ -1,5 +1,10 @@
+use std::time::{Duration, Instant};
+
+use futures::future::select_all;
+
 use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::types::blocking::BlockingManager;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
@@ -478,6 +483,756 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
+/// Redis LPUSHX command - Push elements to the head of a list only if the key exists
+pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+
+    if !engine.exists(key).await? {
+        return Ok(RespValue::Integer(0));
+    }
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(RespValue::Integer(0)),
+    };
+
+    for element in &args[1..] {
+        list.insert(0, element.clone());
+    }
+
+    let length = list.len();
+    let serialized = bincode::serialize(&list)
+        .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+
+    Ok(RespValue::Integer(length as i64))
+}
+
+/// Redis RPUSHX command - Push elements to the tail of a list only if the key exists
+pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+
+    if !engine.exists(key).await? {
+        return Ok(RespValue::Integer(0));
+    }
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(RespValue::Integer(0)),
+    };
+
+    for element in &args[1..] {
+        list.push(element.clone());
+    }
+
+    let length = list.len();
+    let serialized = bincode::serialize(&list)
+        .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+
+    Ok(RespValue::Integer(length as i64))
+}
+
+/// Redis LINSERT command - Insert an element before or after a pivot element
+pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 4 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+    let position = bytes_to_string(&args[1])?.to_uppercase();
+    let pivot = &args[2];
+    let element = &args[3];
+
+    if position != "BEFORE" && position != "AFTER" {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+
+    if !engine.exists(key).await? {
+        return Ok(RespValue::Integer(0));
+    }
+
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(RespValue::Integer(0)),
+    };
+
+    if let Some(idx) = list.iter().position(|e| e == pivot) {
+        let insert_idx = if position == "BEFORE" { idx } else { idx + 1 };
+        list.insert(insert_idx, element.clone());
+
+        let length = list.len();
+        let serialized = bincode::serialize(&list)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+
+        Ok(RespValue::Integer(length as i64))
+    } else {
+        Ok(RespValue::Integer(-1))
+    }
+}
+
+/// Redis LSET command - Set the value of an element at an index
+pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 3 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+    let index_str = bytes_to_string(&args[1])?;
+    let index = index_str.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let element = &args[2];
+
+    if !engine.exists(key).await? {
+        return Err(CommandError::InvalidArgument("no such key".to_string()));
+    }
+
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Err(CommandError::InvalidArgument("no such key".to_string())),
+    };
+
+    let len = list.len() as i64;
+    let actual_index = if index < 0 { len + index } else { index };
+
+    if actual_index < 0 || actual_index >= len {
+        return Err(CommandError::InvalidArgument("index out of range".to_string()));
+    }
+
+    list[actual_index as usize] = element.clone();
+
+    let serialized = bincode::serialize(&list)
+        .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+
+    Ok(RespValue::SimpleString("OK".to_string()))
+}
+
+/// Redis LPOS command - Return the index of matching elements in a list
+pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+    let element = &args[1];
+
+    let mut rank = 1i64;
+    let mut count: Option<i64> = None;
+    let mut maxlen = 0usize;
+
+    let mut i = 2;
+    while i < args.len() {
+        let opt = bytes_to_string(&args[i])?.to_uppercase();
+        match opt.as_str() {
+            "RANK" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::InvalidArgument("syntax error".to_string()));
+                }
+                i += 1;
+                rank = bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
+                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                })?;
+                if rank == 0 {
+                    return Err(CommandError::InvalidArgument("RANK can't be zero: use a positive or negative rank".to_string()));
+                }
+            }
+            "COUNT" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::InvalidArgument("syntax error".to_string()));
+                }
+                i += 1;
+                count = Some(bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
+                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                })?);
+                if count.unwrap() < 0 {
+                    return Err(CommandError::InvalidArgument("COUNT can't be negative".to_string()));
+                }
+            }
+            "MAXLEN" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::InvalidArgument("syntax error".to_string()));
+                }
+                i += 1;
+                let ml = bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
+                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                })?;
+                if ml < 0 {
+                    return Err(CommandError::InvalidArgument("MAXLEN can't be negative".to_string()));
+                }
+                maxlen = ml as usize;
+            }
+            _ => return Err(CommandError::InvalidArgument("syntax error".to_string())),
+        }
+        i += 1;
+    }
+
+    if !engine.exists(key).await? {
+        return Ok(if count.is_some() {
+            RespValue::Array(Some(vec![]))
+        } else {
+            RespValue::BulkString(None)
+        });
+    }
+
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(if count.is_some() {
+            RespValue::Array(Some(vec![]))
+        } else {
+            RespValue::BulkString(None)
+        }),
+    };
+
+    let mut matches = Vec::new();
+
+    if rank > 0 {
+        // Forward scan
+        let search_len = if maxlen > 0 { maxlen.min(list.len()) } else { list.len() };
+        let mut found = 0i64;
+        for idx in 0..search_len {
+            if list[idx] == *element {
+                found += 1;
+                if found >= rank {
+                    matches.push(idx as i64);
+                    if let Some(c) = count {
+                        if c > 0 && matches.len() >= c as usize {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        // Reverse scan
+        let abs_rank = rank.unsigned_abs();
+        let start = if maxlen > 0 { list.len().saturating_sub(maxlen) } else { 0 };
+        let mut found = 0u64;
+        for idx in (start..list.len()).rev() {
+            if list[idx] == *element {
+                found += 1;
+                if found >= abs_rank {
+                    matches.push(idx as i64);
+                    if let Some(c) = count {
+                        if c > 0 && matches.len() >= c as usize {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if count.is_some() {
+        Ok(RespValue::Array(Some(
+            matches.into_iter().map(RespValue::Integer).collect()
+        )))
+    } else {
+        match matches.first() {
+            Some(&idx) => Ok(RespValue::Integer(idx)),
+            None => Ok(RespValue::BulkString(None)),
+        }
+    }
+}
+
+/// Redis LMOVE command - Atomically pop from one list and push to another
+pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 4 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let source = &args[0];
+    let destination = &args[1];
+    let wherefrom = bytes_to_string(&args[2])?.to_uppercase();
+    let whereto = bytes_to_string(&args[3])?.to_uppercase();
+
+    if !matches!(wherefrom.as_str(), "LEFT" | "RIGHT") {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+    if !matches!(whereto.as_str(), "LEFT" | "RIGHT") {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+
+    if !engine.exists(source).await? {
+        return Ok(RespValue::BulkString(None));
+    }
+    let key_type = engine.get_type(source).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut src_list = match engine.get(source).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(RespValue::BulkString(None)),
+    };
+
+    if src_list.is_empty() {
+        return Ok(RespValue::BulkString(None));
+    }
+
+    // Pop from source
+    let element = if wherefrom == "LEFT" {
+        src_list.remove(0)
+    } else {
+        src_list.pop().unwrap()
+    };
+
+    // Save source (or delete if empty)
+    if src_list.is_empty() {
+        engine.del(source).await?;
+    } else {
+        let serialized = bincode::serialize(&src_list)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(source.clone(), serialized, RedisDataType::List, None).await?;
+    }
+
+    // Get or create destination list
+    let mut dst_list = if source == destination {
+        src_list
+    } else {
+        if engine.exists(destination).await? {
+            let dest_type = engine.get_type(destination).await?;
+            if dest_type != "list" {
+                return Err(CommandError::WrongType);
+            }
+        }
+        match engine.get(destination).await? {
+            Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+                .map_err(|_| CommandError::WrongType)?,
+            None => Vec::new(),
+        }
+    };
+
+    // Push to destination
+    if whereto == "LEFT" {
+        dst_list.insert(0, element.clone());
+    } else {
+        dst_list.push(element.clone());
+    }
+
+    let serialized = bincode::serialize(&dst_list)
+        .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+    engine.set_with_type(destination.clone(), serialized, RedisDataType::List, None).await?;
+
+    Ok(RespValue::BulkString(Some(element)))
+}
+
+/// Redis LMPOP command - Pop elements from the first non-empty list
+pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 3 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let numkeys_str = bytes_to_string(&args[0])?;
+    let numkeys = numkeys_str.parse::<usize>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+
+    if numkeys == 0 {
+        return Err(CommandError::InvalidArgument("numkeys can't be non-positive".to_string()));
+    }
+
+    if args.len() < 1 + numkeys + 1 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let keys = &args[1..1 + numkeys];
+    let direction = bytes_to_string(&args[1 + numkeys])?.to_uppercase();
+
+    if direction != "LEFT" && direction != "RIGHT" {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+
+    let mut count = 1usize;
+    let mut opt_idx = 2 + numkeys;
+    if opt_idx < args.len() {
+        let count_opt = bytes_to_string(&args[opt_idx])?.to_uppercase();
+        if count_opt == "COUNT" {
+            opt_idx += 1;
+            if opt_idx >= args.len() {
+                return Err(CommandError::WrongNumberOfArguments);
+            }
+            count = bytes_to_string(&args[opt_idx])?.parse::<usize>().map_err(|_| {
+                CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+            })?;
+            if count == 0 {
+                return Err(CommandError::InvalidArgument("COUNT value of 0 is not allowed".to_string()));
+            }
+        }
+    }
+
+    for key in keys {
+        if !engine.exists(key).await? {
+            continue;
+        }
+        let key_type = engine.get_type(key).await?;
+        if key_type != "list" {
+            return Err(CommandError::WrongType);
+        }
+
+        let mut list = match engine.get(key).await? {
+            Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+                .map_err(|_| CommandError::WrongType)?,
+            None => continue,
+        };
+
+        if list.is_empty() {
+            continue;
+        }
+
+        let pop_count = count.min(list.len());
+        let mut popped = Vec::with_capacity(pop_count);
+
+        for _ in 0..pop_count {
+            if direction == "LEFT" {
+                popped.push(list.remove(0));
+            } else {
+                popped.push(list.pop().unwrap());
+            }
+        }
+
+        if list.is_empty() {
+            engine.del(key).await?;
+        } else {
+            let serialized = bincode::serialize(&list)
+                .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+        }
+
+        let elements: Vec<RespValue> = popped.into_iter()
+            .map(|e| RespValue::BulkString(Some(e)))
+            .collect();
+
+        return Ok(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(key.clone())),
+            RespValue::Array(Some(elements)),
+        ])));
+    }
+
+    Ok(RespValue::Array(None))
+}
+
+// --- Blocking Commands ---
+
+/// Helper: try to pop an element from a list
+async fn try_pop(engine: &StorageEngine, key: &[u8], left: bool) -> Result<Option<Vec<u8>>, CommandError> {
+    if !engine.exists(key).await? {
+        return Ok(None);
+    }
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(None),
+    };
+
+    if list.is_empty() {
+        return Ok(None);
+    }
+
+    let element = if left {
+        list.remove(0)
+    } else {
+        list.pop().unwrap()
+    };
+
+    if list.is_empty() {
+        engine.del(key).await?;
+    } else {
+        let serialized = bincode::serialize(&list)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(key.to_vec(), serialized, RedisDataType::List, None).await?;
+    }
+
+    Ok(Some(element))
+}
+
+/// Core blocking pop implementation shared by BLPOP and BRPOP
+async fn blocking_pop(
+    engine: &StorageEngine,
+    keys: &[Vec<u8>],
+    timeout_secs: f64,
+    left: bool,
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
+    // Try immediate pop first
+    for key in keys {
+        match try_pop(engine, key, left).await? {
+            Some(element) => {
+                return Ok(RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(key.clone())),
+                    RespValue::BulkString(Some(element)),
+                ])));
+            }
+            None => continue,
+        }
+    }
+
+    let deadline = if timeout_secs > 0.0 {
+        Some(Instant::now() + Duration::from_secs_f64(timeout_secs))
+    } else {
+        None // 0 means wait indefinitely
+    };
+
+    loop {
+        // Subscribe to all keys before checking (avoids race condition)
+        let receivers: Vec<_> = keys.iter()
+            .map(|k| blocking_mgr.subscribe(k))
+            .collect();
+
+        // Try to pop from each key
+        for key in keys {
+            match try_pop(engine, key, left).await? {
+                Some(element) => {
+                    return Ok(RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(key.clone())),
+                        RespValue::BulkString(Some(element)),
+                    ])));
+                }
+                None => continue,
+            }
+        }
+
+        // Wait for any key to get data or timeout
+        let futs: Vec<_> = receivers.into_iter()
+            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+            .collect();
+
+        if futs.is_empty() {
+            return Ok(RespValue::Array(None));
+        }
+
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(RespValue::Array(None));
+            }
+            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+                return Ok(RespValue::Array(None));
+            }
+        } else {
+            let _ = select_all(futs).await;
+        }
+    }
+}
+
+/// Redis BLPOP command - Blocking left pop with timeout
+pub async fn blpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let timeout_str = bytes_to_string(args.last().unwrap())?;
+    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+        CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
+    })?;
+    if timeout_secs < 0.0 {
+        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+    }
+
+    let keys = &args[..args.len() - 1];
+    blocking_pop(engine, keys, timeout_secs, true, blocking_mgr).await
+}
+
+/// Redis BRPOP command - Blocking right pop with timeout
+pub async fn brpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+    if args.len() < 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let timeout_str = bytes_to_string(args.last().unwrap())?;
+    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+        CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
+    })?;
+    if timeout_secs < 0.0 {
+        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+    }
+
+    let keys = &args[..args.len() - 1];
+    blocking_pop(engine, keys, timeout_secs, false, blocking_mgr).await
+}
+
+/// Redis BLMOVE command - Blocking LMOVE with timeout
+pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+    if args.len() != 5 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let source = &args[0];
+    let destination = &args[1];
+    let wherefrom = bytes_to_string(&args[2])?.to_uppercase();
+    let whereto = bytes_to_string(&args[3])?.to_uppercase();
+    let timeout_str = bytes_to_string(&args[4])?;
+
+    if !matches!(wherefrom.as_str(), "LEFT" | "RIGHT") {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+    if !matches!(whereto.as_str(), "LEFT" | "RIGHT") {
+        return Err(CommandError::InvalidArgument("syntax error".to_string()));
+    }
+
+    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+        CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
+    })?;
+    if timeout_secs < 0.0 {
+        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+    }
+
+    // Try immediately first
+    let lmove_args = vec![source.clone(), destination.clone(), args[2].clone(), args[3].clone()];
+    let result = lmove(engine, &lmove_args).await?;
+    if result != RespValue::BulkString(None) {
+        return Ok(result);
+    }
+
+    // Block until data is available
+    let deadline = if timeout_secs > 0.0 {
+        Some(Instant::now() + Duration::from_secs_f64(timeout_secs))
+    } else {
+        None
+    };
+
+    loop {
+        let receivers: Vec<_> = vec![blocking_mgr.subscribe(source)];
+
+        // Try again
+        let result = lmove(engine, &lmove_args).await?;
+        if result != RespValue::BulkString(None) {
+            return Ok(result);
+        }
+
+        let futs: Vec<_> = receivers.into_iter()
+            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+            .collect();
+
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(RespValue::BulkString(None));
+            }
+            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+                return Ok(RespValue::BulkString(None));
+            }
+        } else {
+            let _ = select_all(futs).await;
+        }
+    }
+}
+
+/// Redis BLMPOP command - Blocking LMPOP with timeout
+pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+    if args.len() < 4 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let timeout_str = bytes_to_string(&args[0])?;
+    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+        CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
+    })?;
+    if timeout_secs < 0.0 {
+        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+    }
+
+    // Parse remaining args as LMPOP args (numkeys key... direction [COUNT count])
+    let lmpop_args = &args[1..];
+
+    // Try immediately
+    let result = lmpop(engine, lmpop_args).await?;
+    if result != RespValue::Array(None) {
+        return Ok(result);
+    }
+
+    // Parse keys for subscription
+    let numkeys_str = bytes_to_string(&lmpop_args[0])?;
+    let numkeys = numkeys_str.parse::<usize>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+
+    if numkeys == 0 || lmpop_args.len() < 1 + numkeys + 1 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+
+    let keys = &lmpop_args[1..1 + numkeys];
+
+    let deadline = if timeout_secs > 0.0 {
+        Some(Instant::now() + Duration::from_secs_f64(timeout_secs))
+    } else {
+        None
+    };
+
+    loop {
+        let receivers: Vec<_> = keys.iter()
+            .map(|k| blocking_mgr.subscribe(k))
+            .collect();
+
+        let result = lmpop(engine, lmpop_args).await?;
+        if result != RespValue::Array(None) {
+            return Ok(result);
+        }
+
+        let futs: Vec<_> = receivers.into_iter()
+            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+            .collect();
+
+        if futs.is_empty() {
+            return Ok(RespValue::Array(None));
+        }
+
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(RespValue::Array(None));
+            }
+            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+                return Ok(RespValue::Array(None));
+            }
+        } else {
+            let _ = select_all(futs).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,4 +1692,422 @@ mod tests {
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
-} 
+
+    #[tokio::test]
+    async fn test_lpushx_rpushx() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // LPUSHX on non-existent key returns 0
+        let args = vec![b"mylist".to_vec(), b"a".to_vec()];
+        let result = lpushx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // Create the list first
+        rpush(&engine, &[b"mylist".to_vec(), b"x".to_vec()]).await.unwrap();
+
+        // LPUSHX on existing list works
+        let result = lpushx(&engine, &[b"mylist".to_vec(), b"a".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(2));
+
+        // RPUSHX on non-existent key returns 0
+        let result = rpushx(&engine, &[b"nolist".to_vec(), b"a".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // RPUSHX on existing list works
+        let result = rpushx(&engine, &[b"mylist".to_vec(), b"z".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        // Verify order: [a, x, z]
+        let result = lrange(&engine, &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 3);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"x".to_vec())));
+            assert_eq!(values[2], RespValue::BulkString(Some(b"z".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_linsert() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create list [a, b, d]
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"d".to_vec()]).await.unwrap();
+
+        // Insert "c" BEFORE "d"
+        let result = linsert(&engine, &[b"mylist".to_vec(), b"BEFORE".to_vec(), b"d".to_vec(), b"c".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(4));
+
+        // Insert "e" AFTER "d"
+        let result = linsert(&engine, &[b"mylist".to_vec(), b"AFTER".to_vec(), b"d".to_vec(), b"e".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(5));
+
+        // Verify: [a, b, c, d, e]
+        let result = lrange(&engine, &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 5);
+            assert_eq!(values[2], RespValue::BulkString(Some(b"c".to_vec())));
+            assert_eq!(values[4], RespValue::BulkString(Some(b"e".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+
+        // Pivot not found returns -1
+        let result = linsert(&engine, &[b"mylist".to_vec(), b"BEFORE".to_vec(), b"z".to_vec(), b"x".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(-1));
+
+        // Non-existent key returns 0
+        let result = linsert(&engine, &[b"nolist".to_vec(), b"BEFORE".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_lset() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create list [a, b, c]
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+
+        // Set index 1 to "B"
+        let result = lset(&engine, &[b"mylist".to_vec(), b"1".to_vec(), b"B".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // Verify
+        let result = lindex(&engine, &[b"mylist".to_vec(), b"1".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"B".to_vec())));
+
+        // Negative index
+        let result = lset(&engine, &[b"mylist".to_vec(), b"-1".to_vec(), b"C".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        let result = lindex(&engine, &[b"mylist".to_vec(), b"-1".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"C".to_vec())));
+
+        // Out of range index
+        let result = lset(&engine, &[b"mylist".to_vec(), b"10".to_vec(), b"x".to_vec()]).await;
+        assert!(result.is_err());
+
+        // Non-existent key
+        let result = lset(&engine, &[b"nolist".to_vec(), b"0".to_vec(), b"x".to_vec()]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lpos() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create list [a, b, c, b, a]
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]).await.unwrap();
+
+        // Find first "b"
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // Find with COUNT 0 (all occurrences)
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec(), b"COUNT".to_vec(), b"0".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values, vec![RespValue::Integer(1), RespValue::Integer(3)]);
+        } else {
+            panic!("Expected array");
+        }
+
+        // Find with RANK 2 (second occurrence)
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec(), b"RANK".to_vec(), b"2".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        // Find with negative RANK (from end)
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"RANK".to_vec(), b"-1".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(4));
+
+        // Not found returns nil
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"z".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // Non-existent key returns nil
+        let result = lpos(&engine, &[b"nolist".to_vec(), b"a".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // With MAXLEN
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"COUNT".to_vec(), b"0".to_vec(), b"MAXLEN".to_vec(), b"3".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values, vec![RespValue::Integer(0)]);
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lmove() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create source [a, b, c]
+        rpush(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+
+        // LMOVE src dst LEFT RIGHT -> moves "a" to end of dst
+        let result = lmove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"a".to_vec())));
+
+        // src should be [b, c]
+        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"b".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+
+        // dst should be [a]
+        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+
+        // Non-existent source returns nil
+        let result = lmove(&engine, &[b"nolist".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // Same key rotation: src [b, c] -> LMOVE src src LEFT RIGHT -> src [c, b]
+        let result = lmove(&engine, &[b"src".to_vec(), b"src".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"b".to_vec())));
+
+        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"c".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"b".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lmpop() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create lists
+        rpush(&engine, &[b"list1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"list2".to_vec(), b"x".to_vec(), b"y".to_vec()]).await.unwrap();
+
+        // Pop 1 from left of first non-empty key
+        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"list1".to_vec())));
+            if let RespValue::Array(Some(elements)) = &values[1] {
+                assert_eq!(elements.len(), 1);
+                assert_eq!(elements[0], RespValue::BulkString(Some(b"a".to_vec())));
+            } else {
+                panic!("Expected elements array");
+            }
+        } else {
+            panic!("Expected array");
+        }
+
+        // Pop 2 from right
+        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"RIGHT".to_vec(), b"COUNT".to_vec(), b"2".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"list1".to_vec())));
+            if let RespValue::Array(Some(elements)) = &values[1] {
+                assert_eq!(elements.len(), 2);
+                assert_eq!(elements[0], RespValue::BulkString(Some(b"c".to_vec())));
+                assert_eq!(elements[1], RespValue::BulkString(Some(b"b".to_vec())));
+            } else {
+                panic!("Expected elements array");
+            }
+        } else {
+            panic!("Expected array");
+        }
+
+        // list1 is now empty, so next pop should come from list2
+        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"list2".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+
+        // All empty returns nil
+        let result = lmpop(&engine, &[b"1".to_vec(), b"emptylist".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Array(None));
+    }
+
+    #[tokio::test]
+    async fn test_blpop_immediate() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        // Create list with data
+        rpush(&engine, &[b"mylist".to_vec(), b"hello".to_vec()]).await.unwrap();
+
+        // BLPOP should return immediately
+        let result = blpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"hello".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blpop_timeout() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        // BLPOP on empty list should timeout
+        let start = Instant::now();
+        let result = blpop(&engine, &[b"emptylist".to_vec(), b"0.1".to_vec()], &blocking_mgr).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, RespValue::Array(None));
+        assert!(elapsed >= Duration::from_millis(90));
+    }
+
+    #[tokio::test]
+    async fn test_blpop_wakeup() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+        let blocking_mgr = Arc::new(BlockingManager::new());
+
+        let engine_clone = engine.clone();
+        let mgr_clone = blocking_mgr.clone();
+
+        // Spawn BLPOP in background
+        let handle = tokio::spawn(async move {
+            blpop(&engine_clone, &[b"wakekey".to_vec(), b"5".to_vec()], &mgr_clone).await
+        });
+
+        // Give it time to start waiting
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Push data to wake it up
+        rpush(&engine, &[b"wakekey".to_vec(), b"wakedata".to_vec()]).await.unwrap();
+        blocking_mgr.notify_key(b"wakekey");
+
+        let result = handle.await.unwrap().unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"wakekey".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"wakedata".to_vec())));
+        } else {
+            panic!("Expected array, got {:?}", result);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_brpop_immediate() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+
+        let result = brpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"b".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blmove_immediate() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        rpush(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+
+        let result = blmove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"a".to_vec())));
+
+        // Verify dst has the element
+        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blmove_timeout() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        let start = Instant::now();
+        let result = blmove(&engine, &[b"empty".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec(), b"0.1".to_vec()], &blocking_mgr).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, RespValue::BulkString(None));
+        assert!(elapsed >= Duration::from_millis(90));
+    }
+
+    #[tokio::test]
+    async fn test_blmpop_immediate() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+
+        // BLMPOP timeout numkeys key LEFT
+        let result = blmpop(&engine, &[b"1".to_vec(), b"1".to_vec(), b"mylist".to_vec(), b"LEFT".to_vec()], &blocking_mgr).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
+            if let RespValue::Array(Some(elements)) = &values[1] {
+                assert_eq!(elements[0], RespValue::BulkString(Some(b"a".to_vec())));
+            } else {
+                panic!("Expected elements array");
+            }
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blmpop_timeout() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        let start = Instant::now();
+        let result = blmpop(&engine, &[b"0.1".to_vec(), b"1".to_vec(), b"emptylist".to_vec(), b"LEFT".to_vec()], &blocking_mgr).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, RespValue::Array(None));
+        assert!(elapsed >= Duration::from_millis(90));
+    }
+
+    #[tokio::test]
+    async fn test_blpop_multi_key() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+        let blocking_mgr = BlockingManager::new();
+
+        // Only second key has data
+        rpush(&engine, &[b"list2".to_vec(), b"hello".to_vec()]).await.unwrap();
+
+        let result = blpop(&engine, &[b"list1".to_vec(), b"list2".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"list2".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"hello".to_vec())));
+        } else {
+            panic!("Expected array");
+        }
+    }
+}

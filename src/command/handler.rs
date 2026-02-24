@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::command::{Command, CommandError, CommandResult};
 use crate::command::commands;
+use crate::command::types::blocking::BlockingManager;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
@@ -9,12 +10,29 @@ use crate::storage::engine::StorageEngine;
 #[derive(Clone)]
 pub struct CommandHandler {
     storage: Arc<StorageEngine>,
+    blocking_mgr: Arc<BlockingManager>,
 }
 
 impl CommandHandler {
     /// Create a new CommandHandler with the given storage engine
     pub fn new(storage: Arc<StorageEngine>) -> Self {
-        CommandHandler { storage }
+        CommandHandler {
+            storage,
+            blocking_mgr: Arc::new(BlockingManager::new()),
+        }
+    }
+
+    /// Create a new CommandHandler with a shared blocking manager
+    pub fn new_with_blocking(storage: Arc<StorageEngine>, blocking_mgr: Arc<BlockingManager>) -> Self {
+        CommandHandler {
+            storage,
+            blocking_mgr,
+        }
+    }
+
+    /// Get a reference to the blocking manager
+    pub fn blocking_mgr(&self) -> &Arc<BlockingManager> {
+        &self.blocking_mgr
     }
     
     /// Process a command and return the result
@@ -93,14 +111,79 @@ impl CommandHandler {
             "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
 
             // List commands
-            "lpush" => commands::lpush(&self.storage, &command.args).await,
-            "rpush" => commands::rpush(&self.storage, &command.args).await,
+            "lpush" => {
+                let result = commands::lpush(&self.storage, &command.args).await;
+                if result.is_ok() && !command.args.is_empty() {
+                    self.blocking_mgr.notify_key(&command.args[0]);
+                }
+                result
+            },
+            "rpush" => {
+                let result = commands::rpush(&self.storage, &command.args).await;
+                if result.is_ok() && !command.args.is_empty() {
+                    self.blocking_mgr.notify_key(&command.args[0]);
+                }
+                result
+            },
+            "lpushx" => {
+                let result = commands::lpushx(&self.storage, &command.args).await;
+                if let Ok(RespValue::Integer(n)) = &result {
+                    if *n > 0 && !command.args.is_empty() {
+                        self.blocking_mgr.notify_key(&command.args[0]);
+                    }
+                }
+                result
+            },
+            "rpushx" => {
+                let result = commands::rpushx(&self.storage, &command.args).await;
+                if let Ok(RespValue::Integer(n)) = &result {
+                    if *n > 0 && !command.args.is_empty() {
+                        self.blocking_mgr.notify_key(&command.args[0]);
+                    }
+                }
+                result
+            },
+            "linsert" => {
+                let result = commands::linsert(&self.storage, &command.args).await;
+                if let Ok(RespValue::Integer(n)) = &result {
+                    if *n > 0 && !command.args.is_empty() {
+                        self.blocking_mgr.notify_key(&command.args[0]);
+                    }
+                }
+                result
+            },
             "lpop" => commands::lpop(&self.storage, &command.args).await,
             "rpop" => commands::rpop(&self.storage, &command.args).await,
             "lrange" => commands::lrange(&self.storage, &command.args).await,
             "lindex" => commands::lindex(&self.storage, &command.args).await,
             "llen" => commands::llen(&self.storage, &command.args).await,
             "ltrim" => commands::ltrim(&self.storage, &command.args).await,
+            "lset" => commands::lset(&self.storage, &command.args).await,
+            "lpos" => commands::lpos(&self.storage, &command.args).await,
+            "lmove" => {
+                let result = commands::lmove(&self.storage, &command.args).await;
+                // Notify destination key if move succeeded
+                if result.is_ok() && command.args.len() >= 2 {
+                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                        self.blocking_mgr.notify_key(&command.args[1]);
+                    }
+                }
+                result
+            },
+            "lmpop" => commands::lmpop(&self.storage, &command.args).await,
+            "blpop" => commands::blpop(&self.storage, &command.args, &self.blocking_mgr).await,
+            "brpop" => commands::brpop(&self.storage, &command.args, &self.blocking_mgr).await,
+            "blmove" => {
+                let result = commands::blmove(&self.storage, &command.args, &self.blocking_mgr).await;
+                // Notify destination key if move succeeded
+                if result.is_ok() && command.args.len() >= 2 {
+                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                        self.blocking_mgr.notify_key(&command.args[1]);
+                    }
+                }
+                result
+            },
+            "blmpop" => commands::blmpop(&self.storage, &command.args, &self.blocking_mgr).await,
             
             // Hash commands
             "hset" => commands::hset(&self.storage, &command.args).await,
