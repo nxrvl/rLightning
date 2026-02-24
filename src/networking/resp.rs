@@ -22,14 +22,39 @@ pub enum RespError {
     ValueTooLarge(String),
 }
 
-/// RESP protocol data types
+/// RESP protocol version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVersion {
+    RESP2,
+    RESP3,
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        ProtocolVersion::RESP2
+    }
+}
+
+/// RESP protocol data types (supports both RESP2 and RESP3)
 #[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
+    // RESP2 types
     SimpleString(String),
     Error(String),
     Integer(i64),
     BulkString(Option<Vec<u8>>),
     Array(Option<Vec<RespValue>>),
+    // RESP3 types
+    Null,
+    Boolean(bool),
+    Double(f64),
+    BigNumber(String),
+    BulkError(String),
+    VerbatimString { encoding: String, data: String },
+    Map(Vec<(RespValue, RespValue)>),
+    Set(Vec<RespValue>),
+    Attribute(Vec<(RespValue, RespValue)>),
+    Push(Vec<RespValue>),
 }
 
 /// Command representation for AOF persistence
@@ -54,11 +79,23 @@ impl RespValue {
         // This prevents stored data from being interpreted as commands
         let first_byte = buffer[0] as char;
         match first_byte {
+            // RESP2 types
             '+' => parse_simple_string(buffer),
             '-' => parse_error(buffer),
             ':' => parse_integer(buffer),
             '$' => parse_bulk_string(buffer),
             '*' => parse_array(buffer),
+            // RESP3 types
+            '_' => parse_null(buffer),
+            '#' => parse_boolean(buffer),
+            ',' => parse_double(buffer),
+            '(' => parse_big_number(buffer),
+            '!' => parse_bulk_error(buffer),
+            '=' => parse_verbatim_string(buffer),
+            '%' => parse_map(buffer),
+            '~' => parse_set(buffer),
+            '|' => parse_attribute(buffer),
+            '>' => parse_push(buffer),
             _ => {
                 // Invalid RESP protocol marker
                 // Note: We don't try to guess if it's "data" vs "command" - just report the error
@@ -78,47 +115,41 @@ impl RespValue {
 
     /// Serializes the RespValue to a vector of bytes
     pub fn serialize(&self) -> Result<Vec<u8>, RespError> {
-        // PROTOCOL FORMAT REMINDER:
-        // Simple strings: +<string>\r\n
-        // Errors: -<e>\r\n
-        // Integers: :<integer>\r\n
-        // Bulk strings: $<length>\r\n<data>\r\n
-        // Arrays: *<number-of-elements>\r\n<element>...
         // Calculate an approximate initial capacity to avoid reallocations
         let estimated_size = match self {
-            RespValue::SimpleString(s) => s.len() + 3, // +{string}\r\n
-            RespValue::Error(s) => s.len() + 3, // -{string}\r\n
-            RespValue::Integer(i) => i.to_string().len() + 3, // :{integer}\r\n
-            RespValue::BulkString(None) => 5, // $-1\r\n
+            RespValue::SimpleString(s) => s.len() + 3,
+            RespValue::Error(s) => s.len() + 3,
+            RespValue::Integer(i) => i.to_string().len() + 3,
+            RespValue::BulkString(None) => 5,
             RespValue::BulkString(Some(data)) => {
-                // $len\r\n{data}\r\n
                 let len_str = data.len().to_string();
                 len_str.len() + data.len() + 5
             }
-            RespValue::Array(None) => 5, // *-1\r\n
+            RespValue::Array(None) => 5,
             RespValue::Array(Some(items)) => {
-                // For arrays, we need to allocate a reasonably large buffer
-                // but we can't calculate precisely without serializing each item
-                
-                // The array header size: *num\r\n
                 let header_size = items.len().to_string().len() + 3;
-                
-                // Estimate the array content size
-                // Depending on the array size, use different strategies
                 const SMALL_ARRAY_THRESHOLD: usize = 10;
                 const AVG_SMALL_ITEM_SIZE: usize = 64;
                 const AVG_LARGE_ITEM_SIZE: usize = 128;
-                
                 if items.len() < SMALL_ARRAY_THRESHOLD {
-                    // For small arrays, we can make a reasonable per-item estimate
-                    // This is a more accurate but still conservative estimate
                     header_size + items.len() * AVG_SMALL_ITEM_SIZE
                 } else {
-                    // For large arrays, use a more conservative estimate
-                    // This ensures we have enough capacity for most typical cases
                     header_size + SMALL_ARRAY_THRESHOLD * AVG_LARGE_ITEM_SIZE
                 }
             }
+            // RESP3 types
+            RespValue::Null => 3,
+            RespValue::Boolean(_) => 4,
+            RespValue::Double(d) => d.to_string().len() + 3,
+            RespValue::BigNumber(s) => s.len() + 3,
+            RespValue::BulkError(s) => s.len().to_string().len() + s.len() + 5,
+            RespValue::VerbatimString { encoding, data } => {
+                (data.len() + encoding.len() + 1).to_string().len() + encoding.len() + 1 + data.len() + 5
+            }
+            RespValue::Map(pairs) => pairs.len().to_string().len() + 3 + pairs.len() * 128,
+            RespValue::Set(items) => items.len().to_string().len() + 3 + items.len() * 64,
+            RespValue::Attribute(pairs) => pairs.len().to_string().len() + 3 + pairs.len() * 128,
+            RespValue::Push(items) => items.len().to_string().len() + 3 + items.len() * 64,
         };
         
         let mut result = Vec::with_capacity(estimated_size);
@@ -176,32 +207,112 @@ impl RespValue {
                 if items.len() > 1_000_000 {
                     return Err(RespError::ValueTooLarge(format!("Array length exceeds 1,000,000 limit: {}", items.len())));
                 }
-                
+
                 // Calculate the total size for all array elements
                 let mut total_size = 0;
                 for item in items.iter() {
                     let item_bytes = item.serialize()?;
                     total_size += item_bytes.len();
-                    
+
                     // Check for reasonable total size
                     if total_size > 1024 * 1024 * 512 { // 512 MB max (was 1 GB)
                         return Err(RespError::ValueTooLarge(format!("Total serialized array size exceeds 512MB limit: {} bytes", total_size)));
                     }
                 }
-                
+
                 // Write array header
                 result.push(b'*');
                 result.extend_from_slice(items.len().to_string().as_bytes());
                 result.extend_from_slice(b"\r\n");
-                
+
                 // Write array elements
                 for item in items {
                     let item_bytes = item.serialize()?;
                     result.extend_from_slice(&item_bytes);
                 }
             }
+            // RESP3 types
+            RespValue::Null => {
+                result.extend_from_slice(b"_\r\n");
+            }
+            RespValue::Boolean(b) => {
+                result.push(b'#');
+                result.push(if *b { b't' } else { b'f' });
+                result.extend_from_slice(b"\r\n");
+            }
+            RespValue::Double(d) => {
+                result.push(b',');
+                if d.is_infinite() {
+                    if d.is_sign_positive() {
+                        result.extend_from_slice(b"inf");
+                    } else {
+                        result.extend_from_slice(b"-inf");
+                    }
+                } else if d.is_nan() {
+                    result.extend_from_slice(b"nan");
+                } else {
+                    result.extend_from_slice(d.to_string().as_bytes());
+                }
+                result.extend_from_slice(b"\r\n");
+            }
+            RespValue::BigNumber(s) => {
+                result.push(b'(');
+                result.extend_from_slice(s.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            }
+            RespValue::BulkError(s) => {
+                result.push(b'!');
+                result.extend_from_slice(s.len().to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                result.extend_from_slice(s.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            }
+            RespValue::VerbatimString { encoding, data } => {
+                let total_len = encoding.len() + 1 + data.len(); // encoding + ':' + data
+                result.push(b'=');
+                result.extend_from_slice(total_len.to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                result.extend_from_slice(encoding.as_bytes());
+                result.push(b':');
+                result.extend_from_slice(data.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            }
+            RespValue::Map(pairs) => {
+                result.push(b'%');
+                result.extend_from_slice(pairs.len().to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                for (key, value) in pairs {
+                    result.extend_from_slice(&key.serialize()?);
+                    result.extend_from_slice(&value.serialize()?);
+                }
+            }
+            RespValue::Set(items) => {
+                result.push(b'~');
+                result.extend_from_slice(items.len().to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                for item in items {
+                    result.extend_from_slice(&item.serialize()?);
+                }
+            }
+            RespValue::Attribute(pairs) => {
+                result.push(b'|');
+                result.extend_from_slice(pairs.len().to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                for (key, value) in pairs {
+                    result.extend_from_slice(&key.serialize()?);
+                    result.extend_from_slice(&value.serialize()?);
+                }
+            }
+            RespValue::Push(items) => {
+                result.push(b'>');
+                result.extend_from_slice(items.len().to_string().as_bytes());
+                result.extend_from_slice(b"\r\n");
+                for item in items {
+                    result.extend_from_slice(&item.serialize()?);
+                }
+            }
         }
-        
+
         Ok(result)
     }
 
@@ -489,8 +600,8 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
     }
 
     match buffer[0] {
-        b'+' | b'-' | b':' => {
-            // Simple string, error, or integer - find CRLF
+        // Simple line types: simple string, error, integer, boolean, double, big number, null
+        b'+' | b'-' | b':' | b'#' | b',' | b'(' => {
             for i in 1..buffer.len() {
                 if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
                     return Some(i + 2);
@@ -498,8 +609,16 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
             }
             None
         }
-        b'$' => {
-            // Bulk string - find length line first
+        b'_' => {
+            // Null is always exactly "_\r\n"
+            if buffer.len() >= 3 && buffer[1] == b'\r' && buffer[2] == b'\n' {
+                Some(3)
+            } else {
+                None
+            }
+        }
+        // Bulk types: bulk string, bulk error, verbatim string
+        b'$' | b'!' | b'=' => {
             let mut crlf_pos = None;
             for i in 1..buffer.len() {
                 if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
@@ -513,7 +632,7 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
             let length = length_str.parse::<i64>().ok()?;
 
             if length == -1 {
-                return Some(crlf_pos + 2); // $-1\r\n
+                return Some(crlf_pos + 2);
             }
 
             if length < 0 {
@@ -527,8 +646,8 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
                 None
             }
         }
-        b'*' => {
-            // Array - find length line first
+        // Aggregate types with elements: array, set, push
+        b'*' | b'~' | b'>' => {
             let mut crlf_pos = None;
             for i in 1..buffer.len() {
                 if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
@@ -542,16 +661,45 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
             let count = length_str.parse::<i64>().ok()?;
 
             if count == -1 {
-                return Some(crlf_pos + 2); // *-1\r\n
+                return Some(crlf_pos + 2);
             }
 
             if count < 0 || count > 1_000_000 {
                 return None;
             }
 
-            // Calculate size of all elements
             let mut offset = crlf_pos + 2;
             for _ in 0..count {
+                if offset >= buffer.len() {
+                    return None;
+                }
+                let elem_size = calculate_resp_size(&buffer[offset..])?;
+                offset += elem_size;
+            }
+
+            Some(offset)
+        }
+        // Map and attribute types: key-value pairs (count = number of pairs, elements = count * 2)
+        b'%' | b'|' => {
+            let mut crlf_pos = None;
+            for i in 1..buffer.len() {
+                if i + 1 < buffer.len() && buffer[i] == b'\r' && buffer[i + 1] == b'\n' {
+                    crlf_pos = Some(i);
+                    break;
+                }
+            }
+
+            let crlf_pos = crlf_pos?;
+            let length_str = std::str::from_utf8(&buffer[1..crlf_pos]).ok()?;
+            let count = length_str.parse::<i64>().ok()?;
+
+            if count < 0 || count > 500_000 {
+                return None;
+            }
+
+            let mut offset = crlf_pos + 2;
+            // Each pair has a key and a value
+            for _ in 0..count * 2 {
                 if offset >= buffer.len() {
                     return None;
                 }
@@ -642,6 +790,302 @@ fn parse_integer(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> 
     } else {
         Ok(None)
     }
+}
+
+// --- RESP3 parsing functions ---
+
+fn parse_null(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Null is "_\r\n" - exactly 3 bytes
+    if buffer.len() < 3 {
+        return Ok(None);
+    }
+    if buffer[1] != b'\r' || buffer[2] != b'\n' {
+        return Err(RespError::InvalidFormatDetails("Invalid null format".to_string()));
+    }
+    buffer.advance(3);
+    Ok(Some(RespValue::Null))
+}
+
+fn parse_boolean(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Boolean is "#t\r\n" or "#f\r\n"
+    let line = read_line(buffer)?;
+    if let Some(line) = line {
+        match line.as_str() {
+            "t" => Ok(Some(RespValue::Boolean(true))),
+            "f" => Ok(Some(RespValue::Boolean(false))),
+            _ => Err(RespError::InvalidFormatDetails(format!("Invalid boolean value: {}", line))),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_double(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Double is ",<floating-point-number>\r\n" or ",inf", ",-inf", ",nan"
+    let line = read_line(buffer)?;
+    if let Some(line) = line {
+        let value = match line.as_str() {
+            "inf" => f64::INFINITY,
+            "-inf" => f64::NEG_INFINITY,
+            "nan" => f64::NAN,
+            _ => line.parse::<f64>().map_err(|e| {
+                RespError::InvalidFormatDetails(format!("Invalid double value '{}': {}", line, e))
+            })?,
+        };
+        Ok(Some(RespValue::Double(value)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_big_number(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Big number is "(<big-number>\r\n"
+    let line = read_line(buffer)?;
+    if let Some(line) = line {
+        // Validate it looks like a number (digits, optional leading -)
+        if line.is_empty() {
+            return Err(RespError::InvalidFormatDetails("Empty big number".to_string()));
+        }
+        let check = if line.starts_with('-') { &line[1..] } else { &line };
+        if check.is_empty() || !check.chars().all(|c| c.is_ascii_digit()) {
+            return Err(RespError::InvalidFormatDetails(format!("Invalid big number: {}", line)));
+        }
+        Ok(Some(RespValue::BigNumber(line)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_bulk_error(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Bulk error is "!<length>\r\n<error>\r\n" (same structure as bulk string)
+    if buffer.len() < 2 {
+        return Ok(None);
+    }
+
+    let cr_positions = memchr_iter(b'\r', buffer);
+    let mut length_line_end = None;
+    for pos in cr_positions {
+        if pos + 1 < buffer.len() && buffer[pos + 1] == b'\n' {
+            length_line_end = Some(pos);
+            break;
+        }
+    }
+
+    let length_line_end = match length_line_end {
+        Some(pos) => pos,
+        None => return Ok(None),
+    };
+
+    let length_str = str::from_utf8(&buffer[1..length_line_end])?;
+    let length = length_str.parse::<i64>()?;
+
+    if length < 0 {
+        return Err(RespError::InvalidFormatDetails(format!("Negative bulk error length: {}", length)));
+    }
+
+    let length = length as usize;
+    let total_needed = length_line_end + 2 + length + 2;
+    if buffer.len() < total_needed {
+        return Ok(None);
+    }
+
+    buffer.advance(length_line_end + 2);
+    let data = buffer.split_to(length).to_vec();
+
+    if buffer[0] != b'\r' || buffer[1] != b'\n' {
+        return Err(RespError::InvalidFormatDetails("Invalid CRLF after bulk error".to_string()));
+    }
+    buffer.advance(2);
+
+    let error_str = String::from_utf8(data).map_err(|e| {
+        RespError::InvalidFormatDetails(format!("Invalid UTF-8 in bulk error: {}", e))
+    })?;
+
+    Ok(Some(RespValue::BulkError(error_str)))
+}
+
+fn parse_verbatim_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Verbatim string is "=<length>\r\n<encoding>:<data>\r\n"
+    // where encoding is exactly 3 characters
+    if buffer.len() < 2 {
+        return Ok(None);
+    }
+
+    let cr_positions = memchr_iter(b'\r', buffer);
+    let mut length_line_end = None;
+    for pos in cr_positions {
+        if pos + 1 < buffer.len() && buffer[pos + 1] == b'\n' {
+            length_line_end = Some(pos);
+            break;
+        }
+    }
+
+    let length_line_end = match length_line_end {
+        Some(pos) => pos,
+        None => return Ok(None),
+    };
+
+    let length_str = str::from_utf8(&buffer[1..length_line_end])?;
+    let length = length_str.parse::<i64>()?;
+
+    if length < 4 {
+        // Minimum: 3 chars encoding + ':' = 4
+        return Err(RespError::InvalidFormatDetails(format!("Verbatim string too short: {}", length)));
+    }
+
+    let length = length as usize;
+    let total_needed = length_line_end + 2 + length + 2;
+    if buffer.len() < total_needed {
+        return Ok(None);
+    }
+
+    buffer.advance(length_line_end + 2);
+    let data = buffer.split_to(length).to_vec();
+
+    if buffer[0] != b'\r' || buffer[1] != b'\n' {
+        return Err(RespError::InvalidFormatDetails("Invalid CRLF after verbatim string".to_string()));
+    }
+    buffer.advance(2);
+
+    // The encoding is the first 3 bytes, then ':', then the actual data
+    if data.len() < 4 || data[3] != b':' {
+        return Err(RespError::InvalidFormatDetails("Invalid verbatim string format: missing encoding:data separator".to_string()));
+    }
+
+    let encoding = String::from_utf8(data[0..3].to_vec()).map_err(|e| {
+        RespError::InvalidFormatDetails(format!("Invalid UTF-8 in verbatim encoding: {}", e))
+    })?;
+    let content = String::from_utf8(data[4..].to_vec()).map_err(|e| {
+        RespError::InvalidFormatDetails(format!("Invalid UTF-8 in verbatim data: {}", e))
+    })?;
+
+    Ok(Some(RespValue::VerbatimString { encoding, data: content }))
+}
+
+fn parse_map(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Map is "%<number-of-pairs>\r\n<key><value>..."
+    let total_size = match calculate_resp_size(buffer) {
+        Some(size) => size,
+        None => return Ok(None),
+    };
+
+    let _ = total_size;
+    let length_str = read_line(buffer)?;
+    if length_str.is_none() {
+        return Ok(None);
+    }
+
+    let count = length_str.unwrap().parse::<i64>()?;
+    if count < 0 {
+        return Err(RespError::InvalidFormatDetails(format!("Negative map length: {}", count)));
+    }
+
+    let mut pairs = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let key = match RespValue::parse(buffer)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let value = match RespValue::parse(buffer)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        pairs.push((key, value));
+    }
+
+    Ok(Some(RespValue::Map(pairs)))
+}
+
+fn parse_set(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Set is "~<number-of-elements>\r\n<element>..."
+    let total_size = match calculate_resp_size(buffer) {
+        Some(size) => size,
+        None => return Ok(None),
+    };
+
+    let _ = total_size;
+    let length_str = read_line(buffer)?;
+    if length_str.is_none() {
+        return Ok(None);
+    }
+
+    let count = length_str.unwrap().parse::<i64>()?;
+    if count < 0 {
+        return Err(RespError::InvalidFormatDetails(format!("Negative set length: {}", count)));
+    }
+
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        match RespValue::parse(buffer)? {
+            Some(v) => items.push(v),
+            None => return Ok(None),
+        }
+    }
+
+    Ok(Some(RespValue::Set(items)))
+}
+
+fn parse_attribute(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Attribute is "|<number-of-pairs>\r\n<key><value>..."
+    let total_size = match calculate_resp_size(buffer) {
+        Some(size) => size,
+        None => return Ok(None),
+    };
+
+    let _ = total_size;
+    let length_str = read_line(buffer)?;
+    if length_str.is_none() {
+        return Ok(None);
+    }
+
+    let count = length_str.unwrap().parse::<i64>()?;
+    if count < 0 {
+        return Err(RespError::InvalidFormatDetails(format!("Negative attribute length: {}", count)));
+    }
+
+    let mut pairs = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let key = match RespValue::parse(buffer)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let value = match RespValue::parse(buffer)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        pairs.push((key, value));
+    }
+
+    Ok(Some(RespValue::Attribute(pairs)))
+}
+
+fn parse_push(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Push is "><number-of-elements>\r\n<element>..."
+    let total_size = match calculate_resp_size(buffer) {
+        Some(size) => size,
+        None => return Ok(None),
+    };
+
+    let _ = total_size;
+    let length_str = read_line(buffer)?;
+    if length_str.is_none() {
+        return Ok(None);
+    }
+
+    let count = length_str.unwrap().parse::<i64>()?;
+    if count < 0 {
+        return Err(RespError::InvalidFormatDetails(format!("Negative push length: {}", count)));
+    }
+
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        match RespValue::parse(buffer)? {
+            Some(v) => items.push(v),
+            None => return Ok(None),
+        }
+    }
+
+    Ok(Some(RespValue::Push(items)))
 }
 
 #[cfg(test)]
@@ -905,6 +1349,407 @@ mod tests {
             assert!(true, "Size check correctly identifies too large data");
         } else {
             assert!(false, "Size check should reject data over 512MB");
+        }
+    }
+
+    // ===== RESP3 Type Tests =====
+
+    #[test]
+    fn test_parse_null() {
+        let mut buffer = BytesMut::from("_\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Null)
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_null() {
+        let value = RespValue::Null;
+        let bytes = value.serialize().unwrap();
+        assert_eq!(bytes, b"_\r\n");
+    }
+
+    #[test]
+    fn test_parse_boolean_true() {
+        let mut buffer = BytesMut::from("#t\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Boolean(true))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_boolean_false() {
+        let mut buffer = BytesMut::from("#f\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Boolean(false))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_boolean_invalid() {
+        let mut buffer = BytesMut::from("#x\r\n");
+        assert!(RespValue::parse(&mut buffer).is_err());
+    }
+
+    #[test]
+    fn test_serialize_boolean() {
+        assert_eq!(RespValue::Boolean(true).serialize().unwrap(), b"#t\r\n");
+        assert_eq!(RespValue::Boolean(false).serialize().unwrap(), b"#f\r\n");
+    }
+
+    #[test]
+    fn test_parse_double() {
+        let mut buffer = BytesMut::from(",3.14\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Double(3.14))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_double_negative() {
+        let mut buffer = BytesMut::from(",-2.5\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Double(-2.5))
+        );
+    }
+
+    #[test]
+    fn test_parse_double_inf() {
+        let mut buffer = BytesMut::from(",inf\r\n");
+        if let Some(RespValue::Double(d)) = RespValue::parse(&mut buffer).unwrap() {
+            assert!(d.is_infinite() && d.is_sign_positive());
+        } else {
+            panic!("Expected Double(inf)");
+        }
+    }
+
+    #[test]
+    fn test_parse_double_neg_inf() {
+        let mut buffer = BytesMut::from(",-inf\r\n");
+        if let Some(RespValue::Double(d)) = RespValue::parse(&mut buffer).unwrap() {
+            assert!(d.is_infinite() && d.is_sign_negative());
+        } else {
+            panic!("Expected Double(-inf)");
+        }
+    }
+
+    #[test]
+    fn test_parse_double_nan() {
+        let mut buffer = BytesMut::from(",nan\r\n");
+        if let Some(RespValue::Double(d)) = RespValue::parse(&mut buffer).unwrap() {
+            assert!(d.is_nan());
+        } else {
+            panic!("Expected Double(NaN)");
+        }
+    }
+
+    #[test]
+    fn test_serialize_double() {
+        let bytes = RespValue::Double(3.14).serialize().unwrap();
+        assert_eq!(bytes, b",3.14\r\n");
+
+        let bytes = RespValue::Double(f64::INFINITY).serialize().unwrap();
+        assert_eq!(bytes, b",inf\r\n");
+
+        let bytes = RespValue::Double(f64::NEG_INFINITY).serialize().unwrap();
+        assert_eq!(bytes, b",-inf\r\n");
+
+        let bytes = RespValue::Double(f64::NAN).serialize().unwrap();
+        assert_eq!(bytes, b",nan\r\n");
+    }
+
+    #[test]
+    fn test_parse_big_number() {
+        let mut buffer = BytesMut::from("(3492890328409238509324850943850943809\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::BigNumber("3492890328409238509324850943850943809".to_string()))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_big_number_negative() {
+        let mut buffer = BytesMut::from("(-12345678901234567890\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::BigNumber("-12345678901234567890".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_big_number_invalid() {
+        let mut buffer = BytesMut::from("(abc\r\n");
+        assert!(RespValue::parse(&mut buffer).is_err());
+    }
+
+    #[test]
+    fn test_serialize_big_number() {
+        let bytes = RespValue::BigNumber("12345678901234567890".to_string()).serialize().unwrap();
+        assert_eq!(bytes, b"(12345678901234567890\r\n");
+    }
+
+    #[test]
+    fn test_parse_bulk_error() {
+        let mut buffer = BytesMut::from("!21\r\nSYNTAX invalid syntax\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::BulkError("SYNTAX invalid syntax".to_string()))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_bulk_error() {
+        let bytes = RespValue::BulkError("SYNTAX invalid syntax".to_string()).serialize().unwrap();
+        assert_eq!(bytes, b"!21\r\nSYNTAX invalid syntax\r\n");
+    }
+
+    #[test]
+    fn test_parse_verbatim_string() {
+        let mut buffer = BytesMut::from("=15\r\ntxt:Some string\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::VerbatimString {
+                encoding: "txt".to_string(),
+                data: "Some string".to_string(),
+            })
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_verbatim_string_markdown() {
+        let mut buffer = BytesMut::from("=11\r\nmkd:# Hello\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::VerbatimString {
+                encoding: "mkd".to_string(),
+                data: "# Hello".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_serialize_verbatim_string() {
+        let bytes = RespValue::VerbatimString {
+            encoding: "txt".to_string(),
+            data: "Some string".to_string(),
+        }.serialize().unwrap();
+        assert_eq!(bytes, b"=15\r\ntxt:Some string\r\n");
+    }
+
+    #[test]
+    fn test_parse_map() {
+        // %2\r\n+first\r\n:1\r\n+second\r\n:2\r\n
+        let mut buffer = BytesMut::from("%2\r\n+first\r\n:1\r\n+second\r\n:2\r\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Map(vec![
+                (RespValue::SimpleString("first".to_string()), RespValue::Integer(1)),
+                (RespValue::SimpleString("second".to_string()), RespValue::Integer(2)),
+            ]))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_map() {
+        let mut buffer = BytesMut::from("%0\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Map(vec![]))
+        );
+    }
+
+    #[test]
+    fn test_serialize_map() {
+        let value = RespValue::Map(vec![
+            (RespValue::SimpleString("key".to_string()), RespValue::Integer(42)),
+        ]);
+        let bytes = value.serialize().unwrap();
+        assert_eq!(bytes, b"%1\r\n+key\r\n:42\r\n");
+    }
+
+    #[test]
+    fn test_parse_set() {
+        let mut buffer = BytesMut::from("~3\r\n+a\r\n+b\r\n+c\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Set(vec![
+                RespValue::SimpleString("a".to_string()),
+                RespValue::SimpleString("b".to_string()),
+                RespValue::SimpleString("c".to_string()),
+            ]))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_set() {
+        let value = RespValue::Set(vec![
+            RespValue::Integer(1),
+            RespValue::Integer(2),
+        ]);
+        let bytes = value.serialize().unwrap();
+        assert_eq!(bytes, b"~2\r\n:1\r\n:2\r\n");
+    }
+
+    #[test]
+    fn test_parse_attribute() {
+        let mut buffer = BytesMut::from("|1\r\n+key\r\n+value\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Attribute(vec![
+                (RespValue::SimpleString("key".to_string()), RespValue::SimpleString("value".to_string())),
+            ]))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_attribute() {
+        let value = RespValue::Attribute(vec![
+            (RespValue::SimpleString("key".to_string()), RespValue::SimpleString("value".to_string())),
+        ]);
+        let bytes = value.serialize().unwrap();
+        assert_eq!(bytes, b"|1\r\n+key\r\n+value\r\n");
+    }
+
+    #[test]
+    fn test_parse_push() {
+        let mut buffer = BytesMut::from(">2\r\n+pubsub\r\n+message\r\n");
+        assert_eq!(
+            RespValue::parse(&mut buffer).unwrap(),
+            Some(RespValue::Push(vec![
+                RespValue::SimpleString("pubsub".to_string()),
+                RespValue::SimpleString("message".to_string()),
+            ]))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_push() {
+        let value = RespValue::Push(vec![
+            RespValue::SimpleString("pubsub".to_string()),
+            RespValue::SimpleString("message".to_string()),
+        ]);
+        let bytes = value.serialize().unwrap();
+        assert_eq!(bytes, b">2\r\n+pubsub\r\n+message\r\n");
+    }
+
+    #[test]
+    fn test_resp3_roundtrip_all_types() {
+        // Test that serializing and then parsing each RESP3 type produces the same value
+        let test_values = vec![
+            RespValue::Null,
+            RespValue::Boolean(true),
+            RespValue::Boolean(false),
+            RespValue::Double(1.23),
+            RespValue::BigNumber("99999999999999999999".to_string()),
+            RespValue::BulkError("ERR something went wrong".to_string()),
+            RespValue::VerbatimString { encoding: "txt".to_string(), data: "hello world".to_string() },
+            RespValue::Map(vec![
+                (RespValue::SimpleString("a".to_string()), RespValue::Integer(1)),
+                (RespValue::SimpleString("b".to_string()), RespValue::Integer(2)),
+            ]),
+            RespValue::Set(vec![
+                RespValue::Integer(1),
+                RespValue::Integer(2),
+                RespValue::Integer(3),
+            ]),
+            RespValue::Push(vec![
+                RespValue::SimpleString("invalidate".to_string()),
+                RespValue::Array(Some(vec![
+                    RespValue::SimpleString("key1".to_string()),
+                ])),
+            ]),
+        ];
+
+        for original in &test_values {
+            let serialized = original.serialize().unwrap();
+            let mut buffer = BytesMut::from(serialized.as_slice());
+            let parsed = RespValue::parse(&mut buffer).unwrap();
+            // Special handling for NaN (NaN != NaN)
+            assert_eq!(parsed.as_ref(), Some(original), "Roundtrip failed for {:?}", original);
+            assert!(buffer.is_empty(), "Buffer not empty after parsing {:?}", original);
+        }
+    }
+
+    #[test]
+    fn test_resp3_nested_types() {
+        // Test a map containing various RESP3 types
+        let value = RespValue::Map(vec![
+            (RespValue::BulkString(Some(b"null".to_vec())), RespValue::Null),
+            (RespValue::BulkString(Some(b"bool".to_vec())), RespValue::Boolean(true)),
+            (RespValue::BulkString(Some(b"double".to_vec())), RespValue::Double(3.14)),
+        ]);
+        let serialized = value.serialize().unwrap();
+        let mut buffer = BytesMut::from(serialized.as_slice());
+        let parsed = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(parsed, Some(value));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_resp3_incomplete_data() {
+        // Test that incomplete RESP3 data returns None without error
+        let incomplete_cases = vec![
+            "_\r",           // Null missing \n
+            "#",             // Boolean incomplete
+            ",3.1",          // Double incomplete
+            "(123",          // Big number incomplete
+            "!5\r\nhe",      // Bulk error incomplete
+            "=10\r\ntxt:he", // Verbatim string incomplete
+            "%1\r\n+key\r\n", // Map missing value
+            "~2\r\n+a\r\n",  // Set missing element
+        ];
+
+        for case in incomplete_cases {
+            let mut buffer = BytesMut::from(case.as_bytes());
+            let result = RespValue::parse(&mut buffer);
+            match result {
+                Ok(None) => {} // Expected: incomplete data
+                Ok(Some(_)) => panic!("Expected None for incomplete data: {}", case),
+                Err(_) => {} // Also acceptable: some edge cases might error
+            }
+        }
+    }
+
+    #[test]
+    fn test_protocol_version_default() {
+        assert_eq!(ProtocolVersion::default(), ProtocolVersion::RESP2);
+    }
+
+    #[test]
+    fn test_double_integer_value() {
+        // Double that is an integer value
+        let mut buffer = BytesMut::from(",10\r\n");
+        if let Some(RespValue::Double(d)) = RespValue::parse(&mut buffer).unwrap() {
+            assert_eq!(d, 10.0);
+        } else {
+            panic!("Expected Double");
+        }
+    }
+
+    #[test]
+    fn test_double_zero() {
+        let mut buffer = BytesMut::from(",0\r\n");
+        if let Some(RespValue::Double(d)) = RespValue::parse(&mut buffer).unwrap() {
+            assert_eq!(d, 0.0);
+        } else {
+            panic!("Expected Double");
         }
     }
 }
