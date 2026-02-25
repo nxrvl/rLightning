@@ -172,14 +172,14 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/storage/engine.rs` (HLL data structure support)
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement HyperLogLog data structure (sparse and dense representations)
-- [ ] Implement PFADD (add elements to HLL)
-- [ ] Implement PFCOUNT (estimate cardinality, single and multi-key)
-- [ ] Implement PFMERGE (merge multiple HLLs into one)
-- [ ] Ensure storage engine handles HLL type correctly
-- [ ] Write tests with known cardinality validation (error margin < 1%)
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement HyperLogLog data structure (sparse and dense representations)
+- [x] Implement PFADD (add elements to HLL)
+- [x] Implement PFCOUNT (estimate cardinality, single and multi-key)
+- [x] Implement PFMERGE (merge multiple HLLs into one)
+- [x] Ensure storage engine handles HLL type correctly
+- [x] Write tests with known cardinality validation (error margin < 1%)
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 9: Geospatial Commands
 
