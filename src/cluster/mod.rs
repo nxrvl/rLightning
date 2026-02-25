@@ -148,7 +148,7 @@ pub struct FailureReport {
 
 impl ClusterNode {
     pub fn new(id: String, addr: SocketAddr, role: NodeRole) -> Self {
-        let bus_port = addr.port() + 10000;
+        let bus_port = addr.port().saturating_add(10000);
         let mut flags = match role {
             NodeRole::Master => NodeFlags::new_master(),
             NodeRole::Replica => NodeFlags::new_replica(),
