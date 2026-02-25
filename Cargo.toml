@@ -96,6 +96,18 @@ harness = false
 name = "auth_bench"
 harness = false
 
+[[bench]]
+name = "command_category_bench"
+harness = false
+
+[[bench]]
+name = "advanced_features_bench"
+harness = false
+
+[[bench]]
+name = "cluster_bench"
+harness = false
+
 # Profiling configuration for benchmarks
 [profile.bench]
 debug = true
