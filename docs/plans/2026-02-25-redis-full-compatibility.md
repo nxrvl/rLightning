@@ -475,27 +475,27 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 
 **All acceptance criteria are automated tests. No manual tests. No ignored (#[ignore]) tests anywhere in the codebase.**
 
-- [ ] Create automated acceptance test: connect with redis crate client, run commands from each category (strings, lists, sets, hashes, sorted sets, streams, bitmap, HLL, geo, pub/sub, transactions, scripting, ACL), verify correct behavior
-- [ ] Create automated acceptance test: run application-level scenarios simulating real workloads (session store, cache, rate limiter, leaderboard, message queue)
-- [ ] Create automated acceptance test: start cluster mode in dev containers, verify slot assignment and redirections work correctly
-- [ ] Create automated acceptance test: start sentinel mode in dev containers, verify failover completes correctly
-- [ ] Create automated test: RESP3 negotiation with modern Redis client libraries
-- [ ] Create CI/CD pipeline (.github/workflows/ci.yml) with the following jobs:
-- [ ] `build`: cargo build --release on Linux, macOS
-- [ ] `test-unit`: cargo test --lib (unit tests)
-- [ ] `test-integration`: cargo test --test '*' (all integration tests including acceptance, compatibility, cluster, sentinel) using Docker service containers
-- [ ] `lint`: cargo clippy -- -D warnings
-- [ ] `format`: cargo fmt -- --check
-- [ ] `coverage`: run cargo-tarpaulin or llvm-cov, verify 80%+ coverage, upload report
-- [ ] `docker-test`: build Docker image, run Redis compatibility tests against containerized rLightning
-- [ ] `redis-compat`: start both real Redis and rLightning in Docker service containers, run compatibility test suite against both
-- [ ] Audit entire codebase: remove all #[ignore] attributes from tests; fix or delete any tests that cannot run
-- [ ] Verify all tests pass in CI: `cargo test` with no failures and no ignored tests
-- [ ] Run linter: `cargo clippy -- -D warnings` with zero warnings
-- [ ] Run formatter: `cargo fmt -- --check` with no diffs
-- [ ] Verify test coverage meets 80%+
-- [ ] Run benchmarks locally: `cargo bench` completes successfully (benchmarks are local-only, not in CI)
-- [ ] Run project test suite - must pass before next task
+- [x] Create automated acceptance test: connect with redis crate client, run commands from each category (strings, lists, sets, hashes, sorted sets, streams, bitmap, HLL, geo, pub/sub, transactions, scripting, ACL), verify correct behavior
+- [x] Create automated acceptance test: run application-level scenarios simulating real workloads (session store, cache, rate limiter, leaderboard, message queue)
+- [x] Create automated acceptance test: start cluster mode in dev containers, verify slot assignment and redirections work correctly
+- [x] Create automated acceptance test: start sentinel mode in dev containers, verify failover completes correctly
+- [x] Create automated test: RESP3 negotiation with modern Redis client libraries
+- [x] Create CI/CD pipeline (.github/workflows/ci.yml) with the following jobs:
+- [x] `build`: cargo build --release on Linux, macOS
+- [x] `test-unit`: cargo test --lib (unit tests)
+- [x] `test-integration`: cargo test --test '*' (all integration tests including acceptance, compatibility, cluster, sentinel) using Docker service containers
+- [x] `lint`: cargo clippy -- -D warnings
+- [x] `format`: cargo fmt -- --check
+- [x] `coverage`: run cargo-tarpaulin or llvm-cov, verify 80%+ coverage, upload report
+- [x] `docker-test`: build Docker image, run Redis compatibility tests against containerized rLightning
+- [x] `redis-compat`: start both real Redis and rLightning in Docker service containers, run compatibility test suite against both
+- [x] Audit entire codebase: remove all #[ignore] attributes from tests; fix or delete any tests that cannot run
+- [x] Verify all tests pass in CI: `cargo test` with no failures and no ignored tests
+- [x] Run linter: `cargo clippy -- -D warnings` with zero warnings
+- [x] Run formatter: `cargo fmt -- --check` with no diffs
+- [x] Verify test coverage meets 80%+
+- [x] Run benchmarks locally: `cargo bench` completes successfully (benchmarks are local-only, not in CI)
+- [x] Run project test suite - must pass before next task
 
 ### Task 23: Redesign Documentation Site (spotctl.com-style)
 

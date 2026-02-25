@@ -2,61 +2,12 @@
 //!
 //! Tests Redis-compatible SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE commands
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::io::{Write, BufRead, BufReader, Read};
 use std::time::Duration;
-use std::thread;
-use std::sync::mpsc;
-use std::process::{Command, Child};
 
-/// Helper to start the server
-fn start_server(port: u16) -> Child {
-    Command::new("cargo")
-        .args(["run", "--", "--port", &port.to_string()])
-        .spawn()
-        .expect("Failed to start server")
-}
-
-/// Helper to wait for server to be ready
-fn wait_for_server(port: u16) -> bool {
-    for _ in 0..50 {
-        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
-/// Helper to send a command and read the response
-fn send_command(stream: &mut TcpStream, cmd: &str) -> String {
-    // Parse the command into RESP format
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let mut resp = format!("*{}\r\n", parts.len());
-    for part in parts {
-        resp.push_str(&format!("${}\r\n{}\r\n", part.len(), part));
-    }
-
-    stream.write_all(resp.as_bytes()).unwrap();
-    stream.flush().unwrap();
-
-    // Read response
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut response = String::new();
-    reader.read_line(&mut response).unwrap();
-    response
-}
-
-/// Helper to send raw RESP and read response
-fn send_resp(stream: &mut TcpStream, resp: &str) -> String {
-    stream.write_all(resp.as_bytes()).unwrap();
-    stream.flush().unwrap();
-
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut response = String::new();
-    reader.read_line(&mut response).unwrap();
-    response
-}
+use rlightning::networking::server::Server;
+use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 /// Read a complete RESP array response
 fn read_resp_array(stream: &mut TcpStream) -> Vec<String> {
@@ -95,21 +46,44 @@ fn read_resp_array(stream: &mut TcpStream) -> Vec<String> {
     result
 }
 
+/// Start an embedded test server on the given port
+fn start_embedded_server(port: u16) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let addr = format!("127.0.0.1:{}", port).parse().unwrap();
+            let config = StorageConfig::default();
+            let storage = StorageEngine::new(config);
+            let server = Server::new(addr, storage)
+                .with_connection_limit(100)
+                .with_buffer_size(1024 * 1024);
+            if let Err(e) = server.start().await {
+                eprintln!("PubSub test server error on port {}: {:?}", port, e);
+            }
+        });
+    });
+
+    // Wait for server to start
+    std::thread::sleep(Duration::from_millis(500));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Note: These tests require a running server
-    // Run with: cargo test --test pubsub_test -- --ignored
-
     #[test]
-    #[ignore = "Requires running server"]
     fn test_subscribe_and_publish() {
-        let port = 16379;
+        let port = 18300;
+        start_embedded_server(port);
 
         // Connect subscriber
         let mut subscriber = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        subscriber.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        subscriber
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         // Connect publisher
         let mut publisher = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
@@ -144,13 +118,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires running server"]
     fn test_pattern_subscribe() {
-        let port = 16379;
+        let port = 18301;
+        start_embedded_server(port);
 
         // Connect subscriber
         let mut subscriber = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        subscriber.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        subscriber
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         // Connect publisher
         let mut publisher = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
@@ -186,14 +162,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires running server"]
     fn test_pubsub_channels() {
-        let port = 16379;
+        let port = 18302;
+        start_embedded_server(port);
 
-        // Connect and subscribe to create active channels (one at a time to avoid
-        // BufReader buffering issues where multiple responses arrive in one TCP packet)
+        // Connect and subscribe to create active channels
         let mut subscriber = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        subscriber.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        subscriber
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // Subscribe to first channel and consume confirmation
         let resp = "*2\r\n$9\r\nSUBSCRIBE\r\n$6\r\nchan:a\r\n";
@@ -212,23 +189,29 @@ mod tests {
 
         // Query active channels
         let mut query = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        query.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        query
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let resp = "*2\r\n$6\r\nPUBSUB\r\n$8\r\nCHANNELS\r\n";
         query.write_all(resp.as_bytes()).unwrap();
         query.flush().unwrap();
 
         let channels = read_resp_array(&mut query);
         assert!(channels.len() >= 2);
-        assert!(channels.contains(&"chan:a".to_string()) || channels.contains(&"chan:b".to_string()));
+        assert!(
+            channels.contains(&"chan:a".to_string()) || channels.contains(&"chan:b".to_string())
+        );
     }
 
     #[test]
-    #[ignore = "Requires running server"]
     fn test_unsubscribe() {
-        let port = 16379;
+        let port = 18303;
+        start_embedded_server(port);
 
         let mut client = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // Subscribe to channel
         let resp = "*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\ntest\r\n";
@@ -269,8 +252,6 @@ mod unit_tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, 1); // 1 subscription
 
-        // Note: Subscription confirmations are sent via response buffer, not broadcast channel
-
         // Publish
         let count = manager.publish(b"test".to_vec(), b"hello".to_vec()).await;
         assert_eq!(count, 1);
@@ -293,18 +274,24 @@ mod unit_tests {
         let (client_id, mut rx) = manager.register_client().await;
 
         // Subscribe to pattern
-        manager.psubscribe(client_id, vec![b"news:*".to_vec()]).await;
-
-        // Note: Subscription confirmations are sent via response buffer, not broadcast channel
+        manager
+            .psubscribe(client_id, vec![b"news:*".to_vec()])
+            .await;
 
         // Publish to matching channel
-        let count = manager.publish(b"news:sports".to_vec(), b"goal!".to_vec()).await;
+        let count = manager
+            .publish(b"news:sports".to_vec(), b"goal!".to_vec())
+            .await;
         assert_eq!(count, 1);
 
         // Receive pmessage
         let msg = rx.recv().await.unwrap();
         match msg {
-            rlightning::pubsub::SubscriptionMessage::PMessage { pattern, channel, data } => {
+            rlightning::pubsub::SubscriptionMessage::PMessage {
+                pattern,
+                channel,
+                data,
+            } => {
                 assert_eq!(pattern, b"news:*".to_vec());
                 assert_eq!(channel, b"news:sports".to_vec());
                 assert_eq!(data, b"goal!".to_vec());
@@ -323,14 +310,20 @@ mod unit_tests {
         let (client3, _rx3) = manager.register_client().await;
 
         // Subscribe all to the same channel
-        manager.subscribe(client1, vec![b"broadcast".to_vec()]).await;
-        manager.subscribe(client2, vec![b"broadcast".to_vec()]).await;
-        manager.subscribe(client3, vec![b"broadcast".to_vec()]).await;
-
-        // Note: Subscription confirmations are sent via response buffer, not broadcast channel
+        manager
+            .subscribe(client1, vec![b"broadcast".to_vec()])
+            .await;
+        manager
+            .subscribe(client2, vec![b"broadcast".to_vec()])
+            .await;
+        manager
+            .subscribe(client3, vec![b"broadcast".to_vec()])
+            .await;
 
         // Publish
-        let count = manager.publish(b"broadcast".to_vec(), b"hello everyone".to_vec()).await;
+        let count = manager
+            .publish(b"broadcast".to_vec(), b"hello everyone".to_vec())
+            .await;
         assert_eq!(count, 3);
 
         // All should receive

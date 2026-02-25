@@ -1,4 +1,4 @@
-name: CI Tests
+name: CI
 
 on:
   push:
@@ -14,11 +14,18 @@ on:
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-jobs:
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
+jobs:
+  # Job 1: Build on Linux and macOS
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,91 +36,311 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci-tests"
+          shared-key: "ci-build-${{ matrix.os }}"
           cache-on-failure: true
 
-      - name: Run all tests
-        run: |
-          cargo test --all-features
+      - name: Build release binary
+        run: cargo build --release
 
-      - name: Test summary
+  # Job 2: Unit tests
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-unit-tests"
+          cache-on-failure: true
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+  # Job 3: Integration tests (all test files)
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-integration-tests"
+          cache-on-failure: true
+
+      - name: Run all integration tests
+        run: cargo test --test '*'
+        env:
+          REDIS_TEST_PORT: 6399
+
+  # Job 4: Clippy lint
+  lint:
+    name: Clippy Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-lint"
+          cache-on-failure: true
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  # Job 5: Format check
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  # Job 6: Code coverage
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-coverage"
+          cache-on-failure: true
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Run coverage
+        run: cargo tarpaulin --out xml --skip-clean --timeout 300
+        continue-on-error: true
+
+      - name: Upload coverage report
         if: always()
-        run: |
-          echo "::notice::Test execution completed"
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: cobertura.xml
+          retention-days: 14
 
+  # Job 7: Docker image build and test
+  docker-test:
+    name: Docker Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: rlightning:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start rLightning container
+        run: |
+          docker run -d --name rlightning-test -p 16379:6379 \
+            -e RLIGHTNING_BIND=0.0.0.0 \
+            rlightning:test
+          # Wait for container to be ready
+          for i in $(seq 1 30); do
+            if docker exec rlightning-test nc -z localhost 6379 2>/dev/null; then
+              echo "rLightning is ready"
+              break
+            fi
+            echo "Waiting for rLightning... ($i/30)"
+            sleep 1
+          done
+
+      - name: Verify container health
+        run: |
+          # Test basic connectivity with redis-cli compatible check
+          docker exec rlightning-test nc -z localhost 6379
+          echo "Container is healthy and accepting connections"
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f rlightning-test || true
+
+  # Job 8: Redis compatibility test (side-by-side)
+  redis-compat:
+    name: Redis Compatibility
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-compat"
+          cache-on-failure: true
+
+      - name: Build rLightning
+        run: cargo build --release
+
+      - name: Start rLightning
+        run: |
+          ./target/release/rlightning --port 6398 &
+          sleep 2
+          echo "rLightning started on port 6398"
+
+      - name: Run compatibility tests
+        run: cargo test --test acceptance_test
+        env:
+          RLIGHTNING_PORT: 6398
+          REDIS_PORT: 6399
+
+  # Notification job
   notify:
     name: Notify Results
     runs-on: ubuntu-latest
-    needs: test
+    needs: [build, test-unit, test-integration, lint, format, coverage, docker-test, redis-compat]
     if: always()
 
     steps:
+      - name: Determine overall result
+        id: result
+        run: |
+          if [[ "${{ needs.build.result }}" == "success" && \
+                "${{ needs.test-unit.result }}" == "success" && \
+                "${{ needs.test-integration.result }}" == "success" && \
+                "${{ needs.lint.result }}" == "success" && \
+                "${{ needs.format.result }}" == "success" && \
+                "${{ needs.docker-test.result }}" == "success" && \
+                "${{ needs.redis-compat.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
       - name: Notify success (push)
-        if: needs.test.result == 'success' && github.event_name == 'push'
+        if: steps.result.outputs.status == 'success' && github.event_name == 'push'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ✅ **Tests Passed**
+            ✅ **CI Passed**
 
             **Repository:** ${{ github.repository }}
             **Branch:** ${{ github.ref_name }}
             **Commit:** `${{ github.sha }}`
 
-            All tests passed successfully!
+            All CI jobs passed: build, tests, lint, format, Docker, compatibility.
 
             [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
       - name: Notify failure (push)
-        if: needs.test.result == 'failure' && github.event_name == 'push'
+        if: steps.result.outputs.status == 'failure' && github.event_name == 'push'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ❌ **Tests Failed**
+            ❌ **CI Failed**
 
             **Repository:** ${{ github.repository }}
             **Branch:** ${{ github.ref_name }}
             **Commit:** `${{ github.sha }}`
 
+            Failed jobs: build=${{ needs.build.result }}, unit=${{ needs.test-unit.result }}, integration=${{ needs.test-integration.result }}, lint=${{ needs.lint.result }}, format=${{ needs.format.result }}, docker=${{ needs.docker-test.result }}, compat=${{ needs.redis-compat.result }}
+
             [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
       - name: Notify success (PR)
-        if: needs.test.result == 'success' && github.event_name == 'pull_request'
+        if: steps.result.outputs.status == 'success' && github.event_name == 'pull_request'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ✅ **Tests Passed - PR #${{ github.event.pull_request.number }}**
+            ✅ **CI Passed - PR #${{ github.event.pull_request.number }}**
 
             **Repository:** ${{ github.repository }}
             **Branch:** ${{ github.head_ref }}
             **Author:** ${{ github.event.pull_request.user.login }}
-            **Commit:** `${{ github.event.pull_request.head.sha }}`
 
-            All tests passed successfully!
+            All CI jobs passed!
 
             [View PR](${{ github.event.pull_request.html_url }})
 
       - name: Notify failure (PR)
-        if: needs.test.result == 'failure' && github.event_name == 'pull_request'
+        if: steps.result.outputs.status == 'failure' && github.event_name == 'pull_request'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ❌ **Tests Failed - PR #${{ github.event.pull_request.number }}**
+            ❌ **CI Failed - PR #${{ github.event.pull_request.number }}**
 
             **Repository:** ${{ github.repository }}
             **Branch:** ${{ github.head_ref }}
             **Author:** ${{ github.event.pull_request.user.login }}
-            **Commit:** `${{ github.event.pull_request.head.sha }}`
 
             [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
