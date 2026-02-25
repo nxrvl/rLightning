@@ -42,6 +42,13 @@ pub use crate::command::types::stream::{xadd, xlen, xrange, xrevrange, xread, xt
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 
+// Connection & server commands
+pub use crate::command::types::connection::{
+    quit, reset, echo, client, command_cmd, config_set, config_rewrite, config_resetstat,
+    save, bgsave, bgrewriteaof, lastsave, shutdown, slowlog, latency, memory, debug,
+    swapdb, time, lolwut, info_expanded,
+};
+
 // Alias for type_command as get_type
 pub use type_command as get_type;
 

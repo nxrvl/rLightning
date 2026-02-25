@@ -301,26 +301,26 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Create: `src/command/types/server.rs` (consolidate server commands)
 - Create: `src/command/types/connection.rs`
 
-- [ ] Implement QUIT / RESET (close/reset connection)
-- [ ] Implement ECHO (echo message back)
-- [ ] Implement CLIENT subcommands: LIST, INFO, SETNAME, GETNAME, ID, KILL, PAUSE, UNPAUSE, REPLY, NO-EVICT, NO-TOUCH
-- [ ] Implement CLIENT TRACKING (server-assisted client-side caching with invalidation)
-- [ ] Implement COMMAND subcommands: COUNT, INFO, DOCS, LIST, GETKEYS
-- [ ] Implement CONFIG SET (currently only GET is implemented)
-- [ ] Implement CONFIG REWRITE / RESETSTAT
-- [ ] Implement SAVE / BGSAVE / BGREWRITEAOF / LASTSAVE (expose persistence commands)
-- [ ] Implement SHUTDOWN (graceful server shutdown with SAVE/NOSAVE options)
-- [ ] Implement SLOWLOG (slow query tracking and retrieval)
-- [ ] Implement LATENCY subcommands (LATEST, HISTORY, RESET, GRAPH)
-- [ ] Implement MEMORY subcommands (USAGE, STATS, DOCTOR, MALLOC-STATS, PURGE)
-- [ ] Implement DEBUG subcommands (SLEEP, SET-ACTIVE-EXPIRE, JMAP, RELOAD, etc.)
-- [ ] Implement SWAPDB (swap two databases)
-- [ ] Implement TIME (server time)
-- [ ] Implement LOLWUT (version art easter egg)
-- [ ] Expand INFO command to include all standard Redis sections
-- [ ] Write tests for each new command
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement QUIT / RESET (close/reset connection)
+- [x] Implement ECHO (echo message back)
+- [x] Implement CLIENT subcommands: LIST, INFO, SETNAME, GETNAME, ID, KILL, PAUSE, UNPAUSE, REPLY, NO-EVICT, NO-TOUCH
+- [x] Implement CLIENT TRACKING (server-assisted client-side caching with invalidation)
+- [x] Implement COMMAND subcommands: COUNT, INFO, DOCS, LIST, GETKEYS
+- [x] Implement CONFIG SET (currently only GET is implemented)
+- [x] Implement CONFIG REWRITE / RESETSTAT
+- [x] Implement SAVE / BGSAVE / BGREWRITEAOF / LASTSAVE (expose persistence commands)
+- [x] Implement SHUTDOWN (graceful server shutdown with SAVE/NOSAVE options)
+- [x] Implement SLOWLOG (slow query tracking and retrieval)
+- [x] Implement LATENCY subcommands (LATEST, HISTORY, RESET, GRAPH)
+- [x] Implement MEMORY subcommands (USAGE, STATS, DOCTOR, MALLOC-STATS, PURGE)
+- [x] Implement DEBUG subcommands (SLEEP, SET-ACTIVE-EXPIRE, JMAP, RELOAD, etc.)
+- [x] Implement SWAPDB (swap two databases)
+- [x] Implement TIME (server time)
+- [x] Implement LOLWUT (version art easter egg)
+- [x] Expand INFO command to include all standard Redis sections
+- [x] Write tests for each new command
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 15: Pub/Sub Enhancements (Sharded Pub/Sub)
 

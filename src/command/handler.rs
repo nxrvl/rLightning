@@ -303,9 +303,21 @@ impl CommandHandler {
             "json.arrindex" | "jsonarrindex" => commands::json_arrindex(&self.storage, &command.args).await,
 
             // Server commands
-            "info" => commands::info(&self.storage, &command.args).await,
+            "info" => commands::info_expanded(&self.storage, &command.args).await,
             "auth" => commands::auth(&self.storage, &command.args).await,
-            "config" => commands::config(&self.storage, &command.args).await,
+            "config" => {
+                if !command.args.is_empty() {
+                    let subcmd = String::from_utf8_lossy(&command.args[0]).to_uppercase();
+                    match subcmd.as_str() {
+                        "SET" => commands::config_set(&self.storage, &command.args[1..]).await,
+                        "REWRITE" => commands::config_rewrite(&self.storage, &[]).await,
+                        "RESETSTAT" => commands::config_resetstat(&self.storage, &[]).await,
+                        _ => commands::config(&self.storage, &command.args).await,
+                    }
+                } else {
+                    commands::config(&self.storage, &command.args).await
+                }
+            },
             "keys" => commands::keys(&self.storage, &command.args).await,
             "rename" => commands::rename(&self.storage, &command.args).await,
             "flushall" => commands::flushall(&self.storage, &command.args).await,
@@ -347,6 +359,31 @@ impl CommandHandler {
             "fcall" => self.scripting.handle_fcall(self, &command.args, false).await,
             "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
 
+            // Connection commands
+            "quit" => commands::quit(&self.storage, &command.args).await,
+            "reset" => commands::reset(&self.storage, &command.args).await,
+            "echo" => commands::echo(&self.storage, &command.args).await,
+            "client" => commands::client(&self.storage, &command.args).await,
+            "command" => commands::command_cmd(&self.storage, &command.args).await,
+
+            // Persistence commands
+            "save" => commands::save(&self.storage, &command.args).await,
+            "bgsave" => commands::bgsave(&self.storage, &command.args).await,
+            "bgrewriteaof" => commands::bgrewriteaof(&self.storage, &command.args).await,
+            "lastsave" => commands::lastsave(&self.storage, &command.args).await,
+            "shutdown" => commands::shutdown(&self.storage, &command.args).await,
+
+            // Monitoring commands
+            "slowlog" => commands::slowlog(&self.storage, &command.args).await,
+            "latency" => commands::latency(&self.storage, &command.args).await,
+            "memory" => commands::memory(&self.storage, &command.args).await,
+            "debug" => commands::debug(&self.storage, &command.args).await,
+
+            // Database commands
+            "swapdb" => commands::swapdb(&self.storage, &command.args).await,
+            "time" => commands::time(&self.storage, &command.args).await,
+            "lolwut" => commands::lolwut(&self.storage, &command.args).await,
+
             // ACL commands are handled in server.rs, but return a friendly message here
             "acl" => {
                 Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))
@@ -358,67 +395,7 @@ impl CommandHandler {
             }
         };
         
-        // Debug commands for development
-        #[cfg(debug_assertions)]
-        if command.name == "debug" {
-            return self.handle_debug_command(command).await;
-        }
-        
         result
-    }
-    
-    // Debug command handler for development builds
-    #[cfg(debug_assertions)]
-    async fn handle_debug_command(&self, command: Command) -> CommandResult {
-        if command.args.is_empty() {
-            return Err(CommandError::WrongNumberOfArguments);
-        }
-        
-        let subcommand = String::from_utf8_lossy(&command.args[0]).to_lowercase();
-        
-        match subcommand.as_str() {
-            "object" => {
-                if command.args.len() < 3 {
-                    return Err(CommandError::WrongNumberOfArguments);
-                }
-                
-                let action = String::from_utf8_lossy(&command.args[1]).to_lowercase();
-                let key = &command.args[2];
-                
-                if action == "info" {
-                    // Get detailed info about a key
-                    if !self.storage.exists(key).await? {
-                        return Ok(RespValue::SimpleString("Key does not exist".to_string()));
-                    }
-                    
-                    let key_type = self.storage.get_type(key).await?;
-                    let ttl = self.storage.ttl(key).await?;
-                    
-                    let ttl_info = match ttl {
-                        Some(t) => format!("{} seconds", t.as_secs()),
-                        None => "No expiration".to_string(),
-                    };
-                    
-                    return Ok(RespValue::SimpleString(format!(
-                        "Type: {}\nTTL: {}", 
-                        key_type, 
-                        ttl_info
-                    )));
-                }
-            },
-            "help" => {
-                return Ok(RespValue::SimpleString(
-                    "DEBUG commands:\n\
-                     DEBUG OBJECT INFO <key> - Get detailed information about a key"
-                     .to_string()
-                ));
-            },
-            _ => {
-                return Err(CommandError::UnknownCommand(format!("DEBUG {}", subcommand)));
-            }
-        }
-        
-        Err(CommandError::UnknownCommand(format!("DEBUG {}", subcommand)))
     }
 }
 
