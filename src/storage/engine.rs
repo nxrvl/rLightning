@@ -1188,6 +1188,7 @@ impl StorageEngine {
                 RedisDataType::Set => "listpack",
                 RedisDataType::Hash => "listpack",
                 RedisDataType::ZSet => "listpack",
+                RedisDataType::Stream => "stream",
             };
             Ok(Some(encoding.to_string()))
         } else {

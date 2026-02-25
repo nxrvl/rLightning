@@ -300,7 +300,29 @@ impl CommandHandler {
             "scan" => commands::scan_with_type(&self.storage, &command.args).await,
             "dbsize" => commands::dbsize(&self.storage, &command.args).await,
             "randomkey" => commands::randomkey(&self.storage, &command.args).await,
-            
+
+            // Stream commands
+            "xadd" => {
+                let result = commands::xadd(&self.storage, &command.args).await;
+                if result.is_ok() && !command.args.is_empty() {
+                    self.blocking_mgr.notify_key(&command.args[0]);
+                }
+                result
+            }
+            "xlen" => commands::xlen(&self.storage, &command.args).await,
+            "xrange" => commands::xrange(&self.storage, &command.args).await,
+            "xrevrange" => commands::xrevrange(&self.storage, &command.args).await,
+            "xread" => commands::xread(&self.storage, &command.args, &self.blocking_mgr).await,
+            "xtrim" => commands::xtrim(&self.storage, &command.args).await,
+            "xdel" => commands::xdel(&self.storage, &command.args).await,
+            "xinfo" => commands::xinfo(&self.storage, &command.args).await,
+            "xgroup" => commands::xgroup(&self.storage, &command.args).await,
+            "xreadgroup" => commands::xreadgroup(&self.storage, &command.args, &self.blocking_mgr).await,
+            "xack" => commands::xack(&self.storage, &command.args).await,
+            "xpending" => commands::xpending(&self.storage, &command.args).await,
+            "xclaim" => commands::xclaim(&self.storage, &command.args).await,
+            "xautoclaim" => commands::xautoclaim(&self.storage, &command.args).await,
+
             // Unknown command
             _ => {
                 return Err(CommandError::UnknownCommand(command.name))

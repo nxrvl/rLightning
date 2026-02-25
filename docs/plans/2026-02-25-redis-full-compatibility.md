@@ -208,22 +208,22 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/storage/engine.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Design and implement Stream data structure: entry IDs (timestamp-sequence), radix tree storage, consumer groups, pending entries list (PEL)
-- [ ] Implement XADD (add entry with auto-generated or explicit ID, MAXLEN/MINID trimming, NOMKSTREAM)
-- [ ] Implement XLEN (stream length)
-- [ ] Implement XRANGE / XREVRANGE (get entries by ID range with COUNT)
-- [ ] Implement XREAD (read from multiple streams with optional COUNT and BLOCK)
-- [ ] Implement XTRIM (trim stream by MAXLEN or MINID with approximate ~)
-- [ ] Implement XDEL (delete entries by ID)
-- [ ] Implement XINFO (STREAM, GROUPS, CONSUMERS subcommands)
-- [ ] Implement XGROUP CREATE / SETID / DESTROY / DELCONSUMER / CREATECONSUMER
-- [ ] Implement XREADGROUP (read from consumer group with GROUP, COUNT, BLOCK, NOACK)
-- [ ] Implement XACK (acknowledge messages)
-- [ ] Implement XPENDING (get pending entries with filtering)
-- [ ] Implement XCLAIM / XAUTOCLAIM (claim/auto-claim pending messages)
-- [ ] Write tests for stream CRUD, consumer groups, blocking reads, trimming
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Design and implement Stream data structure: entry IDs (timestamp-sequence), radix tree storage, consumer groups, pending entries list (PEL)
+- [x] Implement XADD (add entry with auto-generated or explicit ID, MAXLEN/MINID trimming, NOMKSTREAM)
+- [x] Implement XLEN (stream length)
+- [x] Implement XRANGE / XREVRANGE (get entries by ID range with COUNT)
+- [x] Implement XREAD (read from multiple streams with optional COUNT and BLOCK)
+- [x] Implement XTRIM (trim stream by MAXLEN or MINID with approximate ~)
+- [x] Implement XDEL (delete entries by ID)
+- [x] Implement XINFO (STREAM, GROUPS, CONSUMERS subcommands)
+- [x] Implement XGROUP CREATE / SETID / DESTROY / DELCONSUMER / CREATECONSUMER
+- [x] Implement XREADGROUP (read from consumer group with GROUP, COUNT, BLOCK, NOACK)
+- [x] Implement XACK (acknowledge messages)
+- [x] Implement XPENDING (get pending entries with filtering)
+- [x] Implement XCLAIM / XAUTOCLAIM (claim/auto-claim pending messages)
+- [x] Write tests for stream CRUD, consumer groups, blocking reads, trimming
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 11: Transaction Commands (MULTI/EXEC/WATCH)
 

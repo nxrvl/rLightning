@@ -322,6 +322,7 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 RedisDataType::Set => 2u8,
                 RedisDataType::Hash => 3u8,
                 RedisDataType::ZSet => 4u8,
+                RedisDataType::Stream => 5u8,
             };
             let mut serialized = Vec::with_capacity(1 + item.value.len());
             serialized.push(type_byte);
@@ -376,6 +377,7 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         2 => RedisDataType::Set,
         3 => RedisDataType::Hash,
         4 => RedisDataType::ZSet,
+        5 => RedisDataType::Stream,
         _ => {
             return Err(CommandError::InvalidArgument(
                 "DUMP payload version or checksum are wrong".to_string(),

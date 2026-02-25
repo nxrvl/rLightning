@@ -36,6 +36,9 @@ pub use crate::command::types::hyperloglog::{pfadd, pfcount, pfmerge};
 // Geo commands
 pub use crate::command::types::geo::{geoadd, geodist, geohash, geopos, geosearch, geosearchstore, georadius, georadiusbymember};
 
+// Stream commands
+pub use crate::command::types::stream::{xadd, xlen, xrange, xrevrange, xread, xtrim, xdel, xinfo, xgroup, xreadgroup, xack, xpending, xclaim, xautoclaim};
+
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 
