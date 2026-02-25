@@ -25,12 +25,15 @@ impl DockerManager {
     }
 
     /// Build the Docker image with retry logic
-    async fn build_image(&self, max_retries: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn build_image(
+        &self,
+        max_retries: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("Building Docker image: {}", self.image_name);
-        
+
         for attempt in 1..=max_retries {
             println!("Build attempt {}/{}", attempt, max_retries);
-            
+
             let output = Command::new("docker")
                 .args(&["build", "-t", &self.image_name, "."])
                 .output()?;
@@ -42,29 +45,34 @@ impl DockerManager {
 
             let stderr = String::from_utf8_lossy(&output.stderr);
             println!("❌ Build attempt {} failed: {}", attempt, stderr);
-            
+
             if attempt < max_retries {
                 println!("Retrying in 5 seconds...");
                 sleep(Duration::from_secs(5)).await;
             }
         }
 
-        Err(format!("Failed to build Docker image after {} attempts", max_retries).into())
+        Err(format!(
+            "Failed to build Docker image after {} attempts",
+            max_retries
+        )
+        .into())
     }
 
     /// Pull base images with retry logic
-    async fn pull_base_images(&self, max_retries: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn pull_base_images(
+        &self,
+        max_retries: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let base_images = vec!["rust:slim", "debian:bookworm-slim"];
-        
+
         for image in base_images {
             println!("Pulling base image: {}", image);
-            
+
             for attempt in 1..=max_retries {
                 println!("Pull attempt {}/{} for {}", attempt, max_retries, image);
-                
-                let output = Command::new("docker")
-                    .args(&["pull", image])
-                    .output()?;
+
+                let output = Command::new("docker").args(&["pull", image]).output()?;
 
                 if output.status.success() {
                     println!("✅ Successfully pulled {}", image);
@@ -72,13 +80,19 @@ impl DockerManager {
                 }
 
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("❌ Pull attempt {} failed for {}: {}", attempt, image, stderr);
-                
+                println!(
+                    "❌ Pull attempt {} failed for {}: {}",
+                    attempt, image, stderr
+                );
+
                 if attempt < max_retries {
                     println!("Retrying in 3 seconds...");
                     sleep(Duration::from_secs(3)).await;
                 } else {
-                    println!("⚠️  Failed to pull {} after {} attempts, will proceed with build", image, max_retries);
+                    println!(
+                        "⚠️  Failed to pull {} after {} attempts, will proceed with build",
+                        image, max_retries
+                    );
                 }
             }
         }
@@ -116,11 +130,13 @@ impl DockerManager {
 
         let output = Command::new("docker")
             .args(&[
-                "run", 
-                "-d", 
-                "--name", &self.container_name,
-                "-p", &format!("{}:6379", self.port),
-                &self.image_name
+                "run",
+                "-d",
+                "--name",
+                &self.container_name,
+                "-p",
+                &format!("{}:6379", self.port),
+                &self.image_name,
             ])
             .output()?;
 
@@ -132,9 +148,16 @@ impl DockerManager {
         // Wait for container to be ready
         for attempt in 1..=30 {
             sleep(Duration::from_millis(500)).await;
-            
+
             let health_output = Command::new("docker")
-                .args(&["exec", &self.container_name, "nc", "-z", "localhost", "6379"])
+                .args(&[
+                    "exec",
+                    &self.container_name,
+                    "nc",
+                    "-z",
+                    "localhost",
+                    "6379",
+                ])
                 .output();
 
             if health_output.map(|o| o.status.success()).unwrap_or(false) {
@@ -215,10 +238,10 @@ async fn test_redis_compatibility_docker() -> Result<(), Box<dyn std::error::Err
 
 /// Run compatibility tests against the Docker container
 async fn run_compatibility_tests_against_docker(
-    docker: &DockerManager
+    docker: &DockerManager,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = format!("127.0.0.1:{}", docker.port).parse()?;
-    
+
     // Wait a bit more for the server to be fully ready
     sleep(Duration::from_millis(1000)).await;
 
@@ -258,20 +281,20 @@ async fn run_local_compatibility_test() -> Result<(), Box<dyn std::error::Error 
     let addr: SocketAddr = "127.0.0.1:16381".parse()?;
     let config = StorageConfig::default();
     let storage = StorageEngine::new(config);
-    
+
     let server = Server::new(addr, storage);
-    
+
     // Start server in background
     tokio::spawn(async move {
         server.start().await.unwrap();
     });
-    
+
     // Wait for server to start
     sleep(Duration::from_millis(100)).await;
-    
+
     // Connect client
     let mut client = Client::connect(addr).await?;
-    
+
     // Run core compatibility tests
     run_core_redis_tests(&mut client).await?;
 
@@ -280,14 +303,19 @@ async fn run_local_compatibility_test() -> Result<(), Box<dyn std::error::Error 
 }
 
 /// Core Redis compatibility tests (shared between Docker and local)
-async fn run_core_redis_tests(client: &mut Client) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_core_redis_tests(
+    client: &mut Client,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Test basic SET/GET
     println!("Testing basic SET/GET...");
     let set_args: Vec<&[u8]> = vec![b"SET", b"test_key", b"test_value"];
     client.send_command(set_args).await?;
     let get_args: Vec<&[u8]> = vec![b"GET", b"test_key"];
     let response = client.send_command(get_args).await?;
-    assert_eq!(response, RespValue::BulkString(Some(b"test_value".to_vec())));
+    assert_eq!(
+        response,
+        RespValue::BulkString(Some(b"test_value".to_vec()))
+    );
 
     // Test SET with EX option
     println!("Testing SET with EX option...");
@@ -392,17 +420,15 @@ async fn run_core_redis_tests(client: &mut Client) -> Result<(), Box<dyn std::er
 }
 
 /// Main compatibility test that tries Docker first, falls back to local
-/// NOTE: This test is ignored in CI as it builds Docker images which takes too long.
-/// Run manually with: cargo test test_redis_compatibility -- --ignored
+/// Docker test is skipped gracefully if Docker is not available.
 #[tokio::test]
-#[ignore]
 async fn test_redis_compatibility() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // First try the original comprehensive local test
     let local_result = run_local_compatibility_test().await;
-    
+
     // Then try Docker test if available
     let docker_result = test_redis_compatibility_docker().await;
-    
+
     // Return success if either test passes
     match (local_result, docker_result) {
         (Ok(_), Ok(_)) => {

@@ -1,149 +1,83 @@
+/// Redis Compatibility Runner
+///
+/// Validates that all required compatibility test files exist in the test suite.
+/// The actual tests are run directly by cargo test (not via subprocess invocation).
+
 #[cfg(test)]
 mod test_runner {
-    use std::process::Command;
-    use std::time::Duration;
-    use std::thread;
+    use std::path::Path;
 
-    /// Run all Redis compatibility tests in sequence
-    /// NOTE: This test is ignored by default as it runs cargo test internally
-    /// and can cause port conflicts. Run manually with: cargo test --test lib redis_compatibility_runner -- --ignored
+    /// Verify that all required compatibility test files exist
     #[test]
-    #[ignore]
-    fn run_all_redis_compatibility_tests() {
-        // List of all compatibility test files
-        let test_files = [
+    fn verify_compatibility_test_files_exist() {
+        let test_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+
+        let required_test_files = [
             "integration_test.rs",
             "redis_compatibility_test.rs",
             "redis_compatibility_edge_cases.rs",
             "redis_protocol_compatibility.rs",
-        ];
-        
-        // List of flaky test files that can be ignored if they fail
-        let flaky_test_files = [
-            "redis_datatype_compatibility.rs",
-            "redis_stress_test.rs",
+            "redis_full_compatibility_test.rs",
+            "acceptance_test.rs",
         ];
 
-        // Run required tests first
-        let mut all_tests_passed = true;
+        let mut missing_files = Vec::new();
 
-        for test_file in test_files.iter() {
-            println!("\n======== Running test: {} ========\n", test_file);
-            
-            // Run the test using cargo test
-            let output = Command::new("cargo")
-                .args(["test", "--test", &test_file.replace(".rs", "")])
-                .output()
-                .expect("Failed to execute command");
-            
-            println!("Test output:");
-            println!("{}", String::from_utf8_lossy(&output.stdout));
-            
-            if !output.status.success() {
-                println!("Test failed: {}", String::from_utf8_lossy(&output.stderr));
-                all_tests_passed = false;
+        for test_file in &required_test_files {
+            let path = test_dir.join(test_file);
+            if !path.exists() {
+                missing_files.push(test_file.to_string());
             }
-            
-            // Wait a bit between tests to make sure server ports are released
-            thread::sleep(Duration::from_secs(1));
         }
-        
-        // Run the flaky tests, but don't panic if they fail
-        for test_file in flaky_test_files.iter() {
-            println!("\n======== Running flaky test: {} ========\n", test_file);
-            
-            // Start the test process
-            let mut child = Command::new("cargo")
-                .args(["test", "--test", &test_file.replace(".rs", "")])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("Failed to start test process");
-            
-            // Get stdout and stderr
-            let stdout = child.stdout.take().expect("Failed to capture stdout");
-            let stderr = child.stderr.take().expect("Failed to capture stderr");
-            
-            // Set up readers in separate threads
-            let stdout_thread = std::thread::spawn(move || {
-                let mut reader = std::io::BufReader::new(stdout);
-                let mut output = String::new();
-                std::io::Read::read_to_string(&mut reader, &mut output).unwrap_or_default();
-                output
-            });
-            
-            let stderr_thread = std::thread::spawn(move || {
-                let mut reader = std::io::BufReader::new(stderr);
-                let mut output = String::new();
-                std::io::Read::read_to_string(&mut reader, &mut output).unwrap_or_default();
-                output
-            });
 
-            // Set up timeout
-            let start_time = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(30);
-            let mut status_option = None;
-            
-            // Poll for completion or timeout
-            while start_time.elapsed() < timeout {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        status_option = Some(status);
-                        break;
-                    },
-                    Ok(None) => {
-                        // Still running, sleep a bit and try again
-                        thread::sleep(Duration::from_millis(100));
-                    },
-                    Err(e) => {
-                        println!("Error waiting for test process: {}", e);
-                        break;
-                    }
-                }
-            }
-            
-            // Handle result or timeout
-            match status_option {
-                Some(status) => {
-                    // Collect stdout and stderr
-                    let stdout_output = stdout_thread.join().unwrap_or_default();
-                    let stderr_output = stderr_thread.join().unwrap_or_default();
-                    
-                    println!("Test {} completed with status: {}", test_file, status);
-                    println!("Test output:\n{}", stdout_output);
-                    
-                    if !status.success() {
-                        println!("Flaky test {} failed, but ignoring failure.", test_file);
-                        println!("Error output:\n{}", stderr_output);
-                    } else {
-                        println!("Flaky test {} passed!", test_file);
-                    }
-                },
-                None => {
-                    println!("Test {} timed out after {:?}, killing process...", test_file, timeout);
-                    // Kill the process if it's still running
-                    match child.kill() {
-                        Ok(_) => println!("Successfully killed test process"),
-                        Err(e) => println!("Failed to kill test process: {}", e),
-                    }
-                    
-                    // Try to get any output that was produced
-                    let stdout_output = stdout_thread.join().unwrap_or_default();
-                    let stderr_output = stderr_thread.join().unwrap_or_default();
-                    println!("Test output before timeout:\n{}", stdout_output);
-                    println!("Error output before timeout:\n{}", stderr_output);
-                }
-            }
-            
-            // Wait a bit between tests to make sure server ports are released
-            thread::sleep(Duration::from_secs(1));
-        }
-        
-        println!("\n======== All required Redis compatibility tests passed! ========");
-        
-        // Only panic if required tests failed
-        if !all_tests_passed {
-            panic!("One or more required tests failed");
-        }
+        assert!(
+            missing_files.is_empty(),
+            "Missing required compatibility test files: {:?}",
+            missing_files
+        );
     }
-} 
+
+    /// Verify that the acceptance test file covers all command categories
+    #[test]
+    fn verify_acceptance_test_coverage() {
+        let acceptance_test = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/acceptance_test.rs"),
+        )
+        .expect("Failed to read acceptance_test.rs");
+
+        let required_categories = [
+            "acceptance_test_string_commands",
+            "acceptance_test_list_commands",
+            "acceptance_test_set_commands",
+            "acceptance_test_hash_commands",
+            "acceptance_test_sorted_set_commands",
+            "acceptance_test_stream_commands",
+            "acceptance_test_bitmap_commands",
+            "acceptance_test_hyperloglog_commands",
+            "acceptance_test_geo_commands",
+            "acceptance_test_transaction_commands",
+            "acceptance_test_scripting_commands",
+            "acceptance_test_acl_commands",
+            "acceptance_test_pubsub_commands",
+            "acceptance_test_scenario_session_store",
+            "acceptance_test_scenario_cache",
+            "acceptance_test_scenario_rate_limiter",
+            "acceptance_test_scenario_leaderboard",
+            "acceptance_test_scenario_message_queue",
+        ];
+
+        let mut missing_tests = Vec::new();
+
+        for test_name in &required_categories {
+            if !acceptance_test.contains(test_name) {
+                missing_tests.push(test_name.to_string());
+            }
+        }
+
+        assert!(
+            missing_tests.is_empty(),
+            "Missing acceptance test functions: {:?}",
+            missing_tests
+        );
+    }
+}
