@@ -343,18 +343,18 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/handler.rs`
 - Modify: `src/persistence/rdb.rs` (RDB transfer during sync)
 
-- [ ] Complete PSYNC partial resynchronization (backlog buffer, offset-based sync)
-- [ ] Implement full RDB transfer during initial sync
-- [ ] Implement command stream propagation to replicas
-- [ ] Implement REPLICAOF / SLAVEOF commands (dynamic replication configuration)
-- [ ] Implement ROLE command (return replication role and state)
-- [ ] Implement replication backlog for partial resync
-- [ ] Implement replica read-only mode
-- [ ] Implement WAIT command (wait for replica acknowledgement)
-- [ ] Implement FAILOVER command (manual failover)
-- [ ] Write tests for full sync, partial sync, failover scenarios (using dev containers for multi-instance testing)
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Complete PSYNC partial resynchronization (backlog buffer, offset-based sync)
+- [x] Implement full RDB transfer during initial sync
+- [x] Implement command stream propagation to replicas
+- [x] Implement REPLICAOF / SLAVEOF commands (dynamic replication configuration)
+- [x] Implement ROLE command (return replication role and state)
+- [x] Implement replication backlog for partial resync
+- [x] Implement replica read-only mode
+- [x] Implement WAIT command (wait for replica acknowledgement)
+- [x] Implement FAILOVER command (manual failover)
+- [x] Write tests for full sync, partial sync, failover scenarios (using dev containers for multi-instance testing)
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 17: Redis Cluster Support
 

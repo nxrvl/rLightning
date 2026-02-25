@@ -19,6 +19,7 @@ use crate::networking::resp::{ProtocolVersion, RespCommand, RespValue};
 use crate::persistence::PersistenceManager;
 use crate::persistence::config::AofSyncPolicy;
 use crate::pubsub::PubSubManager;
+use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
 use crate::storage::engine::StorageEngine;
 use crate::utils::logging;
@@ -30,6 +31,7 @@ pub struct Server {
     pubsub: Arc<PubSubManager>,
     persistence: Option<Arc<PersistenceManager>>,
     security: Option<Arc<SecurityManager>>,
+    replication: Option<Arc<ReplicationManager>>,
     aof_sync_policy: AofSyncPolicy,
     connection_limit: Arc<Semaphore>,
     buffer_size: usize,
@@ -47,6 +49,7 @@ impl Server {
             pubsub,
             persistence: None,
             security: None,
+            replication: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
             buffer_size: 64 * 1024 * 1024,                     // 64MB buffer size for large JSON values
@@ -67,6 +70,12 @@ impl Server {
     /// Set the security manager for this server
     pub fn with_security(mut self, security: Arc<SecurityManager>) -> Self {
         self.security = Some(security);
+        self
+    }
+
+    /// Set the replication manager for this server
+    pub fn with_replication(mut self, replication: Arc<ReplicationManager>) -> Self {
+        self.replication = Some(replication);
         self
     }
 
@@ -100,6 +109,7 @@ impl Server {
                             let pubsub = Arc::clone(&self.pubsub);
                             let persistence = self.persistence.clone();
                             let security = self.security.clone();
+                            let replication = self.replication.clone();
                             let aof_sync_policy = self.aof_sync_policy;
                             let buffer_size = self.buffer_size;
 
@@ -114,6 +124,7 @@ impl Server {
                                     pubsub,
                                     persistence,
                                     security,
+                                    replication,
                                     aof_sync_policy,
                                     buffer_size,
                                 )
@@ -146,6 +157,7 @@ impl Server {
         pubsub: Arc<PubSubManager>,
         persistence: Option<Arc<PersistenceManager>>,
         security: Option<Arc<SecurityManager>>,
+        replication: Option<Arc<ReplicationManager>>,
         aof_sync_policy: AofSyncPolicy,
         buffer_size: usize,
     ) -> Result<(), NetworkError> {
@@ -427,11 +439,167 @@ impl Server {
                                     commands_processed += 1;
                                     continue;
                                 }
+                                // Handle replication commands
+                                "role" => {
+                                    if let Some(ref repl) = replication {
+                                        let response = repl.get_role_response().await;
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    } else {
+                                        // Default: we're a master with no replicas
+                                        let response = RespValue::Array(Some(vec![
+                                            RespValue::BulkString(Some(b"master".to_vec())),
+                                            RespValue::Integer(0),
+                                            RespValue::Array(Some(vec![])),
+                                        ]));
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "replicaof" | "slaveof" => {
+                                    if cmd.args.len() != 2 {
+                                        Self::send_error_to_writer(&mut socket_writer, "ERR wrong number of arguments for 'replicaof' command".to_string(), &client_addr_str).await?;
+                                    } else if let Some(ref repl) = replication {
+                                        let host = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                                        let port_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
+                                        match repl.handle_replicaof(&host, &port_str).await {
+                                            Ok(response) => {
+                                                if let Ok(bytes) = response.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Self::send_error_to_writer(&mut socket_writer, format!("ERR {}", e), &client_addr_str).await?;
+                                            }
+                                        }
+                                    } else {
+                                        let response = RespValue::SimpleString("OK".to_string());
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "replconf" => {
+                                    // Handle REPLCONF from replicas (ACK mainly)
+                                    if let Some(ref repl) = replication {
+                                        if cmd.args.len() >= 2 {
+                                            let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
+                                            if subcmd == "ACK" {
+                                                if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
+                                                    repl.update_replica_offset(&client_addr_str, offset).await;
+                                                }
+                                                // REPLCONF ACK doesn't get a response in replication stream
+                                                commands_processed += 1;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    let response = RespValue::SimpleString("OK".to_string());
+                                    if let Ok(bytes) = response.serialize() {
+                                        response_buffer.extend_from_slice(&bytes);
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "psync" => {
+                                    // PSYNC is handled specially - transitions to replication stream
+                                    if let Some(ref repl) = replication {
+                                        // Flush any pending responses first
+                                        if !response_buffer.is_empty() {
+                                            if let Err(e) = socket_writer.write_all(&response_buffer).await {
+                                                error!(client_addr = %client_addr_str, "Failed to flush before PSYNC: {}", e);
+                                                break;
+                                            }
+                                            response_buffer.clear();
+                                        }
+
+                                        // Handle the PSYNC and enter replication stream mode
+                                        if let Err(e) = Self::handle_psync_command(
+                                            &mut socket_writer,
+                                            &cmd.args,
+                                            &repl,
+                                            &client_addr_str,
+                                        ).await {
+                                            error!(client_addr = %client_addr_str, "PSYNC error: {}", e);
+                                        }
+                                        // After PSYNC, the connection is in replication mode
+                                        // The replica will only receive propagated commands
+                                        // We exit the normal client loop
+                                        return Ok(());
+                                    } else {
+                                        Self::send_error_to_writer(&mut socket_writer, "ERR PSYNC not supported".to_string(), &client_addr_str).await?;
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "failover" => {
+                                    if let Some(ref repl) = replication {
+                                        match repl.handle_failover().await {
+                                            Ok(response) => {
+                                                if let Ok(bytes) = response.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Self::send_error_to_writer(&mut socket_writer, format!("ERR {}", e), &client_addr_str).await?;
+                                            }
+                                        }
+                                    } else {
+                                        Self::send_error_to_writer(&mut socket_writer, "ERR FAILOVER not supported".to_string(), &client_addr_str).await?;
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "wait" => {
+                                    if cmd.args.len() != 2 {
+                                        Self::send_error_to_writer(&mut socket_writer, "ERR wrong number of arguments for 'wait' command".to_string(), &client_addr_str).await?;
+                                    } else if let Some(ref repl) = replication {
+                                        let numreplicas = String::from_utf8_lossy(&cmd.args[0]).parse::<usize>().unwrap_or(0);
+                                        let timeout_ms = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>().unwrap_or(0);
+                                        let timeout = if timeout_ms == 0 {
+                                            std::time::Duration::from_secs(300) // 5 min max
+                                        } else {
+                                            std::time::Duration::from_millis(timeout_ms)
+                                        };
+                                        // Flush responses before blocking
+                                        if !response_buffer.is_empty() {
+                                            let _ = socket_writer.write_all(&response_buffer).await;
+                                            response_buffer.clear();
+                                        }
+                                        let count = repl.wait_for_replicas(numreplicas, timeout).await;
+                                        let response = RespValue::Integer(count);
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    } else {
+                                        let response = RespValue::Integer(0);
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
                                 _ => {}
                             }
 
                             // Check if this is an AUTH command
                             let is_auth_command = cmd_lower == "auth";
+
+                            // Check read-only mode (replica rejecting write commands)
+                            if let Some(ref repl) = replication {
+                                if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
+                                    Self::send_error_to_writer(&mut socket_writer, "READONLY You can't write against a read only replica.".to_string(), &client_addr_str).await?;
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                            }
 
                             // If authentication is required and the client is not authenticated
                             // and this is not an AUTH command, return an error
@@ -501,6 +669,12 @@ impl Server {
 
                             match tx_result {
                                 Ok(response) => {
+                                    // Propagate write commands to replicas
+                                    if let Some(ref repl) = replication {
+                                        if ReplicationManager::is_write_command(&cmd_lower) {
+                                            repl.propagate_command(&resp_cmd).await;
+                                        }
+                                    }
                                     if let Ok(bytes) = response.serialize() {
                                         response_buffer.extend_from_slice(&bytes);
                                     } else {
@@ -664,11 +838,52 @@ impl Server {
                                                     commands_processed += 1;
                                                     continue;
                                                 }
+                                                // Handle replication commands (slow path)
+                                                "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" | "wait" => {
+                                                    // Build a RespCommand for replication handlers
+                                                    let resp_cmd = RespCommand {
+                                                        name: cmd.name.as_bytes().to_vec(),
+                                                        args: cmd.args.clone(),
+                                                    };
+                                                    let response = Self::handle_replication_command_slow(
+                                                        &cmd_lower,
+                                                        &cmd,
+                                                        &resp_cmd,
+                                                        &replication,
+                                                        &mut socket_writer,
+                                                        &mut response_buffer,
+                                                        &client_addr_str,
+                                                    ).await;
+                                                    match response {
+                                                        Ok(true) => {
+                                                            // PSYNC - connection taken over, exit
+                                                            return Ok(());
+                                                        }
+                                                        Ok(false) => {
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                        Err(e) => {
+                                                            error!(client_addr = %client_addr_str, "Replication command error: {}", e);
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
                                                 _ => {}
                                             }
 
                                             // Check if this is an AUTH command
                                             let is_auth_command = cmd_lower == "auth";
+
+                                            // Check read-only mode (replica rejecting write commands)
+                                            if let Some(ref repl) = replication {
+                                                if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
+                                                    Self::send_error_to_writer(&mut socket_writer, "READONLY You can't write against a read only replica.".to_string(), &client_addr_str).await?;
+                                                    commands_processed += 1;
+                                                    continue;
+                                                }
+                                            }
 
                                             // If authentication is required and the client is not authenticated
                                             // and this is not an AUTH command, return an error
@@ -738,6 +953,16 @@ impl Server {
 
                                             match tx_result {
                                                 Ok(response) => {
+                                                    // Propagate write commands to replicas
+                                                    if let Some(ref repl) = replication {
+                                                        if ReplicationManager::is_write_command(&cmd_lower) {
+                                                            let resp_cmd = RespCommand {
+                                                                name: cmd.name.as_bytes().to_vec(),
+                                                                args: cmd.args.clone(),
+                                                            };
+                                                            repl.propagate_command(&resp_cmd).await;
+                                                        }
+                                                    }
                                                     if let Ok(bytes) = response.serialize() {
                                                         response_buffer.extend_from_slice(&bytes);
                                                     } else {
@@ -1235,6 +1460,229 @@ impl Server {
                 Err(NetworkError::Serialization(e.to_string()))
             }
         }
+    }
+
+    /// Handle PSYNC command - transitions connection into replication stream mode.
+    /// After this, the connection only receives propagated write commands.
+    async fn handle_psync_command(
+        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        args: &[Vec<u8>],
+        replication: &Arc<ReplicationManager>,
+        client_addr: &str,
+    ) -> Result<(), NetworkError> {
+        use tokio::io::AsyncWriteExt;
+
+        if args.len() < 2 {
+            let err = RespValue::Error("ERR wrong number of arguments for 'psync' command".to_string());
+            if let Ok(bytes) = err.serialize() {
+                writer.write_all(&bytes).await?;
+            }
+            return Ok(());
+        }
+
+        let replid = String::from_utf8_lossy(&args[0]).to_string();
+        let offset_str = String::from_utf8_lossy(&args[1]).to_string();
+        let offset: i64 = offset_str.parse().unwrap_or(-1);
+
+        let master_replid = replication.get_master_replid().await;
+        let master_offset = replication.get_master_repl_offset();
+
+        // Check if partial resync is possible
+        let partial_possible = offset >= 0 && replication.can_partial_resync(&replid, offset as u64).await;
+
+        if partial_possible {
+            // Partial resync - send CONTINUE and the missing data
+            let response = RespValue::SimpleString(format!("CONTINUE {}", master_replid));
+            let bytes = response.serialize().map_err(|e| NetworkError::Serialization(e.to_string()))?;
+            writer.write_all(&bytes).await?;
+
+            // Send backlog data from the replica's offset
+            let backlog = replication.backlog().read().await;
+            if let Some(data) = backlog.get_from_offset(offset as u64) {
+                writer.write_all(&data).await?;
+            }
+        } else {
+            // Full resync - send FULLRESYNC, then RDB, then stream
+            let response = RespValue::SimpleString(format!("FULLRESYNC {} {}", master_replid, master_offset));
+            let bytes = response.serialize().map_err(|e| NetworkError::Serialization(e.to_string()))?;
+            writer.write_all(&bytes).await?;
+
+            // Generate and send RDB snapshot
+            let engine = replication.engine();
+            let snapshot = engine.snapshot().await.map_err(|e| {
+                NetworkError::Internal(format!("Failed to get snapshot: {}", e))
+            })?;
+
+            // Serialize snapshot using serde_json (our internal format)
+            let rdb_data = serde_json::to_vec(&snapshot).unwrap_or_default();
+
+            // Send RDB as a bulk string: $<length>\r\n<data>
+            let header = format!("${}\r\n", rdb_data.len());
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(&rdb_data).await?;
+        }
+
+        // Register this replica for command propagation
+        let replica_id = client_addr.to_string();
+        let (host, port) = client_addr.split_once(':').map(|(h, p)| {
+            (h.to_string(), p.parse::<u16>().unwrap_or(0))
+        }).unwrap_or((client_addr.to_string(), 0));
+
+        let mut rx = replication.register_replica(replica_id.clone(), host, port).await;
+
+        info!(client_addr = %client_addr, "Replica entered replication stream mode");
+
+        // Enter replication stream: forward propagated commands to this replica
+        loop {
+            match rx.recv().await {
+                Some(data) => {
+                    if let Err(e) = writer.write_all(&data).await {
+                        error!(client_addr = %client_addr, "Error writing to replica: {}", e);
+                        break;
+                    }
+                }
+                None => {
+                    // Channel closed, replica was unregistered
+                    info!(client_addr = %client_addr, "Replication channel closed");
+                    break;
+                }
+            }
+        }
+
+        // Clean up
+        replication.unregister_replica(&replica_id).await;
+        info!(client_addr = %client_addr, "Replica disconnected from replication stream");
+
+        Ok(())
+    }
+
+    /// Handle replication commands in the slow path.
+    /// Returns Ok(true) if the connection was taken over (PSYNC), Ok(false) otherwise.
+    async fn handle_replication_command_slow(
+        cmd_lower: &str,
+        cmd: &Command,
+        _resp_cmd: &RespCommand,
+        replication: &Option<Arc<ReplicationManager>>,
+        socket_writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        response_buffer: &mut Vec<u8>,
+        client_addr_str: &str,
+    ) -> Result<bool, NetworkError> {
+        match cmd_lower {
+            "role" => {
+                if let Some(repl) = replication {
+                    let response = repl.get_role_response().await;
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                } else {
+                    let response = RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(b"master".to_vec())),
+                        RespValue::Integer(0),
+                        RespValue::Array(Some(vec![])),
+                    ]));
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            "replicaof" | "slaveof" => {
+                if cmd.args.len() != 2 {
+                    Self::send_error_to_writer(socket_writer, "ERR wrong number of arguments for 'replicaof' command".to_string(), client_addr_str).await?;
+                } else if let Some(repl) = replication {
+                    let host = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                    let port_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
+                    match repl.handle_replicaof(&host, &port_str).await {
+                        Ok(response) => {
+                            if let Ok(bytes) = response.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        Err(e) => {
+                            Self::send_error_to_writer(socket_writer, format!("ERR {}", e), client_addr_str).await?;
+                        }
+                    }
+                } else {
+                    let response = RespValue::SimpleString("OK".to_string());
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            "replconf" => {
+                if let Some(repl) = replication {
+                    if cmd.args.len() >= 2 {
+                        let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
+                        if subcmd == "ACK" {
+                            if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
+                                repl.update_replica_offset(client_addr_str, offset).await;
+                            }
+                            return Ok(false);
+                        }
+                    }
+                }
+                let response = RespValue::SimpleString("OK".to_string());
+                if let Ok(bytes) = response.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                }
+            }
+            "psync" => {
+                if let Some(repl) = replication {
+                    if !response_buffer.is_empty() {
+                        socket_writer.write_all(response_buffer).await?;
+                        response_buffer.clear();
+                    }
+                    Self::handle_psync_command(socket_writer, &cmd.args, repl, client_addr_str).await?;
+                    return Ok(true); // Connection taken over
+                } else {
+                    Self::send_error_to_writer(socket_writer, "ERR PSYNC not supported".to_string(), client_addr_str).await?;
+                }
+            }
+            "failover" => {
+                if let Some(repl) = replication {
+                    match repl.handle_failover().await {
+                        Ok(response) => {
+                            if let Ok(bytes) = response.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        Err(e) => {
+                            Self::send_error_to_writer(socket_writer, format!("ERR {}", e), client_addr_str).await?;
+                        }
+                    }
+                } else {
+                    Self::send_error_to_writer(socket_writer, "ERR FAILOVER not supported".to_string(), client_addr_str).await?;
+                }
+            }
+            "wait" => {
+                if cmd.args.len() != 2 {
+                    Self::send_error_to_writer(socket_writer, "ERR wrong number of arguments for 'wait' command".to_string(), client_addr_str).await?;
+                } else if let Some(repl) = replication {
+                    let numreplicas = String::from_utf8_lossy(&cmd.args[0]).parse::<usize>().unwrap_or(0);
+                    let timeout_ms = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>().unwrap_or(0);
+                    let timeout = if timeout_ms == 0 {
+                        std::time::Duration::from_secs(300)
+                    } else {
+                        std::time::Duration::from_millis(timeout_ms)
+                    };
+                    if !response_buffer.is_empty() {
+                        let _ = socket_writer.write_all(response_buffer).await;
+                        response_buffer.clear();
+                    }
+                    let count = repl.wait_for_replicas(numreplicas, timeout).await;
+                    let response = RespValue::Integer(count);
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                } else {
+                    let response = RespValue::Integer(0);
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     /// Handle the HELLO command for RESP3 protocol negotiation.

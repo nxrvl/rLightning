@@ -6,6 +6,8 @@ use rlightning::networking::client::Client;
 use rlightning::networking::server::Server;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 use rlightning::security::{SecurityConfig, SecurityManager};
+use rlightning::replication::ReplicationManager;
+use rlightning::replication::config::ReplicationConfig;
 use rlightning::command::handler::CommandHandler;
 // Removed unused import: rlightning::persistence::config::AofSyncPolicy
 use std::sync::Arc;
@@ -80,6 +82,34 @@ pub async fn create_client(addr: SocketAddr) -> Result<Client, Box<dyn std::erro
         }
     };
     Ok(client)
+}
+
+/// Sets up a test server with replication enabled
+pub async fn setup_test_server_with_replication(
+    port_offset: u16,
+    replication_config: ReplicationConfig,
+) -> Result<(SocketAddr, Arc<ReplicationManager>), Box<dyn std::error::Error + Send + Sync>> {
+    let port = DEFAULT_TEST_PORT + port_offset;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+    let _command_handler = Arc::new(CommandHandler::new(Arc::clone(&storage)));
+
+    let replication = ReplicationManager::new(Arc::clone(&storage), replication_config);
+
+    let server = Server::new(addr, Arc::clone(&storage))
+        .with_connection_limit(100)
+        .with_buffer_size(1024 * 1024)
+        .with_replication(Arc::clone(&replication));
+
+    tokio::spawn(async move {
+        if let Err(e) = server.start().await {
+            eprintln!("Server error: {:?}", e);
+        }
+    });
+
+    sleep(Duration::from_millis(200)).await;
+
+    Ok((addr, replication))
 }
 
 /// Waits for the specified duration
