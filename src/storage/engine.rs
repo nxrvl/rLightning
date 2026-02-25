@@ -551,6 +551,23 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Set a key-value pair preserving the existing TTL if present.
+    /// Use this for collection-type modifications (lists, sets, sorted sets, streams, geo)
+    /// where updating the value should not reset the key's expiration.
+    pub async fn set_with_type_preserve_ttl(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType) -> StorageResult<()> {
+        // Read existing TTL before overwriting
+        let existing_ttl = if let Some(entry) = self.data.get(&key) {
+            if entry.value().is_expired() {
+                None
+            } else {
+                entry.value().ttl()
+            }
+        } else {
+            None
+        };
+        self.set_with_type(key, value, data_type, existing_ttl).await
+    }
+
     /// Get a value from the storage engine
     pub async fn get(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
         let result = if let Some(mut entry) = self.data.get_mut(key) {

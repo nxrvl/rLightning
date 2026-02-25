@@ -29,7 +29,7 @@ async fn get_stream(engine: &StorageEngine, key: &[u8]) -> Result<Option<StreamD
 async fn save_stream(engine: &StorageEngine, key: Vec<u8>, stream: &StreamData) -> Result<(), CommandError> {
     let serialized = bincode::serialize(stream)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(key, serialized, RedisDataType::Stream, None)
+    engine.set_with_type_preserve_ttl(key, serialized, RedisDataType::Stream)
         .await
         .map_err(|e| CommandError::StorageError(e.to_string()))
 }

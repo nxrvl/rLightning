@@ -84,9 +84,9 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         };
         
-        // Store the set in the storage engine
-        engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await?;
-        
+        // Store the set in the storage engine (preserve existing TTL)
+        engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::Set).await?;
+
         // Return the number of new members added
         Ok(RespValue::Integer(new_members_count))
     } else {
@@ -166,7 +166,7 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
             
-            match engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await {
+            match engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::Set).await {
                 Ok(_) => {},
                 Err(e) => {
                     return Err(CommandError::InternalError(format!("Error updating set: {}", e)));
@@ -333,7 +333,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         } else {
             let serialized = bincode::serialize(&set)
                 .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-            engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await?;
+            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::Set).await?;
         }
 
         Ok(RespValue::Array(Some(result)))
@@ -353,7 +353,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         } else {
             let serialized = bincode::serialize(&set)
                 .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-            engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await?;
+            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::Set).await?;
         }
 
         Ok(RespValue::BulkString(Some(member)))
@@ -645,7 +645,7 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         let serialized = bincode::serialize(&src_set)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(source.to_vec(), serialized, RedisDataType::Set, None).await?;
+        engine.set_with_type_preserve_ttl(source.to_vec(), serialized, RedisDataType::Set).await?;
     }
 
     // Get or create destination set
@@ -660,7 +660,7 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     dst_set.insert(member.clone());
     let serialized = bincode::serialize(&dst_set)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+    engine.set_with_type_preserve_ttl(destination.to_vec(), serialized, RedisDataType::Set).await?;
 
     Ok(RespValue::Integer(1))
 }

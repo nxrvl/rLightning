@@ -53,7 +53,7 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InternalError(format!("Serialization error: {}", e))
     })?;
     
-    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
     
     Ok(RespValue::Integer(length as i64))
 }
@@ -101,7 +101,7 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InternalError(format!("Serialization error: {}", e))
     })?;
     
-    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
     
     Ok(RespValue::Integer(length as i64))
 }
@@ -171,7 +171,7 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                             let serialized = bincode::serialize(&list).map_err(|e| {
                                 CommandError::InternalError(format!("Serialization error: {}", e))
                             })?;
-                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
                         }
 
                         Ok(RespValue::Array(Some(result)))
@@ -185,7 +185,7 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                             let serialized = bincode::serialize(&list).map_err(|e| {
                                 CommandError::InternalError(format!("Serialization error: {}", e))
                             })?;
-                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
                         }
 
                         Ok(RespValue::BulkString(Some(element)))
@@ -255,7 +255,7 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                             let serialized = bincode::serialize(&list).map_err(|e| {
                                 CommandError::InternalError(format!("Serialization error: {}", e))
                             })?;
-                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
                         }
 
                         Ok(RespValue::Array(Some(result)))
@@ -269,7 +269,7 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                             let serialized = bincode::serialize(&list).map_err(|e| {
                                 CommandError::InternalError(format!("Serialization error: {}", e))
                             })?;
-                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
                         }
 
                         Ok(RespValue::BulkString(Some(element)))
@@ -545,7 +545,7 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             CommandError::InternalError(format!("Serialization error: {}", e))
         })?;
         
-        engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+        engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
     }
     
     // LTRIM always returns OK
@@ -580,7 +580,7 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let length = list.len();
     let serialized = bincode::serialize(&list)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
 
     Ok(RespValue::Integer(length as i64))
 }
@@ -613,7 +613,7 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let length = list.len();
     let serialized = bincode::serialize(&list)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
 
     Ok(RespValue::Integer(length as i64))
 }
@@ -654,7 +654,7 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         let length = list.len();
         let serialized = bincode::serialize(&list)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+        engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
 
         Ok(RespValue::Integer(length as i64))
     } else {
@@ -700,7 +700,7 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let serialized = bincode::serialize(&list)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
 }
@@ -893,7 +893,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
         let serialized = bincode::serialize(&src_list)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(source.clone(), serialized, RedisDataType::List, None).await?;
+        engine.set_with_type_preserve_ttl(source.clone(), serialized, RedisDataType::List).await?;
 
         return Ok(RespValue::BulkString(Some(element)));
     }
@@ -904,7 +904,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         let serialized = bincode::serialize(&src_list)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(source.clone(), serialized, RedisDataType::List, None).await?;
+        engine.set_with_type_preserve_ttl(source.clone(), serialized, RedisDataType::List).await?;
     }
 
     // Get or create destination list
@@ -931,7 +931,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let serialized = bincode::serialize(&dst_list)
         .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type(destination.clone(), serialized, RedisDataType::List, None).await?;
+    engine.set_with_type_preserve_ttl(destination.clone(), serialized, RedisDataType::List).await?;
 
     Ok(RespValue::BulkString(Some(element)))
 }
@@ -1031,7 +1031,7 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         } else {
             let serialized = bincode::serialize(&list)
                 .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
         }
 
         let elements: Vec<RespValue> = popped.into_iter()
@@ -1080,7 +1080,7 @@ async fn try_pop(engine: &StorageEngine, key: &[u8], left: bool) -> Result<Optio
     } else {
         let serialized = bincode::serialize(&list)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(key.to_vec(), serialized, RedisDataType::List, None).await?;
+        engine.set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::List).await?;
     }
 
     Ok(Some(element))
