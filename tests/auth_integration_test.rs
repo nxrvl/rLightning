@@ -111,34 +111,29 @@ pub mod auth_integration_tests {
         let mut client = create_client(addr).await.expect("Failed to create client");
 
         // Send AUTH command with incorrect password
+        // With ACL system, AUTH with wrong password returns an error (matching Redis behavior)
         let auth_response = client
             .send_command_str("AUTH", &["wrongpassword"])
             .await
             .expect("Failed to send AUTH command");
-        // Redis typically returns an error for wrong password, but our AUTH command itself returns OK.
-        // The check happens when SecurityManager::authenticate is called.
-        // The current server logic might return OK for AUTH, but then deny subsequent commands.
-        // Let's assume for now AUTH itself might return an error or OK, but subsequent commands will fail.
-        // Based on src/networking/server.rs, the AUTH command handler itself returns OK.
-        // The actual authentication happens in SecurityManager.authenticate.
-        // If authenticate fails, the client is not marked as authenticated.
-        assert_eq!(auth_response, RespValue::SimpleString("OK".to_string()));
-
-
-        // Send PING command - should fail
-        let ping_response = client
-            .send_command_str("PING", &[])
-            .await
-            .expect("Failed to send PING command");
-        
-        // Expect "NOAUTH Authentication required."
-        // The error message comes from server.rs: Self::send_error(&mut socket, error_msg.to_string(), &client_addr_str).await?;
-        // Where error_msg = "NOAUTH Authentication required.";
-        // This is wrapped in RespValue::Error.
-        assert_eq!(
-            ping_response,
-            RespValue::Error("ERR NOAUTH Authentication required.".to_string())
-        );
+        // ACL validates the password and returns WRONGPASS error
+        match &auth_response {
+            RespValue::Error(msg) => {
+                assert!(msg.contains("WRONGPASS") || msg.contains("invalid"),
+                    "Expected WRONGPASS error, got: {}", msg);
+            }
+            _ => {
+                // If we got OK (shouldn't happen with ACL), verify subsequent commands fail
+                let ping_response = client
+                    .send_command_str("PING", &[])
+                    .await
+                    .expect("Failed to send PING command");
+                assert_eq!(
+                    ping_response,
+                    RespValue::Error("ERR NOAUTH Authentication required.".to_string())
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -214,9 +209,10 @@ pub mod auth_integration_tests {
             RespValue::Error("ERR wrong number of arguments".to_string())
         );
 
-        // AUTH with too many arguments
+        // AUTH with too many arguments (3+ args)
+        // Note: AUTH now supports 2 args (username password) per Redis 6.0+ ACL
         let response_too_many_args = client
-            .send_command_str("AUTH", &["pass1", "pass2"])
+            .send_command_str("AUTH", &["user", "pass1", "extra"])
             .await
             .expect("Failed to send AUTH command with too many args");
         assert_eq!(

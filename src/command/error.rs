@@ -22,6 +22,8 @@ pub enum CommandError {
     InternalError(String),
     /// A storage engine error occurred
     StorageError(String),
+    /// Permission denied by ACL
+    PermissionDenied(String),
 }
 
 impl std::fmt::Display for CommandError {
@@ -53,6 +55,9 @@ impl std::fmt::Display for CommandError {
             }
             CommandError::StorageError(msg) => {
                 write!(f, "ERR {}", msg)
+            }
+            CommandError::PermissionDenied(msg) => {
+                write!(f, "NOPERM {}", msg)
             }
         }
     }
