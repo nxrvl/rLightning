@@ -188,17 +188,17 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/storage/engine.rs` (geo uses sorted sets internally)
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement geohash encoding/decoding utility
-- [ ] Implement GEOADD (add geospatial members using sorted set with geohash scores)
-- [ ] Implement GEODIST (distance between members with unit options: m, km, mi, ft)
-- [ ] Implement GEOHASH (get geohash strings)
-- [ ] Implement GEOPOS (get longitude/latitude)
-- [ ] Implement GEOSEARCH (search by radius or box from member or coordinates, with COUNT and ASC/DESC)
-- [ ] Implement GEOSEARCHSTORE (store GEOSEARCH results)
-- [ ] Implement GEORADIUS / GEORADIUSBYMEMBER (deprecated but needed for compatibility)
-- [ ] Write tests for all geo commands with real-world coordinate data
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement geohash encoding/decoding utility
+- [x] Implement GEOADD (add geospatial members using sorted set with geohash scores)
+- [x] Implement GEODIST (distance between members with unit options: m, km, mi, ft)
+- [x] Implement GEOHASH (get geohash strings)
+- [x] Implement GEOPOS (get longitude/latitude)
+- [x] Implement GEOSEARCH (search by radius or box from member or coordinates, with COUNT and ASC/DESC)
+- [x] Implement GEOSEARCHSTORE (store GEOSEARCH results)
+- [x] Implement GEORADIUS / GEORADIUSBYMEMBER (deprecated but needed for compatibility)
+- [x] Write tests for all geo commands with real-world coordinate data
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 10: Stream Commands
 
