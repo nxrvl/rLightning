@@ -78,7 +78,6 @@ impl CommandHandler {
             "restore" => commands::restore(&self.storage, &command.args).await,
             "sort" => commands::sort(&self.storage, &command.args).await,
             "sort_ro" => commands::sort_ro(&self.storage, &command.args).await,
-            "wait" => commands::wait_cmd(&self.storage, &command.args).await,
             "waitaof" => commands::waitaof(&self.storage, &command.args).await,
             "select" => commands::select(&self.storage, &command.args).await,
             
@@ -388,6 +387,14 @@ impl CommandHandler {
             "acl" => {
                 Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))
             },
+
+            // Replication commands are handled at the server level
+            "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" => {
+                Ok(RespValue::Error("ERR Replication commands must be handled at the server level".to_string()))
+            },
+
+            // WAIT is handled at the server level (needs access to ReplicationManager)
+            "wait" => commands::wait_cmd(&self.storage, &command.args).await,
 
             // Unknown command
             _ => {

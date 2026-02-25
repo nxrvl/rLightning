@@ -507,7 +507,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the server with replication support
     let server = Server::new(addr, Arc::clone(&storage))
         .with_persistence(Arc::new(persistence), settings.persistence.aof_sync_policy)
-        .with_security(security);
+        .with_security(security)
+        .with_replication(replication);
 
     // Start the server (this will block until shutdown)
     if let Err(e) = server.start().await {
