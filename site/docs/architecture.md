@@ -11,46 +11,62 @@ graph TB
         C2[Redis Client 2]
         C3[Redis Client N]
     end
-    
+
     subgraph "Network Layer"
         TCP[TCP Server]
-        RESP[RESP Parser/Serializer]
+        RESP[RESP2/RESP3 Parser]
     end
-    
+
+    subgraph "Security Layer"
+        ACL[ACL Engine]
+        AUTH[Authentication]
+    end
+
     subgraph "Command Layer"
         CMD[Command Handler]
         DISP[Command Dispatcher]
+        TXN[Transaction Manager]
+        LUA[Lua Scripting Engine]
     end
-    
+
     subgraph "Core Engine"
         STORE[Storage Engine]
         MEM[Memory Manager]
         TTL[TTL Monitor]
+        STREAM[Stream Engine]
+        PUBSUB[Pub/Sub Manager]
     end
-    
+
     subgraph "Persistence Layer"
         RDB[RDB Writer]
         AOF[AOF Logger]
     end
-    
-    subgraph "Replication Layer"
+
+    subgraph "Distributed Layer"
         REP[Replication Manager]
-        SYNC[Sync Handler]
+        CLUSTER[Cluster Manager]
+        SENTINEL[Sentinel Monitor]
     end
-    
+
     C1 -->|RESP| TCP
     C2 -->|RESP| TCP
     C3 -->|RESP| TCP
     TCP --> RESP
-    RESP --> CMD
+    RESP --> ACL
+    ACL --> CMD
     CMD --> DISP
+    CMD --> TXN
+    CMD --> LUA
     DISP --> STORE
+    DISP --> STREAM
+    DISP --> PUBSUB
     STORE --> MEM
     STORE --> TTL
     DISP --> RDB
     DISP --> AOF
     DISP --> REP
-    REP --> SYNC
+    REP --> CLUSTER
+    CLUSTER --> SENTINEL
 ```
 
 ## Core Components
@@ -59,277 +75,273 @@ graph TB
 
 **Location**: `src/networking/`
 
-Handles all network communication using the Redis Serialization Protocol (RESP).
+Handles all network communication using both RESP2 and RESP3 protocols.
 
 #### TCP Server
 - Built on Tokio async runtime
 - Handles concurrent client connections
-- Connection pooling and management
+- Per-connection protocol version tracking (RESP2/RESP3)
 
 #### RESP Parser
-- Parses RESP protocol messages
-- Supports all RESP data types:
-  - Simple Strings
-  - Errors
-  - Integers
-  - Bulk Strings
-  - Arrays
+- Supports all RESP2 and RESP3 data types
+- RESP3: Map, Set, Null, Boolean, Double, Big Number, Verbatim String, Push
+- Protocol negotiation via HELLO command
 
-#### RESP Serializer
-- Serializes responses back to RESP format
-- Efficient zero-copy where possible
+### 2. Security Layer
 
-### 2. Command Processing Layer
+**Location**: `src/security/`
+
+#### ACL Engine
+- Per-user command permissions, key patterns, and channel restrictions
+- Command category-based rules (+@read, -@write)
+- Integrated into command dispatch pipeline
+
+#### Authentication
+- Password-based authentication (AUTH)
+- Named user authentication (AUTH username password)
+- Client session tracking
+
+### 3. Command Processing Layer
 
 **Location**: `src/command/`
-
-Processes incoming commands and dispatches them to appropriate handlers.
-
-#### Command Handler
-```rust
-pub trait CommandHandler {
-    async fn handle(&self, args: Vec<Value>) -> Result<Value>;
-}
-```
-
-Each command has its own handler implementation.
 
 #### Command Dispatcher
 - Routes commands to handlers
 - Validates command arguments
-- Handles errors and responses
-- Thread-safe command execution
+- Enforces ACL permissions
 
-### 3. Storage Engine
+#### Transaction Manager (`src/command/transaction.rs`)
+- MULTI/EXEC command queuing
+- WATCH-based optimistic locking with key versioning
+- Atomic execution with per-command error isolation
+
+#### Lua Scripting Engine (`src/scripting/`)
+- Lua 5.1 via mlua
+- redis.call() and redis.pcall() bindings
+- Script caching (EVALSHA)
+- Redis 7.0 Functions (FCALL)
+- Atomic execution (no other commands during script)
+
+### 4. Storage Engine
 
 **Location**: `src/storage/`
 
-The heart of rLightning, managing all data operations.
-
-#### Data Structure
-Uses `DashMap` for lock-free concurrent access:
-
-```rust
-pub struct Storage {
-    data: DashMap<Key, Entry>,
-    memory_manager: MemoryManager,
-    ttl_monitor: TtlMonitor,
-}
-```
+Uses `DashMap` for lock-free concurrent access with fine-grained internal sharding.
 
 #### Supported Data Types
 - **String**: Binary-safe strings
 - **Hash**: Field-value pairs
-- **List**: Linked list implementation
+- **List**: Double-ended queue
 - **Set**: Hash set of unique values
 - **Sorted Set**: Skip list with scores
+- **Stream**: Radix tree with consumer groups
+- **HyperLogLog**: Sparse and dense representations
+- **Bitmap**: Bit-level operations on strings
 
 #### Memory Management
-- Configurable memory limits
-- Eviction policies (LRU, Random, No Eviction)
-- Real-time memory tracking
-- Efficient memory allocation with jemalloc
+- Configurable limits with LRU, Random, and No Eviction policies
+- Real-time tracking via MEMORY USAGE/STATS
+- Lazy expiration on access + periodic background cleanup
 
-#### TTL Monitor
-- Background thread for expiration
-- Efficient expiration checking
-- Lazy expiration on access
-- Periodic cleanup of expired keys
-
-### 4. Persistence Layer
+### 5. Persistence Layer
 
 **Location**: `src/persistence/`
 
-Ensures data durability through various persistence strategies.
-
 #### RDB (Redis Database)
-- Point-in-time snapshots
-- Binary format for efficiency
-- Configurable save intervals
-- Background save operations
+- Point-in-time snapshots with background save
 - Atomic writes with temp files
 
 #### AOF (Append-Only File)
-- Logs every write operation
-- Configurable sync strategies:
-  - `always`: Sync after every write
-  - `everysec`: Sync every second
-  - `no`: Let OS decide
-- AOF rewrite for compaction
+- Configurable sync: always, everysec, no
+- Background rewrite for compaction
 
 #### Hybrid Mode
-- Combines RDB and AOF
-- RDB for fast restarts
-- AOF for durability
-- Best of both worlds
+- RDB for fast restarts + AOF for durability
 
-### 5. Replication Layer
+### 6. Pub/Sub System
 
-**Location**: `src/replication/`
+**Location**: `src/pubsub/`
 
-Enables master-replica setup for high availability and read scaling.
+- Channel and pattern subscriptions (SUBSCRIBE, PSUBSCRIBE)
+- Sharded pub/sub (SSUBSCRIBE, SPUBLISH) for Redis 7.0+ compatibility
+- Real-time message broadcasting
 
-#### Replication Manager
-- Manages replica connections
-- Propagates writes to replicas
-- Handles disconnections and reconnections
+### 7. Stream Engine
 
-#### Sync Handler
-- Full synchronization (SYNC)
-- Partial synchronization (PSYNC)
-- Incremental updates
+**Location**: `src/storage/stream.rs`
 
-#### Replication Flow
+- Append-only log with auto-generated entry IDs
+- Consumer groups with pending entry lists (PEL)
+- Blocking reads (XREAD BLOCK, XREADGROUP BLOCK)
+- Trimming (MAXLEN, MINID)
+
+## Cluster Architecture
+
+```mermaid
+graph TB
+    subgraph "Cluster - 16384 Hash Slots"
+        subgraph "Shard 1 - Slots 0 to 5460"
+            M1[Master 1]
+            R1[Replica 1a]
+            R2[Replica 1b]
+            M1 --> R1
+            M1 --> R2
+        end
+
+        subgraph "Shard 2 - Slots 5461 to 10922"
+            M2[Master 2]
+            R3[Replica 2a]
+            R4[Replica 2b]
+            M2 --> R3
+            M2 --> R4
+        end
+
+        subgraph "Shard 3 - Slots 10923 to 16383"
+            M3[Master 3]
+            R5[Replica 3a]
+            R6[Replica 3b]
+            M3 --> R5
+            M3 --> R6
+        end
+    end
+
+    CLIENT[Client] -->|CRC16 mod 16384| M1
+    CLIENT -->|MOVED redirect| M2
+    CLIENT -->|ASK redirect| M3
+
+    M1 <-->|Gossip Bus| M2
+    M2 <-->|Gossip Bus| M3
+    M3 <-->|Gossip Bus| M1
+```
+
+**Location**: `src/cluster/`
+
+### Key Components
+
+- **Hash Slot Calculation**: CRC16 mod 16384 with hash tag support (`{tag}`)
+- **Gossip Protocol**: Inter-node communication on port+10000
+- **Slot Assignment**: Epoch-based versioning for consistency
+- **Redirections**: MOVED (permanent) and ASK (temporary) for cross-slot operations
+- **Slot Migration**: IMPORTING/MIGRATING states with MIGRATE command
+- **Automatic Failover**: Detection and replica promotion
+
+### Cluster Data Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant N1 as Node 1
+    participant N2 as Node 2
+
+    C->>N1: SET user:1001 alice
+    Note over N1: CRC16 user:1001 mod 16384 = slot 5532
+    Note over N1: Slot 5532 owned by Node 2
+    N1->>C: MOVED 5532 192.168.1.2:6379
+    C->>N2: SET user:1001 alice
+    N2->>C: OK
+```
+
+## Sentinel Architecture
+
+```mermaid
+graph TB
+    subgraph "Sentinel Quorum"
+        S1[Sentinel 1]
+        S2[Sentinel 2]
+        S3[Sentinel 3]
+        S1 <-->|Gossip| S2
+        S2 <-->|Gossip| S3
+        S3 <-->|Gossip| S1
+    end
+
+    subgraph "Monitored Deployment"
+        MASTER[Master]
+        REPL1[Replica 1]
+        REPL2[Replica 2]
+        MASTER --> REPL1
+        MASTER --> REPL2
+    end
+
+    S1 -->|Monitor| MASTER
+    S2 -->|Monitor| MASTER
+    S3 -->|Monitor| MASTER
+    S1 -.->|Monitor| REPL1
+    S2 -.->|Monitor| REPL2
+```
+
+**Location**: `src/sentinel/`
+
+### Key Components
+
+- **Master Monitoring**: Configurable quorum-based down detection
+- **SDOWN/ODOWN**: Subjective and Objective Down states
+- **Leader Election**: Raft-like election for failover coordination
+- **Automatic Failover**: Replica selection, promotion, and reconfiguration
+- **Configuration Provider**: Clients query Sentinel for current master address
+
+### Failover Sequence
+
+```mermaid
+sequenceDiagram
+    participant S1 as Sentinel 1
+    participant S2 as Sentinel 2
+    participant S3 as Sentinel 3
+    participant M as Master
+    participant R as Best Replica
+
+    Note over M: Master becomes unreachable
+    S1->>S1: SDOWN detected
+    S2->>S2: SDOWN detected
+    S1->>S2: Is master down?
+    S2->>S1: Yes - ODOWN reached
+    S1->>S2: Vote for me as leader
+    S2->>S1: Granted
+    S3->>S1: Granted
+    Note over S1: Elected as failover leader
+    S1->>R: REPLICAOF NO ONE
+    R->>R: Promoted to master
+    S1->>S1: Reconfigure other replicas
+    S1->>S1: Publish +switch-master
+```
+
+## Replication Flow
+
 ```mermaid
 sequenceDiagram
     participant R as Replica
     participant M as Master
-    
+
     R->>M: REPLCONF listening-port 6380
     M->>R: OK
-    R->>M: PSYNC ? -1
-    M->>R: FULLRESYNC <runid> <offset>
-    M->>R: RDB Snapshot
-    R->>R: Load RDB
+    R->>M: PSYNC replication-id offset
+    alt Full Sync
+        M->>R: FULLRESYNC runid offset
+        M->>R: RDB Snapshot Transfer
+        R->>R: Load RDB
+    else Partial Sync
+        M->>R: CONTINUE
+        M->>R: Backlog Commands
+    end
     loop Continuous Replication
         M->>R: Write Commands
         R->>R: Apply Commands
+        R->>M: REPLCONF ACK offset
     end
-```
-
-### 6. Security Layer
-
-**Location**: `src/security/`
-
-Manages authentication and authorization.
-
-#### Authentication
-- Password-based authentication
-- Client session tracking
-- AUTH command implementation
-
-## Data Flow
-
-### Write Operation Flow
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant N as Network
-    participant CMD as Command Handler
-    participant S as Storage
-    participant P as Persistence
-    participant R as Replication
-    
-    C->>N: SET key value
-    N->>CMD: Parse command
-    CMD->>S: Write to storage
-    S->>S: Check memory limits
-    S->>S: Apply eviction if needed
-    S-->>CMD: OK
-    CMD->>P: Log to AOF
-    CMD->>R: Replicate to replicas
-    CMD->>N: Serialize response
-    N->>C: OK
-```
-
-### Read Operation Flow
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant N as Network
-    participant CMD as Command Handler
-    participant S as Storage
-    
-    C->>N: GET key
-    N->>CMD: Parse command
-    CMD->>S: Read from storage
-    S->>S: Check TTL
-    alt Key expired
-        S->>S: Delete key
-        S-->>CMD: Nil
-    else Key valid
-        S-->>CMD: Value
-    end
-    CMD->>N: Serialize response
-    N->>C: Response
 ```
 
 ## Concurrency Model
 
-### Async Runtime
-- Built on **Tokio** async runtime
-- Non-blocking I/O operations
-- Efficient task scheduling
-
-### Lock-Free Storage
-- **DashMap** for concurrent access
-- Fine-grained internal locking
-- Minimal contention
-
-### Thread Safety
-All components are designed to be thread-safe:
-- Shared state uses `Arc<T>`
-- Mutations use interior mutability (`RwLock`, `Mutex`)
-- Atomic operations where possible
-
-## Performance Optimizations
-
-### Memory Efficiency
-- **jemalloc** allocator for better memory management
-- Efficient data structures
-- Zero-copy operations where possible
-
-### Network Efficiency
-- Connection pooling
-- Buffered I/O
-- Efficient RESP parsing
-
-### Storage Efficiency
-- Lock-free concurrent access
-- LRU cache for hot data
-- Efficient eviction algorithms
-
-### CPU Efficiency
-- Async I/O reduces thread overhead
-- Work stealing scheduler
-- SIMD operations for parsing (where available)
-
-## Scalability
-
-### Vertical Scaling
-- Multi-threaded design
-- Configurable worker threads
-- Efficient CPU utilization
-
-### Horizontal Scaling
-- Master-replica replication
-- Read scaling with replicas
-- Future: Cluster mode with sharding
-
-## Reliability
-
-### Data Durability
-- Multiple persistence options
-- Atomic operations
-- Crash recovery
-
-### High Availability
-- Master-replica setup
-- Automatic reconnection
-- Future: Automatic failover
-
-### Error Handling
-- Graceful error recovery
-- Connection timeout handling
-- Memory pressure handling
+- **Async Runtime**: Tokio with work-stealing scheduler
+- **Lock-Free Storage**: DashMap with fine-grained internal sharding
+- **Thread Safety**: `Arc<T>`, interior mutability, atomic operations
+- **Blocking Commands**: Per-key wait queues with client wakeup mechanism
 
 ## Technology Stack
 
 - **Language**: Rust 2024 Edition
 - **Async Runtime**: Tokio
 - **Concurrency**: DashMap, parking_lot
+- **Scripting**: mlua (Lua 5.1)
 - **Serialization**: bincode, serde
 - **Memory**: jemalloc
 - **CLI**: clap
@@ -339,48 +351,29 @@ All components are designed to be thread-safe:
 
 ```
 src/
-├── main.rs              # Entry point
-├── networking/          # Network layer
-│   ├── server.rs        # TCP server
-│   ├── protocol.rs      # RESP protocol
-│   └── connection.rs    # Connection handling
-├── command/             # Command processing
-│   ├── handler.rs       # Command handlers
-│   ├── dispatcher.rs    # Command dispatch
-│   └── commands/        # Individual commands
-├── storage/             # Storage engine
-│   ├── engine.rs        # Core storage
-│   ├── types.rs         # Data types
-│   ├── memory.rs        # Memory management
-│   └── ttl.rs           # TTL monitoring
-├── persistence/         # Persistence layer
-│   ├── rdb.rs           # RDB implementation
-│   ├── aof.rs           # AOF implementation
-│   └── loader.rs        # Data loading
-├── replication/         # Replication
-│   ├── master.rs        # Master logic
-│   ├── replica.rs       # Replica logic
-│   └── sync.rs          # Synchronization
-└── security/            # Security
-    └── auth.rs          # Authentication
+  main.rs              # Entry point
+  networking/           # RESP2/RESP3 protocol, TCP server
+  command/              # Command handlers and dispatch
+    types/              # Per-type command implementations
+    transaction.rs      # MULTI/EXEC
+  storage/              # Storage engine, data types
+    engine.rs           # Core storage
+    stream.rs           # Stream data structure
+  persistence/          # RDB/AOF
+  replication/          # Master-replica sync
+  security/             # Authentication, ACL
+    acl.rs              # Access Control Lists
+  pubsub/               # Pub/Sub messaging
+  scripting/            # Lua scripting engine
+  cluster/              # Cluster mode
+    slot.rs             # Hash slot management
+    gossip.rs           # Cluster bus protocol
+    migration.rs        # Slot migration
+  sentinel/             # Sentinel HA
+    monitor.rs          # Master monitoring
+    failover.rs         # Automatic failover
+  module/               # Module system stubs
 ```
-
-## Future Enhancements
-
-1. **Pub/Sub**: Message broadcasting
-2. **Transactions**: MULTI/EXEC support
-3. **Cluster Mode**: Automatic sharding
-4. **Lua Scripting**: Custom logic
-5. **Streams**: Log data structure
-6. **Modules API**: Plugin system
-
-## Design Principles
-
-1. **Safety First**: Leverage Rust's safety guarantees
-2. **Performance Matters**: Optimize hot paths
-3. **Simplicity**: Keep it simple and maintainable
-4. **Compatibility**: Follow Redis semantics
-5. **Modularity**: Clean separation of concerns
 
 ## Learn More
 
