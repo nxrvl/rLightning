@@ -400,6 +400,11 @@ impl CommandHandler {
                 Ok(RespValue::Error("ERR Replication commands must be handled at the server level".to_string()))
             },
 
+            // Sentinel commands are handled at the server level
+            "sentinel" => {
+                Ok(RespValue::Error("ERR Sentinel commands must be handled at the server level".to_string()))
+            },
+
             // WAIT is handled at the server level (needs access to ReplicationManager)
             "wait" => commands::wait_cmd(&self.storage, &command.args).await,
 

@@ -21,6 +21,7 @@ use crate::persistence::config::AofSyncPolicy;
 use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
+use crate::sentinel::SentinelManager;
 use crate::storage::engine::StorageEngine;
 use crate::utils::logging;
 
@@ -32,6 +33,7 @@ pub struct Server {
     persistence: Option<Arc<PersistenceManager>>,
     security: Option<Arc<SecurityManager>>,
     replication: Option<Arc<ReplicationManager>>,
+    sentinel: Option<Arc<SentinelManager>>,
     aof_sync_policy: AofSyncPolicy,
     connection_limit: Arc<Semaphore>,
     buffer_size: usize,
@@ -50,6 +52,7 @@ impl Server {
             persistence: None,
             security: None,
             replication: None,
+            sentinel: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
             buffer_size: 64 * 1024 * 1024,                     // 64MB buffer size for large JSON values
@@ -76,6 +79,12 @@ impl Server {
     /// Set the replication manager for this server
     pub fn with_replication(mut self, replication: Arc<ReplicationManager>) -> Self {
         self.replication = Some(replication);
+        self
+    }
+
+    /// Set the sentinel manager for this server
+    pub fn with_sentinel(mut self, sentinel: Arc<SentinelManager>) -> Self {
+        self.sentinel = Some(sentinel);
         self
     }
 
@@ -110,6 +119,7 @@ impl Server {
                             let persistence = self.persistence.clone();
                             let security = self.security.clone();
                             let replication = self.replication.clone();
+                            let sentinel = self.sentinel.clone();
                             let aof_sync_policy = self.aof_sync_policy;
                             let buffer_size = self.buffer_size;
 
@@ -125,6 +135,7 @@ impl Server {
                                     persistence,
                                     security,
                                     replication,
+                                    sentinel,
                                     aof_sync_policy,
                                     buffer_size,
                                 )
@@ -158,6 +169,7 @@ impl Server {
         persistence: Option<Arc<PersistenceManager>>,
         security: Option<Arc<SecurityManager>>,
         replication: Option<Arc<ReplicationManager>>,
+        sentinel: Option<Arc<SentinelManager>>,
         aof_sync_policy: AofSyncPolicy,
         buffer_size: usize,
     ) -> Result<(), NetworkError> {
@@ -432,6 +444,28 @@ impl Server {
                                         }
                                     } else {
                                         let response = RespValue::SimpleString("OK".to_string());
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                // Handle sentinel commands
+                                "sentinel" => {
+                                    if let Some(ref sentinel_mgr) = sentinel {
+                                        match sentinel_mgr.handle_sentinel_command(&cmd.args).await {
+                                            Ok(resp) => {
+                                                if let Ok(bytes) = resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Self::send_error_to_writer(&mut socket_writer, e, &client_addr_str).await?;
+                                            }
+                                        }
+                                    } else {
+                                        let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
                                         if let Ok(bytes) = response.serialize() {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
@@ -831,6 +865,28 @@ impl Server {
                                                         }
                                                     } else {
                                                         let response = RespValue::SimpleString("OK".to_string());
+                                                        if let Ok(bytes) = response.serialize() {
+                                                            response_buffer.extend_from_slice(&bytes);
+                                                        }
+                                                    }
+                                                    commands_processed += 1;
+                                                    continue;
+                                                }
+                                                // Handle sentinel commands (slow path)
+                                                "sentinel" => {
+                                                    if let Some(ref sentinel_mgr) = sentinel {
+                                                        match sentinel_mgr.handle_sentinel_command(&cmd.args).await {
+                                                            Ok(resp) => {
+                                                                if let Ok(bytes) = resp.serialize() {
+                                                                    response_buffer.extend_from_slice(&bytes);
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                Self::send_error_to_writer(&mut socket_writer, e, &client_addr_str).await?;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
                                                         if let Ok(bytes) = response.serialize() {
                                                             response_buffer.extend_from_slice(&bytes);
                                                         }

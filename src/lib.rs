@@ -11,6 +11,7 @@ pub mod pubsub;
 pub mod replication;
 pub mod scripting;
 pub mod security;
+pub mod sentinel;
 pub mod storage;
 pub mod utils;
 

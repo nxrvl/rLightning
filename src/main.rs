@@ -25,6 +25,7 @@ mod pubsub;
 mod replication;
 mod scripting;
 mod security;
+mod sentinel;
 mod storage;
 mod utils;
 
@@ -34,6 +35,7 @@ use crate::persistence::config::{AofSyncPolicy, PersistenceConfig, PersistenceMo
 use crate::replication::ReplicationManager;
 use crate::replication::config::ReplicationConfig;
 use crate::security::{SecurityConfig, SecurityManager};
+use crate::sentinel::{SentinelConfig, SentinelManager};
 use crate::storage::engine::{EvictionPolicy, StorageConfig, StorageEngine};
 
 // --- Command Line Arguments ---
@@ -108,8 +110,31 @@ struct AppSettings {
     security: SecuritySettings,
     persistence: PersistenceSettings,
     replication: ReplicationSettings,
+    sentinel: SentinelSettings,
     logging: LoggingSettings,
     // Removed keys section for simplicity, storage section has relevant limits
+}
+
+#[derive(Deserialize, Debug, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct SentinelSettings {
+    enabled: bool,
+    down_after_ms: u64,
+    failover_timeout_ms: u64,
+    ping_period_ms: u64,
+    parallel_syncs: usize,
+}
+
+impl Default for SentinelSettings {
+    fn default() -> Self {
+        SentinelSettings {
+            enabled: false,
+            down_after_ms: 30000,
+            failover_timeout_ms: 180000,
+            ping_period_ms: 1000,
+            parallel_syncs: 1,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, serde::Serialize)]
@@ -505,11 +530,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )));
     }
 
-    // Initialize the server with replication support
+    // Create sentinel configuration and manager
+    let sentinel_config = SentinelConfig {
+        enabled: settings.sentinel.enabled,
+        down_after_ms: settings.sentinel.down_after_ms,
+        failover_timeout_ms: settings.sentinel.failover_timeout_ms,
+        ping_period_ms: settings.sentinel.ping_period_ms,
+        parallel_syncs: settings.sentinel.parallel_syncs,
+        ..Default::default()
+    };
+    let sentinel = SentinelManager::new(Arc::clone(&storage), sentinel_config);
+    sentinel.init().await;
+
+    // Initialize the server with replication and sentinel support
     let server = Server::new(addr, Arc::clone(&storage))
         .with_persistence(Arc::new(persistence), settings.persistence.aof_sync_policy)
         .with_security(security)
-        .with_replication(replication);
+        .with_replication(replication)
+        .with_sentinel(sentinel);
 
     // Start the server (this will block until shutdown)
     if let Err(e) = server.start().await {

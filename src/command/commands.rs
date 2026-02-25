@@ -52,6 +52,9 @@ pub use crate::command::types::connection::{
 // Cluster commands
 pub use crate::command::types::cluster::{cluster_command, asking, readonly, readwrite, migrate};
 
+// Sentinel commands
+pub use crate::command::types::sentinel::sentinel_command;
+
 // Alias for type_command as get_type
 pub use type_command as get_type;
 
