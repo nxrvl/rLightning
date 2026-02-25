@@ -1150,9 +1150,14 @@ impl AclManager {
             })?
         };
 
-        // Generate random bytes and hex-encode
+        // Generate cryptographically secure random bytes and hex-encode
         let num_bytes = (bits + 7) / 8;
-        let bytes: Vec<u8> = (0..num_bytes).map(|_| fastrand::u8(..)).collect();
+        let mut bytes = vec![0u8; num_bytes];
+        getrandom::fill(&mut bytes).map_err(|_| {
+            crate::command::CommandError::InternalError(
+                "ERR Failed to generate random bytes".to_string(),
+            )
+        })?;
 
         let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
 

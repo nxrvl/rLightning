@@ -117,23 +117,10 @@ pub mod auth_integration_tests {
             .await
             .expect("Failed to send AUTH command");
         // ACL validates the password and returns WRONGPASS error
-        match &auth_response {
-            RespValue::Error(msg) => {
-                assert!(msg.contains("WRONGPASS") || msg.contains("invalid"),
-                    "Expected WRONGPASS error, got: {}", msg);
-            }
-            _ => {
-                // If we got OK (shouldn't happen with ACL), verify subsequent commands fail
-                let ping_response = client
-                    .send_command_str("PING", &[])
-                    .await
-                    .expect("Failed to send PING command");
-                assert_eq!(
-                    ping_response,
-                    RespValue::Error("NOAUTH Authentication required.".to_string())
-                );
-            }
-        }
+        assert!(
+            matches!(&auth_response, RespValue::Error(msg) if msg.contains("WRONGPASS") || msg.contains("invalid")),
+            "AUTH with wrong password should return WRONGPASS error, got: {:?}", auth_response
+        );
     }
 
     #[tokio::test]

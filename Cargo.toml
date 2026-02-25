@@ -55,6 +55,8 @@ num_cpus = "1.16.0"
 lru = "0.12"
 # Random number generation
 fastrand = "2.0"
+# Cryptographically secure random bytes (for ACL GENPASS)
+getrandom = "0.3"
 # Lua scripting engine (Lua 5.1 for Redis compatibility)
 mlua = { version = "0.10", features = ["lua51", "vendored"] }
 # SHA1 hashing for script caching

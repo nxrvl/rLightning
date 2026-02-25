@@ -750,21 +750,26 @@ impl StorageEngine {
         pi == p.len()
     }
     
-    /// Flush all data (remove all keys)
+    /// Flush all data (remove all keys from all databases)
     pub async fn flush_all(&self) -> StorageResult<()> {
         self.data.clear();
-        
+
+        // Clear all extra databases (1-15)
+        for db in &self.extra_dbs {
+            db.clear();
+        }
+
         // Reset memory and key count atomically
         self.current_memory.store(0, Ordering::Relaxed);
         self.key_count.store(0, Ordering::Relaxed);
-        
+
         // Clear prefix index
         let mut prefix_index = self.prefix_index.write().await;
         prefix_index.clear();
-        
+
         // Increment write counters
         self.increment_write_counters().await;
-        
+
         Ok(())
     }
     
@@ -773,16 +778,26 @@ impl StorageEngine {
         self.flush_all().await
     }
     
-    /// Get a snapshot of the current data
+    /// Get a snapshot of the current data (all databases)
     pub async fn snapshot(&self) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
         let mut snapshot = HashMap::with_capacity(self.data.len());
-        
+
+        // Snapshot database 0
         for item in self.data.iter() {
             if !item.value().is_expired() {
                 snapshot.insert(item.key().clone(), item.value().clone());
             }
         }
-        
+
+        // Snapshot extra databases (1-15)
+        for db in &self.extra_dbs {
+            for item in db.iter() {
+                if !item.value().is_expired() {
+                    snapshot.insert(item.key().clone(), item.value().clone());
+                }
+            }
+        }
+
         Ok(snapshot)
     }
     

@@ -1388,26 +1388,26 @@ async fn test_compat_acl_basic() {
     let user = get_string(&r);
     assert!(!user.is_empty(), "ACL WHOAMI should return a non-empty response");
 
-    // ACL USERS
+    // ACL USERS - returns user list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "USERS"]).await;
-    match &r {
-        RespValue::Array(Some(users)) => assert!(!users.is_empty()),
-        _ => {} // Some implementations may return differently without auth configured
-    }
+    assert!(
+        !matches!(&r, RespValue::Error(_)),
+        "ACL USERS should not return an error, got: {:?}", r
+    );
 
-    // ACL LIST
+    // ACL LIST - returns rule list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "LIST"]).await;
-    match &r {
-        RespValue::Array(Some(list)) => assert!(!list.is_empty()),
-        _ => {} // Acceptable without auth configured
-    }
+    assert!(
+        !matches!(&r, RespValue::Error(_)),
+        "ACL LIST should not return an error, got: {:?}", r
+    );
 
-    // ACL CAT
+    // ACL CAT - returns category list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "CAT"]).await;
-    match &r {
-        RespValue::Array(Some(categories)) => assert!(!categories.is_empty()),
-        _ => {} // Acceptable
-    }
+    assert!(
+        !matches!(&r, RespValue::Error(_)),
+        "ACL CAT should not return an error, got: {:?}", r
+    );
 
     // ACL GENPASS
     let r = cmd(&mut c, &["ACL", "GENPASS"]).await;
@@ -1691,23 +1691,19 @@ async fn test_compat_hello_resp3() {
     let addr = setup_test_server(2290).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    // HELLO (should return server info)
+    // HELLO (should return server info as array of key-value pairs)
     let r = cmd(&mut c, &["HELLO"]).await;
-    match &r {
-        RespValue::Array(Some(arr)) => {
-            assert!(!arr.is_empty(), "HELLO should return server info");
-        }
-        _ => {
-            // HELLO may also return a map-like structure
-        }
-    }
+    assert!(
+        matches!(&r, RespValue::Array(Some(arr)) if !arr.is_empty()),
+        "HELLO should return non-empty server info, got: {:?}", r
+    );
 
-    // HELLO 2 (explicitly request RESP2)
+    // HELLO 2 (explicitly request RESP2 - should return server info)
     let r = cmd(&mut c, &["HELLO", "2"]).await;
-    match &r {
-        RespValue::Error(_) => {} // May not be supported
-        _ => {} // OK if it returns server info
-    }
+    assert!(
+        !matches!(&r, RespValue::Error(_)),
+        "HELLO 2 should not return an error, got: {:?}", r
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,16 +1721,10 @@ async fn test_compat_persistence_commands() {
 
     // BGSAVE (may not actually save in test env but should not error)
     let r = cmd(&mut c, &["BGSAVE"]).await;
-    match &r {
-        RespValue::SimpleString(s) => {
-            assert!(
-                s.contains("Background saving started") || s.contains("OK"),
-                "Unexpected BGSAVE response: {}",
-                s
-            );
-        }
-        _ => {} // Some responses are OK
-    }
+    assert!(
+        !matches!(&r, RespValue::Error(_)),
+        "BGSAVE should not return an error, got: {:?}", r
+    );
 }
 
 // ---------------------------------------------------------------------------
