@@ -38,13 +38,10 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => Vec::new(),
     };
     
-    // Prepend each element to the list
-    // Note: In Redis standard behavior, LPUSH prepends elements in the order they are given
-    // So elements are added left-to-right, meaning the last element in the args will end up at the head
-    // We need to reverse the order when adding to maintain compatibility
-    for element in elements {
-        list.insert(0, element.clone());
-    }
+    // Prepend all elements at once using splice for O(N+M) instead of O(N*M).
+    // Redis LPUSH pushes elements left-to-right, so the last arg ends up at the head.
+    let new_elements: Vec<Vec<u8>> = elements.iter().rev().map(|e| e.clone()).collect();
+    list.splice(0..0, new_elements);
     
     let length = list.len();
     

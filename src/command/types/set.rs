@@ -311,21 +311,19 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
     
     if let Some(count) = count {
-        // Return multiple elements
-        let mut result = Vec::new();
+        // Return multiple elements using Fisher-Yates partial shuffle
         let actual_count = std::cmp::min(count, set.len());
-        
-        for _ in 0..actual_count {
-            // Select a random member using Vec conversion for random index
-            let members: Vec<_> = set.iter().cloned().collect();
-            if members.is_empty() {
-                break;
-            }
-            let idx = fastrand::usize(0..members.len());
-            let member = members[idx].clone();
-            set.remove(&member);
-            result.push(RespValue::BulkString(Some(member)));
+        let mut members: Vec<_> = set.into_iter().collect();
+        for i in 0..actual_count {
+            let j = fastrand::usize(i..members.len());
+            members.swap(i, j);
         }
+        let popped: Vec<_> = members[..actual_count].to_vec();
+        // Rebuild set from remaining elements
+        set = members[actual_count..].iter().cloned().collect();
+        let result: Vec<_> = popped.into_iter()
+            .map(|m| RespValue::BulkString(Some(m)))
+            .collect();
         
         // Update or delete the key
         if set.is_empty() {

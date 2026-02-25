@@ -526,11 +526,25 @@ fn aof_rewrite_commands_for_item(key: &Vec<u8>, item: &StorageItem) -> Vec<Vec<V
 
 /// Helper function to check if a command is read-only
 fn is_read_only_command(command: &[u8]) -> bool {
-    matches!(command,
+    let upper: Vec<u8> = command.iter().map(|b| b.to_ascii_uppercase()).collect();
+    matches!(upper.as_slice(),
         b"GET" | b"EXISTS" | b"TTL" | b"PTTL" | b"PING" | b"KEYS" | b"INFO" | b"TYPE" |
         b"MGET" | b"STRLEN" | b"LLEN" | b"HLEN" | b"SCARD" | b"ZCARD" |
         b"HGET" | b"HGETALL" | b"HKEYS" | b"HVALS" | b"SMEMBERS" | b"SISMEMBER" |
-        b"LRANGE" | b"ZRANGE" | b"ZSCORE")
+        b"LRANGE" | b"ZRANGE" | b"ZSCORE" |
+        b"DBSIZE" | b"RANDOMKEY" | b"SCAN" | b"HSCAN" | b"SSCAN" | b"ZSCAN" |
+        b"OBJECT" | b"TIME" | b"COMMAND" | b"CLIENT" |
+        b"LPOS" | b"SRANDMEMBER" | b"ZRANGEBYSCORE" | b"ZRANGEBYLEX" |
+        b"ZREVRANGE" | b"ZREVRANGEBYSCORE" | b"ZREVRANGEBYLEX" | b"ZRANK" | b"ZREVRANK" |
+        b"ZCOUNT" | b"ZLEXCOUNT" | b"GEODIST" | b"GEOPOS" | b"GEOHASH" | b"GEOSEARCH" |
+        b"XRANGE" | b"XREVRANGE" | b"XLEN" | b"XINFO" | b"XREAD" | b"XPENDING" |
+        b"BITCOUNT" | b"BITPOS" | b"GETBIT" | b"SUBSTR" | b"GETRANGE" |
+        b"LINDEX" | b"HEXISTS" | b"SMISMEMBER" |
+        b"PFCOUNT" | b"ECHO" | b"SELECT" | b"WAIT" | b"DEBUG" |
+        b"SLOWLOG" | b"MEMORY" | b"LATENCY" | b"MODULE" |
+        b"CLUSTER" | b"SENTINEL" | b"SUBSCRIBE" | b"UNSUBSCRIBE" |
+        b"PSUBSCRIBE" | b"PUNSUBSCRIBE" | b"PUBSUB" |
+        b"AUTH" | b"HELLO" | b"RESET" | b"QUIT")
 }
 
 /// Helper function to ensure a directory exists

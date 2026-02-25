@@ -82,8 +82,13 @@ impl JsonResp {
                         }
                     }
                 } else {
-                    // Skip validation, assume valid UTF-8
-                    unsafe { str::from_utf8_unchecked(data) }
+                    // Still validate UTF-8 safely - invalid UTF-8 would cause UB
+                    match str::from_utf8(data) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Err(RespError::Utf8Error(e));
+                        }
+                    }
                 };
                 
                 // Parse JSON

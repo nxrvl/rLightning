@@ -59,26 +59,26 @@ impl ScriptingEngine {
     /// Load a script into the cache, returning its SHA1 hash
     pub fn load_script(&self, script: &str) -> String {
         let sha1 = Self::compute_sha1(script);
-        let mut cache = self.script_cache.write().unwrap();
+        let mut cache = self.script_cache.write().unwrap_or_else(|e| e.into_inner());
         cache.insert(sha1.clone(), script.to_string());
         sha1
     }
 
     /// Get a cached script by its SHA1 hash
     pub fn get_script(&self, sha1: &str) -> Option<String> {
-        let cache = self.script_cache.read().unwrap();
+        let cache = self.script_cache.read().unwrap_or_else(|e| e.into_inner());
         cache.get(sha1).cloned()
     }
 
     /// Check which SHA1 hashes exist in the script cache
     pub fn script_exists(&self, sha1s: &[String]) -> Vec<bool> {
-        let cache = self.script_cache.read().unwrap();
+        let cache = self.script_cache.read().unwrap_or_else(|e| e.into_inner());
         sha1s.iter().map(|s| cache.contains_key(s.as_str())).collect()
     }
 
     /// Clear all cached scripts
     pub fn flush_scripts(&self) {
-        let mut cache = self.script_cache.write().unwrap();
+        let mut cache = self.script_cache.write().unwrap_or_else(|e| e.into_inner());
         cache.clear();
     }
 
@@ -136,11 +136,11 @@ impl ScriptingEngine {
     ) -> CommandResult {
         // Find the library containing this function
         let library_code = {
-            let index = self.function_index.read().unwrap();
+            let index = self.function_index.read().unwrap_or_else(|e| e.into_inner());
             let lib_name = index.get(func_name).ok_or_else(|| {
                 CommandError::InternalError("ERR Function not found".to_string())
             })?;
-            let libs = self.function_libraries.read().unwrap();
+            let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
             let lib = libs.get(lib_name.as_str()).ok_or_else(|| {
                 CommandError::InternalError("ERR Function library not found".to_string())
             })?;
@@ -205,7 +205,7 @@ impl ScriptingEngine {
 
         // Check if library already exists
         {
-            let libs = self.function_libraries.read().unwrap();
+            let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
             if libs.contains_key(&lib_name) && !replace {
                 return Err(CommandError::InternalError(format!(
                     "ERR Library '{}' already exists",
@@ -230,8 +230,8 @@ impl ScriptingEngine {
         // Acquire both locks in the same scope (index first, then libs) to match
         // function_delete/function_flush ordering and prevent TOCTOU races
         {
-            let mut index = self.function_index.write().unwrap();
-            let mut libs = self.function_libraries.write().unwrap();
+            let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
+            let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
 
             // Remove old library's functions from index if replacing
             if let Some(old_lib) = libs.get(&lib_name) {
@@ -276,8 +276,8 @@ impl ScriptingEngine {
     pub fn function_delete(&self, library_name: &str) -> Result<(), CommandError> {
         // Acquire locks in the same order as function_load (index first, then libs)
         // to prevent AB-BA deadlock
-        let mut index = self.function_index.write().unwrap();
-        let mut libs = self.function_libraries.write().unwrap();
+        let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(lib) = libs.remove(library_name) {
             for func in &lib.functions {
@@ -295,8 +295,8 @@ impl ScriptingEngine {
     pub fn function_flush(&self) {
         // Acquire locks in the same order as function_load/function_delete (index first, then libs)
         // to prevent AB-BA deadlock
-        let mut index = self.function_index.write().unwrap();
-        let mut libs = self.function_libraries.write().unwrap();
+        let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
         index.clear();
         libs.clear();
     }
@@ -306,7 +306,7 @@ impl ScriptingEngine {
         &self,
         library_pattern: Option<&str>,
     ) -> Vec<(String, String, Vec<FunctionInfo>)> {
-        let libs = self.function_libraries.read().unwrap();
+        let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
 
         for (name, lib) in libs.iter() {
@@ -323,7 +323,7 @@ impl ScriptingEngine {
 
     /// Dump all function libraries as serialized data
     pub fn function_dump(&self) -> Vec<u8> {
-        let libs = self.function_libraries.read().unwrap();
+        let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
         let serializable: Vec<(&str, &str)> = libs
             .iter()
             .map(|(name, lib)| (name.as_str(), lib.code.as_str()))
