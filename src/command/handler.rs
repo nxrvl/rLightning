@@ -4,6 +4,7 @@ use crate::command::{Command, CommandError, CommandResult};
 use crate::command::commands;
 use crate::command::types::blocking::BlockingManager;
 use crate::networking::resp::RespValue;
+use crate::scripting::ScriptingEngine;
 use crate::storage::engine::StorageEngine;
 
 /// The CommandHandler routes incoming commands to their implementations
@@ -11,6 +12,7 @@ use crate::storage::engine::StorageEngine;
 pub struct CommandHandler {
     storage: Arc<StorageEngine>,
     blocking_mgr: Arc<BlockingManager>,
+    scripting: Arc<ScriptingEngine>,
 }
 
 impl CommandHandler {
@@ -19,6 +21,7 @@ impl CommandHandler {
         CommandHandler {
             storage,
             blocking_mgr: Arc::new(BlockingManager::new()),
+            scripting: Arc::new(ScriptingEngine::new()),
         }
     }
 
@@ -27,6 +30,7 @@ impl CommandHandler {
         CommandHandler {
             storage,
             blocking_mgr,
+            scripting: Arc::new(ScriptingEngine::new()),
         }
     }
 
@@ -38,6 +42,11 @@ impl CommandHandler {
     /// Get a reference to the storage engine
     pub fn storage(&self) -> &Arc<StorageEngine> {
         &self.storage
+    }
+
+    /// Get a reference to the scripting engine
+    pub fn scripting(&self) -> &Arc<ScriptingEngine> {
+        &self.scripting
     }
     
     /// Process a command and return the result
@@ -327,6 +336,16 @@ impl CommandHandler {
             "xpending" => commands::xpending(&self.storage, &command.args).await,
             "xclaim" => commands::xclaim(&self.storage, &command.args).await,
             "xautoclaim" => commands::xautoclaim(&self.storage, &command.args).await,
+
+            // Scripting commands
+            "eval" => self.scripting.handle_eval(self, &command.args, false).await,
+            "eval_ro" => self.scripting.handle_eval(self, &command.args, true).await,
+            "evalsha" => self.scripting.handle_evalsha(self, &command.args, false).await,
+            "evalsha_ro" => self.scripting.handle_evalsha(self, &command.args, true).await,
+            "script" => self.scripting.handle_script(&command.args),
+            "function" => self.scripting.handle_function(&command.args),
+            "fcall" => self.scripting.handle_fcall(self, &command.args, false).await,
+            "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
 
             // Unknown command
             _ => {
