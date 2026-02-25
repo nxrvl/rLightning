@@ -555,17 +555,18 @@ fn parse_bulk_string(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespErr
 
     let length = length as usize;
 
+    // Validate data size limit BEFORE checking buffer completeness
+    // to prevent a malicious client from forcing large buffer allocations
+    if length > 512 * 1024 * 1024 { // 512MB limit
+        return Err(RespError::ValueTooLarge(format!("Bulk string exceeds 512MB limit: {} bytes", length)));
+    }
+
     // Now check if we have ALL the data we need:
     // length_line + CRLF + data + CRLF
     let total_needed = length_line_end + 2 + length + 2;
     if buffer.len() < total_needed {
         // Don't have all the data yet - return without modifying buffer
         return Ok(None);
-    }
-    
-    // Validate data size limit
-    if length > 512 * 1024 * 1024 { // 512MB limit
-        return Err(RespError::ValueTooLarge(format!("Bulk string exceeds 512MB limit: {} bytes", length)));
     }
 
     // Log large operations for debugging

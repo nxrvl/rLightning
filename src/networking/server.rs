@@ -398,6 +398,11 @@ impl Server {
                                     let _ = socket_writer.write_all(&bytes).await;
                                     let _ = socket_writer.flush().await;
                                 }
+                                // Cleanup before exiting
+                                pubsub.unregister_client(client_id).await;
+                                if let Some(ref security_mgr) = security {
+                                    security_mgr.remove_client(&client_addr_str);
+                                }
                                 return Ok(());
                             }
 
@@ -687,6 +692,11 @@ impl Server {
                                         // After PSYNC, the connection is in replication mode
                                         // The replica will only receive propagated commands
                                         // We exit the normal client loop
+                                        // Cleanup before exiting
+                                        pubsub.unregister_client(client_id).await;
+                                        if let Some(ref security_mgr) = security {
+                                            security_mgr.remove_client(&client_addr_str);
+                                        }
                                         return Ok(());
                                     } else {
                                         Self::send_error_to_writer(&mut socket_writer, "ERR PSYNC not supported".to_string(), &client_addr_str).await?;
@@ -841,6 +851,11 @@ impl Server {
                                                 if let Ok(bytes) = response.serialize() {
                                                     let _ = socket_writer.write_all(&bytes).await;
                                                     let _ = socket_writer.flush().await;
+                                                }
+                                                // Cleanup before exiting
+                                                pubsub.unregister_client(client_id).await;
+                                                if let Some(ref security_mgr) = security {
+                                                    security_mgr.remove_client(&client_addr_str);
                                                 }
                                                 return Ok(());
                                             }
@@ -1123,6 +1138,11 @@ impl Server {
                                                     match response {
                                                         Ok(true) => {
                                                             // PSYNC - connection taken over, exit
+                                                            // Cleanup before exiting
+                                                            pubsub.unregister_client(client_id).await;
+                                                            if let Some(ref security_mgr) = security {
+                                                                security_mgr.remove_client(&client_addr_str);
+                                                            }
                                                             return Ok(());
                                                         }
                                                         Ok(false) => {

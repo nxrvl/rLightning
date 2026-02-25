@@ -233,13 +233,17 @@ impl StorageEngine {
     async fn probabilistic_cleanup(&self) {
         const SAMPLE_SIZE: usize = 20;
         let mut keys_to_remove = Vec::new();
-        
-        // Sample random keys to check for expiration
-        for (sampled_count, entry) in self.data.iter().enumerate() {
+
+        // Sample keys starting from a random offset to avoid always checking the same keys
+        let len = self.data.len();
+        let skip = if len > SAMPLE_SIZE { fastrand::usize(0..len) } else { 0 };
+        let mut sampled_count = 0;
+        for entry in self.data.iter().skip(skip) {
             if sampled_count >= SAMPLE_SIZE {
                 break;
             }
-            
+            sampled_count += 1;
+
             if entry.value().is_expired() {
                 keys_to_remove.push(entry.key().clone());
             }
@@ -365,8 +369,14 @@ impl StorageEngine {
                             .map(|item| item.key().clone())
                     },
                     EvictionPolicy::Random => {
-                        // Pick a random key - this could be improved with better randomization
-                        self.data.iter().next().map(|item| item.key().clone())
+                        // Pick a random key by skipping a random number of entries
+                        let len = self.data.len();
+                        if len == 0 {
+                            None
+                        } else {
+                            let skip = fastrand::usize(0..len);
+                            self.data.iter().nth(skip).map(|item| item.key().clone())
+                        }
                     },
                     _ => {
                         // Default to LRU for now
@@ -409,28 +419,6 @@ impl StorageEngine {
         if value.len() > 10240 { // 10KB
             tracing::debug!("Large value SET operation: key={:?}, value_len={}", 
                 String::from_utf8_lossy(&key), value.len());
-        }
-        
-        // Validate that data doesn't start with RESP command indicators
-        // This prevents stored data from being misinterpreted as commands
-        if !value.is_empty() {
-            let first_byte = value[0];
-            let looks_like_resp_command = matches!(first_byte, b'+' | b'-' | b':' | b'$' | b'*');
-            
-            if looks_like_resp_command {
-                // If data starts with RESP indicators, it needs special handling
-                tracing::warn!("SET data starts with RESP command byte: {:02x} ({})", 
-                    first_byte, first_byte as char);
-                
-                // For safety, we could prefix such data, but for now just log it
-                // This helps identify problematic data patterns
-                let preview = if value.len() > 50 { 
-                    String::from_utf8_lossy(&value[0..50]) 
-                } else { 
-                    String::from_utf8_lossy(&value) 
-                };
-                tracing::debug!("RESP-like data preview: {}", preview);
-            }
         }
         
         let required_size = Self::calculate_size(&key, &value);
