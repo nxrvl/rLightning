@@ -2,8 +2,8 @@ site_name: rLightning
 site_url: https://rlightning.io/
 site_author: Altista Tech
 site_description: >-
-  rLightning is a high-performance, Redis-compatible in-memory key-value store
-  built in Rust, focused on session management and caching use cases.
+  rLightning is a high-performance, Redis 7.x compatible in-memory data store
+  built in Rust with full protocol support and blazing speed.
 
 repo_name: altista-tech/rLightning
 repo_url: https://github.com/altista-tech/rLightning
@@ -14,23 +14,20 @@ theme:
   custom_dir: overrides
   favicon: favicon.svg
   language: en
+  font: false
   palette:
-    # Light mode
-    - scheme: default
-      primary: deep orange
-      accent: orange
-      media: "(prefers-color-scheme: light)"
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    # Dark mode
     - scheme: slate
-      primary: deep orange
-      accent: orange
-      media: "(prefers-color-scheme: dark)"
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
   features:
     - navigation.instant
     - navigation.tracking
@@ -41,7 +38,6 @@ theme:
     - navigation.indexes
     - navigation.top
     - toc.follow
-    - toc.integrate
     - search.suggest
     - search.highlight
     - search.share
@@ -54,6 +50,9 @@ theme:
 
 extra_css:
   - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/extra.js
 
 plugins:
   - search:
@@ -140,7 +139,16 @@ nav:
     - List Commands: commands/lists.md
     - Set Commands: commands/sets.md
     - Sorted Set Commands: commands/sorted-sets.md
+    - Bitmap Commands: commands/bitmap.md
+    - HyperLogLog Commands: commands/hyperloglog.md
+    - Geospatial Commands: commands/geo.md
+    - Stream Commands: commands/streams.md
+    - Transaction Commands: commands/transactions.md
+    - Scripting Commands: commands/scripting.md
     - Pub/Sub Commands: commands/pubsub.md
+    - ACL Commands: commands/acl.md
+    - Cluster Commands: commands/cluster.md
+    - Sentinel Commands: commands/sentinel.md
     - Server Commands: commands/server.md
   - Configuration:
     - Overview: configuration.md

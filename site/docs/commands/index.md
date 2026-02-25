@@ -1,220 +1,153 @@
 # Command Reference
 
-rLightning implements a subset of Redis commands, focusing on the most commonly used operations for session management and caching.
+rLightning implements full Redis 7.x command compatibility across all data types and feature areas.
 
 ## Command Categories
 
-### [String Commands](strings.md)
-Basic key-value operations, the foundation of any key-value store.
+### Data Types
 
-- `GET`, `SET`, `MGET`, `MSET` - Basic operations
-- `INCR`, `DECR` - Atomic counters
-- `APPEND` - String manipulation
+<div class="rl-grid rl-grid-3">
+  <div class="rl-card">
+    <h3><a href="strings/">String Commands</a></h3>
+    <p>GET, SET, MGET, MSET, INCR, APPEND, GETEX, GETDEL, LCS, and more.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="hashes/">Hash Commands</a></h3>
+    <p>HGET, HSET, HGETALL, HRANDFIELD, HSCAN, and all hash operations.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="lists/">List Commands</a></h3>
+    <p>LPUSH, RPUSH, LPOP, RPOP, LRANGE, BLPOP, BRPOP, LMOVE, LMPOP, and more.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="sets/">Set Commands</a></h3>
+    <p>SADD, SREM, SMEMBERS, SMOVE, SINTERCARD, SMISMEMBER, SSCAN.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="sorted-sets/">Sorted Set Commands</a></h3>
+    <p>ZADD, ZRANGE, ZSCORE, ZPOPMIN, BZPOPMIN, ZRANGESTORE, ZSCAN, and more.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="streams/">Stream Commands</a></h3>
+    <p>XADD, XREAD, XREADGROUP, XACK, XPENDING, XCLAIM, XINFO, and consumer groups.</p>
+  </div>
+</div>
 
-[View String Commands →](strings.md)
+### Specialized Data Types
 
-### [Hash Commands](hashes.md)
-Store and manipulate field-value pairs within a single key.
+<div class="rl-grid rl-grid-3">
+  <div class="rl-card">
+    <h3><a href="bitmap/">Bitmap Commands</a></h3>
+    <p>SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD for bit-level operations.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="hyperloglog/">HyperLogLog Commands</a></h3>
+    <p>PFADD, PFCOUNT, PFMERGE for probabilistic cardinality estimation.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="geo/">Geospatial Commands</a></h3>
+    <p>GEOADD, GEODIST, GEOSEARCH, GEOPOS, GEOHASH for location-based queries.</p>
+  </div>
+</div>
 
-- `HGET`, `HSET`, `HGETALL` - Field operations
-- `HDEL`, `HEXISTS` - Hash management
+### Features
 
-[View Hash Commands →](hashes.md)
+<div class="rl-grid rl-grid-3">
+  <div class="rl-card">
+    <h3><a href="transactions/">Transaction Commands</a></h3>
+    <p>MULTI, EXEC, DISCARD, WATCH, UNWATCH for atomic operations.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="scripting/">Scripting Commands</a></h3>
+    <p>EVAL, EVALSHA, SCRIPT, FUNCTION, FCALL for Lua scripting.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="pubsub/">Pub/Sub Commands</a></h3>
+    <p>SUBSCRIBE, PUBLISH, PSUBSCRIBE, SSUBSCRIBE, SPUBLISH.</p>
+  </div>
+</div>
 
-### [List Commands](lists.md)
-Ordered collections of strings, useful for queues and stacks.
+### Infrastructure
 
-- `LPUSH`, `RPUSH` - Add elements
-- `LPOP`, `RPOP` - Remove elements
-- `LRANGE` - Retrieve ranges
-
-[View List Commands →](lists.md)
-
-### [Set Commands](sets.md)
-Unordered collections of unique strings.
-
-- `SADD`, `SREM` - Manage members
-- `SMEMBERS` - Get all members
-- `SISMEMBER` - Check membership
-
-[View Set Commands →](sets.md)
-
-### [Sorted Set Commands](sorted-sets.md)
-Sets with scores, perfect for rankings and leaderboards.
-
-- `ZADD`, `ZREM` - Manage scored members
-- `ZRANGE` - Range queries
-- `ZSCORE` - Get scores
-
-[View Sorted Set Commands →](sorted-sets.md)
-
-### [Pub/Sub Commands](pubsub.md)
-Publish/Subscribe messaging for real-time communication.
-
-- `SUBSCRIBE`, `UNSUBSCRIBE` - Channel subscriptions
-- `PSUBSCRIBE`, `PUNSUBSCRIBE` - Pattern subscriptions
-- `PUBLISH` - Send messages
-- `PUBSUB` - Introspection commands
-
-[View Pub/Sub Commands →](pubsub.md)
-
-### [Server Commands](server.md)
-Server management and information commands.
-
-- `PING`, `INFO` - Server status
-- `AUTH` - Authentication
-- `CONFIG` - Configuration
-- `KEYS`, `DEL`, `EXISTS` - Key management
-
-[View Server Commands →](server.md)
+<div class="rl-grid rl-grid-3">
+  <div class="rl-card">
+    <h3><a href="acl/">ACL Commands</a></h3>
+    <p>ACL SETUSER, GETUSER, DELUSER, LIST, CAT, LOG for access control.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="cluster/">Cluster Commands</a></h3>
+    <p>CLUSTER INFO, NODES, SLOTS, MEET, FAILOVER for cluster management.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="sentinel/">Sentinel Commands</a></h3>
+    <p>SENTINEL MASTERS, FAILOVER, MONITOR for high availability.</p>
+  </div>
+  <div class="rl-card">
+    <h3><a href="server/">Server Commands</a></h3>
+    <p>PING, INFO, CONFIG, CLIENT, COMMAND, MEMORY, DEBUG, SLOWLOG.</p>
+  </div>
+</div>
 
 ## Command Compatibility
 
-rLightning aims for high compatibility with Redis. The following matrix shows the current implementation status:
+rLightning implements full Redis 7.x command compatibility:
 
-| Category | Implemented | Total | Coverage |
-|----------|-------------|-------|----------|
-| Strings  | 7/15        | 15    | 47%      |
-| Hashes   | 5/13        | 13    | 38%      |
-| Lists    | 5/17        | 17    | 29%      |
-| Sets     | 4/15        | 15    | 27%      |
-| Sorted Sets | 4/21     | 21    | 19%      |
-| Pub/Sub  | 8/8         | 8     | 100%     |
-| Keys     | 5/20        | 20    | 25%      |
-| Server   | 8/30        | 30    | 27%      |
+| Category | Commands | Status |
+|----------|----------|--------|
+| Strings | GET, SET, MGET, MSET, INCR, DECR, APPEND, GETEX, GETDEL, LCS, PSETEX, SUBSTR | Complete |
+| Hashes | HGET, HSET, HGETALL, HDEL, HEXISTS, HRANDFIELD, HSCAN | Complete |
+| Lists | LPUSH, RPUSH, LPOP, RPOP, LRANGE, BLPOP, BRPOP, LMOVE, LMPOP, BLMOVE, BLMPOP | Complete |
+| Sets | SADD, SREM, SMEMBERS, SMOVE, SINTERCARD, SMISMEMBER, SSCAN | Complete |
+| Sorted Sets | ZADD, ZRANGE, ZSCORE, ZPOPMIN/MAX, BZPOPMIN/MAX, ZRANGESTORE, ZMPOP | Complete |
+| Streams | XADD, XREAD, XREADGROUP, XACK, XPENDING, XCLAIM, XAUTOCLAIM, XINFO | Complete |
+| Bitmap | SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD | Complete |
+| HyperLogLog | PFADD, PFCOUNT, PFMERGE | Complete |
+| Geospatial | GEOADD, GEODIST, GEOSEARCH, GEOSEARCHSTORE, GEOPOS, GEOHASH | Complete |
+| Transactions | MULTI, EXEC, DISCARD, WATCH, UNWATCH | Complete |
+| Scripting | EVAL, EVALSHA, SCRIPT, FUNCTION, FCALL | Complete |
+| Pub/Sub | SUBSCRIBE, PUBLISH, PSUBSCRIBE, SSUBSCRIBE, SPUBLISH | Complete |
+| ACL | ACL SETUSER, GETUSER, DELUSER, LIST, USERS, WHOAMI, CAT, LOG | Complete |
+| Cluster | CLUSTER INFO, NODES, SLOTS, SHARDS, MEET, FAILOVER, MIGRATE | Complete |
+| Sentinel | SENTINEL MASTERS, REPLICAS, FAILOVER, MONITOR, CKQUORUM | Complete |
+| Server | PING, INFO, CONFIG, CLIENT, COMMAND, MEMORY, SLOWLOG, DEBUG | Complete |
+| Keys | KEYS, SCAN, DEL, EXISTS, EXPIRE, TTL, TYPE, RENAME, COPY, SORT | Complete |
 
-## Common Command Patterns
+## Common Patterns
 
-### Caching Pattern
+### Caching
 
 ```bash
-# Try to get from cache
-GET cache:user:1001
-
-# If miss, fetch from source and cache
 SET cache:user:1001 "user_data" EX 300
+GET cache:user:1001
 ```
 
 ### Session Management
 
 ```bash
-# Create session
 SET session:abc123 "user_id:1001" EX 3600
-
-# Check session
 GET session:abc123
-
-# Extend session
 EXPIRE session:abc123 3600
-
-# Delete session
 DEL session:abc123
 ```
 
 ### Rate Limiting
 
 ```bash
-# Increment request count
-INCR ratelimit:user:1001:2024-01-15
-
-# Set expiry if first request
-EXPIRE ratelimit:user:1001:2024-01-15 86400
-
-# Check if over limit
-GET ratelimit:user:1001:2024-01-15
+INCR ratelimit:user:1001
+EXPIRE ratelimit:user:1001 60
 ```
 
 ### Leaderboard
 
 ```bash
-# Add scores
 ZADD leaderboard 1000 player1
-ZADD leaderboard 1500 player2
-ZADD leaderboard 800 player3
-
-# Get top 10
 ZREVRANGE leaderboard 0 9 WITHSCORES
-
-# Get player rank
 ZREVRANK leaderboard player1
 ```
 
-### Job Queue
+### Message Queue
 
 ```bash
-# Producer: Add jobs
 LPUSH jobs "process_order:1001"
-LPUSH jobs "send_email:user@example.com"
-
-# Consumer: Process jobs
-RPOP jobs
+BRPOP jobs 30
 ```
-
-### Real-time Notifications
-
-```bash
-# Subscriber: User notification service
-SUBSCRIBE user:1001:notifications
-PSUBSCRIBE user:*:alerts
-
-# Publisher: Send notifications
-PUBLISH user:1001:notifications "New message from Alice"
-PUBLISH user:1001:alerts "Password changed"
-
-# Multiple subscribers receive the same message
-# Great for event broadcasting and real-time updates
-```
-
-## Command Conventions
-
-### Keys
-- Keys are binary safe (can contain any byte sequence)
-- Recommended to use a naming scheme like `object-type:id:field`
-- Examples: `user:1001`, `session:abc123`, `cache:article:5001`
-
-### Return Values
-Commands return different types of values:
-
-- **Simple strings**: `OK`, `PONG`
-- **Errors**: Error messages prefixed with `-ERR`
-- **Integers**: Numbers prefixed with `:`
-- **Bulk strings**: Binary-safe strings
-- **Arrays**: Multiple values
-
-### TTL (Time To Live)
-Many commands support TTL options:
-
-- `EX seconds` - Set expiry in seconds
-- `PX milliseconds` - Set expiry in milliseconds
-- `EXPIRE key seconds` - Set expiry on existing key
-- `TTL key` - Get remaining time to live
-
-## Performance Considerations
-
-### Command Complexity
-
-| Command | Time Complexity | Notes |
-|---------|----------------|-------|
-| GET     | O(1)           | Very fast |
-| SET     | O(1)           | Very fast |
-| DEL     | O(N)           | N = number of keys |
-| KEYS    | O(N)           | Avoid in production |
-| HGETALL | O(N)           | N = number of fields |
-| LRANGE  | O(S+N)         | S = start offset, N = elements |
-| SMEMBERS| O(N)           | N = set cardinality |
-| ZRANGE  | O(log(N)+M)    | N = set size, M = results |
-
-### Best Practices
-
-1. **Avoid `KEYS` in production** - Use `SCAN` instead (when available)
-2. **Use appropriate data types** - Hashes for objects, lists for queues
-3. **Set TTLs** - Prevent memory bloat with automatic expiration
-4. **Pipeline commands** - Reduce network round trips
-5. **Use MGET/MSET** - Batch operations are more efficient
-
-## Next Steps
-
-- Explore each command category in detail
-- Learn about [Configuration](../configuration.md)
-- Understand [Performance](../benchmarks.md)
-- Review [Use Cases](../use-cases.md)

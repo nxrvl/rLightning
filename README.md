@@ -5,18 +5,22 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/docker/automated/altista/rlightning.svg)](https://hub.docker.com/r/altista/rlightning)
 
-A high-performance, Redis-compatible in-memory key-value store built in Rust, focused on session management and caching use cases.
+A high-performance, Redis 7.x compatible in-memory data store built from the ground up in Rust. Full protocol support, all data types, and blazing speed with memory safety guarantees.
 
 ## Why rLightning?
 
-- **🚀 High Performance**: Built with Rust for maximum speed and safety
-- **🔌 Redis Compatible**: Drop-in replacement for Redis in many scenarios
-- **💾 Multiple Data Types**: Strings, hashes, lists, sets, sorted sets
-- **⏰ TTL Support**: Automatic key expiration
-- **🔄 Replication**: Master-replica setup for high availability
-- **💿 Persistence**: RDB snapshots and AOF logging
-- **🔒 Secure**: Built-in authentication support
-- **📊 Resource Efficient**: Configurable memory limits and eviction policies
+- **High Performance**: Lock-free DashMap storage, Tokio async I/O, sub-millisecond latency
+- **Full Redis 7.x Compatibility**: RESP2/RESP3 protocols, 400+ commands, drop-in replacement
+- **All Data Types**: Strings, hashes, lists, sets, sorted sets, streams, bitmaps, HyperLogLog, geospatial
+- **Transactions**: MULTI/EXEC with WATCH-based optimistic locking
+- **Lua Scripting**: EVAL/EVALSHA, Redis 7.0 Functions (FCALL)
+- **ACL Security**: Fine-grained per-user command, key, and channel permissions
+- **Cluster Mode**: Automatic sharding with hash slots, MOVED/ASK redirections, slot migration
+- **Sentinel HA**: Monitoring, automatic failover, quorum-based detection
+- **Pub/Sub**: Channel, pattern, and sharded pub/sub (Redis 7.0+)
+- **Persistence**: RDB snapshots, AOF logging, and hybrid mode
+- **Replication**: Full/partial sync (PSYNC), replication backlog, replica read-only mode
+- **Memory Safe**: Built in Rust with no unsafe code in the hot path
 
 ## Quick Start
 
@@ -95,48 +99,27 @@ redis-cli -h localhost -p 6379
 
 ## Features
 
-### Supported Redis Commands
+### Supported Redis Commands (400+)
 
-#### String Operations
-- `GET`, `SET`, `MGET`, `MSET` - Basic string operations
-- `INCR`, `DECR` - Atomic increment/decrement
-- `APPEND` - Append to string values
-- TTL support with `EXPIRE` and expiry options in `SET`
+#### Data Types
+- **Strings**: GET, SET, MGET, MSET, INCR, DECR, APPEND, GETEX, GETDEL, LCS, PSETEX
+- **Hashes**: HGET, HSET, HGETALL, HDEL, HEXISTS, HRANDFIELD, HSCAN
+- **Lists**: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LMOVE, LMPOP, BLPOP, BRPOP, BLMOVE, BLMPOP
+- **Sets**: SADD, SREM, SMEMBERS, SMOVE, SINTERCARD, SMISMEMBER, SSCAN
+- **Sorted Sets**: ZADD, ZRANGE (unified), ZSCORE, ZPOPMIN/MAX, BZPOPMIN/MAX, ZRANGESTORE, ZMPOP
+- **Streams**: XADD, XREAD, XREADGROUP, XACK, XPENDING, XCLAIM, XAUTOCLAIM, XINFO
+- **Bitmaps**: SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD
+- **HyperLogLog**: PFADD, PFCOUNT, PFMERGE
+- **Geospatial**: GEOADD, GEODIST, GEOSEARCH, GEOSEARCHSTORE, GEOPOS, GEOHASH
 
-#### Hash Operations
-- `HGET`, `HSET`, `HGETALL` - Field-value pairs
-- `HDEL`, `HEXISTS` - Hash management
-- Efficient storage for structured data
-
-#### List Operations
-- `LPUSH`, `RPUSH` - Add elements to lists
-- `LPOP`, `RPOP` - Remove and return elements
-- `LRANGE` - Retrieve list ranges
-
-#### Set Operations
-- `SADD`, `SREM` - Add/remove set members
-- `SMEMBERS` - Get all members
-- `SISMEMBER` - Check membership
-
-#### Sorted Set Operations
-- `ZADD`, `ZREM` - Scored set operations
-- `ZRANGE` - Range queries
-- `ZSCORE` - Get member scores
-
-#### Pub/Sub Operations
-- `SUBSCRIBE`, `UNSUBSCRIBE` - Channel subscriptions
-- `PSUBSCRIBE`, `PUNSUBSCRIBE` - Pattern-based subscriptions
-- `PUBLISH` - Send messages to channels
-- `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` - Introspection commands
-
-#### Server Commands
-- `PING` - Server health check
-- `INFO` - Server statistics
-- `AUTH` - Authentication
-- `CONFIG` - Runtime configuration
-- `KEYS` - Pattern matching
-- `FLUSHALL`, `FLUSHDB` - Data management
-- `MONITOR` - Real-time command monitoring
+#### Features
+- **Transactions**: MULTI, EXEC, DISCARD, WATCH, UNWATCH
+- **Lua Scripting**: EVAL, EVALSHA, SCRIPT, FUNCTION, FCALL
+- **Pub/Sub**: SUBSCRIBE, PUBLISH, PSUBSCRIBE, SSUBSCRIBE, SPUBLISH (sharded)
+- **ACL**: ACL SETUSER, GETUSER, DELUSER, LIST, USERS, WHOAMI, CAT, LOG
+- **Cluster**: CLUSTER INFO, NODES, SLOTS, SHARDS, MEET, FAILOVER, MIGRATE
+- **Sentinel**: SENTINEL MASTERS, REPLICAS, FAILOVER, MONITOR, CKQUORUM
+- **Server**: PING, INFO, CONFIG, CLIENT, COMMAND, MEMORY, SLOWLOG, LATENCY, DEBUG
 
 ### Memory Management
 
@@ -380,21 +363,19 @@ rLightning excels in:
 
 ## Roadmap
 
-### Current Status (v1.0)
-- ✅ Core Redis commands
-- ✅ Multiple data types
-- ✅ TTL support
-- ✅ Persistence (RDB/AOF)
-- ✅ Replication
-- ✅ Authentication
-- ✅ Pub/Sub messaging
-
-### Planned Features
-- 🔄 Lua scripting support
-- 🔄 Cluster mode
-- 🔄 Transactions (MULTI/EXEC)
-- 🔄 Streams
-- 🔄 Modules API
+### Current Status (v2.0 - Full Redis 7.x Compatibility)
+- All core Redis commands (400+)
+- All data types including streams, bitmaps, HyperLogLog, geospatial
+- RESP2 and RESP3 protocol support
+- Transactions (MULTI/EXEC/WATCH)
+- Lua scripting (EVAL/EVALSHA/Functions)
+- ACL security system
+- Cluster mode with hash slot sharding
+- Sentinel high availability
+- Pub/Sub with sharded channels
+- Persistence (RDB/AOF/hybrid)
+- Full/partial replication (PSYNC)
+- Comprehensive benchmark and test suites
 
 ## Documentation
 
