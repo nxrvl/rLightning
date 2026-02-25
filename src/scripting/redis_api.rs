@@ -17,6 +17,16 @@ fn sandbox_lua(lua: &Lua) {
     }
 }
 
+/// Commands that cannot be called from within Lua scripts (matching Redis behavior).
+/// These commands manage connection state, subscriptions, or transactions that
+/// should not be manipulated from inside a script.
+const BLOCKED_SCRIPT_COMMANDS: &[&str] = &[
+    "auth", "acl", "subscribe", "unsubscribe", "psubscribe", "punsubscribe",
+    "ssubscribe", "sunsubscribe", "multi", "exec", "discard", "watch", "unwatch",
+    "wait", "waitaof", "hello", "reset", "quit", "monitor", "debug", "shutdown",
+    "cluster", "failover", "psync", "replconf", "replicaof", "slaveof",
+];
+
 /// List of Redis write commands for read-only script enforcement
 const WRITE_COMMANDS: &[&str] = &[
     "set", "setnx", "setex", "psetex", "mset", "msetnx", "append", "incr", "incrby",
@@ -283,9 +293,20 @@ fn redis_call_impl(
         }
     };
 
+    // Block commands that should never be called from Lua scripts (matching Redis behavior)
+    let cmd_lower = cmd_name.to_lowercase();
+    if BLOCKED_SCRIPT_COMMANDS.contains(&cmd_lower.as_str()) {
+        let msg = format!("ERR This Redis command is not allowed from script: {}", cmd_name);
+        if protected {
+            let table = lua.create_table()?;
+            table.set("err", msg.as_str())?;
+            return Ok(Value::Table(table));
+        }
+        return Err(mlua::Error::external(msg));
+    }
+
     // Enforce read-only mode: block write commands in EVAL_RO/FCALL_RO
     if read_only {
-        let cmd_lower = cmd_name.to_lowercase();
         if WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
             let msg = format!("ERR Write commands are not allowed from read-only scripts. Command '{}' is a write command.", cmd_name);
             if protected {

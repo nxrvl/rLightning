@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 pub use acl::AclManager;
 
 /// Configuration for the security module
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SecurityConfig {
     /// Whether authentication is required
     pub require_auth: bool,
@@ -17,6 +17,16 @@ pub struct SecurityConfig {
     /// Path to ACL file (optional)
     #[allow(dead_code)]
     pub acl_file: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field("require_auth", &self.require_auth)
+            .field("password", &if self.password.is_empty() { "(none)" } else { "[REDACTED]" })
+            .field("acl_file", &self.acl_file)
+            .finish()
+    }
 }
 
 /// Security manager that handles authentication and ACL

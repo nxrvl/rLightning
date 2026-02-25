@@ -1987,12 +1987,10 @@ async fn acceptance_test_server_commands() {
 async fn acceptance_test_module_commands() {
     let (_addr, mut client) = setup_server_and_client(18135).await;
 
-    // MODULE LIST should return empty
+    // MODULE LIST should return empty array
     let resp = client.send_command_str("MODULE", &["LIST"]).await.unwrap();
-    match &resp {
-        RespValue::Array(Some(arr)) => {
-            assert_eq!(arr.len(), 0, "MODULE LIST should be empty");
-        }
-        _ => {} // Error is also acceptable
-    }
+    assert!(
+        matches!(&resp, RespValue::Array(Some(arr)) if arr.is_empty()),
+        "MODULE LIST should return empty array, got: {:?}", resp
+    );
 }

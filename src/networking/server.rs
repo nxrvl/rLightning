@@ -391,6 +391,16 @@ impl Server {
                                 }
                             }
 
+                            // Check for connection-closing commands
+                            if cmd_lower == "quit" {
+                                let response = RespValue::SimpleString("OK".to_string());
+                                if let Ok(bytes) = response.serialize() {
+                                    let _ = socket_writer.write_all(&bytes).await;
+                                    let _ = socket_writer.flush().await;
+                                }
+                                return Ok(());
+                            }
+
                             // Check for pub/sub commands
                             match cmd_lower.as_str() {
                                 "subscribe" => {
@@ -825,9 +835,19 @@ impl Server {
                                                 continue;
                                             }
 
+                                            // Handle QUIT - close connection (slow path)
+                                            if cmd_lower == "quit" {
+                                                let response = RespValue::SimpleString("OK".to_string());
+                                                if let Ok(bytes) = response.serialize() {
+                                                    let _ = socket_writer.write_all(&bytes).await;
+                                                    let _ = socket_writer.flush().await;
+                                                }
+                                                return Ok(());
+                                            }
+
                                             // Early authentication check for slow path
                                             let is_auth_command = cmd_lower == "auth";
-                                            if !is_auth_command && cmd_lower != "quit" {
+                                            if !is_auth_command {
                                                 if let Some(ref security_mgr) = security {
                                                     if security_mgr.require_auth()
                                                         && !security_mgr.is_authenticated(&client_addr_str)
@@ -2012,12 +2032,9 @@ impl Server {
                         if let Err(e) = security_mgr.authenticate_with_username(client_addr, &username, &password) {
                             return (RespValue::Error(e), current_version);
                         }
-                    } else {
-                        return (
-                            RespValue::Error("ERR Client sent AUTH, but no password is set. Did you mean ACL SETUSER with >password?".to_string()),
-                            current_version,
-                        );
                     }
+                    // When no security manager is configured (no auth required),
+                    // silently ignore the AUTH option (matching Redis behavior)
                     i += 3;
                 }
                 "SETNAME" => {

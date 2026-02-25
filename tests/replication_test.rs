@@ -518,11 +518,23 @@ async fn test_psync_without_replication() {
     // PSYNC ? -1 should be handled (it transitions to replication stream)
     // We just verify it doesn't crash the server
     let response = send_command(&mut stream, "PSYNC", &["?", "-1"]).await;
-    // The connection may close after PSYNC (it enters replication mode), so we just verify no panic
+    // The connection may close after PSYNC (it enters replication mode)
+    // Either a valid response or a connection close is acceptable
     match response {
-        Ok(_) => {} // Got some response
-        Err(_) => {} // Connection closed (expected for PSYNC)
+        Ok(resp) => {
+            let resp_str = format!("{:?}", resp);
+            assert!(
+                resp_str.contains("FULLRESYNC") || resp_str.contains("ERR") || resp_str.contains("CONTINUE"),
+                "PSYNC should return FULLRESYNC, CONTINUE, or ERR, got: {}", resp_str
+            );
+        }
+        Err(_) => {} // Connection closed (expected for PSYNC entering replication stream)
     }
+
+    // Verify the server is still alive after PSYNC
+    let mut verify_stream = TcpStream::connect(addr).await.unwrap();
+    let ping_resp = send_command(&mut verify_stream, "PING", &[]).await;
+    assert!(ping_resp.is_ok(), "Server should still be alive after PSYNC");
 }
 
 #[tokio::test]

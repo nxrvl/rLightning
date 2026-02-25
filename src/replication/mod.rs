@@ -1,6 +1,5 @@
 pub mod config;
 pub mod error;
-pub mod manager;
 pub mod client;
 pub mod server;
 #[cfg(test)]
