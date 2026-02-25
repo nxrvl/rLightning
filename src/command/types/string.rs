@@ -660,12 +660,20 @@ pub async fn setex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
-    let ttl = parse_ttl(&args[1])?;
+    let seconds_str = bytes_to_string(&args[1])?;
+    let seconds = seconds_str.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+
+    if seconds <= 0 {
+        return Err(CommandError::InvalidArgument("invalid expire time in 'setex' command".to_string()));
+    }
+
     let value = args[2].clone();
-    
-    // Set the key with the TTL
+    let ttl = Some(std::time::Duration::from_secs(seconds as u64));
+
     engine.set(key, value, ttl).await?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }

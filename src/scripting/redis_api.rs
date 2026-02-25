@@ -111,12 +111,12 @@ pub fn execute_function_in_lua(
     .exec()
     .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
-    // Load the library (skip shebang line)
-    let code_without_shebang: String = library_code
-        .lines()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Load the library (skip shebang line if present)
+    let code_without_shebang: String = if library_code.starts_with("#!") {
+        library_code.lines().skip(1).collect::<Vec<_>>().join("\n")
+    } else {
+        library_code.to_string()
+    };
 
     lua.load(&code_without_shebang)
         .exec()
@@ -511,8 +511,12 @@ pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec
         .set("redis", redis_table)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
-    // Evaluate the library code (skip shebang line)
-    let code_without_shebang: String = code.lines().skip(1).collect::<Vec<_>>().join("\n");
+    // Evaluate the library code (skip shebang line if present)
+    let code_without_shebang: String = if code.starts_with("#!") {
+        code.lines().skip(1).collect::<Vec<_>>().join("\n")
+    } else {
+        code.to_string()
+    };
 
     lua.load(&code_without_shebang)
         .exec()

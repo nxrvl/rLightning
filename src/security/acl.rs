@@ -1143,11 +1143,17 @@ impl AclManager {
             256
         } else {
             let bits_str = String::from_utf8_lossy(&args[0]);
-            bits_str.parse::<usize>().map_err(|_| {
+            let b = bits_str.parse::<usize>().map_err(|_| {
                 crate::command::CommandError::InvalidArgument(
                     "ERR ACL GENPASS argument must be a valid integer".to_string(),
                 )
-            })?
+            })?;
+            if b == 0 {
+                return Err(crate::command::CommandError::InvalidArgument(
+                    "ERR ACL GENPASS argument must be a positive number".to_string(),
+                ));
+            }
+            b
         };
 
         // Generate cryptographically secure random bytes and hex-encode
