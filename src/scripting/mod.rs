@@ -226,10 +226,12 @@ impl ScriptingEngine {
             })
             .collect();
 
-        // Update the function index
+        // Update the function index and store the library atomically
+        // Acquire both locks in the same scope (index first, then libs) to match
+        // function_delete/function_flush ordering and prevent TOCTOU races
         {
             let mut index = self.function_index.write().unwrap();
-            let libs = self.function_libraries.read().unwrap();
+            let mut libs = self.function_libraries.write().unwrap();
 
             // Remove old library's functions from index if replacing
             if let Some(old_lib) = libs.get(&lib_name) {
@@ -254,11 +256,8 @@ impl ScriptingEngine {
             for func in &functions {
                 index.insert(func.name.clone(), lib_name.clone());
             }
-        }
 
-        // Store the library
-        {
-            let mut libs = self.function_libraries.write().unwrap();
+            // Store the library in the same lock scope
             libs.insert(
                 lib_name.clone(),
                 FunctionLibrary {

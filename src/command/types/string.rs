@@ -140,28 +140,31 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     // Check key existence for NX/XX conditions
     let exists = engine.exists(&key).await?;
-    
-    // NX: Only set the key if it does not already exist
-    if nx && exists {
-        return Ok(RespValue::BulkString(None)); // Key exists, don't set
-    }
-    
-    // XX: Only set the key if it already exists
-    if xx && !exists {
-        return Ok(RespValue::BulkString(None)); // Key doesn't exist, don't set
-    }
-    
-    // Handle KEEPTTL: Get the current TTL if we're keeping it and the key exists
-    if keepttl && exists {
-        ttl = engine.ttl(&key).await?;
-    }
 
-    // Fetch old value before overwriting if GET option was specified
+    // Fetch old value before NX/XX early returns if GET option was specified
     let old_value = if get_old {
         engine.get(&key).await?
     } else {
         None
     };
+
+    // NX: Only set the key if it does not already exist
+    if nx && exists {
+        if get_old {
+            return Ok(RespValue::BulkString(old_value));
+        }
+        return Ok(RespValue::BulkString(None)); // Key exists, don't set
+    }
+
+    // XX: Only set the key if it already exists
+    if xx && !exists {
+        return Ok(RespValue::BulkString(None)); // Key doesn't exist, don't set
+    }
+
+    // Handle KEEPTTL: Get the current TTL if we're keeping it and the key exists
+    if keepttl && exists {
+        ttl = engine.ttl(&key).await?;
+    }
 
     // For large values, add debug logging
     if value.len() > 10240 {  // Log details for values > 10KB
@@ -524,9 +527,10 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         current_value[offset + i] = byte;
     }
     
-    // Store the modified value
-    engine.set(key, current_value.clone(), None).await?;
-    
+    // Store the modified value, preserving existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+    engine.set(key, current_value.clone(), existing_ttl).await?;
+
     // Return the new length
     Ok(RespValue::Integer(current_value.len() as i64))
 }

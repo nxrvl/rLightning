@@ -250,6 +250,7 @@ impl Server {
                                     client_id,
                                     &client_addr_str,
                                     &mut in_subscription_mode,
+                                    &security,
                                 ).await;
 
                                 if let Err(e) = result {
@@ -1475,6 +1476,7 @@ impl Server {
         client_id: ClientId,
         client_addr_str: &str,
         in_subscription_mode: &mut bool,
+        security: &Option<Arc<SecurityManager>>,
     ) -> Result<(), NetworkError> {
         // Combine partial buffer if needed
         if !partial_command_buffer.is_empty() {
@@ -1494,6 +1496,17 @@ impl Server {
 
                             match cmd_lower.as_str() {
                                 "subscribe" => {
+                                    // ACL channel check in subscription mode
+                                    if let Some(security_mgr) = security {
+                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                            let ch_str = String::from_utf8_lossy(denied);
+                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
+                                            if let Ok(bytes) = err.serialize() {
+                                                socket_writer.write_all(&bytes).await?;
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     if let Ok(responses) = pubsub_commands::subscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             if let Ok(bytes) = resp.serialize() {
@@ -1518,6 +1531,17 @@ impl Server {
                                     }
                                 }
                                 "psubscribe" => {
+                                    // ACL channel check in subscription mode
+                                    if let Some(security_mgr) = security {
+                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                            let ch_str = String::from_utf8_lossy(denied);
+                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
+                                            if let Ok(bytes) = err.serialize() {
+                                                socket_writer.write_all(&bytes).await?;
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     if let Ok(responses) = pubsub_commands::psubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             if let Ok(bytes) = resp.serialize() {
@@ -1542,6 +1566,17 @@ impl Server {
                                     }
                                 }
                                 "ssubscribe" => {
+                                    // ACL channel check in subscription mode
+                                    if let Some(security_mgr) = security {
+                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                            let ch_str = String::from_utf8_lossy(denied);
+                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
+                                            if let Ok(bytes) = err.serialize() {
+                                                socket_writer.write_all(&bytes).await?;
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     if let Ok(responses) = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             if let Ok(bytes) = resp.serialize() {

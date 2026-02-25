@@ -386,23 +386,34 @@ impl AofPersistence {
         }).await;
         
         // Handle the result
-        if result.is_ok() && result.unwrap().is_ok() {
-            debug!("AOF rewrite completed successfully");
-            // Update the file size
-            if let Ok(metadata) = tokio::fs::metadata(&self.path).await {
-                *self.file_size.write().await = metadata.len();
+        let rewrite_result = match result {
+            Ok(Ok(())) => {
+                debug!("AOF rewrite completed successfully");
+                // Update the file size
+                if let Ok(metadata) = tokio::fs::metadata(&self.path).await {
+                    *self.file_size.write().await = metadata.len();
+                }
+                *self.last_rewrite.write().await = Instant::now();
+                Ok(())
             }
-            *self.last_rewrite.write().await = Instant::now();
-        } else {
-            // Clean up temp file on error
-            let _ = fs::remove_file(&temp_path_cleanup);
-            error!("AOF rewrite failed");
-        }
-        
+            Ok(Err(e)) => {
+                // Clean up temp file on error
+                let _ = fs::remove_file(&temp_path_cleanup);
+                error!("AOF rewrite failed: {}", e);
+                Err(e)
+            }
+            Err(e) => {
+                // Clean up temp file on join error
+                let _ = fs::remove_file(&temp_path_cleanup);
+                error!("AOF rewrite task panicked: {}", e);
+                Err(PersistenceError::CorruptedFile(format!("AOF rewrite task panicked: {}", e)))
+            }
+        };
+
         // Mark rewrite as complete
         *in_progress = false;
-        
-        Ok(())
+
+        rewrite_result
     }
 }
 
