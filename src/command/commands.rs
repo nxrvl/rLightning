@@ -55,6 +55,9 @@ pub use crate::command::types::cluster::{cluster_command, asking, readonly, read
 // Sentinel commands
 pub use crate::command::types::sentinel::sentinel_command;
 
+// Module commands
+pub use crate::command::types::module::module_command;
+
 // Alias for type_command as get_type
 pub use type_command as get_type;
 

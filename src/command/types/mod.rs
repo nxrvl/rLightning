@@ -15,6 +15,7 @@ pub mod geo;
 pub mod json;
 pub mod stream;
 pub mod connection;
+pub mod module;
 // pub mod json_config;
 // pub mod json_document;
 // pub mod json_storage;
