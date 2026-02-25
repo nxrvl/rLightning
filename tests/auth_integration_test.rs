@@ -130,7 +130,7 @@ pub mod auth_integration_tests {
                     .expect("Failed to send PING command");
                 assert_eq!(
                     ping_response,
-                    RespValue::Error("ERR NOAUTH Authentication required.".to_string())
+                    RespValue::Error("NOAUTH Authentication required.".to_string())
                 );
             }
         }
@@ -153,7 +153,7 @@ pub mod auth_integration_tests {
             .expect("Failed to send PING command");
         assert_eq!(
             ping_response,
-            RespValue::Error("ERR NOAUTH Authentication required.".to_string())
+            RespValue::Error("NOAUTH Authentication required.".to_string())
         );
     }
 
