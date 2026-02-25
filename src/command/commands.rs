@@ -33,6 +33,9 @@ pub use crate::command::types::bitmap::{setbit, getbit, bitcount, bitpos, bitop,
 // HyperLogLog commands
 pub use crate::command::types::hyperloglog::{pfadd, pfcount, pfmerge};
 
+// Geo commands
+pub use crate::command::types::geo::{geoadd, geodist, geohash, geopos, geosearch, geosearchstore, georadius, georadiusbymember};
+
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 

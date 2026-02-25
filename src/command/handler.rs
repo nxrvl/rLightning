@@ -115,6 +115,16 @@ impl CommandHandler {
             "pfcount" => commands::pfcount(&self.storage, &command.args).await,
             "pfmerge" => commands::pfmerge(&self.storage, &command.args).await,
 
+            // Geo commands
+            "geoadd" => commands::geoadd(&self.storage, &command.args).await,
+            "geodist" => commands::geodist(&self.storage, &command.args).await,
+            "geohash" => commands::geohash(&self.storage, &command.args).await,
+            "geopos" => commands::geopos(&self.storage, &command.args).await,
+            "geosearch" => commands::geosearch(&self.storage, &command.args).await,
+            "geosearchstore" => commands::geosearchstore(&self.storage, &command.args).await,
+            "georadius" => commands::georadius(&self.storage, &command.args).await,
+            "georadiusbymember" => commands::georadiusbymember(&self.storage, &command.args).await,
+
             // List commands
             "lpush" => {
                 let result = commands::lpush(&self.storage, &command.args).await;
