@@ -347,6 +347,11 @@ impl CommandHandler {
             "fcall" => self.scripting.handle_fcall(self, &command.args, false).await,
             "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
 
+            // ACL commands are handled in server.rs, but return a friendly message here
+            "acl" => {
+                Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))
+            },
+
             // Unknown command
             _ => {
                 return Err(CommandError::UnknownCommand(command.name))

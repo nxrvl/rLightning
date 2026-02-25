@@ -276,22 +276,22 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/handler.rs`
 - Modify: `src/networking/mod.rs` (per-connection user context)
 
-- [ ] Design ACL data model: users, passwords, command permissions, key patterns, channels
-- [ ] Implement ACL SETUSER (create/modify users with complex rule syntax: +command, -command, ~keypattern, &channelpattern, >password, <password, on/off, allcommands, allkeys, nopass, reset)
-- [ ] Implement ACL GETUSER (get user details)
-- [ ] Implement ACL DELUSER (delete users)
-- [ ] Implement ACL LIST (list all users and rules)
-- [ ] Implement ACL USERS (list usernames)
-- [ ] Implement ACL WHOAMI (current user)
-- [ ] Implement ACL CAT (list command categories)
-- [ ] Implement ACL GENPASS (generate password)
-- [ ] Implement ACL LOG (log denied commands)
-- [ ] Implement ACL SAVE / LOAD (persist ACL to file)
-- [ ] Integrate ACL checks into command dispatch (check permissions before execution)
-- [ ] Update AUTH command to support username + password (AUTH username password)
-- [ ] Write tests for each ACL subcommand and permission enforcement
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Design ACL data model: users, passwords, command permissions, key patterns, channels
+- [x] Implement ACL SETUSER (create/modify users with complex rule syntax: +command, -command, ~keypattern, &channelpattern, >password, <password, on/off, allcommands, allkeys, nopass, reset)
+- [x] Implement ACL GETUSER (get user details)
+- [x] Implement ACL DELUSER (delete users)
+- [x] Implement ACL LIST (list all users and rules)
+- [x] Implement ACL USERS (list usernames)
+- [x] Implement ACL WHOAMI (current user)
+- [x] Implement ACL CAT (list command categories)
+- [x] Implement ACL GENPASS (generate password)
+- [x] Implement ACL LOG (log denied commands)
+- [x] Implement ACL SAVE / LOAD (persist ACL to file)
+- [x] Integrate ACL checks into command dispatch (check permissions before execution)
+- [x] Update AUTH command to support username + password (AUTH username password)
+- [x] Write tests for each ACL subcommand and permission enforcement
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 14: Connection & Server Commands
 

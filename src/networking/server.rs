@@ -371,6 +371,29 @@ impl Server {
                                     commands_processed += 1;
                                     continue;
                                 }
+                                // Handle ACL commands
+                                "acl" => {
+                                    if let Some(ref security_mgr) = security {
+                                        let response = security_mgr.acl().handle_acl_command(&cmd.args, &client_addr_str);
+                                        match response {
+                                            Ok(resp) => {
+                                                if let Ok(bytes) = resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                            }
+                                        }
+                                    } else {
+                                        let response = RespValue::SimpleString("OK".to_string());
+                                        if let Ok(bytes) = response.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
                                 _ => {}
                             }
 
@@ -392,6 +415,41 @@ impl Server {
                                     )
                                     .await?;
                                     continue;
+                                }
+
+                                // ACL permission check for authenticated clients
+                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
+                                    // Check command permission
+                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
+                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
+                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                                        Self::send_error_to_writer(
+                                            &mut socket_writer,
+                                            error_msg,
+                                            &client_addr_str,
+                                        )
+                                        .await?;
+                                        continue;
+                                    }
+
+                                    // Check key permission
+                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                    for &idx in &key_indices {
+                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
+                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
+                                            Self::send_error_to_writer(
+                                                &mut socket_writer,
+                                                error_msg,
+                                                &client_addr_str,
+                                            )
+                                            .await?;
+                                            continue;
+                                        }
+                                    }
                                 }
                             }
 
@@ -517,6 +575,29 @@ impl Server {
                                                     commands_processed += 1;
                                                     continue;
                                                 }
+                                                // Handle ACL commands
+                                                "acl" => {
+                                                    if let Some(ref security_mgr) = security {
+                                                        let response = security_mgr.acl().handle_acl_command(&cmd.args, &client_addr_str);
+                                                        match response {
+                                                            Ok(resp) => {
+                                                                if let Ok(bytes) = resp.serialize() {
+                                                                    response_buffer.extend_from_slice(&bytes);
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let response = RespValue::SimpleString("OK".to_string());
+                                                        if let Ok(bytes) = response.serialize() {
+                                                            response_buffer.extend_from_slice(&bytes);
+                                                        }
+                                                    }
+                                                    commands_processed += 1;
+                                                    continue;
+                                                }
                                                 _ => {}
                                             }
 
@@ -538,6 +619,41 @@ impl Server {
                                                     )
                                                     .await?;
                                                     continue;
+                                                }
+
+                                                // ACL permission check for authenticated clients
+                                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
+                                                    // Check command permission
+                                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
+                                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
+                                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                                                        Self::send_error_to_writer(
+                                                            &mut socket_writer,
+                                                            error_msg,
+                                                            &client_addr_str,
+                                                        )
+                                                        .await?;
+                                                        continue;
+                                                    }
+
+                                                    // Check key permission
+                                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                                    for &idx in &key_indices {
+                                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
+                                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
+                                                            Self::send_error_to_writer(
+                                                                &mut socket_writer,
+                                                                error_msg,
+                                                                &client_addr_str,
+                                                            )
+                                                            .await?;
+                                                            continue;
+                                                        }
+                                                    }
                                                 }
                                             }
 
@@ -771,8 +887,27 @@ impl Server {
         if is_auth_command {
             if let Some(security_mgr) = security {
                 if let RespValue::SimpleString(ref s) = result {
-                    if s == "OK" && cmd.args.len() == 1 {
-                        security_mgr.authenticate(client_addr_str, &cmd.args[0]);
+                    if s == "OK" {
+                        if cmd.args.len() == 1 {
+                            // AUTH password (default user)
+                            let password_str = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                            match security_mgr.authenticate_with_username(client_addr_str, "default", &password_str) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    return Err(crate::command::CommandError::InvalidArgument(e));
+                                }
+                            }
+                        } else if cmd.args.len() == 2 {
+                            // AUTH username password
+                            let username = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                            let password_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
+                            match security_mgr.authenticate_with_username(client_addr_str, &username, &password_str) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    return Err(crate::command::CommandError::InvalidArgument(e));
+                                }
+                            }
+                        }
                     }
                 }
             }

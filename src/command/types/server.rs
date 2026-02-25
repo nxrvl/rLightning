@@ -37,11 +37,12 @@ pub async fn info(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis AUTH command - Authenticate to the server
+/// Supports both AUTH password and AUTH username password
 pub async fn auth(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     // Authentication is handled by the Server's authentication middleware
     // For compatibility, we always return OK because the actual authentication
     // check happens in the networking layer
