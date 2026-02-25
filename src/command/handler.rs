@@ -390,6 +390,9 @@ impl CommandHandler {
             "readwrite" => commands::readwrite(&self.storage, &command.args).await,
             "migrate" => commands::migrate(&self.storage, &command.args).await,
 
+            // Module commands (stubs - rLightning doesn't support C-extension modules)
+            "module" => commands::module_command(&self.storage, &command.args).await,
+
             // ACL commands are handled in server.rs, but return a friendly message here
             "acl" => {
                 Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))

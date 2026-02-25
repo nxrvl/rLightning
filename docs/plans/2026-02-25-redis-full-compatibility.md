@@ -405,11 +405,11 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Create: `src/module/mod.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement MODULE LIST (return empty list or loaded modules)
-- [ ] Implement MODULE LOADEX / LOAD / UNLOAD stubs (return appropriate errors or no-ops)
-- [ ] Document module system limitations (rLightning is not C-extension compatible)
-- [ ] Write tests for module commands
-- [ ] Run project test suite - must pass before next task
+- [x] Implement MODULE LIST (return empty list or loaded modules)
+- [x] Implement MODULE LOADEX / LOAD / UNLOAD stubs (return appropriate errors or no-ops)
+- [x] Document module system limitations (rLightning is not C-extension compatible)
+- [x] Write tests for module commands
+- [x] Run project test suite - must pass before next task
 
 ### Task 20: Comprehensive Benchmark Suite (rLightning vs Redis)
 
