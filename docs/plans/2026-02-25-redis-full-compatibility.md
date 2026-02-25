@@ -422,24 +422,24 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 
 **Note: Benchmarks run locally only (not in CI/CD) due to hardware-dependent results.**
 
-- [ ] String command benchmarks: SET/GET/MSET/MGET/INCR/APPEND with various value sizes (64B, 1KB, 10KB, 100KB)
-- [ ] List command benchmarks: LPUSH/RPUSH/LPOP/RPOP/LRANGE with varying list sizes
-- [ ] Hash command benchmarks: HSET/HGET/HGETALL with varying field counts
-- [ ] Set command benchmarks: SADD/SINTER/SUNION with varying set sizes
-- [ ] Sorted set command benchmarks: ZADD/ZRANGE/ZRANGEBYSCORE with varying sizes
-- [ ] Stream command benchmarks: XADD/XREAD/XRANGE throughput
-- [ ] Pub/Sub benchmarks: message throughput, fan-out performance
-- [ ] Transaction benchmarks: MULTI/EXEC overhead vs non-transactional
-- [ ] Pipeline benchmarks: batched command throughput
-- [ ] Persistence benchmarks: RDB save/load times, AOF write throughput
-- [ ] Memory efficiency benchmarks: memory usage per key for each data type
-- [ ] Concurrent client benchmarks: throughput with 1/10/100/1000 clients
-- [ ] Latency benchmarks: p50/p95/p99 latency for common operations
-- [ ] Blocking command benchmarks: BLPOP/BRPOP wakeup latency
-- [ ] Lua scripting benchmarks: script execution overhead
-- [ ] Create automated comparison script that runs both Redis and rLightning, generates comparison report
-- [ ] Write benchmark result validation tests (ensure benchmarks complete without errors)
-- [ ] Run all benchmarks locally - verify they complete successfully
+- [x] String command benchmarks: SET/GET/MSET/MGET/INCR/APPEND with various value sizes (64B, 1KB, 10KB, 100KB)
+- [x] List command benchmarks: LPUSH/RPUSH/LPOP/RPOP/LRANGE with varying list sizes
+- [x] Hash command benchmarks: HSET/HGET/HGETALL with varying field counts
+- [x] Set command benchmarks: SADD/SINTER/SUNION with varying set sizes
+- [x] Sorted set command benchmarks: ZADD/ZRANGE/ZRANGEBYSCORE with varying sizes
+- [x] Stream command benchmarks: XADD/XREAD/XRANGE throughput
+- [x] Pub/Sub benchmarks: message throughput, fan-out performance
+- [x] Transaction benchmarks: MULTI/EXEC overhead vs non-transactional
+- [x] Pipeline benchmarks: batched command throughput
+- [x] Persistence benchmarks: RDB save/load times, AOF write throughput
+- [x] Memory efficiency benchmarks: memory usage per key for each data type
+- [x] Concurrent client benchmarks: throughput with 1/10/100/1000 clients
+- [x] Latency benchmarks: p50/p95/p99 latency for common operations
+- [x] Blocking command benchmarks: BLPOP/BRPOP wakeup latency
+- [x] Lua scripting benchmarks: script execution overhead
+- [x] Create automated comparison script that runs both Redis and rLightning, generates comparison report
+- [x] Write benchmark result validation tests (ensure benchmarks complete without errors)
+- [x] Run all benchmarks locally - verify they complete successfully
 
 ### Task 21: Full Redis Compatibility Test Suite (Dev Container-Based)
 
