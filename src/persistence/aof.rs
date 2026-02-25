@@ -15,6 +15,7 @@ use crate::networking::resp::{RespCommand, RespValue};
 use crate::persistence::config::{AofSyncPolicy, PersistenceConfig};
 use crate::persistence::error::PersistenceError;
 use crate::storage::engine::StorageEngine;
+use crate::storage::item::{RedisDataType, StorageItem};
 
 // Constants
 const BUFFER_SIZE: usize = 4096; // 4KB buffer
@@ -343,30 +344,20 @@ impl AofPersistence {
             
             let mut writer = BufWriter::new(file);
             
-            // Write each key as a SET command
+            // Write each key using type-appropriate commands
             for (key, item) in snapshot.iter() {
-                // Create a SET command
-                let mut args = vec![b"SET".to_vec(), key.clone(), item.value.clone()];
-                
-                // Add EX argument if there's a TTL
-                if let Some(ttl) = item.ttl() {
-                    if ttl.as_secs() > 0 {
-                        args.push(b"EX".to_vec());
-                        args.push(ttl.as_secs().to_string().into_bytes());
-                    }
+                let commands = aof_rewrite_commands_for_item(key, item);
+                for args in commands {
+                    let resp_cmd = RespValue::Array(Some(
+                        args.into_iter().map(|arg: Vec<u8>| RespValue::BulkString(Some(arg))).collect()
+                    ));
+
+                    let serialized = resp_cmd.serialize()
+                        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+
+                    writer.write_all(&serialized)
+                        .map_err(PersistenceError::Io)?;
                 }
-                
-                // Serialize to RESP format
-                let resp_cmd = RespValue::Array(Some(
-                    args.into_iter().map(|arg: Vec<u8>| RespValue::BulkString(Some(arg))).collect()
-                ));
-                
-                let serialized = resp_cmd.serialize()
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                
-                // Write to the file
-                writer.write_all(&serialized)
-                    .map_err(PersistenceError::Io)?;
             }
             
             // Ensure all data is flushed to disk
@@ -430,6 +421,107 @@ impl Clone for AofPersistence {
             next_sync: AtomicBool::new(self.next_sync.load(Ordering::SeqCst)),
         }
     }
+}
+
+/// Generate AOF-rewrite commands for a single key/item based on its data type.
+/// Returns a Vec of commands, where each command is a Vec of byte arguments.
+/// For collection types, we emit the appropriate Redis command to reconstruct the data.
+/// If a key has a TTL, we append a PEXPIRE command.
+fn aof_rewrite_commands_for_item(key: &Vec<u8>, item: &StorageItem) -> Vec<Vec<Vec<u8>>> {
+    let mut commands: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    match item.data_type {
+        RedisDataType::String => {
+            let mut args = vec![b"SET".to_vec(), key.clone(), item.value.clone()];
+            if let Some(ttl) = item.ttl() {
+                if ttl.as_millis() > 0 {
+                    args.push(b"PX".to_vec());
+                    args.push(ttl.as_millis().to_string().into_bytes());
+                }
+            }
+            commands.push(args);
+        }
+        RedisDataType::List => {
+            if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&item.value) {
+                if !list.is_empty() {
+                    // Emit RPUSH key elem1 elem2 ...
+                    let mut args = vec![b"RPUSH".to_vec(), key.clone()];
+                    args.extend(list);
+                    commands.push(args);
+                }
+            }
+        }
+        RedisDataType::Set => {
+            if let Ok(set) = bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(&item.value) {
+                if !set.is_empty() {
+                    // Emit SADD key member1 member2 ...
+                    let mut args = vec![b"SADD".to_vec(), key.clone()];
+                    args.extend(set.into_iter());
+                    commands.push(args);
+                }
+            }
+        }
+        RedisDataType::ZSet => {
+            // SortedSet is stored as Vec<(f64, Vec<u8>)> - (score, member) pairs
+            if let Ok(ss) = bincode::deserialize::<Vec<(f64, Vec<u8>)>>(&item.value) {
+                if !ss.is_empty() {
+                    // Emit ZADD key score1 member1 score2 member2 ...
+                    let mut args = vec![b"ZADD".to_vec(), key.clone()];
+                    for (score, member) in ss {
+                        args.push(score.to_string().into_bytes());
+                        args.push(member);
+                    }
+                    commands.push(args);
+                }
+            }
+        }
+        RedisDataType::Hash => {
+            // Hash fields are stored as composite keys (key:field) in the global keyspace,
+            // so individual hash field entries appear as String type items.
+            // A key marked as Hash type shouldn't normally appear in snapshot,
+            // but emit SET as fallback to avoid data loss.
+            let mut args = vec![b"SET".to_vec(), key.clone(), item.value.clone()];
+            if let Some(ttl) = item.ttl() {
+                if ttl.as_millis() > 0 {
+                    args.push(b"PX".to_vec());
+                    args.push(ttl.as_millis().to_string().into_bytes());
+                }
+            }
+            commands.push(args);
+        }
+        RedisDataType::Stream => {
+            if let Ok(stream) = bincode::deserialize::<crate::storage::stream::StreamData>(&item.value) {
+                // Emit XADD for each entry in the stream
+                for (_id, entry) in &stream.entries {
+                    let mut args = vec![
+                        b"XADD".to_vec(),
+                        key.clone(),
+                        entry.id.to_string().into_bytes(),
+                    ];
+                    for (field, value) in &entry.fields {
+                        args.push(field.clone());
+                        args.push(value.clone());
+                    }
+                    commands.push(args);
+                }
+            }
+        }
+    }
+
+    // For non-string types, append a PEXPIRE command if TTL is set
+    if item.data_type != RedisDataType::String {
+        if let Some(ttl) = item.ttl() {
+            if ttl.as_millis() > 0 {
+                commands.push(vec![
+                    b"PEXPIRE".to_vec(),
+                    key.clone(),
+                    ttl.as_millis().to_string().into_bytes(),
+                ]);
+            }
+        }
+    }
+
+    commands
 }
 
 /// Helper function to check if a command is read-only

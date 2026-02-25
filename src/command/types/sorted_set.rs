@@ -30,7 +30,7 @@ async fn save_sorted_set(engine: &StorageEngine, key: &[u8], ss: &SortedSet) -> 
     } else {
         let serialized = bincode::serialize(ss)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(key.to_vec(), serialized, RedisDataType::ZSet, None).await?;
+        engine.set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::ZSet).await?;
     }
     Ok(())
 }
@@ -237,7 +237,7 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InternalError(format!("Serialization error: {}", e))
     })?;
     
-    engine.set_with_type(key.clone(), serialized, RedisDataType::ZSet, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
     
     // CH flag: return added + changed instead of just added
     let result = if return_changed { added + changed } else { added };
@@ -382,7 +382,7 @@ pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 CommandError::InternalError(format!("Serialization error: {}", e))
             })?;
             
-            engine.set_with_type(key.clone(), serialized, RedisDataType::ZSet, None).await?;
+            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
         }
     }
     
@@ -697,7 +697,7 @@ pub async fn zincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         CommandError::InternalError(format!("Serialization error: {}", e))
     })?;
     
-    engine.set_with_type(key.clone(), serialized, RedisDataType::ZSet, None).await?;
+    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
     
     // Return the new score
     let score_str = format_score(new_score);

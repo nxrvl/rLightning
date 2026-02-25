@@ -161,7 +161,7 @@ async fn save_sorted_set(
         let serialized = bincode::serialize(ss)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
-            .set_with_type(key.to_vec(), serialized, RedisDataType::ZSet, None)
+            .set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::ZSet)
             .await?;
     }
     Ok(())
