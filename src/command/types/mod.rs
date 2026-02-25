@@ -1,5 +1,6 @@
 pub mod bitmap;
 pub mod blocking;
+pub mod cluster;
 pub mod hash;
 pub mod key;
 pub mod list;

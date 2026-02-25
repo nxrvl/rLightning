@@ -3,6 +3,7 @@
 /// This crate provides a high-performance, Redis-compatible in-memory database
 /// focused on session management and caching use cases.
 // Re-export modules for testing
+pub mod cluster;
 pub mod command;
 pub mod networking;
 pub mod persistence;
