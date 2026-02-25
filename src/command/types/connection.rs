@@ -513,6 +513,11 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let seconds: f64 = seconds_str.parse().map_err(|_| {
                 CommandError::InvalidArgument("Invalid sleep duration".to_string())
             })?;
+            if seconds < 0.0 || seconds > 30.0 {
+                return Err(CommandError::InvalidArgument(
+                    "ERR sleep duration must be between 0 and 30 seconds".to_string(),
+                ));
+            }
             let duration = std::time::Duration::from_secs_f64(seconds);
             tokio::time::sleep(duration).await;
             Ok(RespValue::SimpleString("OK".to_string()))

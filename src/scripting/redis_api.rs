@@ -11,9 +11,14 @@ fn sandbox_lua(lua: &Lua) {
         "io", "os", "loadfile", "dofile", "debug", "require", "package",
         "load", "loadstring",
         "setfenv", "getfenv", "newproxy",
+        "rawget", "rawset", "rawequal", "collectgarbage",
     ];
     for name in &globals_to_disable {
         let _ = lua.globals().set(*name, Value::Nil);
+    }
+    // Disable string.dump which can serialize functions to bytecode
+    if let Ok(string_table) = lua.globals().get::<mlua::Table>("string") {
+        let _ = string_table.set("dump", Value::Nil);
     }
 }
 

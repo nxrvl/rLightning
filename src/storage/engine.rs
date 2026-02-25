@@ -793,7 +793,11 @@ impl StorageEngine {
             .sum();
         self.data.clear();
         self.current_memory.fetch_sub(size.min(self.current_memory.load(Ordering::Relaxed)), Ordering::Relaxed);
-        self.key_count.store(0, Ordering::Relaxed);
+        // Recount keys across extra databases rather than blindly setting to 0
+        let remaining: u64 = self.extra_dbs.iter()
+            .map(|db| db.len() as u64)
+            .sum();
+        self.key_count.store(remaining, Ordering::Relaxed);
         Ok(())
     }
     

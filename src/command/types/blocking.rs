@@ -40,6 +40,12 @@ impl BlockingManager {
             });
         entry.subscribe()
     }
+
+    /// Remove entries where all receivers have been dropped to prevent memory leaks.
+    /// Should be called periodically (e.g., from the TTL cleanup timer).
+    pub fn cleanup_stale_entries(&self) {
+        self.signals.retain(|_key, sender| sender.receiver_count() > 0);
+    }
 }
 
 #[cfg(test)]

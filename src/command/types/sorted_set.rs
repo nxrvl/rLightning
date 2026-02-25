@@ -41,7 +41,7 @@ fn format_score(score: f64) -> String {
         "inf".to_string()
     } else if score == f64::NEG_INFINITY {
         "-inf".to_string()
-    } else if score.fract() == 0.0 && score.abs() < 1e15 {
+    } else if score.fract() == 0.0 && score.abs() < (1_i64 << 53) as f64 {
         format!("{}", score as i64)
     } else {
         format!("{}", score)

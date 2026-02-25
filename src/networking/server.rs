@@ -187,7 +187,7 @@ impl Server {
         let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut response_buffer = Vec::with_capacity(buffer_size);
         let mut partial_command_buffer: Vec<u8> = Vec::new(); // For reassembling partial large commands
-        const MAX_PARTIAL_BUFFER_SIZE: usize = 256 * 1024 * 1024; // 256MB limit for partial command buffer
+        const MAX_PARTIAL_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB limit for partial command buffer
 
         // Split the socket for concurrent read/write in subscription mode
         let (mut socket_reader, mut socket_writer) = socket.into_split();
