@@ -30,6 +30,9 @@ pub use crate::command::types::key::{copy, move_cmd, unlink, touch, expireat, pe
 // Bitmap commands
 pub use crate::command::types::bitmap::{setbit, getbit, bitcount, bitpos, bitop, bitfield, bitfield_ro};
 
+// HyperLogLog commands
+pub use crate::command::types::hyperloglog::{pfadd, pfcount, pfmerge};
+
 // Server commands
 pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
 

@@ -133,9 +133,12 @@ async fn test_redis_hyperloglog_commands() -> Result<(), Box<dyn std::error::Err
     let result = client.send_command_str("PFCOUNT", &[]).await?;
     assert!(matches!(result, RespValue::Error(_)), "PFCOUNT without key should return error");
     
-    // Test PFMERGE with wrong number of arguments
-    let result = client.send_command_str("PFMERGE", &["destination"]).await?;
-    assert!(matches!(result, RespValue::Error(_)), "PFMERGE with only destination should return error");
+    // Test PFMERGE with only destination (valid in Redis - creates empty HLL or no-op)
+    let result = client.send_command_str("PFMERGE", &["destination_only"]).await?;
+    assert!(
+        matches!(result, RespValue::SimpleString(ref s) if s == "OK"),
+        "PFMERGE with only destination should return OK (Redis behavior)"
+    );
     
     // ======== TEST INTERACTION WITH OTHER COMMANDS ========
     println!("Testing interaction with other Redis commands");

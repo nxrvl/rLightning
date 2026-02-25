@@ -110,6 +110,11 @@ impl CommandHandler {
             "bitfield" => commands::bitfield(&self.storage, &command.args).await,
             "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
 
+            // HyperLogLog commands
+            "pfadd" => commands::pfadd(&self.storage, &command.args).await,
+            "pfcount" => commands::pfcount(&self.storage, &command.args).await,
+            "pfmerge" => commands::pfmerge(&self.storage, &command.args).await,
+
             // List commands
             "lpush" => {
                 let result = commands::lpush(&self.storage, &command.args).await;
