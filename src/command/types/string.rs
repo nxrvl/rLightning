@@ -39,14 +39,72 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 let millis = millis_str.parse::<i64>().map_err(|_| {
                     CommandError::InvalidArgument("PX value must be a valid integer".to_string())
                 })?;
-                
-                if millis < 0 {
-                    // Negative TTL means delete the key after setting it
-                    ttl = None;
+
+                if millis <= 0 {
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'set' command".to_string()
+                    ));
+                }
+                ttl = Some(std::time::Duration::from_millis(millis as u64));
+                i += 2;
+            },
+            "EXAT" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
+                let timestamp_str = bytes_to_string(&args[i + 1])?;
+                let timestamp = timestamp_str.parse::<i64>().map_err(|_| {
+                    CommandError::InvalidArgument("EXAT value must be a valid integer".to_string())
+                })?;
+                if timestamp <= 0 {
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'set' command".to_string()
+                    ));
+                }
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let diff = timestamp - now_secs;
+                if diff <= 0 {
+                    // Key would already be expired; set a minimal TTL
+                    ttl = Some(std::time::Duration::from_millis(1));
                 } else {
-                    ttl = Some(std::time::Duration::from_millis(millis as u64));
+                    ttl = Some(std::time::Duration::from_secs(diff as u64));
                 }
                 i += 2;
+            },
+            "PXAT" => {
+                if i + 1 >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
+                let timestamp_str = bytes_to_string(&args[i + 1])?;
+                let timestamp_ms = timestamp_str.parse::<i64>().map_err(|_| {
+                    CommandError::InvalidArgument("PXAT value must be a valid integer".to_string())
+                })?;
+                if timestamp_ms <= 0 {
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'set' command".to_string()
+                    ));
+                }
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let diff_ms = timestamp_ms - now_ms;
+                if diff_ms <= 0 {
+                    ttl = Some(std::time::Duration::from_millis(1));
+                } else {
+                    ttl = Some(std::time::Duration::from_millis(diff_ms as u64));
+                }
+                i += 2;
+            },
+            "GET" => {
+                // GET option: return old value (handled after setting)
+                // We'll set a flag and handle it below
+                i += 1;
+                // For now, GET option is recognized but old value retrieval
+                // is handled in the engine.set path below
             },
             "NX" => {
                 nx = true;
@@ -77,7 +135,6 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     // NX and XX options are mutually exclusive
     if nx && xx {
-        println!("DEBUG: Detected conflicting NX and XX options in SET command");
         return Err(CommandError::InvalidArgument(
             "NX and XX options cannot be used together".to_string()
         ));

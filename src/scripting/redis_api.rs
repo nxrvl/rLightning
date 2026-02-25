@@ -4,6 +4,33 @@ use crate::command::{Command, CommandError, CommandResult};
 use crate::command::handler::CommandHandler;
 use crate::networking::resp::RespValue;
 
+/// Apply sandbox restrictions to a Lua state, matching Redis behavior.
+/// Disables dangerous globals and libraries that could allow sandbox escape.
+fn sandbox_lua(lua: &Lua) {
+    let globals_to_disable = [
+        "io", "os", "loadfile", "dofile", "debug", "require", "package",
+        "load", "loadstring", "rawset", "rawget", "rawequal",
+        "collectgarbage", "setfenv", "getfenv", "newproxy", "print",
+    ];
+    for name in &globals_to_disable {
+        let _ = lua.globals().set(*name, Value::Nil);
+    }
+}
+
+/// List of Redis write commands for read-only script enforcement
+const WRITE_COMMANDS: &[&str] = &[
+    "set", "setnx", "setex", "psetex", "mset", "msetnx", "append", "incr", "incrby",
+    "incrbyfloat", "decr", "decrby", "getset", "getdel", "getex", "del", "unlink",
+    "expire", "expireat", "pexpire", "pexpireat", "persist", "rename", "renamenx",
+    "copy", "move", "lpush", "rpush", "lpop", "rpop", "linsert", "lset", "ltrim",
+    "lmove", "lmpop", "rpoplpush", "sadd", "srem", "smove", "spop", "sinterstore",
+    "sunionstore", "sdiffstore", "zadd", "zrem", "zincrby", "zpopmin", "zpopmax",
+    "zrangestore", "zinterstore", "zunionstore", "zdiffstore", "hset", "hsetnx",
+    "hdel", "hincrby", "hincrbyfloat", "xadd", "xdel", "xtrim", "xgroup",
+    "xack", "xclaim", "xautoclaim", "pfadd", "pfmerge", "geoadd", "geosearchstore",
+    "setbit", "bitop", "bitfield", "flushdb", "flushall", "sort",
+];
+
 /// Execute a Lua script with the given keys and args.
 /// This runs inside a spawn_blocking context.
 pub fn execute_in_lua(
@@ -12,20 +39,15 @@ pub fn execute_in_lua(
     args: Vec<Vec<u8>>,
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
-    _read_only: bool,
+    read_only: bool,
 ) -> CommandResult {
     let lua = Lua::new();
-
-    // Disable potentially dangerous libraries (matching Redis behavior)
-    let _ = lua.globals().set("io", Value::Nil);
-    let _ = lua.globals().set("os", Value::Nil);
-    let _ = lua.globals().set("loadfile", Value::Nil);
-    let _ = lua.globals().set("dofile", Value::Nil);
+    sandbox_lua(&lua);
 
     setup_keys_argv(&lua, &keys, &args)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
-    setup_redis_api(&lua, handler, handle)
+    setup_redis_api(&lua, handler, handle, read_only)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
     // Execute the script
@@ -46,17 +68,12 @@ pub fn execute_function_in_lua(
     args: Vec<Vec<u8>>,
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
-    _read_only: bool,
+    read_only: bool,
 ) -> CommandResult {
     let lua = Lua::new();
+    sandbox_lua(&lua);
 
-    // Disable dangerous libraries
-    let _ = lua.globals().set("io", Value::Nil);
-    let _ = lua.globals().set("os", Value::Nil);
-    let _ = lua.globals().set("loadfile", Value::Nil);
-    let _ = lua.globals().set("dofile", Value::Nil);
-
-    setup_redis_api(&lua, handler, handle)
+    setup_redis_api(&lua, handler, handle, read_only)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
     // Create a table to store registered functions
@@ -137,6 +154,7 @@ fn setup_redis_api(
     lua: &Lua,
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
+    read_only: bool,
 ) -> mlua::Result<()> {
     let redis_table = lua.create_table()?;
 
@@ -144,7 +162,7 @@ fn setup_redis_api(
     let handler_call = handler.clone();
     let handle_call = handle.clone();
     let call_fn = lua.create_function(move |lua, args: MultiValue| {
-        redis_call_impl(lua, args, &handler_call, &handle_call, false)
+        redis_call_impl(lua, args, &handler_call, &handle_call, false, read_only)
     })?;
     redis_table.set("call", call_fn)?;
 
@@ -152,7 +170,7 @@ fn setup_redis_api(
     let handler_pcall = handler.clone();
     let handle_pcall = handle.clone();
     let pcall_fn = lua.create_function(move |lua, args: MultiValue| {
-        redis_call_impl(lua, args, &handler_pcall, &handle_pcall, true)
+        redis_call_impl(lua, args, &handler_pcall, &handle_pcall, true, read_only)
     })?;
     redis_table.set("pcall", pcall_fn)?;
 
@@ -233,6 +251,7 @@ fn redis_call_impl(
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
     protected: bool,
+    read_only: bool,
 ) -> mlua::Result<Value> {
     if args.is_empty() {
         let msg = "ERR wrong number of arguments for 'redis.call'";
@@ -260,6 +279,20 @@ fn redis_call_impl(
             return Err(mlua::Error::external(msg));
         }
     };
+
+    // Enforce read-only mode: block write commands in EVAL_RO/FCALL_RO
+    if read_only {
+        let cmd_lower = cmd_name.to_lowercase();
+        if WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
+            let msg = format!("ERR Write commands are not allowed from read-only scripts. Command '{}' is a write command.", cmd_name);
+            if protected {
+                let table = lua.create_table()?;
+                table.set("err", msg.as_str())?;
+                return Ok(Value::Table(table));
+            }
+            return Err(mlua::Error::external(msg));
+        }
+    }
 
     // Convert remaining arguments to byte vectors
     let cmd_args: Vec<Vec<u8>> = args
@@ -409,6 +442,7 @@ pub fn lua_to_resp(value: &Value) -> RespValue {
 /// Creates a temporary Lua state and evaluates the library to find registered functions.
 pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec<String>)>, CommandError> {
     let lua = Lua::new();
+    sandbox_lua(&lua);
     let functions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let funcs_clone = functions.clone();

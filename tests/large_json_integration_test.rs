@@ -11,7 +11,7 @@ async fn test_large_json_through_resp() {
     config.max_value_size = 1024 * 1024; // 1MB
 
     // Use a unique port number to avoid conflicts with other tests
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18100));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18199));
     let storage = std::sync::Arc::new(StorageEngine::new(config.clone()));
     let server = Server::new(addr, std::sync::Arc::clone(&storage));
     
