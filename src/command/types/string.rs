@@ -17,6 +17,7 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut nx = false;
     let mut xx = false;
     let mut keepttl = false;
+    let mut get_old = false;
     let mut i = 2;
     
     while i < args.len() {
@@ -100,11 +101,8 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 i += 2;
             },
             "GET" => {
-                // GET option: return old value (handled after setting)
-                // We'll set a flag and handle it below
+                get_old = true;
                 i += 1;
-                // For now, GET option is recognized but old value retrieval
-                // is handled in the engine.set path below
             },
             "NX" => {
                 nx = true;
@@ -157,16 +155,30 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if keepttl && exists {
         ttl = engine.ttl(&key).await?;
     }
-    
+
+    // Fetch old value before overwriting if GET option was specified
+    let old_value = if get_old {
+        engine.get(&key).await?
+    } else {
+        None
+    };
+
     // For large values, add debug logging
     if value.len() > 10240 {  // Log details for values > 10KB
-        tracing::debug!("SET command with large value: key length={}, value length={}", 
+        tracing::debug!("SET command with large value: key length={}, value length={}",
                         key.len(), value.len());
     }
-    
+
     // Perform the SET operation
     match engine.set(key, value, ttl).await {
-        Ok(_) => Ok(RespValue::SimpleString("OK".to_string())),
+        Ok(_) => {
+            if get_old {
+                // Return the old value (or nil if key didn't exist)
+                Ok(RespValue::BulkString(old_value))
+            } else {
+                Ok(RespValue::SimpleString("OK".to_string()))
+            }
+        },
         Err(e) => {
             tracing::error!("SET command failed: {}", e);
             Err(CommandError::InvalidArgument(format!("SET operation failed: {}", e)))
@@ -252,14 +264,17 @@ pub async fn incr(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => 0,
     };
     
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Increment the value
     let new_value = value.checked_add(1).ok_or_else(|| {
         CommandError::InvalidArgument("Increment operation would overflow".to_string())
     })?;
-    
-    // Store the new value
-    engine.set(key, new_value.to_string().into_bytes(), None).await?;
-    
+
+    // Store the new value, preserving TTL
+    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
+
     Ok(RespValue::Integer(new_value))
 }
 
@@ -288,14 +303,17 @@ pub async fn incrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => 0,
     };
     
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Increment the value by the given amount
     let new_value = value.checked_add(increment).ok_or_else(|| {
         CommandError::InvalidArgument("Increment operation would overflow".to_string())
     })?;
-    
-    // Store the new value
-    engine.set(key, new_value.to_string().into_bytes(), None).await?;
-    
+
+    // Store the new value, preserving TTL
+    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
+
     Ok(RespValue::Integer(new_value))
 }
 
@@ -319,14 +337,17 @@ pub async fn decr(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => 0,
     };
     
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Decrement the value
     let new_value = value.checked_sub(1).ok_or_else(|| {
         CommandError::InvalidArgument("Decrement operation would underflow".to_string())
     })?;
-    
-    // Store the new value
-    engine.set(key, new_value.to_string().into_bytes(), None).await?;
-    
+
+    // Store the new value, preserving TTL
+    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
+
     Ok(RespValue::Integer(new_value))
 }
 
@@ -355,14 +376,17 @@ pub async fn decrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => 0,
     };
     
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Decrement the value by the given amount
     let new_value = value.checked_sub(decrement).ok_or_else(|| {
         CommandError::InvalidArgument("Decrement operation would underflow".to_string())
     })?;
-    
-    // Store the new value
-    engine.set(key, new_value.to_string().into_bytes(), None).await?;
-    
+
+    // Store the new value, preserving TTL
+    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
+
     Ok(RespValue::Integer(new_value))
 }
 
@@ -377,12 +401,15 @@ pub async fn append(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     // Get the current value
     let mut current_value = engine.get(&key).await?.unwrap_or_default();
-    
+
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Append the new value
     current_value.extend_from_slice(&value);
-    
-    // Store the result
-    engine.set(key, current_value.clone(), None).await?;
+
+    // Store the result, preserving TTL
+    engine.set(key, current_value.clone(), existing_ttl).await?;
     
     // Return the new length
     Ok(RespValue::Integer(current_value.len() as i64))
@@ -580,14 +607,17 @@ pub async fn incrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         None => 0.0,
     };
     
+    // Preserve existing TTL
+    let existing_ttl = engine.ttl(&key).await?;
+
     // Increment the value by the given amount
     let new_value = value + increment;
-    
+
     // Check for NaN or infinity
     if !new_value.is_finite() {
         return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
     }
-    
+
     // Store the new value
     let new_value_str = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
         // If it's a whole number, format without decimal
@@ -596,8 +626,8 @@ pub async fn incrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         // Otherwise, use Redis-compatible float formatting
         format!("{}", new_value)
     };
-    
-    engine.set(key, new_value_str.as_bytes().to_vec(), None).await?;
+
+    engine.set(key, new_value_str.as_bytes().to_vec(), existing_ttl).await?;
     
     Ok(RespValue::BulkString(Some(new_value_str.into_bytes())))
 }

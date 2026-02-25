@@ -106,9 +106,9 @@ impl AofPersistence {
             let mut fsync_interval = time::interval(Duration::from_secs(1));
             fsync_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             
-            // Track whether we need to fsync
-            let need_fsync = false;
-            
+            // Track whether we need to fsync (for EverySecond policy)
+            let mut need_fsync = false;
+
             loop {
                 tokio::select! {
                     // Handle new entries
@@ -119,7 +119,7 @@ impl AofPersistence {
                                 .chain(entry.command.args.into_iter().map(|arg| RespValue::BulkString(Some(arg))))
                                 .collect()
                         ));
-                        
+
                         // Serialize and handle errors
                         let serialized = match resp_cmd.serialize() {
                             Ok(data) => data,
@@ -128,44 +128,44 @@ impl AofPersistence {
                                 continue;
                             }
                         };
-                        
+
                         // Write to the file
                         if let Err(e) = writer.write_all(&serialized).await {
                             error!(path = ?path, "Failed to write to AOF file: {:?}", e);
                             continue;
                         }
-                        
+
                         // Update the file size
                         *file_size.write().await += serialized.len() as u64;
-                        
-                        // Set fsync flag if this entry requires it
+
                         if entry.sync {
-                            // Instead of assigning to need_fsync, just flush immediately
-                            
-                            // Flush the buffer to ensure data is written to the OS
+                            // Always policy: flush and fsync immediately
                             if let Err(e) = writer.flush().await {
                                 error!(path = ?path, "Failed to flush AOF buffer: {:?}", e);
                             }
-                            
-                            // Sync to disk
                             if let Err(e) = writer.get_ref().sync_all().await {
                                 error!(path = ?path, "Failed to fsync AOF file: {:?}", e);
                             }
+                        } else {
+                            // EverySecond policy: mark that we have unfsynced data
+                            need_fsync = true;
                         }
                     }
-                    
-                    // Handle periodic fsync
+
+                    // Handle periodic fsync (for EverySecond policy)
                     _ = fsync_interval.tick() => {
                         if need_fsync {
                             // Flush the buffer
                             if let Err(e) = writer.flush().await {
                                 error!(path = ?path, "Failed to flush AOF buffer during periodic fsync: {:?}", e);
                             }
-                            
+
                             // Sync to disk
                             if let Err(e) = writer.get_ref().sync_all().await {
                                 error!(path = ?path, "Failed to fsync AOF file during periodic fsync: {:?}", e);
                             }
+
+                            need_fsync = false;
                         }
                     }
                 }

@@ -547,12 +547,13 @@ impl ReplicationManager {
             "set" | "setnx" | "setex" | "psetex" | "mset" | "msetnx" | "getset" | "getex" | "getdel" |
             "append" | "setrange" | "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" |
             "del" | "unlink" | "expire" | "pexpire" | "expireat" | "pexpireat" | "persist" |
-            "rename" | "copy" | "move" | "sort" |
+            "rename" | "renamenx" | "copy" | "move" | "sort" |
             "lpush" | "rpush" | "lpushx" | "rpushx" | "lpop" | "rpop" | "linsert" | "lset" | "ltrim" | "lmove" | "lmpop" |
+            "rpoplpush" | "brpoplpush" | "blmove" | "blmpop" | "blpop" | "brpop" |
             "hset" | "hdel" | "hmset" | "hincrby" | "hincrbyfloat" | "hsetnx" |
             "sadd" | "srem" | "spop" | "smove" | "sinterstore" | "sunionstore" | "sdiffstore" |
-            "zadd" | "zrem" | "zincrby" | "zinterstore" | "zunionstore" | "zdiffstore" |
-            "zpopmin" | "zpopmax" | "zrangestore" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" |
+            "zadd" | "zrem" | "zincrby" | "zinterstore" | "zunionstore" | "zdiffstore" | "zmpop" | "bzmpop" |
+            "zpopmin" | "zpopmax" | "bzpopmin" | "bzpopmax" | "zrangestore" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" |
             "setbit" | "bitop" | "bitfield" |
             "pfadd" | "pfmerge" |
             "geoadd" | "geosearchstore" |

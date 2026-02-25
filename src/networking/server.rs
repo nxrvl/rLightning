@@ -397,6 +397,16 @@ impl Server {
                             // Check for pub/sub commands
                             match cmd_lower.as_str() {
                                 "subscribe" => {
+                                    // ACL channel check
+                                    if let Some(ref security_mgr) = security {
+                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                        if let Some(channel) = denied {
+                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                    }
                                     let responses = pubsub_commands::subscribe(&pubsub, client_id, &cmd.args).await;
                                     match responses {
                                         Ok(resp_list) => {
@@ -415,6 +425,16 @@ impl Server {
                                     continue;
                                 }
                                 "psubscribe" => {
+                                    // ACL channel check (patterns are checked as-is)
+                                    if let Some(ref security_mgr) = security {
+                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                        if let Some(channel) = denied {
+                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                    }
                                     let responses = pubsub_commands::psubscribe(&pubsub, client_id, &cmd.args).await;
                                     match responses {
                                         Ok(resp_list) => {
@@ -433,6 +453,15 @@ impl Server {
                                     continue;
                                 }
                                 "publish" => {
+                                    // ACL channel check (first arg is channel)
+                                    if let Some(ref security_mgr) = security {
+                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
+                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                    }
                                     let response = pubsub_commands::publish(&pubsub, &cmd.args).await;
                                     match response {
                                         Ok(resp) => {
@@ -448,6 +477,16 @@ impl Server {
                                     continue;
                                 }
                                 "ssubscribe" => {
+                                    // ACL channel check
+                                    if let Some(ref security_mgr) = security {
+                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                        if let Some(channel) = denied {
+                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                    }
                                     let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
                                     match responses {
                                         Ok(resp_list) => {
@@ -466,6 +505,15 @@ impl Server {
                                     continue;
                                 }
                                 "spublish" => {
+                                    // ACL channel check (first arg is channel)
+                                    if let Some(ref security_mgr) = security {
+                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
+                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                    }
                                     let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
                                     match response {
                                         Ok(resp) => {
@@ -848,6 +896,16 @@ impl Server {
                                             // Check for pub/sub commands
                                             match cmd_lower.as_str() {
                                                 "subscribe" => {
+                                                    // ACL channel check
+                                                    if let Some(ref security_mgr) = security {
+                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                                        if let Some(channel) = denied {
+                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
                                                     let responses = pubsub_commands::subscribe(&pubsub, client_id, &cmd.args).await;
                                                     match responses {
                                                         Ok(resp_list) => {
@@ -866,6 +924,16 @@ impl Server {
                                                     continue;
                                                 }
                                                 "psubscribe" => {
+                                                    // ACL channel check
+                                                    if let Some(ref security_mgr) = security {
+                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                                        if let Some(channel) = denied {
+                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
                                                     let responses = pubsub_commands::psubscribe(&pubsub, client_id, &cmd.args).await;
                                                     match responses {
                                                         Ok(resp_list) => {
@@ -884,6 +952,15 @@ impl Server {
                                                     continue;
                                                 }
                                                 "publish" => {
+                                                    // ACL channel check
+                                                    if let Some(ref security_mgr) = security {
+                                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
+                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
                                                     let response = pubsub_commands::publish(&pubsub, &cmd.args).await;
                                                     match response {
                                                         Ok(resp) => {
@@ -899,6 +976,16 @@ impl Server {
                                                     continue;
                                                 }
                                                 "ssubscribe" => {
+                                                    // ACL channel check
+                                                    if let Some(ref security_mgr) = security {
+                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
+                                                        if let Some(channel) = denied {
+                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
                                                     let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
                                                     match responses {
                                                         Ok(resp_list) => {
@@ -917,6 +1004,15 @@ impl Server {
                                                     continue;
                                                 }
                                                 "spublish" => {
+                                                    // ACL channel check
+                                                    if let Some(ref security_mgr) = security {
+                                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
+                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                                            commands_processed += 1;
+                                                            continue;
+                                                        }
+                                                    }
                                                     let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
                                                     match response {
                                                         Ok(resp) => {
