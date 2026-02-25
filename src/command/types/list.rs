@@ -106,119 +106,179 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::Integer(length as i64))
 }
 
-/// Redis LPOP command - Remove and return the first element of a list
+/// Redis LPOP command - Remove and return the first element(s) of a list
 pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
-    // First, check if the key exists 
+
+    // Parse optional count parameter (Redis 6.2+)
+    let count = if args.len() == 2 {
+        let count_str = bytes_to_string(&args[1])?;
+        let c = count_str.parse::<i64>().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
+        if c < 0 {
+            return Err(CommandError::InvalidArgument("value is not an integer or out of range".to_string()));
+        }
+        Some(c as usize)
+    } else {
+        None
+    };
+
+    // First, check if the key exists
     if engine.exists(key).await? {
         let key_type = engine.get_type(key).await?;
         if key_type != "list" {
             return Err(CommandError::WrongType);
         }
     } else {
-        // List doesn't exist, return nil
-        return Ok(RespValue::BulkString(None));
+        // List doesn't exist, return nil (or empty array with count)
+        return if count.is_some() {
+            Ok(RespValue::BulkString(None))
+        } else {
+            Ok(RespValue::BulkString(None))
+        };
     }
-    
+
     // Get the current list
     match engine.get(key).await? {
         Some(data) => {
-            // Try to deserialize the list
             match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
                 Ok(mut list) => {
-                    // Pop the first element
                     if list.is_empty() {
-                        return Ok(RespValue::BulkString(None));
+                        return if count.is_some() {
+                            Ok(RespValue::BulkString(None))
+                        } else {
+                            Ok(RespValue::BulkString(None))
+                        };
                     }
-                    
-                    let element = list.remove(0);
-                    
-                    // If the list is now empty, remove the key
-                    if list.is_empty() {
-                        engine.del(key).await?;
+
+                    if let Some(count) = count {
+                        // Multi-pop: return array
+                        let actual_count = std::cmp::min(count, list.len());
+                        let elements: Vec<Vec<u8>> = list.drain(..actual_count).collect();
+                        let result: Vec<RespValue> = elements
+                            .into_iter()
+                            .map(|e| RespValue::BulkString(Some(e)))
+                            .collect();
+
+                        if list.is_empty() {
+                            engine.del(key).await?;
+                        } else {
+                            let serialized = bincode::serialize(&list).map_err(|e| {
+                                CommandError::InternalError(format!("Serialization error: {}", e))
+                            })?;
+                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        }
+
+                        Ok(RespValue::Array(Some(result)))
                     } else {
-                        // Otherwise update the list
-                        let serialized = bincode::serialize(&list).map_err(|e| {
-                            CommandError::InternalError(format!("Serialization error: {}", e))
-                        })?;
-                        
-                        engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        // Single-pop: return bulk string
+                        let element = list.remove(0);
+
+                        if list.is_empty() {
+                            engine.del(key).await?;
+                        } else {
+                            let serialized = bincode::serialize(&list).map_err(|e| {
+                                CommandError::InternalError(format!("Serialization error: {}", e))
+                            })?;
+                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        }
+
+                        Ok(RespValue::BulkString(Some(element)))
                     }
-                    
-                    Ok(RespValue::BulkString(Some(element)))
                 },
-                Err(_) => {
-                    return Err(CommandError::WrongType)
-                }
+                Err(_) => Err(CommandError::WrongType),
             }
         },
-        None => {
-            // List doesn't exist, return nil
-            Ok(RespValue::BulkString(None))
-        },
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
-/// Redis RPOP command - Remove and return the last element of a list
+/// Redis RPOP command - Remove and return the last element(s) of a list
 pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
-    // First, check if the key exists 
+
+    // Parse optional count parameter (Redis 6.2+)
+    let count = if args.len() == 2 {
+        let count_str = bytes_to_string(&args[1])?;
+        let c = count_str.parse::<i64>().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
+        if c < 0 {
+            return Err(CommandError::InvalidArgument("value is not an integer or out of range".to_string()));
+        }
+        Some(c as usize)
+    } else {
+        None
+    };
+
+    // First, check if the key exists
     if engine.exists(key).await? {
         let key_type = engine.get_type(key).await?;
         if key_type != "list" {
             return Err(CommandError::WrongType);
         }
     } else {
-        // List doesn't exist, return nil
         return Ok(RespValue::BulkString(None));
     }
-    
+
     // Get the current list
     match engine.get(key).await? {
         Some(data) => {
-            // Try to deserialize the list
             match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
                 Ok(mut list) => {
-                    // Pop the last element
                     if list.is_empty() {
                         return Ok(RespValue::BulkString(None));
                     }
-                    
-                    let element = list.pop().unwrap();
-                    
-                    // If the list is now empty, remove the key
-                    if list.is_empty() {
-                        engine.del(key).await?;
+
+                    if let Some(count) = count {
+                        // Multi-pop: return array (pop from the end)
+                        let actual_count = std::cmp::min(count, list.len());
+                        let start = list.len() - actual_count;
+                        let elements: Vec<Vec<u8>> = list.drain(start..).rev().collect();
+                        let result: Vec<RespValue> = elements
+                            .into_iter()
+                            .map(|e| RespValue::BulkString(Some(e)))
+                            .collect();
+
+                        if list.is_empty() {
+                            engine.del(key).await?;
+                        } else {
+                            let serialized = bincode::serialize(&list).map_err(|e| {
+                                CommandError::InternalError(format!("Serialization error: {}", e))
+                            })?;
+                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        }
+
+                        Ok(RespValue::Array(Some(result)))
                     } else {
-                        // Otherwise update the list
-                        let serialized = bincode::serialize(&list).map_err(|e| {
-                            CommandError::InternalError(format!("Serialization error: {}", e))
-                        })?;
-                        
-                        engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        // Single-pop: return bulk string
+                        let element = list.pop().unwrap();
+
+                        if list.is_empty() {
+                            engine.del(key).await?;
+                        } else {
+                            let serialized = bincode::serialize(&list).map_err(|e| {
+                                CommandError::InternalError(format!("Serialization error: {}", e))
+                            })?;
+                            engine.set_with_type(key.clone(), serialized, RedisDataType::List, None).await?;
+                        }
+
+                        Ok(RespValue::BulkString(Some(element)))
                     }
-                    
-                    Ok(RespValue::BulkString(Some(element)))
                 },
-                Err(_) => {
-                    return Err(CommandError::WrongType)
-                }
+                Err(_) => Err(CommandError::WrongType),
             }
         },
-        None => {
-            // List doesn't exist, return nil
-            Ok(RespValue::BulkString(None))
-        },
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -447,11 +507,20 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
     
     let stop_idx = if stop < 0 {
-        (len + stop) as usize
+        let raw = len + stop;
+        if raw < 0 {
+            // Negative result means the range is empty, clear the list
+            list.clear();
+            if list.is_empty() {
+                engine.del(key).await?;
+            }
+            return Ok(RespValue::SimpleString("OK".to_string()));
+        }
+        raw as usize
     } else {
         stop as usize
     };
-    
+
     // If start is greater than stop or start is beyond the list length, clear the list
     if start_idx > stop_idx || start_idx >= list.len() {
         list.clear();
@@ -814,7 +883,22 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         src_list.pop().unwrap()
     };
 
-    // Save source (or delete if empty)
+    if source == destination {
+        // Same-key: pop and push in memory, save once to avoid intermediate state
+        if whereto == "LEFT" {
+            src_list.insert(0, element.clone());
+        } else {
+            src_list.push(element.clone());
+        }
+
+        let serialized = bincode::serialize(&src_list)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type(source.clone(), serialized, RedisDataType::List, None).await?;
+
+        return Ok(RespValue::BulkString(Some(element)));
+    }
+
+    // Different keys: save source, then handle destination
     if src_list.is_empty() {
         engine.del(source).await?;
     } else {
@@ -824,9 +908,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     // Get or create destination list
-    let mut dst_list = if source == destination {
-        src_list
-    } else {
+    let mut dst_list = {
         if engine.exists(destination).await? {
             let dest_type = engine.get_type(destination).await?;
             if dest_type != "list" {

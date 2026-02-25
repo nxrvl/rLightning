@@ -115,11 +115,14 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     let key = &args[0];
     
-    // Parse options - check for NX, XX, etc.
+    // Parse options - check for NX, XX, GT, LT, CH
     let mut only_if_new = false; // NX option
     let mut only_if_exists = false; // XX option
+    let mut only_if_greater = false; // GT option
+    let mut only_if_less = false; // LT option
+    let mut return_changed = false; // CH option
     let mut i = 1;
-    
+
     // Process options
     while i < args.len() {
         let option = bytes_to_string(&args[i])?;
@@ -132,16 +135,31 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 only_if_exists = true;
                 i += 1;
             },
+            "GT" => {
+                only_if_greater = true;
+                i += 1;
+            },
+            "LT" => {
+                only_if_less = true;
+                i += 1;
+            },
+            "CH" => {
+                return_changed = true;
+                i += 1;
+            },
             _ => {
                 // Not an option, continue to score-member pairs
                 break;
             }
         }
     }
-    
+
     // Check for conflicting options
     if only_if_new && only_if_exists {
         return Err(CommandError::InvalidArgument("NX and XX options cannot be used together".to_string()));
+    }
+    if only_if_new && (only_if_greater || only_if_less) {
+        return Err(CommandError::InvalidArgument("GT/LT options cannot be used with NX".to_string()));
     }
     
     // Now check that we have score-member pairs
@@ -157,33 +175,47 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => Vec::new(),
     };
     
-    // Track how many new members were added
+    // Track how many new members were added and changed
     let mut added = 0;
-    
+    let mut changed = 0;
+
     // Process score-member pairs
     while i < args.len() {
         if i + 1 >= args.len() {
             return Err(CommandError::WrongNumberOfArguments);
         }
-        
+
         let score_bytes = &args[i];
         let member = args[i + 1].clone();
         i += 2;
-        
+
         // Parse the score
         let score_str = bytes_to_string(score_bytes)?;
         let score = score_str.parse::<f64>().map_err(|_| {
             CommandError::InvalidArgument("Score is not a valid float".to_string())
         })?;
-        
-        // Check if member already exists 
+
+        // Check if member already exists
         let existing_index = sorted_set.iter().position(|(_, m)| m == &member);
-        
+
         if let Some(index) = existing_index {
             // Member exists already
             if !only_if_new {
-                // Update the existing member if NX is not set
-                sorted_set[index].0 = score;
+                let old_score = sorted_set[index].0;
+                let mut should_update = true;
+
+                // Apply GT/LT conditions
+                if only_if_greater && score <= old_score {
+                    should_update = false;
+                }
+                if only_if_less && score >= old_score {
+                    should_update = false;
+                }
+
+                if should_update && old_score != score {
+                    sorted_set[index].0 = score;
+                    changed += 1;
+                }
             }
             // With NX, we skip updating existing members
         } else {
@@ -207,7 +239,9 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     engine.set_with_type(key.clone(), serialized, RedisDataType::ZSet, None).await?;
     
-    Ok(RespValue::Integer(added))
+    // CH flag: return added + changed instead of just added
+    let result = if return_changed { added + changed } else { added };
+    Ok(RespValue::Integer(result))
 }
 
 /// Redis ZRANGE command - Return a range of members in a sorted set by index
