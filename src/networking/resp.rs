@@ -331,7 +331,7 @@ impl RespValue {
         }
         
         // Fast path for GET command: "*2\r\n$3\r\nGET\r\n$<keylen>\r\n<key>\r\n"
-        if buffer.len() >= 14 && &buffer[0..5] == b"*2\r\n$" && &buffer[6..11] == b"\r\nGET\r\n" {
+        if buffer.len() >= 14 && &buffer[0..6] == b"*2\r\n$3" && &buffer[6..11] == b"\r\nGET\r\n" {
             // Extract key length and position
             let mut pos = 11;
             if pos >= buffer.len() || buffer[pos] != b'$' {
@@ -381,7 +381,7 @@ impl RespValue {
         }
         
         // Fast path for SET command: "*3\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n"
-        if buffer.len() >= 14 && &buffer[0..5] == b"*3\r\n$" && &buffer[6..11] == b"\r\nSET\r\n" {
+        if buffer.len() >= 14 && &buffer[0..6] == b"*3\r\n$3" && &buffer[6..11] == b"\r\nSET\r\n" {
             // Similar parsing logic as for GET...
             let mut pos = 11;
             if pos >= buffer.len() || buffer[pos] != b'$' {

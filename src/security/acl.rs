@@ -580,6 +580,9 @@ impl AclUser {
                 } else if rule.starts_with('#') {
                     // Hashed password (already SHA256)
                     let hash = rule[1..].to_string();
+                    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(format!("Invalid SHA256 hash format in ACL rule: '{}'", rule));
+                    }
                     self.passwords.push(hash);
                     self.nopass = false;
                     Ok(())
@@ -1393,7 +1396,7 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         | "waitaof" => vec![0],
 
         // Commands with key at index 0 and 1 (source, dest)
-        "rename" | "copy" | "lmove" | "blmove" | "smove" | "geosearchstore"
+        "rename" | "renamenx" | "copy" | "lmove" | "blmove" | "smove" | "geosearchstore"
         | "zrangestore" => {
             let mut keys = vec![0];
             if args.len() > 1 {

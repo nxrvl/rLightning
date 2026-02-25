@@ -151,8 +151,9 @@ impl ClusterMessage {
         let sender_id = String::from_utf8_lossy(&data[pos..pos + id_end]).to_string();
         pos += 40;
 
-        // Sender address (null-terminated)
-        let addr_end = data[pos..].iter().position(|&b| b == 0)?;
+        // Sender address (null-terminated, max 256 bytes)
+        let search_limit = std::cmp::min(data.len() - pos, 256);
+        let addr_end = data[pos..pos + search_limit].iter().position(|&b| b == 0)?;
         let sender_addr = String::from_utf8_lossy(&data[pos..pos + addr_end]).to_string();
         pos += addr_end + 1;
 

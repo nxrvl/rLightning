@@ -189,10 +189,6 @@ impl Server {
         let mut partial_command_buffer: Vec<u8> = Vec::new(); // For reassembling partial large commands
         const MAX_PARTIAL_BUFFER_SIZE: usize = 256 * 1024 * 1024; // 256MB limit for partial command buffer
 
-        // CRITICAL FIX: Use stateful parser to prevent data/command confusion
-        use crate::networking::resp_parser_state::StatefulRespParser;
-        let mut state_parser = StatefulRespParser::new();
-
         // Split the socket for concurrent read/write in subscription mode
         let (mut socket_reader, mut socket_writer) = socket.into_split();
 
@@ -1313,12 +1309,6 @@ impl Server {
                     {
                         break;
                     }
-                }
-
-                // Reset parser state after processing commands
-                if commands_processed > 0 {
-                    state_parser.reset();
-                    debug!(client_addr = %client_addr_str, "Reset parser state after {} commands", commands_processed);
                 }
 
                 // Send the batched responses if we have any

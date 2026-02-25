@@ -278,7 +278,6 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
             // Simple string check for require_auth = true
             if content.contains("require_auth = true") {
                 require_auth_in_config = true;
-                eprintln!("DEBUG: Found require_auth = true in config file");
             }
         }
 
@@ -288,14 +287,6 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
 
     // Merge environment variables (prefixed with RLIGHTNING_)
     figment = figment.merge(Env::prefixed("RLIGHTNING_"));
-
-    // Check if settings were loaded correctly from the config file
-    if let Ok(settings) = figment.extract::<AppSettings>() {
-        eprintln!(
-            "DEBUG: Settings after config file: require_auth = {}",
-            settings.security.require_auth
-        );
-    }
 
     // Merge command-line arguments (overriding file and env)
     // Create a temporary struct with only the fields present in Args
@@ -368,7 +359,8 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
         security: Some(SecurityOverrides {
             // If require_auth is true in config, preserve it but don't set it yet
             require_auth: None,
-            password: Some(args.master_password.clone().unwrap_or_default()),
+            // Only override password if explicitly provided via CLI
+            password: args.master_password.clone(),
         }),
         persistence: Some(PersistenceOverrides {
             mode: args.persistence_mode,
@@ -392,14 +384,8 @@ fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
 
     // Now override the require_auth field directly
     if require_auth_in_config {
-        eprintln!("DEBUG: Setting require_auth = true directly in the final settings");
         settings.security.require_auth = true;
     }
-
-    eprintln!(
-        "DEBUG: Final settings: require_auth = {}",
-        settings.security.require_auth
-    );
 
     Ok(settings)
 }
@@ -427,18 +413,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Update the tracing filter based on the loaded configuration if RUST_LOG isn't set
+    // Log the configured log level (tracing subscriber is already initialized above)
     if env::var("RUST_LOG").is_err() {
-        // Create a new filter based on the config file
         let log_level = &settings.logging.level;
-        // Validate that the log level is valid
         if EnvFilter::try_new(log_level).is_ok() {
-            // Apply the new filter - this is a bit tricky since we can't replace the global subscriber
-            // Instead, we'll log what's happening and set the env var for future log calls
-            info!("Setting log level to '{}' from configuration", log_level);
-            unsafe {
-                std::env::set_var("RUST_LOG", log_level);
-            }
+            info!("Configuration specifies log level '{}' (note: tracing subscriber already initialized)", log_level);
         } else {
             warn!(
                 "Invalid log level '{}' in configuration, using default",
