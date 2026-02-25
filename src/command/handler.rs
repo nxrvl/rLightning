@@ -34,6 +34,11 @@ impl CommandHandler {
     pub fn blocking_mgr(&self) -> &Arc<BlockingManager> {
         &self.blocking_mgr
     }
+
+    /// Get a reference to the storage engine
+    pub fn storage(&self) -> &Arc<StorageEngine> {
+        &self.storage
+    }
     
     /// Process a command and return the result
     pub async fn process(&self, command: Command) -> CommandResult {

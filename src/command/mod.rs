@@ -2,6 +2,7 @@ pub mod commands;
 pub mod error;
 pub mod handler;
 pub mod parser;
+pub mod transaction;
 pub mod types;
 pub mod utils;
 

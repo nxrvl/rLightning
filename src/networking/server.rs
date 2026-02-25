@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::command::Command;
 use crate::command::handler::CommandHandler;
 use crate::command::parser;
+use crate::command::transaction::{self, TransactionState};
 use crate::command::types::pubsub::{
     self as pubsub_commands, subscription_message_to_resp, ClientId,
 };
@@ -175,6 +176,9 @@ impl Server {
 
         // Track the per-connection protocol version (RESP2 by default)
         let mut _protocol_version = ProtocolVersion::RESP2;
+
+        // Per-connection transaction state for MULTI/EXEC/WATCH
+        let mut tx_state = TransactionState::new();
 
         loop {
             // In subscription mode, we need to handle both:
@@ -391,35 +395,21 @@ impl Server {
                                 }
                             }
 
-                            // If persistence is enabled, log the command to AOF
-                            if let Some(ref persistence_mgr) = persistence {
-                                if let Err(e) = persistence_mgr
-                                    .log_command(resp_cmd.clone(), aof_sync_policy)
-                                    .await
-                                {
-                                    error!(client_addr = %client_addr_str, command = ?resp_cmd.name, error = ?e, "Failed to log command to AOF");
-                                    let error_msg = format!("ERR Failed to persist command: {}", e);
-                                    Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                    continue;
-                                }
-                            }
+                            // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
+                            let tx_result = Self::process_with_transaction(
+                                &cmd,
+                                &cmd_lower,
+                                &mut tx_state,
+                                &command_handler,
+                                &persistence,
+                                aof_sync_policy,
+                                is_auth_command,
+                                &security,
+                                &client_addr_str,
+                            ).await;
 
-                            // Execute the command with error handling
-                            match command_handler.process(cmd.clone()).await {
+                            match tx_result {
                                 Ok(response) => {
-                                    // For AUTH command, update authentication status
-                                    if is_auth_command {
-                                        if let Some(ref security_mgr) = security {
-                                            if let RespValue::SimpleString(ref s) = response {
-                                                if s == "OK" && cmd.args.len() == 1 {
-                                                    security_mgr
-                                                        .authenticate(&client_addr_str, &cmd.args[0]);
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Add the response to the batch
                                     if let Ok(bytes) = response.serialize() {
                                         response_buffer.extend_from_slice(&bytes);
                                     } else {
@@ -551,51 +541,21 @@ impl Server {
                                                 }
                                             }
 
-                                            // Prepare a RESP command for persistence
-                                            if let Some(ref persistence_mgr) = persistence {
-                                                let resp_cmd = RespCommand {
-                                                    name: cmd.name.as_bytes().to_vec(),
-                                                    args: cmd.args.clone(),
-                                                };
+                                            // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
+                                            let tx_result = Self::process_with_transaction(
+                                                &cmd,
+                                                &cmd_lower,
+                                                &mut tx_state,
+                                                &command_handler,
+                                                &persistence,
+                                                aof_sync_policy,
+                                                is_auth_command,
+                                                &security,
+                                                &client_addr_str,
+                                            ).await;
 
-                                                // Log command to AOF
-                                                if let Err(e) = persistence_mgr
-                                                    .log_command(resp_cmd, aof_sync_policy)
-                                                    .await
-                                                {
-                                                    error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
-                                                    let error_msg =
-                                                        format!("ERR Failed to persist command: {}", e);
-                                                    Self::send_error_to_writer(
-                                                        &mut socket_writer,
-                                                        error_msg,
-                                                        &client_addr_str,
-                                                    )
-                                                    .await?;
-                                                    continue;
-                                                }
-                                            }
-
-                                            // Execute the command with error handling
-                                            match command_handler.process(cmd.clone()).await {
+                                            match tx_result {
                                                 Ok(response) => {
-                                                    // For AUTH command, update authentication status
-                                                    if is_auth_command {
-                                                        if let Some(ref security_mgr) = security {
-                                                            if let RespValue::SimpleString(ref s) =
-                                                                response
-                                                            {
-                                                                if s == "OK" && cmd.args.len() == 1 {
-                                                                    security_mgr.authenticate(
-                                                                        &client_addr_str,
-                                                                        &cmd.args[0],
-                                                                    );
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // Add the response to the batch
                                                     if let Ok(bytes) = response.serialize() {
                                                         response_buffer.extend_from_slice(&bytes);
                                                     } else {
@@ -757,6 +717,68 @@ impl Server {
         debug!(client_addr = %client_addr_str, client_id = client_id, "Client unregistered from PubSub manager");
 
         Ok(())
+    }
+
+    /// Process a command with transaction state handling.
+    /// Handles MULTI/EXEC/DISCARD/WATCH/UNWATCH and queuing during transactions.
+    async fn process_with_transaction(
+        cmd: &Command,
+        cmd_lower: &str,
+        tx_state: &mut TransactionState,
+        command_handler: &Arc<CommandHandler>,
+        persistence: &Option<Arc<PersistenceManager>>,
+        aof_sync_policy: AofSyncPolicy,
+        is_auth_command: bool,
+        security: &Option<Arc<SecurityManager>>,
+        client_addr_str: &str,
+    ) -> Result<RespValue, crate::command::CommandError> {
+        let engine = command_handler.storage();
+
+        // Handle transaction commands
+        match cmd_lower {
+            "multi" => return transaction::handle_multi(tx_state),
+            "discard" => return transaction::handle_discard(tx_state),
+            "exec" => return transaction::handle_exec(tx_state, command_handler, engine).await,
+            "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args),
+            "unwatch" => return transaction::handle_unwatch(tx_state),
+            _ => {}
+        }
+
+        // If in a MULTI block, queue the command instead of executing
+        if tx_state.in_multi {
+            return transaction::queue_command(tx_state, cmd.clone());
+        }
+
+        // Normal command execution path
+        // Log to AOF if persistence is enabled
+        if let Some(persistence_mgr) = persistence {
+            let resp_cmd = RespCommand {
+                name: cmd.name.as_bytes().to_vec(),
+                args: cmd.args.clone(),
+            };
+            if let Err(e) = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await {
+                error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
+                return Err(crate::command::CommandError::InternalError(
+                    format!("Failed to persist command: {}", e),
+                ));
+            }
+        }
+
+        // Execute the command
+        let result = command_handler.process(cmd.clone()).await?;
+
+        // For AUTH command, update authentication status
+        if is_auth_command {
+            if let Some(security_mgr) = security {
+                if let RespValue::SimpleString(ref s) = result {
+                    if s == "OK" && cmd.args.len() == 1 {
+                        security_mgr.authenticate(client_addr_str, &cmd.args[0]);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Process commands while in subscription mode
