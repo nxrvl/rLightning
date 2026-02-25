@@ -4,7 +4,7 @@ use crate::storage::engine::StorageEngine;
 use crate::command::utils::parse_ttl;
 
 // List commands
-pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lpos, lmove, lmpop, blpop, brpop, blmove, blmpop};
+pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lpos, lmove, rpoplpush, lmpop, blpop, brpop, blmove, blmpop};
 
 // Blocking infrastructure
 pub use crate::command::types::blocking::BlockingManager;
@@ -40,7 +40,7 @@ pub use crate::command::types::geo::{geoadd, geodist, geohash, geopos, geosearch
 pub use crate::command::types::stream::{xadd, xlen, xrange, xrevrange, xread, xtrim, xdel, xinfo, xgroup, xreadgroup, xack, xpending, xclaim, xautoclaim};
 
 // Server commands
-pub use crate::command::types::server::{info, auth, config, keys, rename, flushall, flushdb, monitor, dbsize, randomkey};
+pub use crate::command::types::server::{info, auth, config, keys, rename, renamenx, flushall, flushdb, monitor, dbsize, randomkey};
 
 // Connection & server commands
 pub use crate::command::types::connection::{

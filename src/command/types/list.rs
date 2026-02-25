@@ -854,6 +854,22 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::BulkString(Some(element)))
 }
 
+/// Redis RPOPLPUSH command (deprecated) - Pop from tail of source, push to head of destination
+/// This is an alias for LMOVE source destination RIGHT LEFT
+pub async fn rpoplpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 2 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    // Translate to LMOVE args: source, destination, RIGHT, LEFT
+    let lmove_args = vec![
+        args[0].clone(),
+        args[1].clone(),
+        b"RIGHT".to_vec(),
+        b"LEFT".to_vec(),
+    ];
+    lmove(engine, &lmove_args).await
+}
+
 /// Redis LMPOP command - Pop elements from the first non-empty list
 pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 3 {
@@ -1314,10 +1330,10 @@ mod tests {
         // Force delete the key to ensure it doesn't exist
         engine.del(&key).await.unwrap();
         
-        // Create a list directly first to make sure it's recognized as a list type
+        // Create a list directly first using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        engine.set(key.clone(), serialized, None).await.unwrap();
+        engine.set_with_type(key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
         
         // DEBUG: Check the key type
         let key_type = engine.get_type(&key).await.unwrap();
@@ -1497,10 +1513,10 @@ mod tests {
         // Force delete the key to ensure it doesn't exist
         engine.del(&key).await.unwrap();
         
-        // Create a list directly first to make sure it's recognized as a list type
+        // Create a list directly first using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        engine.set(key.clone(), serialized, None).await.unwrap();
+        engine.set_with_type(key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
         
         // DEBUG: Check the key type
         let key_type = engine.get_type(&key).await.unwrap();

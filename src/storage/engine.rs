@@ -263,6 +263,11 @@ impl StorageEngine {
     /// Helper method to remove expired key and update memory/counters
     async fn remove_expired_key(&self, key: &[u8]) {
         if let Some((k, item)) = self.data.remove(key) {
+            if !item.is_expired() {
+                // Key was refreshed concurrently — put it back
+                self.data.insert(k, item);
+                return;
+            }
             // Use atomic operations for memory tracking
             let size = Self::calculate_size(&k, &item.value) as u64;
             self.current_memory.fetch_sub(size, Ordering::Relaxed);
@@ -879,46 +884,9 @@ impl StorageEngine {
                 return Ok("none".to_string());
             }
 
-            // Use the stored data type for new format data
+            // Use the stored data type authoritatively
             let data_type = entry.value().data_type.as_str().to_string();
-            
-            // For backward compatibility with existing data, fall back to heuristic detection
-            // if the stored type is "string" but the data might be another type
-            if data_type == "string" {
-                let value = &entry.value().value;
-                let key_str = String::from_utf8_lossy(key);
-                
-                // Try to detect legacy serialized data structures
-                // This maintains compatibility with existing tests and data
-                
-                // Try to deserialize as a Vec<Vec<u8>> (list)
-                if bincode::deserialize::<Vec<Vec<u8>>>(value).is_ok() {
-                    tracing::debug!("Legacy 'list' type detected for key '{}'", key_str);
-                    return Ok("list".to_string());
-                }
-                
-                // Try to deserialize as a HashSet<Vec<u8>> (set)
-                if bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(value).is_ok() {
-                    tracing::debug!("Legacy 'set' type detected for key '{}'", key_str);
-                    return Ok("set".to_string());
-                }
-                
-                // Check for Hash (HashMap<Vec<u8>, Vec<u8>>)
-                if bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(value).is_ok() {
-                    tracing::debug!("Legacy 'hash' type detected for key '{}'", key_str);
-                    return Ok("hash".to_string());
-                }
-                
-                // Check for Sorted Set (Vec<(f64, Vec<u8>)>)
-                if bincode::deserialize::<Vec<(f64, Vec<u8>)>>(value).is_ok() {
-                    tracing::debug!("Legacy 'zset' type detected for key '{}'", key_str);
-                    return Ok("zset".to_string());
-                }
-            }
-            
-            tracing::debug!("Key '{}' has stored type: {}", 
-                          String::from_utf8_lossy(key), data_type);
-            
+
             Ok(data_type)
         } else {
             Ok("none".to_string())

@@ -166,7 +166,7 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
             
-            match engine.set(key.clone(), serialized, None).await {
+            match engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await {
                 Ok(_) => {},
                 Err(e) => {
                     return Err(CommandError::InternalError(format!("Error updating set: {}", e)));
@@ -174,7 +174,7 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
     }
-    
+
     Ok(RespValue::Integer(removed))
 }
 
@@ -185,27 +185,18 @@ pub async fn smembers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     }
     
     let key = &args[0];
-    println!("DEBUG - SMEMBERS: Getting members for key '{}'", String::from_utf8_lossy(key));
-    
+
     // Get the set
     let set = match engine.get(key).await? {
         Some(data) => {
             match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-                Ok(set) => {
-                    println!("DEBUG - SMEMBERS: Deserialized {} members", set.len());
-                    for member in &set {
-                        println!("DEBUG - SMEMBERS: Member: '{}'", String::from_utf8_lossy(member));
-                    }
-                    set
-                },
-                Err(e) => {
-                    println!("DEBUG - SMEMBERS: Error deserializing set: {}", e);
+                Ok(set) => set,
+                Err(_) => {
                     return Err(CommandError::WrongType);
                 }
             }
         },
         None => {
-            println!("DEBUG - SMEMBERS: Set doesn't exist, returning empty array");
             // Set doesn't exist, return empty array
             return Ok(RespValue::Array(Some(vec![])));
         },
@@ -325,10 +316,15 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let actual_count = std::cmp::min(count, set.len());
         
         for _ in 0..actual_count {
-            if let Some(member) = set.iter().next().cloned() {
-                set.remove(&member);
-                result.push(RespValue::BulkString(Some(member)));
+            // Select a random member using Vec conversion for random index
+            let members: Vec<_> = set.iter().cloned().collect();
+            if members.is_empty() {
+                break;
             }
+            let idx = fastrand::usize(0..members.len());
+            let member = members[idx].clone();
+            set.remove(&member);
+            result.push(RespValue::BulkString(Some(member)));
         }
         
         // Update or delete the key
@@ -337,28 +333,30 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         } else {
             let serialized = bincode::serialize(&set)
                 .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-            engine.set(key.clone(), serialized, None).await?;
+            engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await?;
         }
-        
+
         Ok(RespValue::Array(Some(result)))
     } else {
-        // Return single element
-        if let Some(member) = set.iter().next().cloned() {
-            set.remove(&member);
-            
-            // Update or delete the key
-            if set.is_empty() {
-                engine.del(key).await?;
-            } else {
-                let serialized = bincode::serialize(&set)
-                    .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-                engine.set(key.clone(), serialized, None).await?;
-            }
-            
-            Ok(RespValue::BulkString(Some(member)))
-        } else {
-            Ok(RespValue::BulkString(None))
+        // Return single random element
+        let members: Vec<_> = set.iter().cloned().collect();
+        if members.is_empty() {
+            return Ok(RespValue::BulkString(None));
         }
+        let idx = fastrand::usize(0..members.len());
+        let member = members[idx].clone();
+        set.remove(&member);
+
+        // Update or delete the key
+        if set.is_empty() {
+            engine.del(key).await?;
+        } else {
+            let serialized = bincode::serialize(&set)
+                .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+            engine.set_with_type(key.clone(), serialized, RedisDataType::Set, None).await?;
+        }
+
+        Ok(RespValue::BulkString(Some(member)))
     }
 }
 
@@ -586,11 +584,16 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if let Some(count) = count {
         // Return multiple elements (with possible repetition if count > set size)
         let mut result = Vec::new();
-        let set_vec: Vec<_> = set.into_iter().collect();
-        
+        let mut set_vec: Vec<_> = set.into_iter().collect();
+
         if count >= 0 {
-            // Positive count: return unique elements
+            // Positive count: return unique random elements
             let actual_count = std::cmp::min(count as usize, set_vec.len());
+            // Fisher-Yates partial shuffle for random selection
+            for i in 0..actual_count {
+                let j = fastrand::usize(i..set_vec.len());
+                set_vec.swap(i, j);
+            }
             for item in set_vec.iter().take(actual_count) {
                 result.push(RespValue::BulkString(Some(item.clone())));
             }

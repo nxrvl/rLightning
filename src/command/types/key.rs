@@ -39,6 +39,11 @@ pub async fn copy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         "invalid DB index".to_string(),
                     ));
                 }
+                if db != 0 {
+                    return Err(CommandError::InvalidArgument(
+                        "ERR cross-database COPY is not yet supported".to_string(),
+                    ));
+                }
                 _destination_db = Some(db);
                 i += 2;
             }
@@ -132,20 +137,61 @@ pub async fn expireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     })?;
 
     // Parse optional condition flags (NX, XX, GT, LT)
-    let mut _nx = false;
-    let mut _xx = false;
-    let mut _gt = false;
-    let mut _lt = false;
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
     for arg in args.iter().skip(2) {
         match bytes_to_string(arg)?.to_uppercase().as_str() {
-            "NX" => _nx = true,
-            "XX" => _xx = true,
-            "GT" => _gt = true,
-            "LT" => _lt = true,
+            "NX" => nx = true,
+            "XX" => xx = true,
+            "GT" => gt = true,
+            "LT" => lt = true,
             _ => {
                 return Err(CommandError::InvalidArgument(
                     "Unsupported option".to_string(),
                 ));
+            }
+        }
+    }
+
+    // Apply condition flags
+    if nx || xx || gt || lt {
+        let current_ttl = engine.ttl(key).await?;
+        let has_expiry = current_ttl.is_some();
+
+        // NX: Set expiry only when the key has no expiry
+        if nx && has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        // XX: Set expiry only when the key has an existing expiry
+        if xx && !has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        // GT: Set expiry only when the new expiry is greater than current
+        if gt {
+            if let Some(current) = current_ttl {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let new_remaining = timestamp - now_unix;
+                if new_remaining <= current.as_secs() as i64 {
+                    return Ok(RespValue::Integer(0));
+                }
+            }
+        }
+        // LT: Set expiry only when the new expiry is less than current
+        if lt {
+            if let Some(current) = current_ttl {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let new_remaining = timestamp - now_unix;
+                if new_remaining >= current.as_secs() as i64 {
+                    return Ok(RespValue::Integer(0));
+                }
             }
         }
     }
