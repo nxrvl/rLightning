@@ -738,14 +738,13 @@ impl AclManager {
         drop(users);
 
         // Register session
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.insert(client_addr.to_string(), username.to_string());
-            debug!(
-                client_addr = %client_addr,
-                username = %username,
-                "Client authenticated"
-            );
-        }
+        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        sessions.insert(client_addr.to_string(), username.to_string());
+        debug!(
+            client_addr = %client_addr,
+            username = %username,
+            "Client authenticated"
+        );
 
         Ok(username.to_string())
     }
@@ -755,36 +754,28 @@ impl AclManager {
         if !self.require_auth {
             return true;
         }
-        if let Ok(sessions) = self.sessions.read() {
-            sessions.contains_key(client_addr)
-        } else {
-            false
-        }
+        let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+        sessions.contains_key(client_addr)
     }
 
     /// Get the username for a client session
     pub fn get_username(&self, client_addr: &str) -> Option<String> {
-        if let Ok(sessions) = self.sessions.read() {
-            sessions.get(client_addr).cloned()
-        } else {
-            None
-        }
+        let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+        sessions.get(client_addr).cloned()
     }
 
     /// Remove a client session
     pub fn remove_client(&self, client_addr: &str) {
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.remove(client_addr);
-            debug!(client_addr = %client_addr, "Client removed from ACL sessions");
-        }
+        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        sessions.remove(client_addr);
+        debug!(client_addr = %client_addr, "Client removed from ACL sessions");
     }
 
     /// Check if a command is allowed for the given client
     pub fn check_command_permission(&self, client_addr: &str, cmd: &str) -> bool {
-        let username = if let Ok(sessions) = self.sessions.read() {
+        let username = {
+            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
             sessions.get(client_addr).cloned()
-        } else {
-            return false;
         };
 
         let username = match username {
@@ -799,20 +790,18 @@ impl AclManager {
             }
         };
 
-        if let Ok(users) = self.users.read() {
-            if let Some(user) = users.get(&username) {
-                return user.can_execute_command(cmd);
-            }
+        let users = self.users.read().expect("ACL users lock poisoned");
+        if let Some(user) = users.get(&username) {
+            return user.can_execute_command(cmd);
         }
         false
     }
 
     /// Check if a key access is allowed for the given client
     pub fn check_key_permission(&self, client_addr: &str, key: &[u8]) -> bool {
-        let username = if let Ok(sessions) = self.sessions.read() {
+        let username = {
+            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
             sessions.get(client_addr).cloned()
-        } else {
-            return false;
         };
 
         let username = match username {
@@ -826,20 +815,18 @@ impl AclManager {
             }
         };
 
-        if let Ok(users) = self.users.read() {
-            if let Some(user) = users.get(&username) {
-                return user.can_access_key(key);
-            }
+        let users = self.users.read().expect("ACL users lock poisoned");
+        if let Some(user) = users.get(&username) {
+            return user.can_access_key(key);
         }
         false
     }
 
     /// Check if a channel access is allowed for the given client
     pub fn check_channel_permission(&self, client_addr: &str, channel: &[u8]) -> bool {
-        let username = if let Ok(sessions) = self.sessions.read() {
+        let username = {
+            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
             sessions.get(client_addr).cloned()
-        } else {
-            return false;
         };
 
         let username = match username {
@@ -853,10 +840,9 @@ impl AclManager {
             }
         };
 
-        if let Ok(users) = self.users.read() {
-            if let Some(user) = users.get(&username) {
-                return user.can_access_channel(channel);
-            }
+        let users = self.users.read().expect("ACL users lock poisoned");
+        if let Some(user) = users.get(&username) {
+            return user.can_access_channel(channel);
         }
         false
     }
@@ -1054,9 +1040,8 @@ impl AclManager {
         }
 
         // Also remove any sessions for deleted users
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.retain(|_, v| users.contains_key(v));
-        }
+        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        sessions.retain(|_, v| users.contains_key(v));
 
         Ok(RespValue::Integer(count))
     }
@@ -1545,10 +1530,36 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // WATCH - all remaining args are keys
         "watch" => (0..args.len()).collect(),
 
+        // EVAL/EVALSHA: args = [script, numkeys, key [key ...], arg [arg ...]]
+        // Keys start at index 2, count given by args[1]
+        "eval" | "evalsha" | "eval_ro" | "evalsha_ro" => {
+            if args.len() >= 2 {
+                if let Ok(s) = std::str::from_utf8(&args[1]) {
+                    if let Ok(numkeys) = s.parse::<usize>() {
+                        return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
+                    }
+                }
+            }
+            vec![]
+        }
+
+        // FCALL/FCALL_RO: args = [function, numkeys, key [key ...], arg [arg ...]]
+        // Keys start at index 2, count given by args[1]
+        "fcall" | "fcall_ro" => {
+            if args.len() >= 2 {
+                if let Ok(s) = std::str::from_utf8(&args[1]) {
+                    if let Ok(numkeys) = s.parse::<usize>() {
+                        return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
+                    }
+                }
+            }
+            vec![]
+        }
+
         // SELECT, PING, AUTH, ACL, etc. - no keys
         "select" | "ping" | "auth" | "acl" | "hello" | "info" | "config" | "monitor"
-        | "flushall" | "flushdb" | "scan" | "dbsize" | "randomkey" | "eval" | "evalsha"
-        | "eval_ro" | "evalsha_ro" | "script" | "function" | "fcall" | "fcall_ro"
+        | "flushall" | "flushdb" | "scan" | "dbsize" | "randomkey"
+        | "script" | "function"
         | "multi" | "exec" | "discard" | "unwatch" | "subscribe"
         | "unsubscribe" | "psubscribe" | "punsubscribe" | "publish" | "pubsub"
         | "command" | "client" | "quit" | "reset" | "echo" => vec![],

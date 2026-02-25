@@ -162,8 +162,17 @@ impl RespValue {
             },
             RespValue::Error(s) => {
                 // Format Redis errors with standard prefix if needed
-                let error_str = if s.starts_with("ERR ") || s.starts_with("WRONGTYPE ") || s.contains(':') {
-                    // Already has a standard prefix
+                // Redis error types: the first word before a space is the error type
+                // Known error types that must NOT get an ERR prefix
+                let known_prefixes = [
+                    "ERR ", "WRONGTYPE ", "NOPERM ", "NOAUTH ", "WRONGPASS ",
+                    "READONLY ", "EXECABORT ", "NOSCRIPT ", "LOADING ",
+                    "BUSY ", "NOPROTO ", "CLUSTERDOWN ", "CROSSSLOT ",
+                    "MOVED ", "ASK ", "NOTBUSY ", "MASTERDOWN ",
+                    "NOREPLICAS ", "UNKILLABLE ",
+                ];
+                let error_str = if known_prefixes.iter().any(|p| s.starts_with(p)) || s.contains(':') {
+                    // Already has a standard prefix or is a categorized error (e.g. "OOM:message")
                     s.clone()
                 } else {
                     // Add the standard ERR prefix

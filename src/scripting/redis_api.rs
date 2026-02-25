@@ -9,8 +9,8 @@ use crate::networking::resp::RespValue;
 fn sandbox_lua(lua: &Lua) {
     let globals_to_disable = [
         "io", "os", "loadfile", "dofile", "debug", "require", "package",
-        "load", "loadstring", "rawset", "rawget", "rawequal",
-        "collectgarbage", "setfenv", "getfenv", "newproxy", "print",
+        "load", "loadstring",
+        "setfenv", "getfenv", "newproxy",
     ];
     for name in &globals_to_disable {
         let _ = lua.globals().set(*name, Value::Nil);

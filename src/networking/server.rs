@@ -316,7 +316,7 @@ impl Server {
 
                             // Check for HELLO command (protocol negotiation)
                             if cmd_lower == "hello" {
-                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version);
+                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version, &security, &client_addr_str);
                                 _protocol_version = new_version;
                                 if let Ok(bytes) = response.serialize() {
                                     response_buffer.extend_from_slice(&bytes);
@@ -816,7 +816,7 @@ impl Server {
 
                                             // Check for HELLO command (protocol negotiation)
                                             if cmd_lower == "hello" {
-                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version);
+                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version, &security, &client_addr_str);
                                                 _protocol_version = new_version;
                                                 if let Ok(bytes) = response.serialize() {
                                                     response_buffer.extend_from_slice(&bytes);
@@ -1970,7 +1970,12 @@ impl Server {
 
     /// Handle the HELLO command for RESP3 protocol negotiation.
     /// Returns the HELLO response and optionally the new protocol version.
-    fn handle_hello_command(args: &[Vec<u8>], current_version: ProtocolVersion) -> (RespValue, ProtocolVersion) {
+    fn handle_hello_command(
+        args: &[Vec<u8>],
+        current_version: ProtocolVersion,
+        security: &Option<Arc<crate::security::SecurityManager>>,
+        client_addr: &str,
+    ) -> (RespValue, ProtocolVersion) {
         // HELLO [protover [AUTH username password] [SETNAME clientname]]
         let mut new_version = current_version;
 
@@ -1982,6 +1987,53 @@ impl Server {
                 _ => {
                     return (
                         RespValue::Error(format!("NOPROTO unsupported protocol version: {}", proto_str)),
+                        current_version,
+                    );
+                }
+            }
+        }
+
+        // Process optional AUTH and SETNAME arguments
+        let mut i = 1;
+        while i < args.len() {
+            let option = String::from_utf8_lossy(&args[i]).to_uppercase();
+            match option.as_str() {
+                "AUTH" => {
+                    // AUTH username password
+                    if i + 2 >= args.len() {
+                        return (
+                            RespValue::Error("ERR Syntax error in HELLO option 'auth'".to_string()),
+                            current_version,
+                        );
+                    }
+                    let username = String::from_utf8_lossy(&args[i + 1]).to_string();
+                    let password = String::from_utf8_lossy(&args[i + 2]).to_string();
+                    if let Some(security_mgr) = security {
+                        if let Err(e) = security_mgr.authenticate_with_username(client_addr, &username, &password) {
+                            return (RespValue::Error(e), current_version);
+                        }
+                    } else {
+                        return (
+                            RespValue::Error("ERR Client sent AUTH, but no password is set. Did you mean ACL SETUSER with >password?".to_string()),
+                            current_version,
+                        );
+                    }
+                    i += 3;
+                }
+                "SETNAME" => {
+                    // SETNAME clientname - we acknowledge but don't track client names yet
+                    if i + 1 >= args.len() {
+                        return (
+                            RespValue::Error("ERR Syntax error in HELLO option 'setname'".to_string()),
+                            current_version,
+                        );
+                    }
+                    // Client name tracking is a future enhancement
+                    i += 2;
+                }
+                _ => {
+                    return (
+                        RespValue::Error(format!("ERR Unrecognized HELLO option: {}", option)),
                         current_version,
                     );
                 }
