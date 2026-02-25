@@ -918,6 +918,11 @@ impl StorageEngine {
     pub fn get_key_count(&self) -> u64 {
         self.key_count.load(Ordering::Relaxed)
     }
+
+    /// Get the current memory usage in bytes
+    pub fn get_used_memory(&self) -> u64 {
+        self.current_memory.load(Ordering::Relaxed)
+    }
     
     /// Get a random key from the storage engine (O(1) operation for RANDOMKEY)
     pub async fn get_random_key(&self) -> StorageResult<Option<Vec<u8>>> {
