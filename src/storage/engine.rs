@@ -197,13 +197,19 @@ impl StorageEngine {
                 
                 let expired_entry = queue.pop().unwrap();
                 drop(queue); // Release queue lock early
-                
-                // Remove the expired key from main storage
-                if let Some((k, item)) = self.data.remove(&expired_entry.key) {
-                    let size = Self::calculate_size(&k, &item.value) as u64;
-                    self.current_memory.fetch_sub(size, Ordering::Relaxed);
-                    self.key_count.fetch_sub(1, Ordering::Relaxed);
-                    removed_count += 1;
+
+                // Only remove the key if it is actually expired (it may have been refreshed with a new TTL)
+                let should_remove = match self.data.get(&expired_entry.key) {
+                    Some(item) => item.is_expired(),
+                    None => false, // Key already deleted
+                };
+                if should_remove {
+                    if let Some((k, item)) = self.data.remove(&expired_entry.key) {
+                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
+                        removed_count += 1;
+                    }
                 }
                 
                 // Limit removals per cycle to avoid blocking

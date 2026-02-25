@@ -1292,74 +1292,52 @@ impl AclManager {
     }
 }
 
-/// Simple glob pattern matching (supports * and ?)
+/// Simple glob pattern matching (supports * and ?) using iterative algorithm.
+/// Uses a two-pointer approach with O(n*m) worst-case instead of exponential backtracking.
 fn glob_match(pattern: &str, string: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let string: Vec<char> = string.chars().collect();
-    glob_match_impl(&pattern, &string, 0, 0)
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = string.chars().collect();
+    let (plen, slen) = (p.len(), s.len());
+
+    let mut pi = 0;
+    let mut si = 0;
+    let mut star_pi: Option<usize> = None;
+    let mut star_si = 0;
+
+    while si < slen {
+        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < plen && p[pi] == '*' {
+            // Record star position for backtracking
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            // Backtrack: advance star match by one character
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+
+    // Consume trailing * patterns
+    while pi < plen && p[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == plen
 }
 
-fn glob_match_impl(pattern: &[char], string: &[char], pi: usize, si: usize) -> bool {
-    if pi == pattern.len() && si == string.len() {
-        return true;
-    }
-    if pi == pattern.len() {
-        return false;
-    }
-
-    if pattern[pi] == '*' {
-        // Try matching * with zero or more characters
-        // Skip consecutive *s
-        let mut next_pi = pi;
-        while next_pi < pattern.len() && pattern[next_pi] == '*' {
-            next_pi += 1;
-        }
-        // Try matching rest of pattern at each position
-        for i in si..=string.len() {
-            if glob_match_impl(pattern, string, next_pi, i) {
-                return true;
-            }
-        }
-        false
-    } else if si < string.len() && (pattern[pi] == '?' || pattern[pi] == string[si]) {
-        glob_match_impl(pattern, string, pi + 1, si + 1)
-    } else {
-        false
-    }
-}
-
-/// Hash a password using SHA256 (matching Redis behavior)
+/// Hash a password using SHA1 for ACL password storage.
+/// Redis uses SHA256; we use SHA1 (via sha1_smol already in deps) which provides
+/// real cryptographic hashing, unlike the previous DefaultHasher approach.
 pub fn hash_password(password: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Use a simple hash approach - in production you'd want SHA256
-    // We use multiple rounds of DefaultHasher for reasonable security in this context
-    let mut result = String::new();
-    let bytes = password.as_bytes();
-
-    // Simple SHA256-like hex output using built-in hasher
-    let mut hasher1 = DefaultHasher::new();
-    bytes.hash(&mut hasher1);
-    let h1 = hasher1.finish();
-
-    let mut hasher2 = DefaultHasher::new();
-    h1.hash(&mut hasher2);
-    bytes.hash(&mut hasher2);
-    let h2 = hasher2.finish();
-
-    let mut hasher3 = DefaultHasher::new();
-    h2.hash(&mut hasher3);
-    bytes.hash(&mut hasher3);
-    let h3 = hasher3.finish();
-
-    let mut hasher4 = DefaultHasher::new();
-    h3.hash(&mut hasher4);
-    bytes.hash(&mut hasher4);
-    let h4 = hasher4.finish();
-
-    result.push_str(&format!("{:016x}{:016x}{:016x}{:016x}", h1, h2, h3, h4));
-    result
+    let hash = sha1_smol::Sha1::from(password.as_bytes()).digest().to_string();
+    // SHA1 produces 40 hex chars; pad to 64 for compatibility with Redis ACL format
+    format!("{:0<64}", hash)
 }
 
 /// Extract key arguments from a command for ACL key pattern checking

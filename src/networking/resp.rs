@@ -208,26 +208,19 @@ impl RespValue {
                     return Err(RespError::ValueTooLarge(format!("Array length exceeds 1,000,000 limit: {}", items.len())));
                 }
 
-                // Calculate the total size for all array elements
-                let mut total_size = 0;
-                for item in items.iter() {
-                    let item_bytes = item.serialize()?;
-                    total_size += item_bytes.len();
-
-                    // Check for reasonable total size
-                    if total_size > 1024 * 1024 * 512 { // 512 MB max (was 1 GB)
-                        return Err(RespError::ValueTooLarge(format!("Total serialized array size exceeds 512MB limit: {} bytes", total_size)));
-                    }
-                }
-
                 // Write array header
                 result.push(b'*');
                 result.extend_from_slice(items.len().to_string().as_bytes());
                 result.extend_from_slice(b"\r\n");
 
-                // Write array elements
+                // Serialize and write each element (single pass)
+                let mut total_size = 0;
                 for item in items {
                     let item_bytes = item.serialize()?;
+                    total_size += item_bytes.len();
+                    if total_size > 1024 * 1024 * 512 { // 512 MB max
+                        return Err(RespError::ValueTooLarge(format!("Total serialized array size exceeds 512MB limit: {} bytes", total_size)));
+                    }
                     result.extend_from_slice(&item_bytes);
                 }
             }

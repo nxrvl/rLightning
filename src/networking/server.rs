@@ -55,7 +55,7 @@ impl Server {
             sentinel: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
-            buffer_size: 64 * 1024 * 1024,                     // 64MB buffer size for large JSON values
+            buffer_size: 64 * 1024,                              // 64KB initial buffer (grows on demand)
         }
     }
 
@@ -325,6 +325,27 @@ impl Server {
                                 }
                                 commands_processed += 1;
                                 continue;
+                            }
+
+                            // Early authentication check - block unauthenticated access
+                            // to all commands except AUTH, HELLO, and QUIT
+                            let is_auth_command = cmd_lower == "auth";
+                            if !is_auth_command && cmd_lower != "quit" {
+                                if let Some(ref security_mgr) = security {
+                                    if security_mgr.require_auth()
+                                        && !security_mgr.is_authenticated(&client_addr_str)
+                                    {
+                                        let error_msg = "NOAUTH Authentication required.";
+                                        Self::send_error_to_writer(
+                                            &mut socket_writer,
+                                            error_msg.to_string(),
+                                            &client_addr_str,
+                                        )
+                                        .await?;
+                                        commands_processed += 1;
+                                        continue;
+                                    }
+                                }
                             }
 
                             // Check for pub/sub commands
@@ -623,9 +644,6 @@ impl Server {
                                 _ => {}
                             }
 
-                            // Check if this is an AUTH command
-                            let is_auth_command = cmd_lower == "auth";
-
                             // Check read-only mode (replica rejecting write commands)
                             if let Some(ref repl) = replication {
                                 if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
@@ -635,24 +653,8 @@ impl Server {
                                 }
                             }
 
-                            // If authentication is required and the client is not authenticated
-                            // and this is not an AUTH command, return an error
+                            // ACL permission checks for authenticated clients
                             if let Some(ref security_mgr) = security {
-                                if !is_auth_command
-                                    && security_mgr.require_auth()
-                                    && !security_mgr.is_authenticated(&client_addr_str)
-                                {
-                                    let error_msg = "NOAUTH Authentication required.";
-                                    Self::send_error_to_writer(
-                                        &mut socket_writer,
-                                        error_msg.to_string(),
-                                        &client_addr_str,
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-
-                                // ACL permission check for authenticated clients
                                 if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
                                     // Check command permission
                                     if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
@@ -670,6 +672,7 @@ impl Server {
 
                                     // Check key permission
                                     let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                    let mut key_denied = false;
                                     for &idx in &key_indices {
                                         if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
                                             let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
@@ -682,8 +685,13 @@ impl Server {
                                                 &client_addr_str,
                                             )
                                             .await?;
-                                            continue;
+                                            key_denied = true;
+                                            break;
                                         }
+                                    }
+                                    if key_denied {
+                                        commands_processed += 1;
+                                        continue;
                                     }
                                 }
                             }
@@ -746,6 +754,26 @@ impl Server {
                                                 }
                                                 commands_processed += 1;
                                                 continue;
+                                            }
+
+                                            // Early authentication check for slow path
+                                            let is_auth_command = cmd_lower == "auth";
+                                            if !is_auth_command && cmd_lower != "quit" {
+                                                if let Some(ref security_mgr) = security {
+                                                    if security_mgr.require_auth()
+                                                        && !security_mgr.is_authenticated(&client_addr_str)
+                                                    {
+                                                        let error_msg = "NOAUTH Authentication required.";
+                                                        Self::send_error_to_writer(
+                                                            &mut socket_writer,
+                                                            error_msg.to_string(),
+                                                            &client_addr_str,
+                                                        )
+                                                        .await?;
+                                                        commands_processed += 1;
+                                                        continue;
+                                                    }
+                                                }
                                             }
 
                                             // Check for pub/sub commands
@@ -929,9 +957,6 @@ impl Server {
                                                 _ => {}
                                             }
 
-                                            // Check if this is an AUTH command
-                                            let is_auth_command = cmd_lower == "auth";
-
                                             // Check read-only mode (replica rejecting write commands)
                                             if let Some(ref repl) = replication {
                                                 if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
@@ -941,24 +966,8 @@ impl Server {
                                                 }
                                             }
 
-                                            // If authentication is required and the client is not authenticated
-                                            // and this is not an AUTH command, return an error
+                                            // ACL permission checks for authenticated clients
                                             if let Some(ref security_mgr) = security {
-                                                if !is_auth_command
-                                                    && security_mgr.require_auth()
-                                                    && !security_mgr.is_authenticated(&client_addr_str)
-                                                {
-                                                    let error_msg = "NOAUTH Authentication required.";
-                                                    Self::send_error_to_writer(
-                                                        &mut socket_writer,
-                                                        error_msg.to_string(),
-                                                        &client_addr_str,
-                                                    )
-                                                    .await?;
-                                                    continue;
-                                                }
-
-                                                // ACL permission check for authenticated clients
                                                 if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
                                                     // Check command permission
                                                     if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
@@ -976,6 +985,7 @@ impl Server {
 
                                                     // Check key permission
                                                     let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                                    let mut key_denied = false;
                                                     for &idx in &key_indices {
                                                         if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
                                                             let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
@@ -988,8 +998,13 @@ impl Server {
                                                                 &client_addr_str,
                                                             )
                                                             .await?;
-                                                            continue;
+                                                            key_denied = true;
+                                                            break;
                                                         }
+                                                    }
+                                                    if key_denied {
+                                                        commands_processed += 1;
+                                                        continue;
                                                     }
                                                 }
                                             }
@@ -1201,7 +1216,28 @@ impl Server {
         match cmd_lower {
             "multi" => return transaction::handle_multi(tx_state),
             "discard" => return transaction::handle_discard(tx_state),
-            "exec" => return transaction::handle_exec(tx_state, command_handler, engine).await,
+            "exec" => {
+                // Capture queued commands before EXEC drains them (for AOF logging)
+                let queued_commands: Vec<Command> = tx_state.queue.clone();
+                let result = transaction::handle_exec(tx_state, command_handler, engine).await?;
+                // Log write commands from the transaction to AOF
+                if let Some(persistence_mgr) = persistence {
+                    if let RespValue::Array(Some(_)) = &result {
+                        // Transaction succeeded (not aborted by WATCH)
+                        for queued_cmd in &queued_commands {
+                            let qcmd_lower = queued_cmd.name.to_lowercase();
+                            if ReplicationManager::is_write_command(&qcmd_lower) {
+                                let resp_cmd = RespCommand {
+                                    name: queued_cmd.name.as_bytes().to_vec(),
+                                    args: queued_cmd.args.clone(),
+                                };
+                                let _ = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await;
+                            }
+                        }
+                    }
+                }
+                return Ok(result);
+            },
             "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args),
             "unwatch" => return transaction::handle_unwatch(tx_state),
             _ => {}
@@ -1212,23 +1248,23 @@ impl Server {
             return transaction::queue_command(tx_state, cmd.clone());
         }
 
-        // Normal command execution path
-        // Log to AOF if persistence is enabled
+        // Execute the command first, then log to AOF only on success
+        let result = command_handler.process(cmd.clone()).await?;
+
+        // Log to AOF if persistence is enabled, command succeeded, and it's a write command
+        // Skip AUTH commands to avoid persisting passwords in the AOF file
         if let Some(persistence_mgr) = persistence {
-            let resp_cmd = RespCommand {
-                name: cmd.name.as_bytes().to_vec(),
-                args: cmd.args.clone(),
-            };
-            if let Err(e) = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await {
-                error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
-                return Err(crate::command::CommandError::InternalError(
-                    format!("Failed to persist command: {}", e),
-                ));
+            if !is_auth_command && ReplicationManager::is_write_command(&cmd_lower) {
+                let resp_cmd = RespCommand {
+                    name: cmd.name.as_bytes().to_vec(),
+                    args: cmd.args.clone(),
+                };
+                if let Err(e) = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await {
+                    error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
+                    // Command already executed; log the error but don't fail the response
+                }
             }
         }
-
-        // Execute the command
-        let result = command_handler.process(cmd.clone()).await?;
 
         // For AUTH command, update authentication status
         if is_auth_command {
