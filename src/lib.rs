@@ -8,6 +8,7 @@ pub mod networking;
 pub mod persistence;
 pub mod pubsub;
 pub mod replication;
+pub mod scripting;
 pub mod security;
 pub mod storage;
 pub mod utils;

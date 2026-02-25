@@ -22,6 +22,7 @@ mod networking;
 mod persistence;
 mod pubsub;
 mod replication;
+mod scripting;
 mod security;
 mod storage;
 mod utils;

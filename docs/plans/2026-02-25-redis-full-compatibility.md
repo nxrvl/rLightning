@@ -253,20 +253,20 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/handler.rs`
 - Modify: `Cargo.toml` (add mlua or rlua dependency)
 
-- [ ] Add Lua scripting engine dependency (mlua with Lua 5.1 compatibility)
-- [ ] Implement script execution sandbox with redis.call() and redis.pcall() bindings
-- [ ] Implement KEYS and ARGV passing to scripts
-- [ ] Implement EVAL (execute Lua script with keys and args)
-- [ ] Implement EVALSHA (execute cached script by SHA1)
-- [ ] Implement EVALSHA_RO / EVAL_RO (read-only variants)
-- [ ] Implement SCRIPT LOAD / EXISTS / FLUSH / KILL subcommands
-- [ ] Implement Redis 7.0 Functions: FUNCTION LOAD / DELETE / FLUSH / KILL / LIST / DUMP / RESTORE
-- [ ] Implement FCALL / FCALL_RO (call named functions)
-- [ ] Implement script replication (propagate scripts or their effects)
-- [ ] Ensure script atomicity (no other commands execute during script)
-- [ ] Write tests: basic scripts, error handling, KEYS/ARGV, script caching, functions
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Add Lua scripting engine dependency (mlua with Lua 5.1 compatibility)
+- [x] Implement script execution sandbox with redis.call() and redis.pcall() bindings
+- [x] Implement KEYS and ARGV passing to scripts
+- [x] Implement EVAL (execute Lua script with keys and args)
+- [x] Implement EVALSHA (execute cached script by SHA1)
+- [x] Implement EVALSHA_RO / EVAL_RO (read-only variants)
+- [x] Implement SCRIPT LOAD / EXISTS / FLUSH / KILL subcommands
+- [x] Implement Redis 7.0 Functions: FUNCTION LOAD / DELETE / FLUSH / KILL / LIST / DUMP / RESTORE
+- [x] Implement FCALL / FCALL_RO (call named functions)
+- [x] Implement script replication (propagate scripts or their effects)
+- [x] Ensure script atomicity (no other commands execute during script)
+- [x] Write tests: basic scripts, error handling, KEYS/ARGV, script caching, functions
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 13: ACL System
 
