@@ -248,6 +248,14 @@ impl StorageEngine {
                 keys_to_remove.push(entry.key().clone());
             }
         }
+        // Wrap around to sample from the beginning if we hit the end
+        if sampled_count < SAMPLE_SIZE && skip > 0 {
+            for entry in self.data.iter().take(SAMPLE_SIZE - sampled_count) {
+                if entry.value().is_expired() {
+                    keys_to_remove.push(entry.key().clone());
+                }
+            }
+        }
         
         // Remove expired keys found in this sample
         for key in keys_to_remove {
@@ -761,28 +769,27 @@ impl StorageEngine {
         Ok(())
     }
     
-    /// Flush the current database
+    /// Flush the current database (db0 only, not all databases)
     pub async fn flush_db(&self) -> StorageResult<()> {
-        self.flush_all().await
+        let size: u64 = self.data.iter()
+            .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
+            .sum();
+        self.data.clear();
+        self.current_memory.fetch_sub(size.min(self.current_memory.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.key_count.store(0, Ordering::Relaxed);
+        Ok(())
     }
     
-    /// Get a snapshot of the current data (all databases)
+    /// Get a snapshot of the current data (database 0 only).
+    /// Note: Extra databases (1-15) are excluded because the persistence layer
+    /// does not yet support per-database serialization, and merging all databases
+    /// into a flat HashMap would silently lose data when keys share names across databases.
     pub async fn snapshot(&self) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
         let mut snapshot = HashMap::with_capacity(self.data.len());
 
-        // Snapshot database 0
         for item in self.data.iter() {
             if !item.value().is_expired() {
                 snapshot.insert(item.key().clone(), item.value().clone());
-            }
-        }
-
-        // Snapshot extra databases (1-15)
-        for db in &self.extra_dbs {
-            for item in db.iter() {
-                if !item.value().is_expired() {
-                    snapshot.insert(item.key().clone(), item.value().clone());
-                }
             }
         }
 
@@ -1153,10 +1160,15 @@ impl StorageEngine {
             return Ok(false);
         };
 
+        // Track the moved item's memory in the global counter
+        // (self.del will decrement for the source, so we add for the destination first)
+        let moved_size = Self::calculate_size(&key.to_vec(), &src_item.value) as u64;
+        self.current_memory.fetch_add(moved_size, Ordering::Relaxed);
+
         // Insert into destination database
         dst.insert(key.to_vec(), src_item);
 
-        // Remove from source database
+        // Remove from source database (this decrements current_memory)
         self.del(key).await?;
 
         Ok(true)

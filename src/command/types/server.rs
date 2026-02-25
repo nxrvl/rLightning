@@ -113,6 +113,16 @@ pub async fn rename(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = args[0].clone();
     let new_key = args[1].clone();
 
+    // RENAME to self is a no-op in Redis
+    if key == new_key {
+        // Verify source key exists (Redis returns error if it doesn't)
+        if engine.exists(&key).await? {
+            return Ok(RespValue::SimpleString("OK".to_string()));
+        } else {
+            return Err(CommandError::InvalidArgument("no such key".to_string()));
+        }
+    }
+
     // Get the full item to preserve data type and TTL
     let item = match engine.get_item(&key).await? {
         Some(item) => item,
@@ -145,6 +155,14 @@ pub async fn renamenx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let key = args[0].clone();
     let new_key = args[1].clone();
 
+    // RENAMENX to self: Redis returns 0 (destination exists = source key itself)
+    if key == new_key {
+        if !engine.exists(&key).await? {
+            return Err(CommandError::InvalidArgument("no such key".to_string()));
+        }
+        return Ok(RespValue::Integer(0));
+    }
+
     // Check if the destination key already exists
     if engine.exists(&new_key).await? {
         return Ok(RespValue::Integer(0));
@@ -154,7 +172,7 @@ pub async fn renamenx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let item = match engine.get_item(&key).await? {
         Some(item) => item,
         None => {
-            return Err(CommandError::InvalidArgument("Key not found".to_string()));
+            return Err(CommandError::InvalidArgument("no such key".to_string()));
         }
     };
 
