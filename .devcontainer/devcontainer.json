@@ -1,0 +1,22 @@
+{
+  "name": "rLightning Development & Testing",
+  "dockerComposeFile": "docker-compose.test.yml",
+  "service": "rlightning-dev",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "serayuzgur.crates"
+      ]
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "cargo build",
+  "remoteUser": "vscode"
+}
