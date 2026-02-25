@@ -71,10 +71,11 @@ impl ClusterMessage {
         // Header: message type (1 byte)
         data.push(self.msg_type as u8);
 
-        // Sender ID (40 bytes, padded)
+        // Sender ID (40 bytes, padded, truncated if longer)
         let id_bytes = self.sender_id.as_bytes();
-        data.extend_from_slice(id_bytes);
-        for _ in id_bytes.len()..40 {
+        let id_len = id_bytes.len().min(40);
+        data.extend_from_slice(&id_bytes[..id_len]);
+        for _ in id_len..40 {
             data.push(0);
         }
 
@@ -106,8 +107,9 @@ impl ClusterMessage {
         // Gossip entries
         for entry in &self.gossip {
             let eid = entry.node_id.as_bytes();
-            data.extend_from_slice(eid);
-            for _ in eid.len()..40 {
+            let eid_len = eid.len().min(40);
+            data.extend_from_slice(&eid[..eid_len]);
+            for _ in eid_len..40 {
                 data.push(0);
             }
             data.extend_from_slice(entry.addr.as_bytes());

@@ -275,8 +275,10 @@ impl ScriptingEngine {
 
     /// Delete a function library
     pub fn function_delete(&self, library_name: &str) -> Result<(), CommandError> {
-        let mut libs = self.function_libraries.write().unwrap();
+        // Acquire locks in the same order as function_load (index first, then libs)
+        // to prevent AB-BA deadlock
         let mut index = self.function_index.write().unwrap();
+        let mut libs = self.function_libraries.write().unwrap();
 
         if let Some(lib) = libs.remove(library_name) {
             for func in &lib.functions {

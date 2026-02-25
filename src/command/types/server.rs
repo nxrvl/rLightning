@@ -109,27 +109,30 @@ pub async fn rename(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let new_key = args[1].clone();
-    
-    // Get the value of the key
-    let value = match engine.get(&key).await? {
-        Some(value) => value,
+
+    // Get the full item to preserve data type and TTL
+    let item = match engine.get_item(&key).await? {
+        Some(item) => item,
         None => {
             return Err(CommandError::InvalidArgument("Key not found".to_string()));
         }
     };
-    
-    // Get the TTL of the key if it has one
-    let ttl = engine.ttl(&key).await?;
-    
-    // Set the new key with the same value and TTL
-    engine.set(new_key, value, ttl).await?;
-    
+
+    // Compute remaining TTL from the item's expiration
+    let ttl = item.expires_at.map(|exp| {
+        let now = std::time::Instant::now();
+        if exp > now { exp - now } else { std::time::Duration::from_millis(1) }
+    });
+
+    // Set the new key preserving data type and TTL
+    engine.set_with_type(new_key, item.value, item.data_type, ttl).await?;
+
     // Delete the old key
     engine.del(&key).await?;
-    
+
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 

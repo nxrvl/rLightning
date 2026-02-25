@@ -22,13 +22,15 @@ const WRITE_COMMANDS: &[&str] = &[
     "set", "setnx", "setex", "psetex", "mset", "msetnx", "append", "incr", "incrby",
     "incrbyfloat", "decr", "decrby", "getset", "getdel", "getex", "del", "unlink",
     "expire", "expireat", "pexpire", "pexpireat", "persist", "rename", "renamenx",
-    "copy", "move", "lpush", "rpush", "lpop", "rpop", "linsert", "lset", "ltrim",
+    "copy", "move", "lpush", "rpush", "lpushx", "rpushx", "lpop", "rpop", "linsert", "lset", "ltrim",
     "lmove", "lmpop", "rpoplpush", "sadd", "srem", "smove", "spop", "sinterstore",
     "sunionstore", "sdiffstore", "zadd", "zrem", "zincrby", "zpopmin", "zpopmax",
-    "zrangestore", "zinterstore", "zunionstore", "zdiffstore", "hset", "hsetnx",
+    "zrangestore", "zinterstore", "zunionstore", "zdiffstore", "zremrangebyrank",
+    "zremrangebyscore", "zremrangebylex", "hset", "hsetnx", "hmset",
     "hdel", "hincrby", "hincrbyfloat", "xadd", "xdel", "xtrim", "xgroup",
     "xack", "xclaim", "xautoclaim", "pfadd", "pfmerge", "geoadd", "geosearchstore",
-    "setbit", "bitop", "bitfield", "flushdb", "flushall", "sort",
+    "setbit", "setrange", "bitop", "bitfield", "flushdb", "flushall", "swapdb", "sort",
+    "restore",
 ];
 
 /// Execute a Lua script with the given keys and args.
@@ -114,18 +116,19 @@ pub fn execute_function_in_lua(
     setup_keys_argv(&lua, &keys, &args)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
-    // Call the named function
-    let call_script = format!(
-        "local func = __registered_functions['{}']\n\
+    // Call the named function safely (avoid string interpolation to prevent injection)
+    lua.globals()
+        .set("__target_func_name", lua.create_string(func_name.as_bytes()).map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?)
+        .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
+
+    let call_script = "local func = __registered_functions[__target_func_name]\n\
          if not func then\n\
              error('Function not found')\n\
          end\n\
-         return func(KEYS, ARGV)",
-        func_name.replace('\'', "\\'")
-    );
+         return func(KEYS, ARGV)";
 
     let result: Value = lua
-        .load(&call_script)
+        .load(call_script)
         .eval()
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 

@@ -1072,29 +1072,33 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_inner(&p, &t, 0, 0)
 }
 
-fn glob_match_inner(pattern: &[char], text: &[char], pi: usize, ti: usize) -> bool {
-    if pi == pattern.len() && ti == text.len() {
-        return true;
-    }
-    if pi == pattern.len() {
-        return false;
-    }
-    if pattern[pi] == '*' {
-        // Try matching zero or more characters
-        for i in ti..=text.len() {
-            if glob_match_inner(pattern, text, pi + 1, i) {
-                return true;
-            }
+fn glob_match_inner(pattern: &[char], text: &[char], mut pi: usize, mut ti: usize) -> bool {
+    // Iterative two-pointer algorithm to avoid exponential backtracking
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti: usize = 0;
+
+    while ti < text.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
         }
-        return false;
     }
-    if ti == text.len() {
-        return false;
+
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
     }
-    if pattern[pi] == '?' || pattern[pi] == text[ti] {
-        return glob_match_inner(pattern, text, pi + 1, ti + 1);
-    }
-    false
+
+    pi == pattern.len()
 }
 
 /// SENTINEL HELP response
