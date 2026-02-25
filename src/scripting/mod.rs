@@ -294,10 +294,12 @@ impl ScriptingEngine {
 
     /// Flush all function libraries
     pub fn function_flush(&self) {
-        let mut libs = self.function_libraries.write().unwrap();
+        // Acquire locks in the same order as function_load/function_delete (index first, then libs)
+        // to prevent AB-BA deadlock
         let mut index = self.function_index.write().unwrap();
-        libs.clear();
+        let mut libs = self.function_libraries.write().unwrap();
         index.clear();
+        libs.clear();
     }
 
     /// List function libraries, optionally filtered by pattern

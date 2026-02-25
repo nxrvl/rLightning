@@ -831,6 +831,33 @@ impl AclManager {
         false
     }
 
+    /// Check if a channel access is allowed for the given client
+    pub fn check_channel_permission(&self, client_addr: &str, channel: &[u8]) -> bool {
+        let username = if let Ok(sessions) = self.sessions.read() {
+            sessions.get(client_addr).cloned()
+        } else {
+            return false;
+        };
+
+        let username = match username {
+            Some(u) => u,
+            None => {
+                if !self.require_auth {
+                    "default".to_string()
+                } else {
+                    return false;
+                }
+            }
+        };
+
+        if let Ok(users) = self.users.read() {
+            if let Some(user) = users.get(&username) {
+                return user.can_access_channel(channel);
+            }
+        }
+        false
+    }
+
     /// Log a denied command
     pub fn log_denial(&self, client_addr: &str, username: &str, cmd: &str, reason: &str) {
         let entry_id = self
@@ -1512,15 +1539,17 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
             keys
         }
 
+        // WATCH - all remaining args are keys
+        "watch" => (0..args.len()).collect(),
+
         // SELECT, PING, AUTH, ACL, etc. - no keys
         "select" | "ping" | "auth" | "acl" | "hello" | "info" | "config" | "monitor"
         | "flushall" | "flushdb" | "scan" | "dbsize" | "randomkey" | "eval" | "evalsha"
         | "eval_ro" | "evalsha_ro" | "script" | "function" | "fcall" | "fcall_ro"
-        | "multi" | "exec" | "discard" | "watch" | "unwatch" | "subscribe"
+        | "multi" | "exec" | "discard" | "unwatch" | "subscribe"
         | "unsubscribe" | "psubscribe" | "punsubscribe" | "publish" | "pubsub"
         | "command" | "client" | "quit" | "reset" | "echo" => vec![],
 
-        // WATCH has keys as all args
         _ => vec![],
     }
 }

@@ -429,27 +429,10 @@ impl StorageEngine {
         }
         
         let required_size = Self::calculate_size(&key, &value);
-        
+
         // Ensure we have enough memory
         self.maybe_evict(required_size).await?;
-        
-        // Set the value
-        // Check if this is a new key for counter update
-        let is_new_key = !self.data.contains_key(&key);
-        
-        // If replacing an existing item, subtract its size
-        let old_size = if let Some(entry) = self.data.get(&key) {
-            Self::calculate_size(&key, &entry.value)
-        } else {
-            0
-        };
-        
-        // Update memory atomically
-        if old_size > 0 {
-            self.current_memory.fetch_sub(old_size as u64, Ordering::Relaxed);
-        }
-        self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
-        
+
         // Create a new item
         let mut item = StorageItem::new(value);
         let expires_at = if let Some(ttl) = ttl {
@@ -458,8 +441,25 @@ impl StorageEngine {
         } else {
             None
         };
-        
-        self.data.insert(key.clone(), item);
+
+        // Use entry API for atomic read-modify-write to avoid TOCTOU races
+        let is_new_key;
+        match self.data.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let old_size = Self::calculate_size(entry.key(), &entry.get().value);
+                if old_size > 0 {
+                    self.current_memory.fetch_sub(old_size as u64, Ordering::Relaxed);
+                }
+                self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
+                entry.insert(item);
+                is_new_key = false;
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
+                entry.insert(item);
+                is_new_key = true;
+            }
+        }
 
         // Add to expiration queue if TTL is set
         if let Some(expires_at) = expires_at {
@@ -707,21 +707,42 @@ impl StorageEngine {
         Ok(keys)
     }
     
-    /// Check if a string matches a simple glob pattern
+    /// Check if a string matches a simple glob pattern using iterative two-pointer algorithm.
+    /// Supports * (match any sequence) and ? (match any single char).
     fn matches_pattern(&self, s: &str, pattern: &str) -> bool {
-        // Convert the glob pattern to a regex pattern
-        let regex_pattern = pattern
-            .replace(".", "\\.")
-            .replace("*", ".*")
-            .replace("?", ".");
-        
-        // Create a regex and match
-        if let Ok(regex) = regex::Regex::new(&format!("^{}$", regex_pattern)) {
-            regex.is_match(s)
-        } else {
-            // If the pattern is invalid, return false
-            false
+        if pattern == "*" {
+            return true;
         }
+
+        let p: Vec<char> = pattern.chars().collect();
+        let s: Vec<char> = s.chars().collect();
+        let (mut pi, mut si) = (0usize, 0usize);
+        let mut star_pi: Option<usize> = None;
+        let mut star_si: Option<usize> = None;
+
+        while si < s.len() {
+            if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+                pi += 1;
+                si += 1;
+            } else if pi < p.len() && p[pi] == '*' {
+                star_pi = Some(pi);
+                star_si = Some(si);
+                pi += 1;
+            } else if let Some(sp) = star_pi {
+                pi = sp + 1;
+                let ss = star_si.unwrap() + 1;
+                star_si = Some(ss);
+                si = ss;
+            } else {
+                return false;
+            }
+        }
+
+        while pi < p.len() && p[pi] == '*' {
+            pi += 1;
+        }
+
+        pi == p.len()
     }
     
     /// Flush all data (remove all keys)

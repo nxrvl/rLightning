@@ -129,6 +129,11 @@ impl SecurityManager {
     pub fn check_key_permission(&self, client_addr: &str, key: &[u8]) -> bool {
         self.acl.check_key_permission(client_addr, key)
     }
+
+    /// Check if a channel access is allowed for the given client (ACL check)
+    pub fn check_channel_permission(&self, client_addr: &str, channel: &[u8]) -> bool {
+        self.acl.check_channel_permission(client_addr, channel)
+    }
 }
 
 #[cfg(test)]
