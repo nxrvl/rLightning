@@ -130,6 +130,15 @@ pub fn queue_command(state: &mut TransactionState, command: Command) -> CommandR
                 "WATCH inside MULTI is not allowed".to_string(),
             ));
         }
+        // AUTH must not be queued inside MULTI because the auth handler always
+        // returns OK and relies on a post-hoc check in the server networking
+        // layer. That post-hoc check does not run for commands executed within
+        // EXEC, so queuing AUTH would silently bypass authentication.
+        "auth" => {
+            return Err(CommandError::InternalError(
+                "AUTH inside MULTI is not allowed".to_string(),
+            ));
+        }
         _ => {}
     }
 
