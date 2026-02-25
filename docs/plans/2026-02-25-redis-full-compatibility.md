@@ -233,17 +233,17 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/networking/mod.rs` (per-connection transaction state)
 - Modify: `src/storage/engine.rs` (WATCH key versioning)
 
-- [ ] Add per-connection transaction state: command queue, WATCH list, dirty flag
-- [ ] Implement MULTI (start queuing commands)
-- [ ] Implement EXEC (execute queued commands atomically, return array of results)
-- [ ] Implement DISCARD (discard queued commands)
-- [ ] Implement WATCH (optimistic locking - track key versions, abort on change)
-- [ ] Implement UNWATCH (clear all watched keys)
-- [ ] Handle errors in queued commands (EXECABORT vs per-command errors)
-- [ ] Ensure commands within MULTI/EXEC are properly isolated
-- [ ] Write tests: basic transactions, WATCH with concurrent modification, nested errors, DISCARD
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Add per-connection transaction state: command queue, WATCH list, dirty flag
+- [x] Implement MULTI (start queuing commands)
+- [x] Implement EXEC (execute queued commands atomically, return array of results)
+- [x] Implement DISCARD (discard queued commands)
+- [x] Implement WATCH (optimistic locking - track key versions, abort on change)
+- [x] Implement UNWATCH (clear all watched keys)
+- [x] Handle errors in queued commands (EXECABORT vs per-command errors)
+- [x] Ensure commands within MULTI/EXEC are properly isolated
+- [x] Write tests: basic transactions, WATCH with concurrent modification, nested errors, DISCARD
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 12: Lua Scripting (EVAL/EVALSHA/FUNCTION)
 

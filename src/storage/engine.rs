@@ -133,6 +133,10 @@ pub struct StorageEngine {
     prefix_index: RwLock<HashMap<String, Vec<Vec<u8>>>>,
     /// Additional databases (1-15) for multi-database support (SELECT/MOVE)
     extra_dbs: Vec<DashMap<Vec<u8>, StorageItem>>,
+    /// Per-key version counter for WATCH (optimistic locking) support
+    key_versions: DashMap<Vec<u8>, u64>,
+    /// Global version counter for generating unique version numbers
+    global_version: AtomicU64,
 }
 
 impl StorageEngine {
@@ -153,6 +157,8 @@ impl StorageEngine {
             expiration_queue: RwLock::new(BinaryHeap::new()),
             prefix_index: RwLock::new(HashMap::new()),
             extra_dbs,
+            key_versions: DashMap::with_capacity(256),
+            global_version: AtomicU64::new(1),
         });
         
         // Start the expiration task
@@ -448,24 +454,26 @@ impl StorageEngine {
         };
         
         self.data.insert(key.clone(), item);
-        
+
         // Add to expiration queue if TTL is set
         if let Some(expires_at) = expires_at {
             self.add_to_expiration_queue(key.clone(), expires_at).await;
         }
-        
+
         // Update prefix index and key count for new keys
         if is_new_key {
             self.update_prefix_indices(&key, true).await;
             self.key_count.fetch_add(1, Ordering::Relaxed);
         }
-        
+
+        // Bump key version for WATCH support
+        self.bump_key_version(&key);
         // Increment write counters
         self.increment_write_counters().await;
-        
+
         Ok(())
     }
-    
+
     /// Set a key-value pair with explicit data type
     pub async fn set_with_type(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType, ttl: Option<Duration>) -> StorageResult<()> {
         // Check size limits
@@ -527,13 +535,15 @@ impl StorageEngine {
             self.update_prefix_indices(&key, true).await;
             self.key_count.fetch_add(1, Ordering::Relaxed);
         }
-        
+
+        // Bump key version for WATCH support
+        self.bump_key_version(&key);
         // Increment write counters
         self.increment_write_counters().await;
-        
+
         Ok(())
     }
-    
+
     /// Get a value from the storage engine
     pub async fn get(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
         let result = if let Some(mut entry) = self.data.get_mut(key) {
@@ -569,6 +579,8 @@ impl StorageEngine {
             // Update prefix index and decrement key count
             self.update_prefix_indices(&k, false).await;
             self.key_count.fetch_sub(1, Ordering::Relaxed);
+            // Bump key version for WATCH support
+            self.bump_key_version(&k);
             Ok(true)
         } else {
             Ok(false)
@@ -596,11 +608,11 @@ impl StorageEngine {
     pub async fn expire(&self, key: &[u8], ttl: Option<Duration>) -> StorageResult<bool> {
         if let Some(mut entry) = self.data.get_mut(key) {
             let item = entry.value_mut();
-            
+
             if item.is_expired() {
                 return Ok(false);
             }
-            
+
             if let Some(ttl) = ttl {
                 item.expire(ttl);
                 // Add to expiration queue
@@ -611,7 +623,9 @@ impl StorageEngine {
                 // Remove from expiration queue (expensive operation, but TTL removal is rare)
                 self.remove_from_expiration_queue(key).await;
             }
-            
+
+            // Bump key version for WATCH support
+            self.bump_key_version(key);
             Ok(true)
         } else {
             Ok(false)
@@ -752,6 +766,17 @@ impl StorageEngine {
         for counter in counters.iter() {
             counter.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Bump the version counter for a specific key (used by WATCH for optimistic locking)
+    pub fn bump_key_version(&self, key: &[u8]) {
+        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
+        self.key_versions.insert(key.to_vec(), new_version);
+    }
+
+    /// Get the current version of a key (returns 0 if key has never been modified)
+    pub fn get_key_version(&self, key: &[u8]) -> u64 {
+        self.key_versions.get(key).map(|v| *v).unwrap_or(0)
     }
     
     /// Process a command (for AOF replay)
@@ -1094,6 +1119,8 @@ impl StorageEngine {
             self.key_count.fetch_add(1, Ordering::Relaxed);
         }
 
+        // Bump key version for WATCH support
+        self.bump_key_version(&dst);
         self.increment_write_counters().await;
         Ok(true)
     }
