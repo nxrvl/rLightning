@@ -383,6 +383,13 @@ impl CommandHandler {
             "time" => commands::time(&self.storage, &command.args).await,
             "lolwut" => commands::lolwut(&self.storage, &command.args).await,
 
+            // Cluster commands
+            "cluster" => commands::cluster_command(&self.storage, &command.args, None).await,
+            "asking" => commands::asking(&self.storage, &command.args).await,
+            "readonly" => commands::readonly(&self.storage, &command.args).await,
+            "readwrite" => commands::readwrite(&self.storage, &command.args).await,
+            "migrate" => commands::migrate(&self.storage, &command.args).await,
+
             // ACL commands are handled in server.rs, but return a friendly message here
             "acl" => {
                 Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))

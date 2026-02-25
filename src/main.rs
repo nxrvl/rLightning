@@ -17,6 +17,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
+mod cluster;
 mod command;
 mod networking;
 mod persistence;

@@ -1242,6 +1242,42 @@ impl StorageEngine {
         self.set_with_type(key, value, data_type, ttl).await?;
         Ok(true)
     }
+
+    /// Count keys that belong to a given hash slot
+    pub async fn count_keys_in_slot(&self, slot: u16) -> usize {
+        use crate::cluster::slot::key_hash_slot;
+        let mut count = 0;
+        for entry in self.data.iter() {
+            if key_hash_slot(entry.key()) == slot {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Get keys that belong to a given hash slot (up to count)
+    pub async fn get_keys_in_slot(&self, slot: u16, count: usize) -> Vec<Vec<u8>> {
+        use crate::cluster::slot::key_hash_slot;
+        let mut keys = Vec::new();
+        for entry in self.data.iter() {
+            if key_hash_slot(entry.key()) == slot {
+                keys.push(entry.key().clone());
+                if keys.len() >= count {
+                    break;
+                }
+            }
+        }
+        keys
+    }
+
+    /// Dump a key's value as serialized bytes (for MIGRATE)
+    pub async fn dump_key(&self, key: &[u8]) -> Option<Vec<u8>> {
+        if let Some(entry) = self.data.get(key) {
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,9 @@ pub use crate::command::types::connection::{
     swapdb, time, lolwut, info_expanded,
 };
 
+// Cluster commands
+pub use crate::command::types::cluster::{cluster_command, asking, readonly, readwrite, migrate};
+
 // Alias for type_command as get_type
 pub use type_command as get_type;
 

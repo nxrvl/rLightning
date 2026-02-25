@@ -366,20 +366,20 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/command/handler.rs`
 - Modify: `src/networking/mod.rs`
 
-- [ ] Implement hash slot calculation (CRC16 mod 16384) and hash tag support
-- [ ] Implement cluster topology: node roles, slot assignment, epoch-based versioning
-- [ ] Implement cluster bus (gossip protocol on port+10000 for inter-node communication)
-- [ ] Implement CLUSTER subcommands: INFO, NODES, SLOTS, SHARDS, MYID, MEET, FORGET, REPLICATE, RESET, ADDSLOTS, DELSLOTS, FLUSHSLOTS, SETSLOT, COUNTKEYSINSLOT, GETKEYSINSLOT, KEYSLOT, FAILOVER, SAVECONFIG, SET-CONFIG-EPOCH, COUNT-FAILURE-REPORTS, LINKS
-- [ ] Implement MOVED and ASK redirections for cross-slot operations
-- [ ] Implement ASKING command (redirect handling)
-- [ ] Implement READONLY / READWRITE (replica reads in cluster mode)
-- [ ] Implement slot migration (IMPORTING/MIGRATING states)
-- [ ] Implement MIGRATE command (move keys between nodes)
-- [ ] Implement cluster-aware key validation (reject cross-slot commands)
-- [ ] Implement automatic failover detection and promotion
-- [ ] Write tests for slot calculation, redirections, topology, migration (using dev containers for multi-node cluster testing)
-- [ ] Write multi-node integration test (using dev containers to spin up 6-node cluster)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement hash slot calculation (CRC16 mod 16384) and hash tag support
+- [x] Implement cluster topology: node roles, slot assignment, epoch-based versioning
+- [x] Implement cluster bus (gossip protocol on port+10000 for inter-node communication)
+- [x] Implement CLUSTER subcommands: INFO, NODES, SLOTS, SHARDS, MYID, MEET, FORGET, REPLICATE, RESET, ADDSLOTS, DELSLOTS, FLUSHSLOTS, SETSLOT, COUNTKEYSINSLOT, GETKEYSINSLOT, KEYSLOT, FAILOVER, SAVECONFIG, SET-CONFIG-EPOCH, COUNT-FAILURE-REPORTS, LINKS
+- [x] Implement MOVED and ASK redirections for cross-slot operations
+- [x] Implement ASKING command (redirect handling)
+- [x] Implement READONLY / READWRITE (replica reads in cluster mode)
+- [x] Implement slot migration (IMPORTING/MIGRATING states)
+- [x] Implement MIGRATE command (move keys between nodes)
+- [x] Implement cluster-aware key validation (reject cross-slot commands)
+- [x] Implement automatic failover detection and promotion
+- [x] Write tests for slot calculation, redirections, topology, migration (using dev containers for multi-node cluster testing)
+- [x] Write multi-node integration test (using dev containers to spin up 6-node cluster)
+- [x] Run project test suite - must pass before next task
 
 ### Task 18: Redis Sentinel Support
 
