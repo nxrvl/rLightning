@@ -198,6 +198,16 @@ impl CommandHandler {
                 }
                 result
             },
+            "rpoplpush" => {
+                let result = commands::rpoplpush(&self.storage, &command.args).await;
+                // Notify destination key if move succeeded
+                if result.is_ok() && command.args.len() >= 2 {
+                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                        self.blocking_mgr.notify_key(&command.args[1]);
+                    }
+                }
+                result
+            },
             "lmpop" => commands::lmpop(&self.storage, &command.args).await,
             "blpop" => commands::blpop(&self.storage, &command.args, &self.blocking_mgr).await,
             "brpop" => commands::brpop(&self.storage, &command.args, &self.blocking_mgr).await,
@@ -319,6 +329,7 @@ impl CommandHandler {
             },
             "keys" => commands::keys(&self.storage, &command.args).await,
             "rename" => commands::rename(&self.storage, &command.args).await,
+            "renamenx" => commands::renamenx(&self.storage, &command.args).await,
             "flushall" => commands::flushall(&self.storage, &command.args).await,
             "flushdb" => commands::flushdb(&self.storage, &command.args).await,
             "monitor" => commands::monitor(&self.storage, &command.args).await,
@@ -880,11 +891,11 @@ mod tests {
         };
         let _ = handler.process(del_command).await.unwrap();
         
-        // Initialize the key as a list
+        // Initialize the key as a list using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        storage.set(list_key.clone(), serialized, None).await.unwrap();
-        
+        storage.set_with_type(list_key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
+
         // Verify the key type
         let key_type = storage.get_type(&list_key).await.unwrap();
         assert_eq!(key_type, "list");
