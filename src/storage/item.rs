@@ -9,6 +9,7 @@ pub enum RedisDataType {
     Set,
     Hash,
     ZSet,
+    Stream,
 }
 
 impl RedisDataType {
@@ -19,6 +20,7 @@ impl RedisDataType {
             RedisDataType::Set => "set",
             RedisDataType::Hash => "hash",
             RedisDataType::ZSet => "zset",
+            RedisDataType::Stream => "stream",
         }
     }
 }
