@@ -1,0 +1,209 @@
+version: "3.8"
+
+# Docker Compose for rLightning compatibility testing
+# Provides Redis 7.x and rLightning side-by-side for behavior comparison
+#
+# Usage:
+#   docker compose -f .devcontainer/docker-compose.test.yml up -d
+#   cargo test --test redis_full_compatibility_test
+#   docker compose -f .devcontainer/docker-compose.test.yml down
+
+services:
+  # Real Redis 7.x for comparison testing
+  redis:
+    image: redis:7-alpine
+    container_name: rlightning-test-redis
+    ports:
+      - "6399:6379"
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    tmpfs:
+      - /data
+
+  # rLightning instance for comparison testing
+  rlightning:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    image: rlightning:test
+    container_name: rlightning-test-server
+    ports:
+      - "6398:6379"
+    environment:
+      RLIGHTNING_BIND: "0.0.0.0"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "6379"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # Development container (for devcontainer.json)
+  rlightning-dev:
+    image: mcr.microsoft.com/devcontainers/rust:1
+    container_name: rlightning-dev
+    volumes:
+      - ../:/workspace:cached
+    command: sleep infinity
+    depends_on:
+      redis:
+        condition: service_healthy
+      rlightning:
+        condition: service_healthy
+
+  # Redis cluster nodes for cluster testing (3 masters + 3 replicas)
+  redis-cluster-1:
+    image: redis:7-alpine
+    container_name: rlightning-test-cluster-1
+    ports:
+      - "7001:6379"
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --save ""
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - cluster
+
+  redis-cluster-2:
+    image: redis:7-alpine
+    container_name: rlightning-test-cluster-2
+    ports:
+      - "7002:6379"
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --save ""
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - cluster
+
+  redis-cluster-3:
+    image: redis:7-alpine
+    container_name: rlightning-test-cluster-3
+    ports:
+      - "7003:6379"
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --save ""
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - cluster
+
+  # Sentinel nodes for sentinel testing
+  redis-sentinel-master:
+    image: redis:7-alpine
+    container_name: rlightning-test-sentinel-master
+    ports:
+      - "6400:6379"
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - sentinel
+
+  redis-sentinel-replica:
+    image: redis:7-alpine
+    container_name: rlightning-test-sentinel-replica
+    ports:
+      - "6401:6379"
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --replicaof redis-sentinel-master 6379
+    depends_on:
+      redis-sentinel-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - sentinel
+
+  redis-sentinel-1:
+    image: redis:7-alpine
+    container_name: rlightning-test-sentinel-1
+    ports:
+      - "26379:26379"
+    command: >
+      sh -c "echo 'sentinel monitor mymaster redis-sentinel-master 6379 2' > /tmp/sentinel.conf &&
+             echo 'sentinel down-after-milliseconds mymaster 5000' >> /tmp/sentinel.conf &&
+             echo 'sentinel failover-timeout mymaster 10000' >> /tmp/sentinel.conf &&
+             redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      redis-sentinel-master:
+        condition: service_healthy
+    profiles:
+      - sentinel
+
+  redis-sentinel-2:
+    image: redis:7-alpine
+    container_name: rlightning-test-sentinel-2
+    ports:
+      - "26380:26379"
+    command: >
+      sh -c "echo 'sentinel monitor mymaster redis-sentinel-master 6379 2' > /tmp/sentinel.conf &&
+             echo 'sentinel down-after-milliseconds mymaster 5000' >> /tmp/sentinel.conf &&
+             echo 'sentinel failover-timeout mymaster 10000' >> /tmp/sentinel.conf &&
+             redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      redis-sentinel-master:
+        condition: service_healthy
+    profiles:
+      - sentinel
+
+  redis-sentinel-3:
+    image: redis:7-alpine
+    container_name: rlightning-test-sentinel-3
+    ports:
+      - "26381:26379"
+    command: >
+      sh -c "echo 'sentinel monitor mymaster redis-sentinel-master 6379 2' > /tmp/sentinel.conf &&
+             echo 'sentinel down-after-milliseconds mymaster 5000' >> /tmp/sentinel.conf &&
+             echo 'sentinel failover-timeout mymaster 10000' >> /tmp/sentinel.conf &&
+             redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      redis-sentinel-master:
+        condition: service_healthy
+    profiles:
+      - sentinel

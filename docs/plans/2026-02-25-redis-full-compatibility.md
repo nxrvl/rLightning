@@ -451,19 +451,19 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Create: `.devcontainer/docker-compose.test.yml` (Redis + rLightning side-by-side for compatibility tests)
 - Modify: existing test files as needed
 
-- [ ] Set up dev container configuration: Docker Compose with Redis 7.x and rLightning containers for side-by-side compatibility testing
-- [ ] Create comprehensive command compatibility test: every implemented command tested against real Redis for identical behavior (using dev container)
-- [ ] Test error responses match Redis exactly (error messages, error types)
-- [ ] Test edge cases: empty keys, binary data, large values, Unicode, special characters
-- [ ] Test RESP3 protocol compatibility with Redis 7.x
-- [ ] Test transaction isolation and error handling matches Redis behavior
-- [ ] Test Lua scripting compatibility with Redis Lua API
-- [ ] Test ACL behavior matches Redis ACL system
-- [ ] Test cluster redirect behavior with redis-cli --cluster (using dev container with multi-node setup)
-- [ ] Test sentinel failover behavior (using dev container with sentinel topology)
-- [ ] Test persistence (RDB/AOF) format compatibility where applicable
-- [ ] Test client library compatibility (test with redis-rs crate against both Redis and rLightning in dev container)
-- [ ] Run full test suite - all tests must pass
+- [x] Set up dev container configuration: Docker Compose with Redis 7.x and rLightning containers for side-by-side compatibility testing
+- [x] Create comprehensive command compatibility test: every implemented command tested against real Redis for identical behavior (using dev container)
+- [x] Test error responses match Redis exactly (error messages, error types)
+- [x] Test edge cases: empty keys, binary data, large values, Unicode, special characters
+- [x] Test RESP3 protocol compatibility with Redis 7.x
+- [x] Test transaction isolation and error handling matches Redis behavior
+- [x] Test Lua scripting compatibility with Redis Lua API
+- [x] Test ACL behavior matches Redis ACL system
+- [x] Test cluster redirect behavior with redis-cli --cluster (using dev container with multi-node setup)
+- [x] Test sentinel failover behavior (using dev container with sentinel topology)
+- [x] Test persistence (RDB/AOF) format compatibility where applicable
+- [x] Test client library compatibility (test with redis-rs crate against both Redis and rLightning in dev container)
+- [x] Run full test suite - all tests must pass
 
 ### Task 22: Automated Acceptance Tests & CI/CD Pipeline
 
