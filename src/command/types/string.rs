@@ -672,28 +672,78 @@ pub async fn setex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
 /// Redis PEXPIRE command - Set a key's time to live in milliseconds
 pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let millis_str = bytes_to_string(&args[1])?;
     let millis = millis_str.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("PEXPIRE value must be a valid integer".to_string())
     })?;
-    
+
     let ttl = if millis < 0 {
         None // Negative TTL means delete the key
     } else {
         Some(std::time::Duration::from_millis(millis as u64))
     };
-    
+
+    // Parse optional condition flags (NX, XX, GT, LT) - Redis 7.0+
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
+    for arg in args.iter().skip(2) {
+        match bytes_to_string(arg)?.to_uppercase().as_str() {
+            "NX" => nx = true,
+            "XX" => xx = true,
+            "GT" => gt = true,
+            "LT" => lt = true,
+            _ => {
+                return Err(CommandError::InvalidArgument(
+                    "Unsupported option".to_string(),
+                ));
+            }
+        }
+    }
+
     // If TTL is None, we need to delete the key
     if ttl.is_none() {
         let deleted = engine.del(&key).await?;
         return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
     }
-    
+
+    // Apply condition flags
+    if nx || xx || gt || lt {
+        let current_ttl = engine.ttl(&key).await?;
+        let has_expiry = current_ttl.is_some();
+
+        if nx && has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        if xx && !has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        if gt {
+            if let Some(current) = current_ttl {
+                if let Some(new_ttl) = &ttl {
+                    if *new_ttl <= current {
+                        return Ok(RespValue::Integer(0));
+                    }
+                }
+            }
+        }
+        if lt {
+            if let Some(current) = current_ttl {
+                if let Some(new_ttl) = &ttl {
+                    if *new_ttl >= current {
+                        return Ok(RespValue::Integer(0));
+                    }
+                }
+            }
+        }
+    }
+
     match engine.expire(&key, ttl).await? {
         true => Ok(RespValue::Integer(1)),
         false => Ok(RespValue::Integer(0)),

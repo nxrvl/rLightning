@@ -214,6 +214,62 @@ pub async fn pexpireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
 
+    // Parse optional condition flags (NX, XX, GT, LT) - Redis 7.0+
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
+    for arg in args.iter().skip(2) {
+        match bytes_to_string(arg)?.to_uppercase().as_str() {
+            "NX" => nx = true,
+            "XX" => xx = true,
+            "GT" => gt = true,
+            "LT" => lt = true,
+            _ => {
+                return Err(CommandError::InvalidArgument(
+                    "Unsupported option".to_string(),
+                ));
+            }
+        }
+    }
+
+    // Apply condition flags
+    if nx || xx || gt || lt {
+        let current_ttl = engine.ttl(key).await?;
+        let has_expiry = current_ttl.is_some();
+
+        if nx && has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        if xx && !has_expiry {
+            return Ok(RespValue::Integer(0));
+        }
+        if gt {
+            if let Some(current) = current_ttl {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let new_remaining_ms = timestamp_ms - now_ms;
+                if new_remaining_ms <= current.as_millis() as i64 {
+                    return Ok(RespValue::Integer(0));
+                }
+            }
+        }
+        if lt {
+            if let Some(current) = current_ttl {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let new_remaining_ms = timestamp_ms - now_ms;
+                if new_remaining_ms >= current.as_millis() as i64 {
+                    return Ok(RespValue::Integer(0));
+                }
+            }
+        }
+    }
+
     match engine.pexpire_at(key, timestamp_ms).await? {
         true => Ok(RespValue::Integer(1)),
         false => Ok(RespValue::Integer(0)),
