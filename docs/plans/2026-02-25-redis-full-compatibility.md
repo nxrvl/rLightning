@@ -389,15 +389,15 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Create: `src/sentinel/failover.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement Sentinel mode (separate binary mode or config flag)
-- [ ] Implement master monitoring with configurable quorum
-- [ ] Implement SENTINEL subcommands: MASTERS, MASTER, REPLICAS/SLAVES, SENTINELS, GET-MASTER-ADDR-BY-NAME, RESET, FAILOVER, CKQUORUM, FLUSHCONFIG, MONITOR, REMOVE, SET, IS-MASTER-DOWN-BY-ADDR, SIMULATE-FAILURE, PENDING-SCRIPTS, INFO-CACHE, MYID, CONFIG
-- [ ] Implement SDOWN (subjective down) and ODOWN (objective down) detection
-- [ ] Implement automatic failover: leader election, replica promotion, reconfiguration
-- [ ] Implement Sentinel pub/sub channels (+switch-master, +sdown, etc.)
-- [ ] Implement configuration provider mode (clients query Sentinel for master address)
-- [ ] Write tests for monitoring, failover, multi-sentinel coordination (using dev containers for multi-sentinel topology)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement Sentinel mode (separate binary mode or config flag)
+- [x] Implement master monitoring with configurable quorum
+- [x] Implement SENTINEL subcommands: MASTERS, MASTER, REPLICAS/SLAVES, SENTINELS, GET-MASTER-ADDR-BY-NAME, RESET, FAILOVER, CKQUORUM, FLUSHCONFIG, MONITOR, REMOVE, SET, IS-MASTER-DOWN-BY-ADDR, SIMULATE-FAILURE, PENDING-SCRIPTS, INFO-CACHE, MYID, CONFIG
+- [x] Implement SDOWN (subjective down) and ODOWN (objective down) detection
+- [x] Implement automatic failover: leader election, replica promotion, reconfiguration
+- [x] Implement Sentinel pub/sub channels (+switch-master, +sdown, etc.)
+- [x] Implement configuration provider mode (clients query Sentinel for master address)
+- [x] Write tests for monitoring, failover, multi-sentinel coordination (using dev containers for multi-sentinel topology)
+- [x] Run project test suite - must pass before next task
 
 ### Task 19: Module System (Minimal Compatibility)
 

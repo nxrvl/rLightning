@@ -5,6 +5,7 @@ pub mod hash;
 pub mod key;
 pub mod list;
 pub mod pubsub;
+pub mod sentinel;
 pub mod set;
 pub mod sorted_set;
 pub mod string;
