@@ -2014,27 +2014,38 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     ])))
 }
 
-/// Simple glob pattern matching (supports * and ?)
+/// Simple glob pattern matching (supports * and ?) using O(1) memory iterative algorithm
 fn glob_match(pattern: &str, s: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = s.chars().collect();
-    let mut dp = vec![vec![false; s.len() + 1]; p.len() + 1];
-    dp[0][0] = true;
-    for i in 1..=p.len() {
-        if p[i - 1] == '*' {
-            dp[i][0] = dp[i - 1][0];
+    let (plen, slen) = (p.len(), s.len());
+    let mut pi = 0;
+    let mut si = 0;
+    let mut star_pi: Option<usize> = None;
+    let mut star_si: usize = 0;
+
+    while si < slen {
+        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < plen && p[pi] == '*' {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
         }
     }
-    for i in 1..=p.len() {
-        for j in 1..=s.len() {
-            if p[i - 1] == '*' {
-                dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-            } else if p[i - 1] == '?' || p[i - 1] == s[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1];
-            }
-        }
+
+    while pi < plen && p[pi] == '*' {
+        pi += 1;
     }
-    dp[p.len()][s.len()]
+
+    pi == plen
 }
 
 /// Redis unified ZRANGE command (Redis 6.2+) with BYSCORE, BYLEX, REV, LIMIT options

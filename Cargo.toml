@@ -59,6 +59,8 @@ fastrand = "2.0"
 mlua = { version = "0.10", features = ["lua51", "vendored"] }
 # SHA1 hashing for script caching
 sha1_smol = "1.0"
+# SHA256 hashing for ACL password storage (Redis-compatible)
+sha2 = "0.10"
 
 
 [dev-dependencies]

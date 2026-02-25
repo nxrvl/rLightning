@@ -187,6 +187,7 @@ impl Server {
         let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut response_buffer = Vec::with_capacity(buffer_size);
         let mut partial_command_buffer: Vec<u8> = Vec::new(); // For reassembling partial large commands
+        const MAX_PARTIAL_BUFFER_SIZE: usize = 256 * 1024 * 1024; // 256MB limit for partial command buffer
 
         // CRITICAL FIX: Use stateful parser to prevent data/command confusion
         use crate::networking::resp_parser_state::StatefulRespParser;
@@ -342,6 +343,51 @@ impl Server {
                                             &client_addr_str,
                                         )
                                         .await?;
+                                        commands_processed += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // ACL permission checks for authenticated clients
+                            // Must run BEFORE dispatching to special command handlers (pubsub, acl, sentinel, replication)
+                            if let Some(ref security_mgr) = security {
+                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
+                                    // Check command permission
+                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
+                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
+                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                                        Self::send_error_to_writer(
+                                            &mut socket_writer,
+                                            error_msg,
+                                            &client_addr_str,
+                                        )
+                                        .await?;
+                                        commands_processed += 1;
+                                        continue;
+                                    }
+
+                                    // Check key permission
+                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                    let mut key_denied = false;
+                                    for &idx in &key_indices {
+                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
+                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
+                                            Self::send_error_to_writer(
+                                                &mut socket_writer,
+                                                error_msg,
+                                                &client_addr_str,
+                                            )
+                                            .await?;
+                                            key_denied = true;
+                                            break;
+                                        }
+                                    }
+                                    if key_denied {
                                         commands_processed += 1;
                                         continue;
                                     }
@@ -653,48 +699,12 @@ impl Server {
                                 }
                             }
 
-                            // ACL permission checks for authenticated clients
-                            if let Some(ref security_mgr) = security {
-                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
-                                    // Check command permission
-                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
-                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
-                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                                        Self::send_error_to_writer(
-                                            &mut socket_writer,
-                                            error_msg,
-                                            &client_addr_str,
-                                        )
-                                        .await?;
-                                        continue;
-                                    }
-
-                                    // Check key permission
-                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
-                                    let mut key_denied = false;
-                                    for &idx in &key_indices {
-                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
-                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
-                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
-                                            Self::send_error_to_writer(
-                                                &mut socket_writer,
-                                                error_msg,
-                                                &client_addr_str,
-                                            )
-                                            .await?;
-                                            key_denied = true;
-                                            break;
-                                        }
-                                    }
-                                    if key_denied {
-                                        commands_processed += 1;
-                                        continue;
-                                    }
-                                }
-                            }
+                            // Capture queued commands before EXEC drains them (for replication)
+                            let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
+                                tx_state.queue.clone()
+                            } else {
+                                vec![]
+                            };
 
                             // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
                             let tx_result = Self::process_with_transaction(
@@ -713,7 +723,21 @@ impl Server {
                                 Ok(response) => {
                                     // Propagate write commands to replicas
                                     if let Some(ref repl) = replication {
-                                        if ReplicationManager::is_write_command(&cmd_lower) {
+                                        if cmd_lower == "exec" {
+                                            // For EXEC, propagate queued write commands individually
+                                            if let RespValue::Array(Some(_)) = &response {
+                                                for queued_cmd in &queued_for_repl {
+                                                    let qcmd_lower = queued_cmd.name.to_lowercase();
+                                                    if ReplicationManager::is_write_command(&qcmd_lower) {
+                                                        let repl_cmd = RespCommand {
+                                                            name: queued_cmd.name.as_bytes().to_vec(),
+                                                            args: queued_cmd.args.clone(),
+                                                        };
+                                                        repl.propagate_command(&repl_cmd).await;
+                                                    }
+                                                }
+                                            }
+                                        } else if ReplicationManager::is_write_command(&cmd_lower) {
                                             repl.propagate_command(&resp_cmd).await;
                                         }
                                     }
@@ -770,6 +794,51 @@ impl Server {
                                                             &client_addr_str,
                                                         )
                                                         .await?;
+                                                        commands_processed += 1;
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+
+                                            // ACL permission checks for authenticated clients (slow path)
+                                            // Must run BEFORE dispatching to special command handlers
+                                            if let Some(ref security_mgr) = security {
+                                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
+                                                    // Check command permission
+                                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
+                                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
+                                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                                                        Self::send_error_to_writer(
+                                                            &mut socket_writer,
+                                                            error_msg,
+                                                            &client_addr_str,
+                                                        )
+                                                        .await?;
+                                                        commands_processed += 1;
+                                                        continue;
+                                                    }
+
+                                                    // Check key permission
+                                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                                                    let mut key_denied = false;
+                                                    for &idx in &key_indices {
+                                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
+                                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
+                                                            Self::send_error_to_writer(
+                                                                &mut socket_writer,
+                                                                error_msg,
+                                                                &client_addr_str,
+                                                            )
+                                                            .await?;
+                                                            key_denied = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if key_denied {
                                                         commands_processed += 1;
                                                         continue;
                                                     }
@@ -966,48 +1035,12 @@ impl Server {
                                                 }
                                             }
 
-                                            // ACL permission checks for authenticated clients
-                                            if let Some(ref security_mgr) = security {
-                                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
-                                                    // Check command permission
-                                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
-                                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
-                                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                                                        Self::send_error_to_writer(
-                                                            &mut socket_writer,
-                                                            error_msg,
-                                                            &client_addr_str,
-                                                        )
-                                                        .await?;
-                                                        continue;
-                                                    }
-
-                                                    // Check key permission
-                                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
-                                                    let mut key_denied = false;
-                                                    for &idx in &key_indices {
-                                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
-                                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
-                                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
-                                                            Self::send_error_to_writer(
-                                                                &mut socket_writer,
-                                                                error_msg,
-                                                                &client_addr_str,
-                                                            )
-                                                            .await?;
-                                                            key_denied = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                    if key_denied {
-                                                        commands_processed += 1;
-                                                        continue;
-                                                    }
-                                                }
-                                            }
+                                            // Capture queued commands before EXEC drains them (for replication)
+                                            let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
+                                                tx_state.queue.clone()
+                                            } else {
+                                                vec![]
+                                            };
 
                                             // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
                                             let tx_result = Self::process_with_transaction(
@@ -1026,7 +1059,21 @@ impl Server {
                                                 Ok(response) => {
                                                     // Propagate write commands to replicas
                                                     if let Some(ref repl) = replication {
-                                                        if ReplicationManager::is_write_command(&cmd_lower) {
+                                                        if cmd_lower == "exec" {
+                                                            // For EXEC, propagate queued write commands individually
+                                                            if let RespValue::Array(Some(_)) = &response {
+                                                                for queued_cmd in &queued_for_repl {
+                                                                    let qcmd_lower = queued_cmd.name.to_lowercase();
+                                                                    if ReplicationManager::is_write_command(&qcmd_lower) {
+                                                                        let repl_cmd = RespCommand {
+                                                                            name: queued_cmd.name.as_bytes().to_vec(),
+                                                                            args: queued_cmd.args.clone(),
+                                                                        };
+                                                                        repl.propagate_command(&repl_cmd).await;
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if ReplicationManager::is_write_command(&cmd_lower) {
                                                             let resp_cmd = RespCommand {
                                                                 name: cmd.name.as_bytes().to_vec(),
                                                                 args: cmd.args.clone(),
@@ -1070,6 +1117,11 @@ impl Server {
                                 }
                                 Ok(None) => {
                                     debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message, waiting for more data");
+                                    if partial_command_buffer.len() + buffer.len() > MAX_PARTIAL_BUFFER_SIZE {
+                                        error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
+                                        Self::send_error_to_writer(&mut socket_writer, "ERR Protocol error: command too large".to_string(), &client_addr_str).await?;
+                                        return Ok(());
+                                    }
                                     partial_command_buffer.extend_from_slice(&buffer);
                                     buffer.clear();
                                     debug!(client_addr = %client_addr_str, partial_buffer_len = partial_command_buffer.len(), "Saved partial command data");
@@ -1116,6 +1168,11 @@ impl Server {
                             error!(client_addr = %client_addr_str, error = ?e, "Fast path error");
                             if let RespError::Incomplete = e {
                                 debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message in fast path, waiting for more data");
+                                if partial_command_buffer.len() + buffer.len() > MAX_PARTIAL_BUFFER_SIZE {
+                                    error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
+                                    Self::send_error_to_writer(&mut socket_writer, "ERR Protocol error: command too large".to_string(), &client_addr_str).await?;
+                                    return Ok(());
+                                }
                                 partial_command_buffer.extend_from_slice(&buffer);
                                 buffer.clear();
                                 break;
@@ -1220,10 +1277,17 @@ impl Server {
                 // Capture queued commands before EXEC drains them (for AOF logging)
                 let queued_commands: Vec<Command> = tx_state.queue.clone();
                 let result = transaction::handle_exec(tx_state, command_handler, engine).await?;
-                // Log write commands from the transaction to AOF
+                // Log transaction commands to AOF wrapped in MULTI/EXEC
                 if let Some(persistence_mgr) = persistence {
                     if let RespValue::Array(Some(_)) = &result {
                         // Transaction succeeded (not aborted by WATCH)
+                        // Log MULTI first
+                        let multi_cmd = RespCommand {
+                            name: b"MULTI".to_vec(),
+                            args: vec![],
+                        };
+                        let _ = persistence_mgr.log_command(multi_cmd, aof_sync_policy).await;
+                        // Log each write command
                         for queued_cmd in &queued_commands {
                             let qcmd_lower = queued_cmd.name.to_lowercase();
                             if ReplicationManager::is_write_command(&qcmd_lower) {
@@ -1234,6 +1298,12 @@ impl Server {
                                 let _ = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await;
                             }
                         }
+                        // Log EXEC to complete the transaction boundary
+                        let exec_cmd = RespCommand {
+                            name: b"EXEC".to_vec(),
+                            args: vec![],
+                        };
+                        let _ = persistence_mgr.log_command(exec_cmd, aof_sync_policy).await;
                     }
                 }
                 return Ok(result);

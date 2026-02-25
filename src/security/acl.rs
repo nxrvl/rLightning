@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use sha2::{Sha256, Digest};
 use tracing::{debug, info, warn};
 
 use crate::command::error::CommandResult;
@@ -1331,13 +1332,11 @@ fn glob_match(pattern: &str, string: &str) -> bool {
     pi == plen
 }
 
-/// Hash a password using SHA1 for ACL password storage.
-/// Redis uses SHA256; we use SHA1 (via sha1_smol already in deps) which provides
-/// real cryptographic hashing, unlike the previous DefaultHasher approach.
+/// Hash a password using SHA256 for ACL password storage (Redis-compatible).
 pub fn hash_password(password: &str) -> String {
-    let hash = sha1_smol::Sha1::from(password.as_bytes()).digest().to_string();
-    // SHA1 produces 40 hex chars; pad to 64 for compatibility with Redis ACL format
-    format!("{:0<64}", hash)
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Extract key arguments from a command for ACL key pattern checking
@@ -1380,10 +1379,95 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         "mget" => (0..args.len()).collect(),
         "mset" | "msetnx" => (0..args.len()).step_by(2).collect(),
 
-        // BLPOP/BRPOP - all args except last (timeout)
-        "blpop" | "brpop" => {
+        // BLPOP/BRPOP/BZPOPMIN/BZPOPMAX - all args except last (timeout)
+        "blpop" | "brpop" | "bzpopmin" | "bzpopmax" => {
             if args.len() > 1 {
                 (0..args.len() - 1).collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // RPOPLPUSH - source and destination
+        "rpoplpush" => {
+            let mut keys = vec![0];
+            if args.len() > 1 {
+                keys.push(1);
+            }
+            keys
+        }
+
+        // LMPOP/BLMPOP - numkeys then keys (BLMPOP has timeout first)
+        "lmpop" => {
+            if let Some(first) = args.first() {
+                if let Ok(numkeys) = String::from_utf8_lossy(first).parse::<usize>() {
+                    (1..=numkeys).filter(|&i| i < args.len()).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+        "blmpop" => {
+            // BLMPOP timeout numkeys key [key ...] LEFT|RIGHT
+            if args.len() >= 2 {
+                if let Ok(numkeys) = String::from_utf8_lossy(&args[1]).parse::<usize>() {
+                    (2..2 + numkeys).filter(|&i| i < args.len()).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+
+        // ZMPOP/BZMPOP - numkeys then keys (BZMPOP has timeout first)
+        "zmpop" => {
+            if let Some(first) = args.first() {
+                if let Ok(numkeys) = String::from_utf8_lossy(first).parse::<usize>() {
+                    (1..=numkeys).filter(|&i| i < args.len()).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+        "bzmpop" => {
+            if args.len() >= 2 {
+                if let Ok(numkeys) = String::from_utf8_lossy(&args[1]).parse::<usize>() {
+                    (2..2 + numkeys).filter(|&i| i < args.len()).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+
+        // SINTERCARD/ZINTER/ZUNION/ZDIFF - numkeys then keys
+        "sintercard" | "zinter" | "zunion" | "zdiff" => {
+            if let Some(first) = args.first() {
+                if let Ok(numkeys) = String::from_utf8_lossy(first).parse::<usize>() {
+                    (1..=numkeys).filter(|&i| i < args.len()).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+
+        // XREAD/XREADGROUP - keys follow STREAMS keyword
+        "xread" | "xreadgroup" => {
+            let streams_idx = args.iter().position(|a| {
+                String::from_utf8_lossy(a).to_uppercase() == "STREAMS"
+            });
+            if let Some(idx) = streams_idx {
+                let remaining = args.len() - idx - 1;
+                let num_keys = remaining / 2;
+                (idx + 1..idx + 1 + num_keys).collect()
             } else {
                 vec![]
             }
