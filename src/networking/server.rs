@@ -356,6 +356,39 @@ impl Server {
                                     commands_processed += 1;
                                     continue;
                                 }
+                                "ssubscribe" => {
+                                    let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
+                                    match responses {
+                                        Ok(resp_list) => {
+                                            for resp in resp_list {
+                                                if let Ok(bytes) = resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                            }
+                                            in_subscription_mode = true;
+                                        }
+                                        Err(e) => {
+                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
+                                "spublish" => {
+                                    let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
+                                    match response {
+                                        Ok(resp) => {
+                                            if let Ok(bytes) = resp.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                        }
+                                    }
+                                    commands_processed += 1;
+                                    continue;
+                                }
                                 "pubsub" => {
                                     let response = pubsub_commands::pubsub_command(&pubsub, &cmd.args).await;
                                     match response {
@@ -547,6 +580,39 @@ impl Server {
                                                 }
                                                 "publish" => {
                                                     let response = pubsub_commands::publish(&pubsub, &cmd.args).await;
+                                                    match response {
+                                                        Ok(resp) => {
+                                                            if let Ok(bytes) = resp.serialize() {
+                                                                response_buffer.extend_from_slice(&bytes);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                                        }
+                                                    }
+                                                    commands_processed += 1;
+                                                    continue;
+                                                }
+                                                "ssubscribe" => {
+                                                    let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
+                                                    match responses {
+                                                        Ok(resp_list) => {
+                                                            for resp in resp_list {
+                                                                if let Ok(bytes) = resp.serialize() {
+                                                                    response_buffer.extend_from_slice(&bytes);
+                                                                }
+                                                            }
+                                                            in_subscription_mode = true;
+                                                        }
+                                                        Err(e) => {
+                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
+                                                        }
+                                                    }
+                                                    commands_processed += 1;
+                                                    continue;
+                                                }
+                                                "spublish" => {
+                                                    let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
                                                     match response {
                                                         Ok(resp) => {
                                                             if let Ok(bytes) = resp.serialize() {
@@ -917,7 +983,7 @@ impl Server {
     }
 
     /// Process commands while in subscription mode
-    /// Only SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PING, and QUIT are allowed
+    /// Only (P|S)SUBSCRIBE, (P|S)UNSUBSCRIBE, PING, and QUIT are allowed
     async fn process_subscription_commands(
         buffer: &mut BytesMut,
         partial_command_buffer: &mut Vec<u8>,
@@ -992,6 +1058,30 @@ impl Server {
                                         }
                                     }
                                 }
+                                "ssubscribe" => {
+                                    if let Ok(responses) = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await {
+                                        for resp in responses {
+                                            if let Ok(bytes) = resp.serialize() {
+                                                socket_writer.write_all(&bytes).await?;
+                                            }
+                                        }
+                                    }
+                                }
+                                "sunsubscribe" => {
+                                    if let Ok(responses) = pubsub_commands::sunsubscribe(pubsub, client_id, &cmd.args).await {
+                                        for resp in responses {
+                                            if let Ok(bytes) = resp.serialize() {
+                                                socket_writer.write_all(&bytes).await?;
+                                            }
+                                        }
+                                        // Check if we should exit subscription mode
+                                        let count = pubsub.get_subscription_count(client_id).await;
+                                        if count == 0 {
+                                            *in_subscription_mode = false;
+                                            debug!(client_addr = %client_addr_str, "Exited subscription mode");
+                                        }
+                                    }
+                                }
                                 "ping" => {
                                     let response = if cmd.args.is_empty() {
                                         RespValue::SimpleString("PONG".to_string())
@@ -1010,7 +1100,7 @@ impl Server {
                                     return Err(NetworkError::ConnectionClosed);
                                 }
                                 _ => {
-                                    let error_msg = "ERR only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context";
+                                    let error_msg = "ERR only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT allowed in this context";
                                     Self::send_error_to_writer(socket_writer, error_msg.to_string(), client_addr_str).await?;
                                 }
                             }

@@ -328,13 +328,13 @@ Implement full Redis 7.x protocol and command compatibility for rLightning, cove
 - Modify: `src/pubsub/manager.rs`
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement SSUBSCRIBE (sharded channel subscribe - Redis 7.0+)
-- [ ] Implement SUNSUBSCRIBE (sharded channel unsubscribe)
-- [ ] Implement SPUBLISH (publish to shard channel)
-- [ ] Implement PUBSUB SHARDCHANNELS / SHARDNUMSUB
-- [ ] Write tests for sharded pub/sub
-- [ ] Write Redis compatibility test (using dev container)
-- [ ] Run project test suite - must pass before next task
+- [x] Implement SSUBSCRIBE (sharded channel subscribe - Redis 7.0+)
+- [x] Implement SUNSUBSCRIBE (sharded channel unsubscribe)
+- [x] Implement SPUBLISH (publish to shard channel)
+- [x] Implement PUBSUB SHARDCHANNELS / SHARDNUMSUB
+- [x] Write tests for sharded pub/sub
+- [x] Write Redis compatibility test (using dev container)
+- [x] Run project test suite - must pass before next task
 
 ### Task 16: Complete Replication System
 

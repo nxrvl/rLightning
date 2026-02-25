@@ -307,7 +307,208 @@ async fn test_redis_pubsub() -> Result<(), Box<dyn std::error::Error + Send + Sy
     
     // Clean up
     pubsub_subscriber.send_command_str("UNSUBSCRIBE", &[]).await?;
-    
+
     println!("All Pub/Sub tests passed!");
+    Ok(())
+}
+
+/// Tests Redis 7.0+ Sharded Pub/Sub functionality
+/// Covers SSUBSCRIBE, SUNSUBSCRIBE, SPUBLISH, and PUBSUB SHARDCHANNELS/SHARDNUMSUB
+#[tokio::test]
+async fn test_redis_sharded_pubsub() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Set up server with a unique port
+    let addr: SocketAddr = "127.0.0.1:16457".parse()?;
+    let config = StorageConfig::default();
+    let storage = StorageEngine::new(config);
+
+    let server = Server::new(addr, storage);
+
+    // Start server in background
+    tokio::spawn(async move {
+        if let Err(e) = server.start().await {
+            eprintln!("Server error: {:?}", e);
+        }
+    });
+
+    // Wait for server to start
+    sleep(Duration::from_millis(200)).await;
+
+    println!("Testing Redis Sharded Pub/Sub functionality...");
+
+    // ======== BASIC SSUBSCRIBE AND SPUBLISH ========
+    println!("Testing basic SSUBSCRIBE and SPUBLISH");
+
+    let mut shard_subscriber = Client::connect(addr).await?;
+    let mut publisher = Client::connect(addr).await?;
+
+    // Subscribe to a shard channel
+    let subscribe_result = shard_subscriber.send_command_str("SSUBSCRIBE", &["shard:channel1"]).await?;
+    match subscribe_result {
+        RespValue::Array(Some(response)) => {
+            assert_eq!(response.len(), 3, "SSUBSCRIBE response should have 3 elements");
+
+            if let RespValue::BulkString(Some(msg_type)) = &response[0] {
+                assert_eq!(std::str::from_utf8(msg_type)?, "ssubscribe");
+            } else {
+                panic!("Expected BulkString for message type");
+            }
+
+            if let RespValue::BulkString(Some(channel)) = &response[1] {
+                assert_eq!(std::str::from_utf8(channel)?, "shard:channel1");
+            } else {
+                panic!("Expected BulkString for channel name");
+            }
+
+            assert_eq!(response[2], RespValue::Integer(1));
+        },
+        _ => {
+            panic!("Unexpected response from SSUBSCRIBE: {:?}", subscribe_result);
+        }
+    }
+
+    // Give subscriber time to set up
+    sleep(Duration::from_millis(100)).await;
+
+    // Publish to shard channel
+    let publish_result = publisher.send_command_str("SPUBLISH", &["shard:channel1", "Hello, Shard!"]).await?;
+    match publish_result {
+        RespValue::Integer(receivers) => {
+            assert_eq!(receivers, 1, "SPUBLISH should return 1");
+
+            // Read the shard message
+            let message_result = shard_subscriber.read_response().await?;
+            if let RespValue::Array(Some(msg)) = message_result {
+                assert_eq!(msg.len(), 3, "smessage should have 3 elements");
+                if let RespValue::BulkString(Some(msg_type)) = &msg[0] {
+                    assert_eq!(std::str::from_utf8(msg_type)?, "smessage");
+                }
+                if let RespValue::BulkString(Some(channel)) = &msg[1] {
+                    assert_eq!(std::str::from_utf8(channel)?, "shard:channel1");
+                }
+                if let RespValue::BulkString(Some(data)) = &msg[2] {
+                    assert_eq!(std::str::from_utf8(data)?, "Hello, Shard!");
+                }
+            } else {
+                panic!("Expected Array message, got: {:?}", message_result);
+            }
+        },
+        _ => {
+            panic!("Unexpected response from SPUBLISH: {:?}", publish_result);
+        }
+    }
+
+    // ======== SHARD VS REGULAR INDEPENDENCE ========
+    println!("Testing shard vs regular pub/sub independence");
+
+    let mut regular_subscriber = Client::connect(addr).await?;
+
+    // Subscribe to same channel name with regular SUBSCRIBE
+    regular_subscriber.send_command_str("SUBSCRIBE", &["shard:channel1"]).await?;
+    sleep(Duration::from_millis(100)).await;
+
+    // SPUBLISH should NOT reach regular subscriber (only shard subscribers get it)
+    let spublish_result = publisher.send_command_str("SPUBLISH", &["shard:channel1", "shard only"]).await?;
+    if let RespValue::Integer(count) = spublish_result {
+        assert_eq!(count, 1, "SPUBLISH should only reach shard subscribers");
+    }
+
+    // Read the shard message from shard subscriber
+    let shard_msg = shard_subscriber.read_response().await?;
+    if let RespValue::Array(Some(msg)) = &shard_msg {
+        if let RespValue::BulkString(Some(msg_type)) = &msg[0] {
+            assert_eq!(std::str::from_utf8(msg_type)?, "smessage");
+        }
+    }
+
+    // Regular PUBLISH should NOT reach shard subscriber (only regular subscribers get it)
+    let publish_result = publisher.send_command_str("PUBLISH", &["shard:channel1", "regular only"]).await?;
+    if let RespValue::Integer(count) = publish_result {
+        assert_eq!(count, 1, "PUBLISH should only reach regular subscribers");
+    }
+
+    // ======== SUNSUBSCRIBE ========
+    println!("Testing SUNSUBSCRIBE");
+
+    // Unsubscribe from shard channel
+    let unsub_result = shard_subscriber.send_command_str("SUNSUBSCRIBE", &["shard:channel1"]).await?;
+    match unsub_result {
+        RespValue::Array(Some(response)) => {
+            assert_eq!(response.len(), 3);
+            if let RespValue::BulkString(Some(msg_type)) = &response[0] {
+                assert_eq!(std::str::from_utf8(msg_type)?, "sunsubscribe");
+            }
+            if let RespValue::BulkString(Some(channel)) = &response[1] {
+                assert_eq!(std::str::from_utf8(channel)?, "shard:channel1");
+            }
+            assert_eq!(response[2], RespValue::Integer(0));
+        },
+        _ => {
+            panic!("Unexpected response from SUNSUBSCRIBE: {:?}", unsub_result);
+        }
+    }
+
+    // After unsubscribing, SPUBLISH should reach 0 shard subscribers
+    let spublish_result = publisher.send_command_str("SPUBLISH", &["shard:channel1", "after unsub"]).await?;
+    if let RespValue::Integer(count) = spublish_result {
+        assert_eq!(count, 0, "SPUBLISH should return 0 after SUNSUBSCRIBE");
+    }
+
+    // ======== PUBSUB SHARDCHANNELS ========
+    println!("Testing PUBSUB SHARDCHANNELS");
+
+    // Create a new shard subscriber with two shard channels
+    let mut shard_sub2 = Client::connect(addr).await?;
+    shard_sub2.send_command_str("SSUBSCRIBE", &["shard:test1"]).await?;
+    shard_sub2.send_command_str("SSUBSCRIBE", &["shard:test2"]).await?;
+    sleep(Duration::from_millis(100)).await;
+
+    let shardchannels_result = publisher.send_command_str("PUBSUB", &["SHARDCHANNELS"]).await?;
+    match shardchannels_result {
+        RespValue::Array(Some(channels)) => {
+            assert!(channels.len() >= 2, "PUBSUB SHARDCHANNELS should return at least 2 channels, got {}", channels.len());
+
+            let mut found_test1 = false;
+            let mut found_test2 = false;
+            for ch in &channels {
+                if let RespValue::BulkString(Some(name)) = ch {
+                    let name_str = std::str::from_utf8(name)?;
+                    if name_str == "shard:test1" { found_test1 = true; }
+                    if name_str == "shard:test2" { found_test2 = true; }
+                }
+            }
+            assert!(found_test1 && found_test2, "Should include shard:test1 and shard:test2");
+        },
+        _ => {
+            panic!("Unexpected response from PUBSUB SHARDCHANNELS: {:?}", shardchannels_result);
+        }
+    }
+
+    // ======== PUBSUB SHARDNUMSUB ========
+    println!("Testing PUBSUB SHARDNUMSUB");
+
+    let shardnumsub_result = publisher.send_command_str("PUBSUB", &["SHARDNUMSUB", "shard:test1", "shard:nonexistent"]).await?;
+    match shardnumsub_result {
+        RespValue::Array(Some(counts)) => {
+            assert_eq!(counts.len(), 4, "PUBSUB SHARDNUMSUB should return 4 elements");
+
+            if let RespValue::BulkString(Some(ch)) = &counts[0] {
+                assert_eq!(std::str::from_utf8(ch)?, "shard:test1");
+            }
+            assert_eq!(counts[1], RespValue::Integer(1));
+
+            if let RespValue::BulkString(Some(ch)) = &counts[2] {
+                assert_eq!(std::str::from_utf8(ch)?, "shard:nonexistent");
+            }
+            assert_eq!(counts[3], RespValue::Integer(0));
+        },
+        _ => {
+            panic!("Unexpected response from PUBSUB SHARDNUMSUB: {:?}", shardnumsub_result);
+        }
+    }
+
+    // Clean up
+    regular_subscriber.send_command_str("UNSUBSCRIBE", &[]).await?;
+
+    println!("All Sharded Pub/Sub tests passed!");
     Ok(())
 }
