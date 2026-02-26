@@ -195,6 +195,11 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             CommandError::InvalidArgument("Score is not a valid float".to_string())
         })?;
 
+        // Reject NaN scores (Redis returns ERR for NaN)
+        if score.is_nan() {
+            return Err(CommandError::InvalidArgument("Score is not a valid float".to_string()));
+        }
+
         // Check if member already exists
         let existing_index = sorted_set.iter().position(|(_, m)| m == &member);
 
@@ -656,7 +661,12 @@ pub async fn zincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     let increment = increment_str.parse::<f64>().map_err(|_| {
         CommandError::InvalidArgument("Increment is not a valid float".to_string())
     })?;
-    
+
+    // Reject NaN increments (Redis returns ERR for NaN)
+    if increment.is_nan() {
+        return Err(CommandError::InvalidArgument("Increment is not a valid float".to_string()));
+    }
+
     // Get the current sorted set or create a new one
     let mut sorted_set = match engine.get(key).await? {
         Some(data) => {
@@ -1065,9 +1075,13 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             "WEIGHTS" => {
                 if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 for j in 0..numkeys {
-                    weights[j] = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
+                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
                         CommandError::InvalidArgument("weight value is not a float".to_string())
                     })?;
+                    if w.is_nan() {
+                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
+                    }
+                    weights[j] = w;
                 }
                 i += 1 + numkeys;
             }
@@ -1151,9 +1165,13 @@ pub async fn zunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             "WEIGHTS" => {
                 if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 for j in 0..numkeys {
-                    weights[j] = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
+                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
                         CommandError::InvalidArgument("weight value is not a float".to_string())
                     })?;
+                    if w.is_nan() {
+                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
+                    }
+                    weights[j] = w;
                 }
                 i += 1 + numkeys;
             }
@@ -1227,9 +1245,13 @@ pub async fn zinter(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             "WEIGHTS" => {
                 if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 for j in 0..numkeys {
-                    weights[j] = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
+                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
                         CommandError::InvalidArgument("weight value is not a float".to_string())
                     })?;
+                    if w.is_nan() {
+                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
+                    }
+                    weights[j] = w;
                 }
                 i += 1 + numkeys;
             }
@@ -1309,9 +1331,13 @@ pub async fn zunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             "WEIGHTS" => {
                 if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 for j in 0..numkeys {
-                    weights[j] = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
+                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
                         CommandError::InvalidArgument("weight value is not a float".to_string())
                     })?;
+                    if w.is_nan() {
+                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
+                    }
+                    weights[j] = w;
                 }
                 i += 1 + numkeys;
             }
