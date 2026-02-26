@@ -276,9 +276,20 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
             vec![CommandCategory::Admin, CommandCategory::Server]
         }
 
-        // JSON commands
-        cmd if cmd.starts_with("json.") || cmd.starts_with("json") => {
-            vec![CommandCategory::Read, CommandCategory::Write]
+        // JSON read commands
+        "json.get" | "jsonget" | "get_json" | "getjson"
+        | "json.type" | "jsontype" | "json.resp" | "jsonresp"
+        | "json.objkeys" | "jsonobjkeys" | "json.objlen" | "jsonobjlen"
+        | "json.arrlen" | "jsonarrlen"
+        | "json.mget" | "jsonmget" | "json.arrindex" | "jsonarrindex" => {
+            vec![CommandCategory::Read]
+        }
+        // JSON write commands
+        "json.set" | "jsonset" | "set_json" | "setjson"
+        | "json.del" | "jsondel"
+        | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim"
+        | "json.numincrby" | "jsonnumincrby" => {
+            vec![CommandCategory::Write]
         }
 
         _ => vec![CommandCategory::Generic],
@@ -1372,9 +1383,9 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // Commands with key at index 0
         "get" | "set" | "setnx" | "setex" | "psetex" | "getex" | "getdel" | "getset"
         | "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" | "append" | "strlen"
-        | "getrange" | "setrange" | "substr" | "del" | "unlink" | "exists" | "type"
+        | "getrange" | "setrange" | "substr" | "type"
         | "expire" | "pexpire" | "expireat" | "pexpireat" | "persist" | "ttl" | "pttl"
-        | "expiretime" | "pexpiretime" | "touch" | "object" | "dump" | "restore" | "sort"
+        | "expiretime" | "pexpiretime" | "object" | "dump" | "restore" | "sort"
         | "sort_ro" | "lpush" | "rpush" | "lpushx" | "rpushx" | "linsert" | "lset"
         | "ltrim" | "lpop" | "rpop" | "lrange" | "lindex" | "llen" | "lpos" | "hset"
         | "hget" | "hgetall" | "hdel" | "hexists" | "hmset" | "hkeys" | "hvals" | "hlen"
@@ -1388,8 +1399,27 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         | "xrevrange" | "xtrim" | "xdel" | "xinfo" | "xgroup" | "xack" | "xpending"
         | "xclaim" | "xautoclaim" | "setbit" | "getbit" | "bitcount" | "bitpos"
         | "bitfield" | "bitfield_ro" | "pfadd" | "pfcount" | "geoadd" | "geodist"
-        | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember" | "wait"
-        | "waitaof" => vec![0],
+        | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember"
+        | "json.get" | "jsonget" | "get_json" | "getjson"
+        | "json.set" | "jsonset" | "set_json" | "setjson"
+        | "json.type" | "jsontype"
+        | "json.del" | "jsondel" | "json.resp" | "jsonresp"
+        | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim"
+        | "json.objkeys" | "jsonobjkeys" | "json.objlen" | "jsonobjlen"
+        | "json.arrlen" | "jsonarrlen" | "json.numincrby" | "jsonnumincrby"
+        | "json.arrindex" | "jsonarrindex" => vec![0],
+
+        // JSON.MGET - all args except the last are keys
+        "json.mget" | "jsonmget" => {
+            if args.len() > 1 {
+                (0..args.len() - 1).collect()
+            } else {
+                vec![0]
+            }
+        }
+
+        // Multi-key commands where all args are keys
+        "del" | "unlink" | "exists" | "touch" => (0..args.len()).collect(),
 
         // Commands with key at index 0 and 1 (source, dest)
         "rename" | "renamenx" | "copy" | "lmove" | "blmove" | "smove" | "geosearchstore"
@@ -1573,7 +1603,8 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         | "script" | "function"
         | "multi" | "exec" | "discard" | "unwatch" | "subscribe"
         | "unsubscribe" | "psubscribe" | "punsubscribe" | "publish" | "pubsub"
-        | "command" | "client" | "quit" | "reset" | "echo" => vec![],
+        | "command" | "client" | "quit" | "reset" | "echo"
+        | "wait" | "waitaof" => vec![],
 
         _ => vec![],
     }

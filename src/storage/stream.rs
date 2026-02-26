@@ -83,9 +83,6 @@ impl StreamEntryId {
         Some(StreamEntryId { ms, seq })
     }
 
-    pub fn to_string(&self) -> String {
-        format!("{}-{}", self.ms, self.seq)
-    }
 }
 
 impl std::fmt::Display for StreamEntryId {

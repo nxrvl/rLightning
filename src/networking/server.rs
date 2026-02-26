@@ -724,29 +724,54 @@ impl Server {
                                 }
                                 "wait" => {
                                     if cmd.args.len() != 2 {
-                                        Self::send_error_to_writer(&mut socket_writer, "ERR wrong number of arguments for 'wait' command".to_string(), &client_addr_str).await?;
-                                    } else if let Some(ref repl) = replication {
-                                        let numreplicas = String::from_utf8_lossy(&cmd.args[0]).parse::<usize>().unwrap_or(0);
-                                        let timeout_ms = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>().unwrap_or(0);
-                                        let timeout = if timeout_ms == 0 {
-                                            std::time::Duration::from_secs(300) // 5 min max
-                                        } else {
-                                            std::time::Duration::from_millis(timeout_ms)
-                                        };
-                                        // Flush responses before blocking
-                                        if !response_buffer.is_empty() {
-                                            let _ = socket_writer.write_all(&response_buffer).await;
-                                            response_buffer.clear();
-                                        }
-                                        let count = repl.wait_for_replicas(numreplicas, timeout).await;
-                                        let response = RespValue::Integer(count);
-                                        if let Ok(bytes) = response.serialize() {
+                                        let error_resp = RespValue::Error("ERR wrong number of arguments for 'wait' command".to_string());
+                                        if let Ok(bytes) = error_resp.serialize() {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
                                     } else {
-                                        let response = RespValue::Integer(0);
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
+                                        let numreplicas = match String::from_utf8_lossy(&cmd.args[0]).parse::<usize>() {
+                                            Ok(n) => n,
+                                            Err(_) => {
+                                                let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                                                if let Ok(bytes) = error_resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                                commands_processed += 1;
+                                                continue;
+                                            }
+                                        };
+                                        let timeout_ms = match String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
+                                            Ok(n) => n,
+                                            Err(_) => {
+                                                let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                                                if let Ok(bytes) = error_resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                                commands_processed += 1;
+                                                continue;
+                                            }
+                                        };
+                                        if let Some(ref repl) = replication {
+                                            let timeout = if timeout_ms == 0 {
+                                                std::time::Duration::from_secs(300) // 5 min max
+                                            } else {
+                                                std::time::Duration::from_millis(timeout_ms)
+                                            };
+                                            // Flush responses before blocking
+                                            if !response_buffer.is_empty() {
+                                                let _ = socket_writer.write_all(&response_buffer).await;
+                                                response_buffer.clear();
+                                            }
+                                            let count = repl.wait_for_replicas(numreplicas, timeout).await;
+                                            let response = RespValue::Integer(count);
+                                            if let Ok(bytes) = response.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                        } else {
+                                            let response = RespValue::Integer(0);
+                                            if let Ok(bytes) = response.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
                                         }
                                     }
                                     commands_processed += 1;
@@ -1978,28 +2003,51 @@ impl Server {
             }
             "wait" => {
                 if cmd.args.len() != 2 {
-                    Self::send_error_to_writer(socket_writer, "ERR wrong number of arguments for 'wait' command".to_string(), client_addr_str).await?;
-                } else if let Some(repl) = replication {
-                    let numreplicas = String::from_utf8_lossy(&cmd.args[0]).parse::<usize>().unwrap_or(0);
-                    let timeout_ms = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>().unwrap_or(0);
-                    let timeout = if timeout_ms == 0 {
-                        std::time::Duration::from_secs(300)
-                    } else {
-                        std::time::Duration::from_millis(timeout_ms)
-                    };
-                    if !response_buffer.is_empty() {
-                        let _ = socket_writer.write_all(response_buffer).await;
-                        response_buffer.clear();
-                    }
-                    let count = repl.wait_for_replicas(numreplicas, timeout).await;
-                    let response = RespValue::Integer(count);
-                    if let Ok(bytes) = response.serialize() {
+                    let error_resp = RespValue::Error("ERR wrong number of arguments for 'wait' command".to_string());
+                    if let Ok(bytes) = error_resp.serialize() {
                         response_buffer.extend_from_slice(&bytes);
                     }
                 } else {
-                    let response = RespValue::Integer(0);
-                    if let Ok(bytes) = response.serialize() {
-                        response_buffer.extend_from_slice(&bytes);
+                    let numreplicas = match String::from_utf8_lossy(&cmd.args[0]).parse::<usize>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                            if let Ok(bytes) = error_resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                            return Ok(false);
+                        }
+                    };
+                    let timeout_ms = match String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                            if let Ok(bytes) = error_resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                            return Ok(false);
+                        }
+                    };
+                    if let Some(repl) = replication {
+                        let timeout = if timeout_ms == 0 {
+                            std::time::Duration::from_secs(300)
+                        } else {
+                            std::time::Duration::from_millis(timeout_ms)
+                        };
+                        if !response_buffer.is_empty() {
+                            let _ = socket_writer.write_all(response_buffer).await;
+                            response_buffer.clear();
+                        }
+                        let count = repl.wait_for_replicas(numreplicas, timeout).await;
+                        let response = RespValue::Integer(count);
+                        if let Ok(bytes) = response.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    } else {
+                        let response = RespValue::Integer(0);
+                        if let Ok(bytes) = response.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
             }
