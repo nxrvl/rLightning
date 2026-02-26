@@ -570,9 +570,10 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => return Ok(RespValue::Integer(0)),
     };
 
-    for element in &args[1..] {
-        list.insert(0, element.clone());
-    }
+    // Prepend all elements at once using splice for O(N+M) instead of O(N*M).
+    // Redis LPUSHX pushes elements left-to-right, so the last arg ends up at the head.
+    let new_elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
+    list.splice(0..0, new_elements);
 
     let length = list.len();
     let serialized = bincode::serialize(&list)
@@ -1089,12 +1090,12 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let pop_count = count.min(list.len());
         let mut popped = Vec::with_capacity(pop_count);
 
-        for _ in 0..pop_count {
-            if direction == "LEFT" {
-                popped.push(list.remove(0));
-            } else {
-                popped.push(list.pop().unwrap());
-            }
+        if direction == "LEFT" {
+            popped.extend(list.drain(..pop_count));
+        } else {
+            let start = list.len() - pop_count;
+            popped.extend(list.drain(start..));
+            popped.reverse();
         }
 
         if list.is_empty() {
