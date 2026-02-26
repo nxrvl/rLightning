@@ -578,11 +578,11 @@ impl ReplicationManager {
             "del" | "unlink" | "expire" | "pexpire" | "expireat" | "pexpireat" | "persist" |
             "rename" | "renamenx" | "copy" | "move" | "sort" |
             "lpush" | "rpush" | "lpushx" | "rpushx" | "lpop" | "rpop" | "linsert" | "lset" | "ltrim" | "lmove" | "lmpop" |
-            "rpoplpush" | "brpoplpush" | "blmove" | "blmpop" | "blpop" | "brpop" |
+            "rpoplpush" |
             "hset" | "hdel" | "hmset" | "hincrby" | "hincrbyfloat" | "hsetnx" |
             "sadd" | "srem" | "spop" | "smove" | "sinterstore" | "sunionstore" | "sdiffstore" |
-            "zadd" | "zrem" | "zincrby" | "zinterstore" | "zunionstore" | "zdiffstore" | "zmpop" | "bzmpop" |
-            "zpopmin" | "zpopmax" | "bzpopmin" | "bzpopmax" | "zrangestore" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" |
+            "zadd" | "zrem" | "zincrby" | "zinterstore" | "zunionstore" | "zdiffstore" | "zmpop" |
+            "zpopmin" | "zpopmax" | "zrangestore" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" |
             "setbit" | "bitop" | "bitfield" |
             "pfadd" | "pfmerge" |
             "geoadd" | "geosearchstore" |

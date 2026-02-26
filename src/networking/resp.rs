@@ -634,12 +634,11 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
             let length_str = std::str::from_utf8(&buffer[1..crlf_pos]).ok()?;
             let length = length_str.parse::<i64>().ok()?;
 
-            if length == -1 {
-                return Some(crlf_pos + 2);
-            }
-
             if length < 0 {
-                return None;
+                // -1 is null bulk string (valid), any other negative is invalid.
+                // Return header size so the parser advances and the actual parse
+                // function can return a proper error for invalid negative lengths.
+                return Some(crlf_pos + 2);
             }
 
             let total_size = crlf_pos + 2 + length as usize + 2;
