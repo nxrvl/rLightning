@@ -318,6 +318,90 @@ impl RespValue {
         Ok(result)
     }
 
+    /// Convert a RESP2-style response to RESP3 format based on the command name.
+    /// This is the central RESP3 adaptation point: command handlers always produce RESP2
+    /// values, and this method upgrades them for RESP3 clients.
+    pub fn convert_for_resp3(self, command_name: &str) -> RespValue {
+        match self {
+            // Null conversions: RESP2 null bulk string/array -> RESP3 Null
+            RespValue::BulkString(None) => RespValue::Null,
+            RespValue::Array(None) => RespValue::Null,
+
+            // Commands that return float values as bulk strings -> RESP3 Double
+            RespValue::BulkString(Some(ref data)) if Self::is_double_command(command_name) => {
+                if let Ok(s) = std::str::from_utf8(data) {
+                    if let Ok(d) = s.parse::<f64>() {
+                        return RespValue::Double(d);
+                    }
+                    // Handle special float strings
+                    match s {
+                        "inf" => return RespValue::Double(f64::INFINITY),
+                        "-inf" => return RespValue::Double(f64::NEG_INFINITY),
+                        _ => {}
+                    }
+                }
+                self
+            }
+
+            // Commands that return key-value flat arrays -> RESP3 Map
+            RespValue::Array(Some(items)) if Self::is_map_command(command_name) && items.len() % 2 == 0 => {
+                let mut pairs = Vec::with_capacity(items.len() / 2);
+                let mut iter = items.into_iter();
+                while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                    pairs.push((k, v));
+                }
+                RespValue::Map(pairs)
+            }
+
+            // Commands that return member arrays -> RESP3 Set
+            RespValue::Array(Some(items)) if Self::is_set_command(command_name) => {
+                RespValue::Set(items)
+            }
+
+            // Recursively convert EXEC results (array of sub-responses)
+            RespValue::Array(Some(items)) if command_name == "exec" => {
+                // EXEC returns an array of results; each is already a final response
+                // We don't convert inner elements since they came from different commands
+                RespValue::Array(Some(items))
+            }
+
+            // Everything else passes through unchanged
+            other => other,
+        }
+    }
+
+    /// Check if a command returns key-value pairs that should be a RESP3 Map
+    fn is_map_command(cmd: &str) -> bool {
+        matches!(cmd,
+            "hgetall" | "config" | "xrange" | "xrevrange" |
+            "zrangebyscore" | "zrangebylex" | "zrange" |
+            "memory" | "command" | "latency"
+        )
+    }
+
+    /// Check if a command returns a set of members that should be a RESP3 Set
+    fn is_set_command(cmd: &str) -> bool {
+        matches!(cmd,
+            "smembers" | "sinter" | "sunion" | "sdiff" | "sscan"
+        )
+    }
+
+    /// Check if a command returns a float value that should be a RESP3 Double
+    fn is_double_command(cmd: &str) -> bool {
+        matches!(cmd,
+            "zscore" | "zincrby" | "geodist" | "incrbyfloat" |
+            "hincrbyfloat"
+        )
+    }
+
+    /// Convert a pub/sub message from RESP2 Array to RESP3 Push type
+    pub fn convert_to_push(self) -> RespValue {
+        match self {
+            RespValue::Array(Some(items)) => RespValue::Push(items),
+            other => other,
+        }
+    }
+
     /// Try to parse common commands using a fast path
     pub fn try_parse_common_command(buffer: &mut BytesMut) -> Result<Option<RespCommand>, RespError> {
         // Check if the buffer is large enough to be a command
@@ -1753,5 +1837,258 @@ mod tests {
         } else {
             panic!("Expected Double");
         }
+    }
+
+    // --- RESP3 conversion tests ---
+
+    #[test]
+    fn test_resp3_null_conversion_bulk_string() {
+        let value = RespValue::BulkString(None);
+        let converted = value.convert_for_resp3("get");
+        assert_eq!(converted, RespValue::Null);
+        // Verify serialization produces RESP3 null
+        let bytes = converted.serialize().unwrap();
+        assert_eq!(bytes, b"_\r\n");
+    }
+
+    #[test]
+    fn test_resp3_null_conversion_array() {
+        let value = RespValue::Array(None);
+        let converted = value.convert_for_resp3("keys");
+        assert_eq!(converted, RespValue::Null);
+        let bytes = converted.serialize().unwrap();
+        assert_eq!(bytes, b"_\r\n");
+    }
+
+    #[test]
+    fn test_resp3_map_conversion_hgetall() {
+        // HGETALL returns flat array [field1, val1, field2, val2] -> Map
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"field1".to_vec())),
+            RespValue::BulkString(Some(b"value1".to_vec())),
+            RespValue::BulkString(Some(b"field2".to_vec())),
+            RespValue::BulkString(Some(b"value2".to_vec())),
+        ]));
+        let converted = value.convert_for_resp3("hgetall");
+        match converted {
+            RespValue::Map(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"field1".to_vec())));
+                assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"value1".to_vec())));
+                assert_eq!(pairs[1].0, RespValue::BulkString(Some(b"field2".to_vec())));
+                assert_eq!(pairs[1].1, RespValue::BulkString(Some(b"value2".to_vec())));
+            }
+            other => panic!("Expected Map, got {:?}", other),
+        }
+        // Verify serialization produces RESP3 map format
+        let value2 = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"k".to_vec())),
+            RespValue::BulkString(Some(b"v".to_vec())),
+        ]));
+        let converted2 = value2.convert_for_resp3("hgetall");
+        let bytes = converted2.serialize().unwrap();
+        // %1\r\n$1\r\nk\r\n$1\r\nv\r\n
+        assert_eq!(&bytes[0..4], b"%1\r\n");
+    }
+
+    #[test]
+    fn test_resp3_set_conversion_smembers() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"member1".to_vec())),
+            RespValue::BulkString(Some(b"member2".to_vec())),
+        ]));
+        let converted = value.convert_for_resp3("smembers");
+        match converted {
+            RespValue::Set(items) => {
+                assert_eq!(items.len(), 2);
+            }
+            other => panic!("Expected Set, got {:?}", other),
+        }
+        // Verify serialization produces RESP3 set format
+        let value2 = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+        ]));
+        let converted2 = value2.convert_for_resp3("smembers");
+        let bytes = converted2.serialize().unwrap();
+        assert_eq!(&bytes[0..4], b"~1\r\n");
+    }
+
+    #[test]
+    fn test_resp3_double_conversion_zscore() {
+        let value = RespValue::BulkString(Some(b"3.14".to_vec()));
+        let converted = value.convert_for_resp3("zscore");
+        match converted {
+            RespValue::Double(d) => {
+                assert!((d - 3.14).abs() < 1e-10);
+            }
+            other => panic!("Expected Double, got {:?}", other),
+        }
+        let bytes = converted.serialize().unwrap();
+        assert!(bytes.starts_with(b","));
+    }
+
+    #[test]
+    fn test_resp3_double_conversion_infinity() {
+        let value = RespValue::BulkString(Some(b"inf".to_vec()));
+        let converted = value.convert_for_resp3("zscore");
+        match converted {
+            RespValue::Double(d) => assert!(d.is_infinite() && d.is_sign_positive()),
+            other => panic!("Expected Double(inf), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resp3_push_conversion() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"message".to_vec())),
+            RespValue::BulkString(Some(b"channel".to_vec())),
+            RespValue::BulkString(Some(b"hello".to_vec())),
+        ]));
+        let converted = value.convert_to_push();
+        match converted {
+            RespValue::Push(items) => {
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("Expected Push, got {:?}", other),
+        }
+        // Verify serialization produces RESP3 push format
+        let value2 = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"x".to_vec())),
+        ]));
+        let converted2 = value2.convert_to_push();
+        let bytes = converted2.serialize().unwrap();
+        assert_eq!(&bytes[0..4], b">1\r\n");
+    }
+
+    #[test]
+    fn test_resp2_no_conversion_for_non_map_commands() {
+        // GET returns a bulk string, not a map - should stay as-is
+        let value = RespValue::BulkString(Some(b"hello".to_vec()));
+        let converted = value.convert_for_resp3("get");
+        assert_eq!(converted, RespValue::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn test_resp3_non_double_command_keeps_bulk_string() {
+        // GET returns a string that happens to look like a float - keep as bulk string
+        let value = RespValue::BulkString(Some(b"3.14".to_vec()));
+        let converted = value.convert_for_resp3("get");
+        assert_eq!(converted, RespValue::BulkString(Some(b"3.14".to_vec())));
+    }
+
+    #[test]
+    fn test_resp3_config_get_map_conversion() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"maxmemory".to_vec())),
+            RespValue::BulkString(Some(b"0".to_vec())),
+        ]));
+        let converted = value.convert_for_resp3("config");
+        match converted {
+            RespValue::Map(pairs) => {
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"maxmemory".to_vec())));
+                assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"0".to_vec())));
+            }
+            other => panic!("Expected Map, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resp3_empty_array_stays_empty() {
+        // Empty array should remain an empty array (not null, not map)
+        let value = RespValue::Array(Some(vec![]));
+        let converted = value.convert_for_resp3("keys");
+        assert_eq!(converted, RespValue::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn test_resp3_sinter_set_conversion() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+            RespValue::BulkString(Some(b"b".to_vec())),
+        ]));
+        let converted = value.convert_for_resp3("sinter");
+        match converted {
+            RespValue::Set(items) => assert_eq!(items.len(), 2),
+            other => panic!("Expected Set, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resp3_boolean_serialization() {
+        // Verify Boolean type serializes correctly
+        let t = RespValue::Boolean(true);
+        assert_eq!(t.serialize().unwrap(), b"#t\r\n");
+        let f = RespValue::Boolean(false);
+        assert_eq!(f.serialize().unwrap(), b"#f\r\n");
+    }
+
+    #[test]
+    fn test_resp3_null_serialization() {
+        let null = RespValue::Null;
+        assert_eq!(null.serialize().unwrap(), b"_\r\n");
+    }
+
+    #[test]
+    fn test_resp3_double_serialization() {
+        let d = RespValue::Double(3.14);
+        let bytes = d.serialize().unwrap();
+        assert!(bytes.starts_with(b","));
+        assert!(bytes.ends_with(b"\r\n"));
+
+        let inf = RespValue::Double(f64::INFINITY);
+        assert_eq!(inf.serialize().unwrap(), b",inf\r\n");
+
+        let neg_inf = RespValue::Double(f64::NEG_INFINITY);
+        assert_eq!(neg_inf.serialize().unwrap(), b",-inf\r\n");
+    }
+
+    #[test]
+    fn test_resp3_map_serialization() {
+        let map = RespValue::Map(vec![
+            (RespValue::BulkString(Some(b"key".to_vec())), RespValue::Integer(42)),
+        ]);
+        let bytes = map.serialize().unwrap();
+        // %1\r\n$3\r\nkey\r\n:42\r\n
+        assert!(bytes.starts_with(b"%1\r\n"));
+    }
+
+    #[test]
+    fn test_resp3_set_serialization() {
+        let set = RespValue::Set(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+            RespValue::BulkString(Some(b"b".to_vec())),
+        ]);
+        let bytes = set.serialize().unwrap();
+        assert!(bytes.starts_with(b"~2\r\n"));
+    }
+
+    #[test]
+    fn test_resp3_push_serialization() {
+        let push = RespValue::Push(vec![
+            RespValue::BulkString(Some(b"message".to_vec())),
+            RespValue::BulkString(Some(b"ch".to_vec())),
+            RespValue::BulkString(Some(b"data".to_vec())),
+        ]);
+        let bytes = push.serialize().unwrap();
+        assert!(bytes.starts_with(b">3\r\n"));
+    }
+
+    #[test]
+    fn test_resp2_backward_compat_no_conversion() {
+        // Without calling convert_for_resp3, values serialize as RESP2
+        let null = RespValue::BulkString(None);
+        assert_eq!(null.serialize().unwrap(), b"$-1\r\n");
+
+        let arr_null = RespValue::Array(None);
+        assert_eq!(arr_null.serialize().unwrap(), b"*-1\r\n");
+
+        // Normal array serialization (RESP2)
+        let arr = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+            RespValue::BulkString(Some(b"b".to_vec())),
+        ]));
+        let bytes = arr.serialize().unwrap();
+        assert!(bytes.starts_with(b"*2\r\n"));
     }
 }
