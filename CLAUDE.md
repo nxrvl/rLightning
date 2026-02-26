@@ -92,14 +92,20 @@ cargo bench --bench storage_bench -- set_get
 ### Core Components
 
 1. **Networking (`src/networking/`)**:
-   - RESP2 and RESP3 protocol support with HELLO negotiation
-   - Async TCP server with Tokio, per-connection state tracking
-   - Buffered I/O with pipeline support
+   - RESP2 and RESP3 protocol support with HELLO negotiation and per-connection protocol version tracking
+   - RESP3 response conversion: Map type for HGETALL/CONFIG, Set type for SMEMBERS, Double for float commands, native Null/Boolean/Push types
+   - Connection tracking via `Arc<DashMap<u64, ClientInfo>>` for real CLIENT LIST/INFO/ID/SETNAME
+   - Async TCP server with Tokio, per-connection state (db_index, protocol_version, client name, subscriptions)
+   - Buffered I/O with pipeline support and unified command dispatch (fast/slow path)
 
 2. **Storage Engine (`src/storage/`)**:
-   - Lock-free concurrent access via DashMap
+   - Lock-free concurrent access via DashMap with atomic read-modify-write primitives (`atomic_incr`, `atomic_append`, `atomic_modify`, `atomic_getdel`, etc.)
+   - Conditional SET operations: `set_nx()`, `set_xx()`, `set_with_options()` for NX/XX/GET flag combinations
+   - Multi-database support (16 databases, SELECT routing via task-local `CURRENT_DB_INDEX`)
+   - Hash storage: single-key HashMap (bincode-serialized) with dedicated methods (`hash_set`, `hash_get`, `hash_getall`, etc.)
+   - Transaction key locking: `lock_keys()` with sorted-order deadlock prevention, key versioning for WATCH
    - All data types: strings, hashes, lists, sets, sorted sets, streams, HLL, bitmaps
-   - TTL handling (lazy + periodic), configurable eviction (LRU, Random)
+   - TTL handling (lazy + periodic with priority queue), configurable eviction (LRU, LFU, Random)
    - Blocking command infrastructure (per-key wait queues)
 
 3. **Command Handler (`src/command/`)**:
@@ -108,9 +114,9 @@ cargo bench --bench storage_bench -- set_get
    - Per-type handlers in `src/command/types/`
 
 4. **Persistence (`src/persistence/`)**:
-   - RDB snapshot persistence with background save
-   - AOF logging with configurable sync (always/everysec/no)
-   - Hybrid persistence model
+   - RDB snapshot persistence with background save, supports all data types (strings, lists, sets, sorted sets, hashes, streams)
+   - AOF logging with configurable sync (always/everysec/no), rewrite generates correct reconstruction commands per type
+   - Hybrid persistence model (RDB + AOF combined)
 
 5. **Replication (`src/replication/`)**:
    - Full and partial sync (PSYNC) with replication backlog
@@ -144,6 +150,10 @@ cargo bench --bench storage_bench -- set_get
 
 11. **Module System (`src/module/`)**:
     - MODULE LIST/LOAD/UNLOAD stubs for compatibility
+
+12. **Utilities (`src/utils/`)**:
+    - Shared glob pattern matching (`glob_match`, `glob_match_bytes`) used by KEYS, SCAN, ACL, Sentinel, Pub/Sub
+    - Supports Redis glob syntax: `*`, `?`, `[abc]`, `[a-z]`, `[^abc]`, `\x` escapes
 
 ### Data Flow
 

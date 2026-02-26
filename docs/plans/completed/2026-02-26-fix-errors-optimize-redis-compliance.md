@@ -262,5 +262,5 @@ Wire existing cluster and sentinel modules into the server so they're functional
 
 ### Task 14: Update Documentation
 
-- [ ] Update CLAUDE.md if internal patterns changed (new storage engine API, utils module, etc.)
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md if internal patterns changed (new storage engine API, utils module, etc.)
+- [x] Move this plan to `docs/plans/completed/`
