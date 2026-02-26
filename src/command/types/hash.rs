@@ -211,33 +211,7 @@ pub async fn hstrlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     Ok(RespValue::Integer(len))
 }
 
-fn glob_match(pattern: &str, input: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let inp: Vec<char> = input.chars().collect();
-    let (plen, ilen) = (pat.len(), inp.len());
-    let (mut pi, mut ii) = (0, 0);
-    let (mut star_p, mut star_i) = (usize::MAX, 0);
-    while ii < ilen {
-        if pi < plen && (pat[pi] == '?' || pat[pi] == inp[ii]) {
-            pi += 1;
-            ii += 1;
-        } else if pi < plen && pat[pi] == '*' {
-            star_p = pi;
-            star_i = ii;
-            pi += 1;
-        } else if star_p != usize::MAX {
-            pi = star_p + 1;
-            star_i += 1;
-            ii = star_i;
-        } else {
-            return false;
-        }
-    }
-    while pi < plen && pat[pi] == '*' {
-        pi += 1;
-    }
-    pi == plen
-}
+use crate::utils::glob::glob_match;
 
 /// Redis HRANDFIELD command - Get random fields from a hash
 pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {

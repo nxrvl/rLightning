@@ -173,35 +173,7 @@ fn score_in_range(score: f64, min_score: f64, min_exclusive: bool, max_score: f6
     above_min && below_max
 }
 
-fn glob_match(pattern: &str, s: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    let (plen, slen) = (p.len(), s.len());
-    let mut pi = 0;
-    let mut si = 0;
-    let mut star_pi: Option<usize> = None;
-    let mut star_si: usize = 0;
-    while si < slen {
-        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if pi < plen && p[pi] == '*' {
-            star_pi = Some(pi);
-            star_si = si;
-            pi += 1;
-        } else if let Some(sp) = star_pi {
-            pi = sp + 1;
-            star_si += 1;
-            si = star_si;
-        } else {
-            return false;
-        }
-    }
-    while pi < plen && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == plen
-}
+use crate::utils::glob::glob_match;
 
 fn normalize_indices(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
     let len_i64 = len as i64;

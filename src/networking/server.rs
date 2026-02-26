@@ -39,6 +39,14 @@ pub struct Server {
     buffer_size: usize,
 }
 
+/// Outcome of dispatching a parsed command
+enum DispatchAction {
+    /// Command was processed, continue to next command
+    Continue,
+    /// Connection should be closed (QUIT or PSYNC connection takeover)
+    CloseConnection,
+}
+
 impl Server {
     /// Create a new server
     pub fn new(addr: SocketAddr, storage: Arc<StorageEngine>) -> Self {
@@ -315,584 +323,30 @@ impl Server {
                     // Try the fast path for common commands first
                     match RespValue::try_parse_common_command(&mut buffer) {
                         Ok(Some(resp_cmd)) => {
-                            debug!(client_addr = %client_addr_str, command = ?resp_cmd, "Fast path command");
-
                             let cmd = Command {
                                 name: String::from_utf8_lossy(&resp_cmd.name).to_string(),
                                 args: resp_cmd.args.clone(),
                             };
+                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Fast path command");
 
-                            let cmd_lower = cmd.name.to_lowercase();
-
-                            // Check for HELLO command (protocol negotiation)
-                            if cmd_lower == "hello" {
-                                let (response, new_version) = Self::handle_hello_command(&cmd.args, protocol_version, &security, &client_addr_str);
-                                protocol_version = new_version;
-                                if let Ok(bytes) = response.serialize() {
-                                    response_buffer.extend_from_slice(&bytes);
-                                }
-                                commands_processed += 1;
-                                continue;
-                            }
-
-                            // Early authentication check - block unauthenticated access
-                            // to all commands except AUTH, HELLO, and QUIT
-                            let is_auth_command = cmd_lower == "auth";
-                            if !is_auth_command && cmd_lower != "quit" {
-                                if let Some(ref security_mgr) = security {
-                                    if security_mgr.require_auth()
-                                        && !security_mgr.is_authenticated(&client_addr_str)
-                                    {
-                                        let error_msg = "NOAUTH Authentication required.";
-                                        Self::send_error_to_writer(
-                                            &mut socket_writer,
-                                            error_msg.to_string(),
-                                            &client_addr_str,
-                                        )
-                                        .await?;
-                                        commands_processed += 1;
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // ACL permission checks for authenticated clients
-                            // Must run BEFORE dispatching to special command handlers (pubsub, acl, sentinel, replication)
-                            if let Some(ref security_mgr) = security {
-                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
-                                    // Check command permission
-                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
-                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
-                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                                        Self::send_error_to_writer(
-                                            &mut socket_writer,
-                                            error_msg,
-                                            &client_addr_str,
-                                        )
-                                        .await?;
-                                        commands_processed += 1;
-                                        continue;
-                                    }
-
-                                    // Check key permission
-                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
-                                    let mut key_denied = false;
-                                    for &idx in &key_indices {
-                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
-                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
-                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
-                                            Self::send_error_to_writer(
-                                                &mut socket_writer,
-                                                error_msg,
-                                                &client_addr_str,
-                                            )
-                                            .await?;
-                                            key_denied = true;
-                                            break;
-                                        }
-                                    }
-                                    if key_denied {
-                                        commands_processed += 1;
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // Check for connection-closing commands
-                            if cmd_lower == "quit" {
-                                let response = RespValue::SimpleString("OK".to_string());
-                                if let Ok(bytes) = response.serialize() {
-                                    let _ = socket_writer.write_all(&bytes).await;
-                                    let _ = socket_writer.flush().await;
-                                }
-                                // Cleanup before exiting
-                                pubsub.unregister_client(client_id).await;
-                                if let Some(ref security_mgr) = security {
-                                    security_mgr.remove_client(&client_addr_str);
-                                }
-                                return Ok(());
-                            }
-
-                            // Handle SELECT command - updates per-connection database
-                            if cmd_lower == "select" {
-                                if cmd.args.len() != 1 {
-                                    let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
-                                    if let Ok(bytes) = response.serialize() {
-                                        response_buffer.extend_from_slice(&bytes);
-                                    }
-                                } else {
-                                    match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
-                                        Some(idx) if idx < 16 => {
-                                            db_index = idx;
-                                            let response = RespValue::SimpleString("OK".to_string());
-                                            if let Ok(bytes) = response.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                        _ => {
-                                            let response = RespValue::Error("ERR DB index is out of range".to_string());
-                                            if let Ok(bytes) = response.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                    }
-                                }
-                                commands_processed += 1;
-                                continue;
-                            }
-
-                            // Check for pub/sub commands
-                            match cmd_lower.as_str() {
-                                "subscribe" => {
-                                    // ACL channel check
-                                    if let Some(ref security_mgr) = security {
-                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                        if let Some(channel) = denied {
-                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                    }
-                                    let responses = pubsub_commands::subscribe(&pubsub, client_id, &cmd.args).await;
-                                    match responses {
-                                        Ok(resp_list) => {
-                                            for resp in resp_list {
-                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            in_subscription_mode = true;
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "psubscribe" => {
-                                    // ACL channel check (patterns are checked as-is)
-                                    if let Some(ref security_mgr) = security {
-                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                        if let Some(channel) = denied {
-                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                    }
-                                    let responses = pubsub_commands::psubscribe(&pubsub, client_id, &cmd.args).await;
-                                    match responses {
-                                        Ok(resp_list) => {
-                                            for resp in resp_list {
-                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            in_subscription_mode = true;
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "publish" => {
-                                    // ACL channel check (first arg is channel)
-                                    if let Some(ref security_mgr) = security {
-                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
-                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                    }
-                                    let response = pubsub_commands::publish(&pubsub, &cmd.args).await;
-                                    match response {
-                                        Ok(resp) => {
-                                            if let Ok(bytes) = resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "ssubscribe" => {
-                                    // ACL channel check
-                                    if let Some(ref security_mgr) = security {
-                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                        if let Some(channel) = denied {
-                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                    }
-                                    let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
-                                    match responses {
-                                        Ok(resp_list) => {
-                                            for resp in resp_list {
-                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            in_subscription_mode = true;
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "spublish" => {
-                                    // ACL channel check (first arg is channel)
-                                    if let Some(ref security_mgr) = security {
-                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
-                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                    }
-                                    let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
-                                    match response {
-                                        Ok(resp) => {
-                                            if let Ok(bytes) = resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "pubsub" => {
-                                    let response = pubsub_commands::pubsub_command(&pubsub, &cmd.args).await;
-                                    match response {
-                                        Ok(resp) => {
-                                            if let Ok(bytes) = resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                // Handle ACL commands
-                                "acl" => {
-                                    if let Some(ref security_mgr) = security {
-                                        let response = security_mgr.acl().handle_acl_command(&cmd.args, &client_addr_str);
-                                        match response {
-                                            Ok(resp) => {
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                            }
-                                        }
-                                    } else {
-                                        let response = RespValue::SimpleString("OK".to_string());
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                // Handle sentinel commands
-                                "sentinel" => {
-                                    if let Some(ref sentinel_mgr) = sentinel {
-                                        match sentinel_mgr.handle_sentinel_command(&cmd.args).await {
-                                            Ok(resp) => {
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                Self::send_error_to_writer(&mut socket_writer, e, &client_addr_str).await?;
-                                            }
-                                        }
-                                    } else {
-                                        let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                // Handle replication commands
-                                "role" => {
-                                    if let Some(ref repl) = replication {
-                                        let response = repl.get_role_response().await;
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    } else {
-                                        // Default: we're a master with no replicas
-                                        let response = RespValue::Array(Some(vec![
-                                            RespValue::BulkString(Some(b"master".to_vec())),
-                                            RespValue::Integer(0),
-                                            RespValue::Array(Some(vec![])),
-                                        ]));
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "replicaof" | "slaveof" => {
-                                    if cmd.args.len() != 2 {
-                                        Self::send_error_to_writer(&mut socket_writer, "ERR wrong number of arguments for 'replicaof' command".to_string(), &client_addr_str).await?;
-                                    } else if let Some(ref repl) = replication {
-                                        let host = String::from_utf8_lossy(&cmd.args[0]).to_string();
-                                        let port_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
-                                        match repl.handle_replicaof(&host, &port_str).await {
-                                            Ok(response) => {
-                                                if let Ok(bytes) = response.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                Self::send_error_to_writer(&mut socket_writer, format!("ERR {}", e), &client_addr_str).await?;
-                                            }
-                                        }
-                                    } else {
-                                        let response = RespValue::SimpleString("OK".to_string());
-                                        if let Ok(bytes) = response.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "replconf" => {
-                                    // Handle REPLCONF from replicas (ACK mainly)
-                                    if let Some(ref repl) = replication {
-                                        if cmd.args.len() >= 2 {
-                                            let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
-                                            if subcmd == "ACK" {
-                                                if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
-                                                    repl.update_replica_offset(&client_addr_str, offset).await;
-                                                }
-                                                // REPLCONF ACK doesn't get a response in replication stream
-                                                commands_processed += 1;
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    let response = RespValue::SimpleString("OK".to_string());
-                                    if let Ok(bytes) = response.serialize() {
-                                        response_buffer.extend_from_slice(&bytes);
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "psync" => {
-                                    // PSYNC is handled specially - transitions to replication stream
-                                    if let Some(ref repl) = replication {
-                                        // Flush any pending responses first
-                                        if !response_buffer.is_empty() {
-                                            if let Err(e) = socket_writer.write_all(&response_buffer).await {
-                                                error!(client_addr = %client_addr_str, "Failed to flush before PSYNC: {}", e);
-                                                break;
-                                            }
-                                            response_buffer.clear();
-                                        }
-
-                                        // Handle the PSYNC and enter replication stream mode
-                                        if let Err(e) = Self::handle_psync_command(
-                                            &mut socket_writer,
-                                            &cmd.args,
-                                            &repl,
-                                            &client_addr_str,
-                                        ).await {
-                                            error!(client_addr = %client_addr_str, "PSYNC error: {}", e);
-                                        }
-                                        // After PSYNC, the connection is in replication mode
-                                        // The replica will only receive propagated commands
-                                        // We exit the normal client loop
-                                        // Cleanup before exiting
-                                        pubsub.unregister_client(client_id).await;
-                                        if let Some(ref security_mgr) = security {
-                                            security_mgr.remove_client(&client_addr_str);
-                                        }
-                                        return Ok(());
-                                    } else {
-                                        Self::send_error_to_writer(&mut socket_writer, "ERR PSYNC not supported".to_string(), &client_addr_str).await?;
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "failover" => {
-                                    if let Some(ref repl) = replication {
-                                        match repl.handle_failover().await {
-                                            Ok(response) => {
-                                                if let Ok(bytes) = response.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                Self::send_error_to_writer(&mut socket_writer, format!("ERR {}", e), &client_addr_str).await?;
-                                            }
-                                        }
-                                    } else {
-                                        Self::send_error_to_writer(&mut socket_writer, "ERR FAILOVER not supported".to_string(), &client_addr_str).await?;
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                "wait" => {
-                                    if cmd.args.len() != 2 {
-                                        let error_resp = RespValue::Error("ERR wrong number of arguments for 'wait' command".to_string());
-                                        if let Ok(bytes) = error_resp.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
-                                        }
-                                    } else {
-                                        let numreplicas = match String::from_utf8_lossy(&cmd.args[0]).parse::<usize>() {
-                                            Ok(n) => n,
-                                            Err(_) => {
-                                                let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
-                                                if let Ok(bytes) = error_resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                                commands_processed += 1;
-                                                continue;
-                                            }
-                                        };
-                                        let timeout_ms = match String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
-                                            Ok(n) => n,
-                                            Err(_) => {
-                                                let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
-                                                if let Ok(bytes) = error_resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                                commands_processed += 1;
-                                                continue;
-                                            }
-                                        };
-                                        if let Some(ref repl) = replication {
-                                            let timeout = if timeout_ms == 0 {
-                                                std::time::Duration::from_secs(300) // 5 min max
-                                            } else {
-                                                std::time::Duration::from_millis(timeout_ms)
-                                            };
-                                            // Flush responses before blocking
-                                            if !response_buffer.is_empty() {
-                                                let _ = socket_writer.write_all(&response_buffer).await;
-                                                response_buffer.clear();
-                                            }
-                                            let count = repl.wait_for_replicas(numreplicas, timeout).await;
-                                            let response = RespValue::Integer(count);
-                                            if let Ok(bytes) = response.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        } else {
-                                            let response = RespValue::Integer(0);
-                                            if let Ok(bytes) = response.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                        }
-                                    }
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                                _ => {}
-                            }
-
-                            // Check read-only mode (replica rejecting write commands)
-                            if let Some(ref repl) = replication {
-                                if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
-                                    Self::send_error_to_writer(&mut socket_writer, "READONLY You can't write against a read only replica.".to_string(), &client_addr_str).await?;
-                                    commands_processed += 1;
-                                    continue;
-                                }
-                            }
-
-                            // Capture queued commands before EXEC drains them (for replication)
-                            let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
-                                tx_state.queue.clone()
-                            } else {
-                                vec![]
-                            };
-
-                            // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
-                            let tx_result = Self::process_with_transaction(
-                                &cmd,
-                                &cmd_lower,
-                                &mut tx_state,
-                                &command_handler,
-                                &persistence,
-                                aof_sync_policy,
-                                is_auth_command,
-                                &security,
+                            match Self::dispatch_command(
+                                &cmd, &mut socket_writer, &mut response_buffer,
+                                &mut db_index, &mut protocol_version, &mut in_subscription_mode,
+                                &mut tx_state, &pubsub, client_id, &security, &sentinel,
+                                &replication, &command_handler, &persistence, aof_sync_policy,
                                 &client_addr_str,
-                                db_index,
-                            ).await;
-
-                            match tx_result {
-                                Ok(response) => {
-                                    // Propagate write commands to replicas
-                                    if let Some(ref repl) = replication {
-                                        if cmd_lower == "exec" {
-                                            // For EXEC, propagate queued write commands individually
-                                            if let RespValue::Array(Some(_)) = &response {
-                                                for queued_cmd in &queued_for_repl {
-                                                    let qcmd_lower = queued_cmd.name.to_lowercase();
-                                                    if ReplicationManager::is_write_command(&qcmd_lower) {
-                                                        let repl_cmd = RespCommand {
-                                                            name: queued_cmd.name.as_bytes().to_vec(),
-                                                            args: queued_cmd.args.clone(),
-                                                        };
-                                                        repl.propagate_command(&repl_cmd).await;
-                                                    }
-                                                }
-                                            }
-                                        } else if ReplicationManager::is_write_command(&cmd_lower) {
-                                            repl.propagate_command(&resp_cmd).await;
-                                        }
+                            ).await? {
+                                DispatchAction::CloseConnection => {
+                                    pubsub.unregister_client(client_id).await;
+                                    if let Some(security_mgr) = security {
+                                        security_mgr.remove_client(&client_addr_str);
                                     }
-                                    // Apply RESP3 conversion if client negotiated RESP3
-                                    let response = if protocol_version == ProtocolVersion::RESP3 {
-                                        response.convert_for_resp3(&cmd_lower)
-                                    } else {
-                                        response
-                                    };
-                                    if let Ok(bytes) = response.serialize() {
-                                        response_buffer.extend_from_slice(&bytes);
-                                    } else {
-                                        Self::send_response_to_writer(&mut socket_writer, response, &client_addr_str)
-                                            .await?;
-                                    }
+                                    return Ok(());
                                 }
-                                Err(err) => {
-                                    Self::send_error_to_writer(&mut socket_writer, err.to_string(), &client_addr_str)
-                                        .await?;
+                                DispatchAction::Continue => {
+                                    commands_processed += 1;
                                 }
                             }
-
-                            commands_processed += 1;
                         }
                         Ok(None) => {
                             // Fast path didn't match, try regular parsing
@@ -903,450 +357,26 @@ impl Server {
                                     // Convert to a command
                                     match parser::parse_command(value) {
                                         Ok(cmd) => {
-                                            debug!(client_addr = %client_addr_str, command = ?cmd, "Processing command");
+                                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Processing command");
 
-                                            let cmd_lower = cmd.name.to_lowercase();
-
-                                            // Check for HELLO command (protocol negotiation)
-                                            if cmd_lower == "hello" {
-                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, protocol_version, &security, &client_addr_str);
-                                                protocol_version = new_version;
-                                                if let Ok(bytes) = response.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                                commands_processed += 1;
-                                                continue;
-                                            }
-
-                                            // Handle QUIT - close connection (slow path)
-                                            if cmd_lower == "quit" {
-                                                let response = RespValue::SimpleString("OK".to_string());
-                                                if let Ok(bytes) = response.serialize() {
-                                                    let _ = socket_writer.write_all(&bytes).await;
-                                                    let _ = socket_writer.flush().await;
-                                                }
-                                                // Cleanup before exiting
-                                                pubsub.unregister_client(client_id).await;
-                                                if let Some(ref security_mgr) = security {
-                                                    security_mgr.remove_client(&client_addr_str);
-                                                }
-                                                return Ok(());
-                                            }
-
-                                            // Early authentication check for slow path
-                                            let is_auth_command = cmd_lower == "auth";
-                                            if !is_auth_command {
-                                                if let Some(ref security_mgr) = security {
-                                                    if security_mgr.require_auth()
-                                                        && !security_mgr.is_authenticated(&client_addr_str)
-                                                    {
-                                                        let error_msg = "NOAUTH Authentication required.";
-                                                        Self::send_error_to_writer(
-                                                            &mut socket_writer,
-                                                            error_msg.to_string(),
-                                                            &client_addr_str,
-                                                        )
-                                                        .await?;
-                                                        commands_processed += 1;
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-
-                                            // ACL permission checks for authenticated clients (slow path)
-                                            // Must run BEFORE dispatching to special command handlers
-                                            if let Some(ref security_mgr) = security {
-                                                if !is_auth_command && security_mgr.is_authenticated(&client_addr_str) {
-                                                    // Check command permission
-                                                    if !security_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
-                                                        let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                                        security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
-                                                        let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                                                        Self::send_error_to_writer(
-                                                            &mut socket_writer,
-                                                            error_msg,
-                                                            &client_addr_str,
-                                                        )
-                                                        .await?;
-                                                        commands_processed += 1;
-                                                        continue;
-                                                    }
-
-                                                    // Check key permission
-                                                    let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
-                                                    let mut key_denied = false;
-                                                    for &idx in &key_indices {
-                                                        if idx < cmd.args.len() && !security_mgr.check_key_permission(&client_addr_str, &cmd.args[idx]) {
-                                                            let username = security_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                                            let key_str = String::from_utf8_lossy(&cmd.args[idx]);
-                                                            security_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                                                            let error_msg = format!("NOPERM this user has no permissions to access one of the keys used as arguments");
-                                                            Self::send_error_to_writer(
-                                                                &mut socket_writer,
-                                                                error_msg,
-                                                                &client_addr_str,
-                                                            )
-                                                            .await?;
-                                                            key_denied = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                    if key_denied {
-                                                        commands_processed += 1;
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-
-                                            // Handle SELECT command - updates per-connection database (slow path)
-                                            if cmd_lower == "select" {
-                                                if cmd.args.len() != 1 {
-                                                    let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
-                                                    if let Ok(bytes) = response.serialize() {
-                                                        response_buffer.extend_from_slice(&bytes);
-                                                    }
-                                                } else {
-                                                    match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
-                                                        Some(idx) if idx < 16 => {
-                                                            db_index = idx;
-                                                            let response = RespValue::SimpleString("OK".to_string());
-                                                            if let Ok(bytes) = response.serialize() {
-                                                                response_buffer.extend_from_slice(&bytes);
-                                                            }
-                                                        }
-                                                        _ => {
-                                                            let response = RespValue::Error("ERR DB index is out of range".to_string());
-                                                            if let Ok(bytes) = response.serialize() {
-                                                                response_buffer.extend_from_slice(&bytes);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                commands_processed += 1;
-                                                continue;
-                                            }
-
-                                            // Check for pub/sub commands
-                                            match cmd_lower.as_str() {
-                                                "subscribe" => {
-                                                    // ACL channel check
-                                                    if let Some(ref security_mgr) = security {
-                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                                        if let Some(channel) = denied {
-                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    let responses = pubsub_commands::subscribe(&pubsub, client_id, &cmd.args).await;
-                                                    match responses {
-                                                        Ok(resp_list) => {
-                                                            for resp in resp_list {
-                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                                if let Ok(bytes) = resp.serialize() {
-                                                                    response_buffer.extend_from_slice(&bytes);
-                                                                }
-                                                            }
-                                                            in_subscription_mode = true;
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                "psubscribe" => {
-                                                    // ACL channel check
-                                                    if let Some(ref security_mgr) = security {
-                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                                        if let Some(channel) = denied {
-                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    let responses = pubsub_commands::psubscribe(&pubsub, client_id, &cmd.args).await;
-                                                    match responses {
-                                                        Ok(resp_list) => {
-                                                            for resp in resp_list {
-                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                                if let Ok(bytes) = resp.serialize() {
-                                                                    response_buffer.extend_from_slice(&bytes);
-                                                                }
-                                                            }
-                                                            in_subscription_mode = true;
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                "publish" => {
-                                                    // ACL channel check
-                                                    if let Some(ref security_mgr) = security {
-                                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
-                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    let response = pubsub_commands::publish(&pubsub, &cmd.args).await;
-                                                    match response {
-                                                        Ok(resp) => {
-                                                            if let Ok(bytes) = resp.serialize() {
-                                                                response_buffer.extend_from_slice(&bytes);
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                "ssubscribe" => {
-                                                    // ACL channel check
-                                                    if let Some(ref security_mgr) = security {
-                                                        let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(&client_addr_str, ch));
-                                                        if let Some(channel) = denied {
-                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    let responses = pubsub_commands::ssubscribe(&pubsub, client_id, &cmd.args).await;
-                                                    match responses {
-                                                        Ok(resp_list) => {
-                                                            for resp in resp_list {
-                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
-                                                                if let Ok(bytes) = resp.serialize() {
-                                                                    response_buffer.extend_from_slice(&bytes);
-                                                                }
-                                                            }
-                                                            in_subscription_mode = true;
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                "spublish" => {
-                                                    // ACL channel check
-                                                    if let Some(ref security_mgr) = security {
-                                                        if !cmd.args.is_empty() && !security_mgr.check_channel_permission(&client_addr_str, &cmd.args[0]) {
-                                                            let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                                                            Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    let response = pubsub_commands::spublish(&pubsub, &cmd.args).await;
-                                                    match response {
-                                                        Ok(resp) => {
-                                                            if let Ok(bytes) = resp.serialize() {
-                                                                response_buffer.extend_from_slice(&bytes);
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                "pubsub" => {
-                                                    let response = pubsub_commands::pubsub_command(&pubsub, &cmd.args).await;
-                                                    match response {
-                                                        Ok(resp) => {
-                                                            if let Ok(bytes) = resp.serialize() {
-                                                                response_buffer.extend_from_slice(&bytes);
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                // Handle ACL commands
-                                                "acl" => {
-                                                    if let Some(ref security_mgr) = security {
-                                                        let response = security_mgr.acl().handle_acl_command(&cmd.args, &client_addr_str);
-                                                        match response {
-                                                            Ok(resp) => {
-                                                                if let Ok(bytes) = resp.serialize() {
-                                                                    response_buffer.extend_from_slice(&bytes);
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                Self::send_error_to_writer(&mut socket_writer, e.to_string(), &client_addr_str).await?;
-                                                            }
-                                                        }
-                                                    } else {
-                                                        let response = RespValue::SimpleString("OK".to_string());
-                                                        if let Ok(bytes) = response.serialize() {
-                                                            response_buffer.extend_from_slice(&bytes);
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                // Handle sentinel commands (slow path)
-                                                "sentinel" => {
-                                                    if let Some(ref sentinel_mgr) = sentinel {
-                                                        match sentinel_mgr.handle_sentinel_command(&cmd.args).await {
-                                                            Ok(resp) => {
-                                                                if let Ok(bytes) = resp.serialize() {
-                                                                    response_buffer.extend_from_slice(&bytes);
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                Self::send_error_to_writer(&mut socket_writer, e, &client_addr_str).await?;
-                                                            }
-                                                        }
-                                                    } else {
-                                                        let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
-                                                        if let Ok(bytes) = response.serialize() {
-                                                            response_buffer.extend_from_slice(&bytes);
-                                                        }
-                                                    }
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                                // Handle replication commands (slow path)
-                                                "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" | "wait" => {
-                                                    // Build a RespCommand for replication handlers
-                                                    let resp_cmd = RespCommand {
-                                                        name: cmd.name.as_bytes().to_vec(),
-                                                        args: cmd.args.clone(),
-                                                    };
-                                                    let response = Self::handle_replication_command_slow(
-                                                        &cmd_lower,
-                                                        &cmd,
-                                                        &resp_cmd,
-                                                        &replication,
-                                                        &mut socket_writer,
-                                                        &mut response_buffer,
-                                                        &client_addr_str,
-                                                    ).await;
-                                                    match response {
-                                                        Ok(true) => {
-                                                            // PSYNC - connection taken over, exit
-                                                            // Cleanup before exiting
-                                                            pubsub.unregister_client(client_id).await;
-                                                            if let Some(ref security_mgr) = security {
-                                                                security_mgr.remove_client(&client_addr_str);
-                                                            }
-                                                            return Ok(());
-                                                        }
-                                                        Ok(false) => {
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                        Err(e) => {
-                                                            error!(client_addr = %client_addr_str, "Replication command error: {}", e);
-                                                            commands_processed += 1;
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-
-                                            // Check read-only mode (replica rejecting write commands)
-                                            if let Some(ref repl) = replication {
-                                                if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
-                                                    Self::send_error_to_writer(&mut socket_writer, "READONLY You can't write against a read only replica.".to_string(), &client_addr_str).await?;
-                                                    commands_processed += 1;
-                                                    continue;
-                                                }
-                                            }
-
-                                            // Capture queued commands before EXEC drains them (for replication)
-                                            let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
-                                                tx_state.queue.clone()
-                                            } else {
-                                                vec![]
-                                            };
-
-                                            // Handle transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
-                                            let tx_result = Self::process_with_transaction(
-                                                &cmd,
-                                                &cmd_lower,
-                                                &mut tx_state,
-                                                &command_handler,
-                                                &persistence,
-                                                aof_sync_policy,
-                                                is_auth_command,
-                                                &security,
+                                            match Self::dispatch_command(
+                                                &cmd, &mut socket_writer, &mut response_buffer,
+                                                &mut db_index, &mut protocol_version, &mut in_subscription_mode,
+                                                &mut tx_state, &pubsub, client_id, &security, &sentinel,
+                                                &replication, &command_handler, &persistence, aof_sync_policy,
                                                 &client_addr_str,
-                                                db_index,
-                                            ).await;
-
-                                            match tx_result {
-                                                Ok(response) => {
-                                                    // Propagate write commands to replicas
-                                                    if let Some(ref repl) = replication {
-                                                        if cmd_lower == "exec" {
-                                                            // For EXEC, propagate queued write commands individually
-                                                            if let RespValue::Array(Some(_)) = &response {
-                                                                for queued_cmd in &queued_for_repl {
-                                                                    let qcmd_lower = queued_cmd.name.to_lowercase();
-                                                                    if ReplicationManager::is_write_command(&qcmd_lower) {
-                                                                        let repl_cmd = RespCommand {
-                                                                            name: queued_cmd.name.as_bytes().to_vec(),
-                                                                            args: queued_cmd.args.clone(),
-                                                                        };
-                                                                        repl.propagate_command(&repl_cmd).await;
-                                                                    }
-                                                                }
-                                                            }
-                                                        } else if ReplicationManager::is_write_command(&cmd_lower) {
-                                                            let resp_cmd = RespCommand {
-                                                                name: cmd.name.as_bytes().to_vec(),
-                                                                args: cmd.args.clone(),
-                                                            };
-                                                            repl.propagate_command(&resp_cmd).await;
-                                                        }
+                                            ).await? {
+                                                DispatchAction::CloseConnection => {
+                                                    pubsub.unregister_client(client_id).await;
+                                                    if let Some(security_mgr) = security {
+                                                        security_mgr.remove_client(&client_addr_str);
                                                     }
-                                                    // Apply RESP3 conversion if client negotiated RESP3
-                                                    let response = if protocol_version == ProtocolVersion::RESP3 {
-                                                        response.convert_for_resp3(&cmd_lower)
-                                                    } else {
-                                                        response
-                                                    };
-                                                    if let Ok(bytes) = response.serialize() {
-                                                        response_buffer.extend_from_slice(&bytes);
-                                                    } else {
-                                                        Self::send_response_to_writer(
-                                                            &mut socket_writer,
-                                                            response,
-                                                            &client_addr_str,
-                                                        )
-                                                        .await?;
-                                                    }
+                                                    return Ok(());
                                                 }
-                                                Err(err) => {
-                                                    Self::send_error_to_writer(
-                                                        &mut socket_writer,
-                                                        err.to_string(),
-                                                        &client_addr_str,
-                                                    )
-                                                    .await?;
+                                                DispatchAction::Continue => {
+                                                    commands_processed += 1;
                                                 }
                                             }
-
-                                            commands_processed += 1;
                                         }
                                         Err(e) => {
                                             error!(client_addr = %client_addr_str, error = ?e, "Command parsing error");
@@ -1490,6 +520,406 @@ impl Server {
         debug!(client_addr = %client_addr_str, client_id = client_id, "Client unregistered from PubSub manager");
 
         Ok(())
+    }
+
+    /// Unified command dispatch - handles auth, ACL, routing, transactions, replication for any parsed command.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_command(
+        cmd: &Command,
+        socket_writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        response_buffer: &mut Vec<u8>,
+        db_index: &mut usize,
+        protocol_version: &mut ProtocolVersion,
+        in_subscription_mode: &mut bool,
+        tx_state: &mut TransactionState,
+        pubsub: &Arc<PubSubManager>,
+        client_id: u64,
+        security: &Option<Arc<SecurityManager>>,
+        sentinel: &Option<Arc<SentinelManager>>,
+        replication: &Option<Arc<ReplicationManager>>,
+        command_handler: &Arc<CommandHandler>,
+        persistence: &Option<Arc<PersistenceManager>>,
+        aof_sync_policy: AofSyncPolicy,
+        client_addr_str: &str,
+    ) -> Result<DispatchAction, NetworkError> {
+        let cmd_lower = cmd.name.to_lowercase();
+
+        // HELLO - protocol negotiation
+        if cmd_lower == "hello" {
+            let (response, new_version) = Self::handle_hello_command(&cmd.args, *protocol_version, security, client_addr_str);
+            *protocol_version = new_version;
+            if let Ok(bytes) = response.serialize() {
+                response_buffer.extend_from_slice(&bytes);
+            }
+            return Ok(DispatchAction::Continue);
+        }
+
+        // QUIT - close connection
+        if cmd_lower == "quit" {
+            let response = RespValue::SimpleString("OK".to_string());
+            if let Ok(bytes) = response.serialize() {
+                let _ = socket_writer.write_all(&bytes).await;
+                let _ = socket_writer.flush().await;
+            }
+            return Ok(DispatchAction::CloseConnection);
+        }
+
+        // Auth check - block unauthenticated access to all commands except AUTH, HELLO, QUIT
+        let is_auth_command = cmd_lower == "auth";
+        if !is_auth_command {
+            if let Some(security_mgr) = security {
+                if security_mgr.require_auth()
+                    && !security_mgr.is_authenticated(client_addr_str)
+                {
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        "NOAUTH Authentication required.".to_string(),
+                        client_addr_str,
+                    ).await?;
+                    return Ok(DispatchAction::Continue);
+                }
+            }
+        }
+
+        // ACL permission checks for authenticated clients
+        if let Some(security_mgr) = security {
+            if !is_auth_command && security_mgr.is_authenticated(client_addr_str) {
+                // Check command permission
+                if !security_mgr.check_command_permission(client_addr_str, &cmd_lower) {
+                    let username = security_mgr.acl().get_username(client_addr_str).unwrap_or_else(|| "default".to_string());
+                    security_mgr.acl().log_denial(client_addr_str, &username, &cmd_lower, "command");
+                    let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                    return Ok(DispatchAction::Continue);
+                }
+
+                // Check key permission
+                let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+                for &idx in &key_indices {
+                    if idx < cmd.args.len() && !security_mgr.check_key_permission(client_addr_str, &cmd.args[idx]) {
+                        let username = security_mgr.acl().get_username(client_addr_str).unwrap_or_else(|| "default".to_string());
+                        let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                        security_mgr.acl().log_denial(client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                        Self::send_error_to_writer(
+                            socket_writer,
+                            "NOPERM this user has no permissions to access one of the keys used as arguments".to_string(),
+                            client_addr_str,
+                        ).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+            }
+        }
+
+        // SELECT - database switching
+        if cmd_lower == "select" {
+            if cmd.args.len() != 1 {
+                let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
+                if let Ok(bytes) = response.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                }
+            } else {
+                match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
+                    Some(idx) if idx < 16 => {
+                        *db_index = idx;
+                        let response = RespValue::SimpleString("OK".to_string());
+                        if let Ok(bytes) = response.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    }
+                    _ => {
+                        let response = RespValue::Error("ERR DB index is out of range".to_string());
+                        if let Ok(bytes) = response.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    }
+                }
+            }
+            return Ok(DispatchAction::Continue);
+        }
+
+        // Special command routing (pub/sub, ACL, sentinel, replication)
+        match cmd_lower.as_str() {
+            "subscribe" => {
+                if let Some(security_mgr) = security {
+                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    if let Some(channel) = denied {
+                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+                let responses = pubsub_commands::subscribe(pubsub, client_id, &cmd.args).await;
+                match responses {
+                    Ok(resp_list) => {
+                        for resp in resp_list {
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            if let Ok(bytes) = resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        *in_subscription_mode = true;
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            "psubscribe" => {
+                if let Some(security_mgr) = security {
+                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    if let Some(channel) = denied {
+                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+                let responses = pubsub_commands::psubscribe(pubsub, client_id, &cmd.args).await;
+                match responses {
+                    Ok(resp_list) => {
+                        for resp in resp_list {
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            if let Ok(bytes) = resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        *in_subscription_mode = true;
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            "publish" => {
+                if let Some(security_mgr) = security {
+                    if !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
+                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+                let response = pubsub_commands::publish(pubsub, &cmd.args).await;
+                match response {
+                    Ok(resp) => {
+                        if let Ok(bytes) = resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            "ssubscribe" => {
+                if let Some(security_mgr) = security {
+                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    if let Some(channel) = denied {
+                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+                let responses = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await;
+                match responses {
+                    Ok(resp_list) => {
+                        for resp in resp_list {
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            if let Ok(bytes) = resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        *in_subscription_mode = true;
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            "spublish" => {
+                if let Some(security_mgr) = security {
+                    if !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
+                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+                let response = pubsub_commands::spublish(pubsub, &cmd.args).await;
+                match response {
+                    Ok(resp) => {
+                        if let Ok(bytes) = resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            "pubsub" => {
+                let response = pubsub_commands::pubsub_command(pubsub, &cmd.args).await;
+                match response {
+                    Ok(resp) => {
+                        if let Ok(bytes) = resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
+                    }
+                    Err(e) => {
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            // ACL commands
+            "acl" => {
+                if let Some(security_mgr) = security {
+                    let response = security_mgr.acl().handle_acl_command(&cmd.args, client_addr_str);
+                    match response {
+                        Ok(resp) => {
+                            if let Ok(bytes) = resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        Err(e) => {
+                            Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        }
+                    }
+                } else {
+                    let response = RespValue::SimpleString("OK".to_string());
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            // Sentinel commands
+            "sentinel" => {
+                if let Some(sentinel_mgr) = sentinel {
+                    match sentinel_mgr.handle_sentinel_command(&cmd.args).await {
+                        Ok(resp) => {
+                            if let Ok(bytes) = resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
+                        }
+                        Err(e) => {
+                            Self::send_error_to_writer(socket_writer, e, client_addr_str).await?;
+                        }
+                    }
+                } else {
+                    let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                }
+                return Ok(DispatchAction::Continue);
+            }
+            // Replication commands
+            "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" | "wait" => {
+                let resp_cmd = RespCommand {
+                    name: cmd.name.as_bytes().to_vec(),
+                    args: cmd.args.clone(),
+                };
+                let result = Self::handle_replication_command_slow(
+                    &cmd_lower,
+                    cmd,
+                    &resp_cmd,
+                    replication,
+                    socket_writer,
+                    response_buffer,
+                    client_addr_str,
+                ).await;
+                match result {
+                    Ok(true) => return Ok(DispatchAction::CloseConnection),
+                    Ok(false) => return Ok(DispatchAction::Continue),
+                    Err(e) => {
+                        error!(client_addr = %client_addr_str, "Replication command error: {}", e);
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Read-only mode check
+        if let Some(repl) = replication {
+            if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
+                Self::send_error_to_writer(
+                    socket_writer,
+                    "READONLY You can't write against a read only replica.".to_string(),
+                    client_addr_str,
+                ).await?;
+                return Ok(DispatchAction::Continue);
+            }
+        }
+
+        // Capture queued commands before EXEC drains them (for replication)
+        let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
+            tx_state.queue.clone()
+        } else {
+            vec![]
+        };
+
+        // Transaction handling (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
+        let tx_result = Self::process_with_transaction(
+            cmd,
+            &cmd_lower,
+            tx_state,
+            command_handler,
+            persistence,
+            aof_sync_policy,
+            is_auth_command,
+            security,
+            client_addr_str,
+            *db_index,
+        ).await;
+
+        match tx_result {
+            Ok(response) => {
+                // Propagate write commands to replicas
+                if let Some(repl) = replication {
+                    if cmd_lower == "exec" {
+                        if let RespValue::Array(Some(_)) = &response {
+                            for queued_cmd in &queued_for_repl {
+                                let qcmd_lower = queued_cmd.name.to_lowercase();
+                                if ReplicationManager::is_write_command(&qcmd_lower) {
+                                    let repl_cmd = RespCommand {
+                                        name: queued_cmd.name.as_bytes().to_vec(),
+                                        args: queued_cmd.args.clone(),
+                                    };
+                                    repl.propagate_command(&repl_cmd).await;
+                                }
+                            }
+                        }
+                    } else if ReplicationManager::is_write_command(&cmd_lower) {
+                        let repl_cmd = RespCommand {
+                            name: cmd.name.as_bytes().to_vec(),
+                            args: cmd.args.clone(),
+                        };
+                        repl.propagate_command(&repl_cmd).await;
+                    }
+                }
+                // RESP3 conversion
+                let response = if *protocol_version == ProtocolVersion::RESP3 {
+                    response.convert_for_resp3(&cmd_lower)
+                } else {
+                    response
+                };
+                if let Ok(bytes) = response.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                } else {
+                    Self::send_response_to_writer(socket_writer, response, client_addr_str).await?;
+                }
+            }
+            Err(err) => {
+                Self::send_error_to_writer(socket_writer, err.to_string(), client_addr_str).await?;
+            }
+        }
+
+        Ok(DispatchAction::Continue)
     }
 
     /// Process a command with transaction state handling.

@@ -767,42 +767,8 @@ impl StorageEngine {
         Ok(keys)
     }
     
-    /// Check if a string matches a simple glob pattern using iterative two-pointer algorithm.
-    /// Supports * (match any sequence) and ? (match any single char).
     fn matches_pattern(&self, s: &str, pattern: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
-
-        let p: Vec<char> = pattern.chars().collect();
-        let s: Vec<char> = s.chars().collect();
-        let (mut pi, mut si) = (0usize, 0usize);
-        let mut star_pi: Option<usize> = None;
-        let mut star_si: Option<usize> = None;
-
-        while si < s.len() {
-            if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
-                pi += 1;
-                si += 1;
-            } else if pi < p.len() && p[pi] == '*' {
-                star_pi = Some(pi);
-                star_si = Some(si);
-                pi += 1;
-            } else if let Some(sp) = star_pi {
-                pi = sp + 1;
-                let ss = star_si.unwrap() + 1;
-                star_si = Some(ss);
-                si = ss;
-            } else {
-                return false;
-            }
-        }
-
-        while pi < p.len() && p[pi] == '*' {
-            pi += 1;
-        }
-
-        pi == p.len()
+        crate::utils::glob::glob_match(pattern, s)
     }
     
     /// Flush all data (remove all keys from all databases)
