@@ -355,12 +355,8 @@ impl RespValue {
                 RespValue::Set(items)
             }
 
-            // Recursively convert EXEC results (array of sub-responses)
-            RespValue::Array(Some(items)) if command_name == "exec" => {
-                // EXEC returns an array of results; each is already a final response
-                // We don't convert inner elements since they came from different commands
-                RespValue::Array(Some(items))
-            }
+            // Note: EXEC inner sub-result conversion is handled in server.rs
+            // where the queued command names are available.
 
             // Everything else passes through unchanged
             other => other,
