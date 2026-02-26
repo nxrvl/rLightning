@@ -84,7 +84,8 @@ async fn test_new_string_commands_compliance() {
     let result = handler.process(incrbyfloat_cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(value)) = result {
         let float_str = String::from_utf8_lossy(&value);
-        assert!(float_str.contains("5"));
+        let float_val: f64 = float_str.parse().expect("INCRBYFLOAT should return a parseable float");
+        assert!((float_val - 5.0).abs() < f64::EPSILON, "Expected 5.0, got {}", float_val);
     } else {
         panic!("Expected BulkString response");
     }

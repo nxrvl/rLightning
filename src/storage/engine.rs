@@ -1627,7 +1627,9 @@ impl StorageEngine {
                     } else {
                         new_expires_at
                     };
-                    (true, old, expired, effective_expires)
+                    // is_new_key is false for Occupied entries: the DashMap entry already
+                    // exists (even if expired), so key_count must not be incremented.
+                    (true, old, false, effective_expires)
                 }
             }
             Entry::Vacant(vac) => {

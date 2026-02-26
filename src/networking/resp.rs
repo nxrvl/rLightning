@@ -367,12 +367,14 @@ impl RespValue {
         }
     }
 
-    /// Check if a command returns key-value pairs that should be a RESP3 Map
+    /// Check if a command returns key-value pairs that should be a RESP3 Map.
+    /// Only commands that always return key-value pair responses belong here.
+    /// Sorted set commands (zrange etc.) return flat arrays or score-interleaved arrays
+    /// depending on WITHSCORES flag, so they must NOT be converted to Map.
+    /// Stream commands (xrange etc.) return nested entry arrays, not key-value maps.
     fn is_map_command(cmd: &str) -> bool {
         matches!(cmd,
-            "hgetall" | "config" | "xrange" | "xrevrange" |
-            "zrangebyscore" | "zrangebylex" | "zrange" |
-            "memory" | "command" | "latency"
+            "hgetall" | "config"
         )
     }
 
@@ -1403,36 +1405,21 @@ mod tests {
     
     #[test]
     fn test_size_limit_check() {
-        // Instead of allocating huge amounts of memory, we'll test the size check directly
-        // Create a struct with the same interface as Vec but doesn't allocate the full memory
-        struct MockLargeVec {
-            len: usize,
-        }
-        
-        impl AsRef<[u8]> for MockLargeVec {
-            fn as_ref(&self) -> &[u8] {
-                // This is not ideal but works for testing - we're only checking the len
-                static EMPTY: [u8; 0] = [];
-                &EMPTY
-            }
-        }
-        
-        impl std::ops::Deref for MockLargeVec {
-            type Target = [u8];
-            fn deref(&self) -> &Self::Target {
-                self.as_ref()
-            }
-        }
-        
-        // Create a mock large vector that pretends to be 600MB but doesn't allocate it
-        let mock_huge_data = MockLargeVec { len: 600 * 1024 * 1024 };
-        
-        // Check the size limit in the BulkString serialize method directly
-        if mock_huge_data.len > 512 * 1024 * 1024 {
-            assert!(true, "Size check correctly identifies too large data");
-        } else {
-            assert!(false, "Size check should reject data over 512MB");
-        }
+        // Verify that RespValue serialization handles large bulk strings correctly.
+        // We test with a reasonably sized payload to verify the serialization format
+        // includes the correct length prefix, rather than allocating 600MB.
+        let data = vec![0x41u8; 1024]; // 1KB of 'A'
+        let value = RespValue::BulkString(Some(data.clone()));
+        let serialized = value.serialize().expect("serialization should succeed for 1KB payload");
+        let expected_prefix = format!("${}\r\n", data.len());
+        let serialized_str = String::from_utf8_lossy(&serialized);
+        assert!(serialized_str.starts_with(&expected_prefix),
+            "BulkString should start with length prefix, got: {}",
+            &serialized_str[..expected_prefix.len().min(serialized_str.len())]);
+        assert!(serialized_str.ends_with("\r\n"),
+            "BulkString should end with CRLF");
+        // Verify the total length: $<len>\r\n<data>\r\n
+        assert_eq!(serialized.len(), expected_prefix.len() + data.len() + 2);
     }
 
     // ===== RESP3 Type Tests =====
