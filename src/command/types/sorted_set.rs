@@ -1109,10 +1109,7 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
 
     if args.len() == 1 {
-        let idx = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as usize) % entries.len();
+        let idx = fastrand::usize(0..entries.len());
         return Ok(RespValue::BulkString(Some(entries[idx].1.clone())));
     }
 
@@ -1124,14 +1121,9 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let mut output = Vec::new();
     if count_val > 0 {
         let count = (count_val as usize).min(entries.len());
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().subsec_nanos() as usize;
         let mut indices: Vec<usize> = (0..entries.len()).collect();
-        let mut rng = seed;
         for i in (1..indices.len()).rev() {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let j = rng % (i + 1);
+            let j = fastrand::usize(0..=i);
             indices.swap(i, j);
         }
         for &idx in indices.iter().take(count) {
@@ -1140,13 +1132,8 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     } else if count_val < 0 {
         let count = (-count_val) as usize;
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().subsec_nanos() as usize;
-        let mut rng = seed;
         for _ in 0..count {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let idx = rng % entries.len();
+            let idx = fastrand::usize(0..entries.len());
             output.push(RespValue::BulkString(Some(entries[idx].1.clone())));
             if with_scores { output.push(RespValue::BulkString(Some(format_score(entries[idx].0).into_bytes()))); }
         }
