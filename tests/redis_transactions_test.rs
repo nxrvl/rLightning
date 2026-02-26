@@ -163,9 +163,10 @@ async fn test_redis_transactions() -> Result<(), Box<dyn std::error::Error + Sen
             // First command should succeed
             assert_eq!(results[0], RespValue::SimpleString("OK".to_string()), "First SET should succeed");
             
-            // Second command should fail with WRONGTYPE error
-            assert!(matches!(results[1], RespValue::Error(ref e) if e.contains("WRONGTYPE")), 
-                   "INCR on string should fail with WRONGTYPE error");
+            // Second command should fail - INCR on non-numeric string returns an error
+            // (Redis returns "ERR value is not an integer or out of range", not WRONGTYPE)
+            assert!(matches!(results[1], RespValue::Error(ref e) if e.contains("not an integer") || e.contains("WRONGTYPE")),
+                   "INCR on non-numeric string should fail: got {:?}", results[1]);
             
             // Third command should still succeed (Redis transactions are not rolled back on errors)
             assert_eq!(results[2], RespValue::SimpleString("OK".to_string()), "Third SET should still succeed");

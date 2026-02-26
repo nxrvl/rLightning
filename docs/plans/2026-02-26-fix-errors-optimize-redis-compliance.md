@@ -66,15 +66,15 @@ Migrate from flat composite `key:field` keys to single-key HashMap storage, fixi
 
 Use the atomic storage primitives from Task 1 to fix all string command race conditions.
 
-- [ ] Rewrite SET handler to use `set_with_options()` for NX/XX/GET flags (single atomic operation instead of exists-check-then-set)
-- [ ] Rewrite SETNX to use `set_nx()`
-- [ ] Rewrite INCR/INCRBY/DECR/DECRBY to use `atomic_incr()`
-- [ ] Rewrite INCRBYFLOAT to use `atomic_incr_float()`
-- [ ] Rewrite APPEND to use `atomic_append()`
-- [ ] Rewrite GETSET/GETDEL/GETEX to use atomic variants
-- [ ] Rewrite MSET/MSETNX to use atomic batch operation (all-or-nothing for MSETNX)
-- [ ] Write concurrency tests: two clients racing SET NX on same key, two clients racing INCR on same key, MSETNX atomicity
-- [ ] Run project test suite - must pass before task 4
+- [x] Rewrite SET handler to use `set_with_options()` for NX/XX/GET flags (single atomic operation instead of exists-check-then-set)
+- [x] Rewrite SETNX to use `set_nx()`
+- [x] Rewrite INCR/INCRBY/DECR/DECRBY to use `atomic_incr()`
+- [x] Rewrite INCRBYFLOAT to use `atomic_incr_float()`
+- [x] Rewrite APPEND to use `atomic_append()`
+- [x] Rewrite GETSET/GETDEL/GETEX to use atomic variants
+- [x] Rewrite MSET/MSETNX to use atomic batch operation (all-or-nothing for MSETNX)
+- [x] Write concurrency tests: two clients racing SET NX on same key, two clients racing INCR on same key, MSETNX atomicity
+- [x] Run project test suite - must pass before task 4
 
 ### Task 4: Collection Command Atomicity and Sorted Set Upgrade
 
