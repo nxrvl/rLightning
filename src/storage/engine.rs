@@ -593,7 +593,8 @@ impl StorageEngine {
     
     /// Set the TTL (time-to-live) for a key
     pub async fn expire(&self, key: &[u8], ttl: Option<Duration>) -> StorageResult<bool> {
-        if let Some(mut entry) = self.active_db().get_mut(key) {
+        // Mutate the entry under the DashMap lock, then drop the guard before any .await
+        let queue_action = if let Some(mut entry) = self.active_db().get_mut(key) {
             let item = entry.value_mut();
 
             if item.is_expired() {
@@ -602,16 +603,23 @@ impl StorageEngine {
 
             if let Some(ttl) = ttl {
                 item.expire(ttl);
-                // Add to expiration queue
                 let expires_at = Instant::now() + ttl;
-                self.add_to_expiration_queue(key.to_vec(), expires_at).await;
+                Some((true, expires_at))
             } else {
                 item.remove_expiry();
-                // Remove from expiration queue (expensive operation, but TTL removal is rare)
+                Some((false, Instant::now()))
+            }
+            // DashMap guard dropped here at end of `if let` block
+        } else {
+            None
+        };
+
+        if let Some((is_set, expires_at)) = queue_action {
+            if is_set {
+                self.add_to_expiration_queue(key.to_vec(), expires_at).await;
+            } else {
                 self.remove_from_expiration_queue(key).await;
             }
-
-            // Bump key version for WATCH support
             self.bump_key_version(key);
             Ok(true)
         } else {
@@ -1803,6 +1811,27 @@ impl StorageEngine {
         }
     }
 
+    /// Read-only atomic access to a key. Uses a shared read lock (DashMap `get()`) instead
+    /// of the exclusive write lock used by `atomic_modify`. Does NOT bump key version, touch
+    /// the key, or write anything back. Use this for read-only operations like HGET, HLEN, etc.
+    pub fn atomic_read<F, R>(&self, key: &[u8], data_type: RedisDataType, f: F) -> StorageResult<R>
+    where
+        F: FnOnce(Option<&Vec<u8>>) -> Result<R, StorageError>,
+    {
+        match self.active_db().get(key) {
+            Some(entry) => {
+                if entry.value().is_expired() {
+                    f(None)
+                } else if entry.value().data_type != data_type {
+                    Err(StorageError::WrongType)
+                } else {
+                    f(Some(&entry.value().value))
+                }
+            }
+            None => f(None),
+        }
+    }
+
     /// Atomically get and delete a key. Returns the old value if it existed.
     pub fn atomic_getdel(&self, key: &[u8]) -> Option<Vec<u8>> {
         use dashmap::mapref::entry::Entry;
@@ -1914,33 +1943,29 @@ impl StorageEngine {
 
     /// Get a single field from a hash.
     pub fn hash_get(&self, key: &[u8], field: &[u8]) -> StorageResult<Option<Vec<u8>>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
-            let val = map.get(field).cloned();
-            Ok((preserved, val))
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
+            Ok(map.get(field).cloned())
         })
     }
 
     /// Get multiple fields from a hash. Returns a Vec of Option<Vec<u8>> in order.
     pub fn hash_mget(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<Vec<Option<Vec<u8>>>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
             let results: Vec<Option<Vec<u8>>> = fields.iter()
                 .map(|f| map.get(*f).cloned())
                 .collect();
-            Ok((preserved, results))
+            Ok(results)
         })
     }
 
     /// Get all field-value pairs from a hash.
     pub fn hash_getall(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
             let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
-            Ok((preserved, pairs))
+            Ok(pairs)
         })
     }
 
@@ -1967,41 +1992,35 @@ impl StorageEngine {
 
     /// Check if a field exists in a hash.
     pub fn hash_exists(&self, key: &[u8], field: &[u8]) -> StorageResult<bool> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
-            let exists = map.contains_key(field);
-            Ok((preserved, exists))
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
+            Ok(map.contains_key(field))
         })
     }
 
     /// Get the number of fields in a hash.
     pub fn hash_len(&self, key: &[u8]) -> StorageResult<i64> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
-            let len = map.len() as i64;
-            Ok((preserved, len))
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
+            Ok(map.len() as i64)
         })
     }
 
     /// Get all field names in a hash.
     pub fn hash_keys(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
             let keys: Vec<Vec<u8>> = map.keys().cloned().collect();
-            Ok((preserved, keys))
+            Ok(keys)
         })
     }
 
     /// Get all values in a hash.
     pub fn hash_vals(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
             let vals: Vec<Vec<u8>> = map.values().cloned().collect();
-            Ok((preserved, vals))
+            Ok(vals)
         })
     }
 
@@ -2050,22 +2069,19 @@ impl StorageEngine {
 
     /// Get the string length of a hash field's value.
     pub fn hash_strlen(&self, key: &[u8], field: &[u8]) -> StorageResult<i64> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
-            let len = map.get(field).map(|v| v.len() as i64).unwrap_or(0);
-            Ok((preserved, len))
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
+            Ok(map.get(field).map(|v| v.len() as i64).unwrap_or(0))
         })
     }
 
     /// Get random fields from a hash. Returns (fields, values) pairs.
     /// If the hash doesn't exist, returns empty vec.
     pub fn hash_randfield(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let preserved = existing.as_ref().map(|v| (*v).clone());
-            let map = Self::hash_deserialize(existing.as_deref());
+        self.atomic_read(key, RedisDataType::Hash, |existing| {
+            let map = Self::hash_deserialize(existing);
             let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
-            Ok((preserved, pairs))
+            Ok(pairs)
         })
     }
 }

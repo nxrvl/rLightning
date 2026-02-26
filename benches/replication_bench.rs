@@ -122,7 +122,7 @@ fn bench_replication_sync_performance(c: &mut Criterion) {
             |storage| {
                 runtime.block_on(async {
                     // Simulate sync operation - reading all keys
-                    let all_keys = storage.all_keys().await.unwrap();
+                    let all_keys = storage.keys("*").await.unwrap();
                     black_box(all_keys);
                 })
             }
@@ -156,7 +156,7 @@ fn bench_replication_memory_usage(c: &mut Criterion) {
                     }
                     
                     // Check memory usage (simulated)
-                    let all_keys = storage.all_keys().await.unwrap();
+                    let all_keys = storage.keys("*").await.unwrap();
                     black_box(all_keys.len());
                 })
             });

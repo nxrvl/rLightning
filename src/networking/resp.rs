@@ -1174,6 +1174,7 @@ fn parse_push(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use bytes::BytesMut;

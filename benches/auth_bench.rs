@@ -164,7 +164,7 @@ fn bench_auth_session_management(c: &mut Criterion) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             
             // Simulate cleanup by checking all session keys
-            let all_keys = storage.all_keys().await.unwrap();
+            let all_keys = storage.keys("*").await.unwrap();
             let session_keys: Vec<_> = all_keys.iter()
                 .filter(|key| key.starts_with(b"session:"))
                 .collect();
@@ -392,7 +392,7 @@ fn bench_auth_memory_usage(c: &mut Criterion) {
                 }
                 
                 // Check total memory usage (simulated)
-                let all_keys = storage.all_keys().await.unwrap();
+                let all_keys = storage.keys("*").await.unwrap();
                 let auth_keys: Vec<_> = all_keys.iter()
                     .filter(|key| {
                         key.starts_with(b"session:") || 
