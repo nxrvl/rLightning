@@ -164,17 +164,17 @@ Implement RESP3-specific response encoding so clients that negotiate RESP3 via H
 
 Ensure all data types survive restart via both RDB and AOF persistence.
 
-- [ ] Implement RDB save for lists (TYPE_LIST): serialize Vec<Vec<u8>> with length-prefixed entries
-- [ ] Implement RDB save for sets (TYPE_SET): serialize HashSet<Vec<u8>> with length-prefixed entries
-- [ ] Implement RDB save for sorted sets (TYPE_ZSET): serialize score-member pairs
-- [ ] Implement RDB save for hashes (TYPE_HASH): serialize field-value pairs (using new single-key format from Task 2)
-- [ ] Implement RDB save for streams (TYPE_STREAM): serialize StreamData structure
-- [ ] Implement corresponding RDB load for each data type
-- [ ] Verify AOF rewrite generates correct reconstruction commands for all types (RPUSH for lists, SADD for sets, ZADD for sorted sets, HSET for hashes, XADD for streams)
-- [ ] Add data type indicator to RDB entries so load can route to correct deserializer
-- [ ] Write tests: save database with all types, restart, verify all data intact via RDB
-- [ ] Write tests: replay AOF with all command types, verify data integrity
-- [ ] Run project test suite - must pass before task 9
+- [x] Implement RDB save for lists (TYPE_LIST): serialize Vec<Vec<u8>> with length-prefixed entries
+- [x] Implement RDB save for sets (TYPE_SET): serialize HashSet<Vec<u8>> with length-prefixed entries
+- [x] Implement RDB save for sorted sets (TYPE_ZSET): serialize score-member pairs
+- [x] Implement RDB save for hashes (TYPE_HASH): serialize field-value pairs (using new single-key format from Task 2)
+- [x] Implement RDB save for streams (TYPE_STREAM): serialize StreamData structure
+- [x] Implement corresponding RDB load for each data type
+- [x] Verify AOF rewrite generates correct reconstruction commands for all types (RPUSH for lists, SADD for sets, ZADD for sorted sets, HSET for hashes, XADD for streams)
+- [x] Add data type indicator to RDB entries so load can route to correct deserializer
+- [x] Write tests: save database with all types, restart, verify all data intact via RDB
+- [x] Write tests: replay AOF with all command types, verify data integrity
+- [x] Run project test suite - must pass before task 9
 
 ### Task 9: ACL Lock Poisoning Fix and Security Hardening
 

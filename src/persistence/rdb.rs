@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -15,23 +14,43 @@ use tokio::time;
 use crate::persistence::config::PersistenceConfig;
 use crate::persistence::error::PersistenceError;
 use crate::storage::engine::StorageEngine;
+use crate::storage::item::RedisDataType;
 
 // Constants for RDB file format
-#[allow(dead_code)]
 const RDB_VERSION: u8 = 1;
-#[allow(dead_code)]
 const RDB_MAGIC_STRING: &[u8] = b"RLDB";
 
 // Type markers for data structures
-#[allow(dead_code)]
 const TYPE_STRING: u8 = 0;
-// Comment out unused constants
-// const TYPE_LIST: u8 = 1;
-// const TYPE_SET: u8 = 2;
-// const TYPE_ZSET: u8 = 3;
-// const TYPE_HASH: u8 = 4;
-#[allow(dead_code)]
+const TYPE_LIST: u8 = 1;
+const TYPE_SET: u8 = 2;
+const TYPE_ZSET: u8 = 3;
+const TYPE_HASH: u8 = 4;
+const TYPE_STREAM: u8 = 5;
 const TYPE_EOF: u8 = 255;
+
+fn data_type_to_marker(dt: &RedisDataType) -> u8 {
+    match dt {
+        RedisDataType::String => TYPE_STRING,
+        RedisDataType::List => TYPE_LIST,
+        RedisDataType::Set => TYPE_SET,
+        RedisDataType::ZSet => TYPE_ZSET,
+        RedisDataType::Hash => TYPE_HASH,
+        RedisDataType::Stream => TYPE_STREAM,
+    }
+}
+
+fn marker_to_data_type(marker: u8) -> Option<RedisDataType> {
+    match marker {
+        TYPE_STRING => Some(RedisDataType::String),
+        TYPE_LIST => Some(RedisDataType::List),
+        TYPE_SET => Some(RedisDataType::Set),
+        TYPE_ZSET => Some(RedisDataType::ZSet),
+        TYPE_HASH => Some(RedisDataType::Hash),
+        TYPE_STREAM => Some(RedisDataType::Stream),
+        _ => None,
+    }
+}
 
 /// RDB persistence implementation
 pub struct RdbPersistence {
@@ -99,102 +118,90 @@ impl RdbPersistence {
             hasher.update(&magic);
             hasher.update(&[version]);
             
-            // Read data
-            let mut data = HashMap::new();
-            
+            // Read data: (key, value, data_type, ttl)
+            let mut data: Vec<(Vec<u8>, Vec<u8>, RedisDataType, Option<Duration>)> = Vec::new();
+
             loop {
                 let type_marker = reader.read_u8()
                     .map_err(PersistenceError::Io)?;
-                
+
                 hasher.update(&[type_marker]);
-                
+
                 if type_marker == TYPE_EOF {
-                    // End of file
                     break;
                 }
-                
+
+                let data_type = marker_to_data_type(type_marker)
+                    .ok_or_else(|| PersistenceError::CorruptedFile(
+                        format!("Unknown data type marker: {}", type_marker)
+                    ))?;
+
                 // Read key
                 let key_len = reader.read_u32::<BigEndian>()
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&key_len.to_be_bytes());
-                
+
                 let mut key = vec![0u8; key_len as usize];
                 reader.read_exact(&mut key)
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&key);
-                
+
                 // Read expiry (if any)
                 let has_expiry = reader.read_u8()
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&[has_expiry]);
-                
+
                 let expiry = if has_expiry == 1 {
                     let secs = reader.read_u64::<BigEndian>()
                         .map_err(PersistenceError::Io)?;
                     hasher.update(&secs.to_be_bytes());
-                    
-                    // Convert to Instant
+
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    
+
                     if secs > now {
                         Some(Duration::from_secs(secs - now))
                     } else {
-                        // Already expired
                         None
                     }
                 } else {
                     None
                 };
-                
-                match type_marker {
-                    TYPE_STRING => {
-                        // Read string value
-                        let value_len = reader.read_u32::<BigEndian>()
-                            .map_err(PersistenceError::Io)?;
-                        hasher.update(&value_len.to_be_bytes());
-                        
-                        let mut value = vec![0u8; value_len as usize];
-                        reader.read_exact(&mut value)
-                            .map_err(PersistenceError::Io)?;
-                        hasher.update(&value);
-                        
-                        if expiry.is_some() {
-                            data.insert(key, (value, expiry));
-                        } else {
-                            data.insert(key, (value, None));
-                        }
-                    }
-                    // Handle other types here...
-                    _ => {
-                        return Err(PersistenceError::CorruptedFile(
-                            format!("Unknown data type: {}", type_marker)
-                        ));
-                    }
-                }
+
+                // Read value (same binary format for all types)
+                let value_len = reader.read_u32::<BigEndian>()
+                    .map_err(PersistenceError::Io)?;
+                hasher.update(&value_len.to_be_bytes());
+
+                let mut value = vec![0u8; value_len as usize];
+                reader.read_exact(&mut value)
+                    .map_err(PersistenceError::Io)?;
+                hasher.update(&value);
+
+                data.push((key, value, data_type, expiry));
             }
-            
+
             // Read and verify checksum
             let expected_checksum = reader.read_u32::<BigEndian>()
                 .map_err(PersistenceError::Io)?;
-            
+
             let computed_checksum = hasher.finalize();
-            
+
             if expected_checksum != computed_checksum {
                 return Err(PersistenceError::CrcValidationFailed(
-                    format!("CRC check failed: expected {}, got {}", 
+                    format!("CRC check failed: expected {}, got {}",
                             expected_checksum, computed_checksum)
                 ));
             }
-            
-            // Transfer loaded data to the storage engine
+
+            // Transfer loaded data to the storage engine with correct data types
             tokio::runtime::Handle::current().block_on(async {
-                for (key, (value, ttl)) in data {
-                    // Use the storage engine's set method
-                    if let Err(e) = engine.set(key.clone(), value, ttl).await {
-                        warn!(key = ?String::from_utf8_lossy(&key), "Error restoring key from RDB: {:?}", e);
+                for (key, value, data_type, ttl) in data {
+                    let result = engine.set_with_type(key.clone(), value, data_type.clone(), ttl).await;
+                    if let Err(e) = result {
+                        warn!(key = ?String::from_utf8_lossy(&key), data_type = ?data_type, "Error restoring key from RDB: {:?}", e);
                     }
                 }
             });
@@ -252,9 +259,7 @@ impl RdbPersistence {
             
             // Write data
             for (key, item) in data.iter() {
-                // Determine the type marker based on the item type
-                // For now, we're only handling string types
-                let type_marker = TYPE_STRING;
+                let type_marker = data_type_to_marker(&item.data_type);
                 
                 writer.write_u8(type_marker)
                     .map_err(PersistenceError::Io)?;
@@ -292,8 +297,7 @@ impl RdbPersistence {
                     hasher.update(&[0]);
                 }
                 
-                // Write value based on type
-                // For string type
+                // Write value (raw bytes for all types - collection types are already bincode-serialized)
                 writer.write_u32::<BigEndian>(item.value.len() as u32)
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&(item.value.len() as u32).to_be_bytes());
@@ -413,15 +417,286 @@ impl Clone for RdbPersistence {
     }
 }
 
-// Comment out or remove unused function
-/*
-fn ensure_dir_exists<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap as StdHashMap, HashSet, BTreeSet};
+    use crate::storage::engine::StorageEngine;
+    use crate::storage::item::RedisDataType;
+    use crate::command::types::sorted_set::SortedSetData;
+    use ordered_float::OrderedFloat;
+    use tempfile::NamedTempFile;
+
+    fn create_test_engine() -> Arc<StorageEngine> {
+        StorageEngine::new(Default::default())
     }
-    Ok(())
+
+    #[tokio::test]
+    async fn test_rdb_save_load_string() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        // Set a string key
+        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+
+        // Save
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        // Load into a new engine
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        let val = engine2.get(b"mykey").await.unwrap();
+        assert_eq!(val, Some(b"myvalue".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_list() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        // Create a list
+        let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        let serialized = bincode::serialize(&list).unwrap();
+        engine.set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        // Verify type and value
+        let tp = engine2.get_type(b"mylist").await.unwrap();
+        assert_eq!(tp, "list");
+        let raw = engine2.get(b"mylist").await.unwrap().unwrap();
+        let loaded: Vec<Vec<u8>> = bincode::deserialize(&raw).unwrap();
+        assert_eq!(loaded, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_set() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        let mut set = HashSet::new();
+        set.insert(b"x".to_vec());
+        set.insert(b"y".to_vec());
+        let serialized = bincode::serialize(&set).unwrap();
+        engine.set_with_type(b"myset".to_vec(), serialized, RedisDataType::Set, None).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        let tp = engine2.get_type(b"myset").await.unwrap();
+        assert_eq!(tp, "set");
+        let raw = engine2.get(b"myset").await.unwrap().unwrap();
+        let loaded: HashSet<Vec<u8>> = bincode::deserialize(&raw).unwrap();
+        assert!(loaded.contains(&b"x".to_vec()));
+        assert!(loaded.contains(&b"y".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_sorted_set() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        let mut zset = SortedSetData::new();
+        zset.insert(1.0, b"alice".to_vec());
+        zset.insert(2.5, b"bob".to_vec());
+        let serialized = bincode::serialize(&zset).unwrap();
+        engine.set_with_type(b"myzset".to_vec(), serialized, RedisDataType::ZSet, None).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        let tp = engine2.get_type(b"myzset").await.unwrap();
+        assert_eq!(tp, "zset");
+        let raw = engine2.get(b"myzset").await.unwrap().unwrap();
+        let loaded: SortedSetData = bincode::deserialize(&raw).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.scores.get(&b"alice".to_vec()), Some(&1.0));
+        assert_eq!(loaded.scores.get(&b"bob".to_vec()), Some(&2.5));
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_hash() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        let mut hash = StdHashMap::new();
+        hash.insert(b"field1".to_vec(), b"val1".to_vec());
+        hash.insert(b"field2".to_vec(), b"val2".to_vec());
+        let serialized = bincode::serialize(&hash).unwrap();
+        engine.set_with_type(b"myhash".to_vec(), serialized, RedisDataType::Hash, None).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        let tp = engine2.get_type(b"myhash").await.unwrap();
+        assert_eq!(tp, "hash");
+        let raw = engine2.get(b"myhash").await.unwrap().unwrap();
+        let loaded: StdHashMap<Vec<u8>, Vec<u8>> = bincode::deserialize(&raw).unwrap();
+        assert_eq!(loaded.get(&b"field1".to_vec()), Some(&b"val1".to_vec()));
+        assert_eq!(loaded.get(&b"field2".to_vec()), Some(&b"val2".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_stream() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        let mut stream = crate::storage::stream::StreamData::new();
+        let entry = crate::storage::stream::StreamEntry {
+            id: crate::storage::stream::StreamEntryId::new(1000, 0),
+            fields: vec![
+                (b"temp".to_vec(), b"25".to_vec()),
+                (b"humidity".to_vec(), b"60".to_vec()),
+            ],
+        };
+        stream.entries.insert(entry.id.clone(), entry);
+        stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
+        let serialized = bincode::serialize(&stream).unwrap();
+        engine.set_with_type(b"mystream".to_vec(), serialized, RedisDataType::Stream, None).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        let tp = engine2.get_type(b"mystream").await.unwrap();
+        assert_eq!(tp, "stream");
+        let raw = engine2.get(b"mystream").await.unwrap().unwrap();
+        let loaded: crate::storage::stream::StreamData = bincode::deserialize(&raw).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_mixed_types() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        // String
+        engine.set(b"str".to_vec(), b"hello".to_vec(), None).await.unwrap();
+
+        // List
+        let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec()];
+        engine.set_with_type(b"lst".to_vec(), bincode::serialize(&list).unwrap(), RedisDataType::List, None).await.unwrap();
+
+        // Set
+        let mut set = HashSet::new();
+        set.insert(b"a".to_vec());
+        engine.set_with_type(b"st".to_vec(), bincode::serialize(&set).unwrap(), RedisDataType::Set, None).await.unwrap();
+
+        // Hash
+        let mut hash = StdHashMap::new();
+        hash.insert(b"f".to_vec(), b"v".to_vec());
+        engine.set_with_type(b"hs".to_vec(), bincode::serialize(&hash).unwrap(), RedisDataType::Hash, None).await.unwrap();
+
+        // Sorted set
+        let mut zset = SortedSetData::new();
+        zset.insert(3.0, b"m".to_vec());
+        engine.set_with_type(b"zs".to_vec(), bincode::serialize(&zset).unwrap(), RedisDataType::ZSet, None).await.unwrap();
+
+        // Save
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        // Load into fresh engine
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        // Verify all types
+        assert_eq!(engine2.get_type(b"str").await.unwrap(), "string");
+        assert_eq!(engine2.get(b"str").await.unwrap(), Some(b"hello".to_vec()));
+
+        assert_eq!(engine2.get_type(b"lst").await.unwrap(), "list");
+        assert_eq!(engine2.get_type(b"st").await.unwrap(), "set");
+        assert_eq!(engine2.get_type(b"hs").await.unwrap(), "hash");
+        assert_eq!(engine2.get_type(b"zs").await.unwrap(), "zset");
+    }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_with_ttl() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        // String with TTL
+        engine.set(b"expiring".to_vec(), b"val".to_vec(), Some(Duration::from_secs(3600))).await.unwrap();
+
+        // List with TTL
+        let list: Vec<Vec<u8>> = vec![b"item".to_vec()];
+        engine.set_with_type(b"explist".to_vec(), bincode::serialize(&list).unwrap(), RedisDataType::List, Some(Duration::from_secs(7200))).await.unwrap();
+
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        // Both should still exist (TTL far in the future)
+        assert!(engine2.get(b"expiring").await.unwrap().is_some());
+        assert!(engine2.get(b"explist").await.unwrap().is_some());
+        assert_eq!(engine2.get_type(b"explist").await.unwrap(), "list");
+    }
+
+    #[tokio::test]
+    async fn test_rdb_checksum_validation() {
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        engine.set(b"key".to_vec(), b"val".to_vec(), None).await.unwrap();
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        // Corrupt the file by modifying a byte
+        let mut contents = fs::read(&path).unwrap();
+        if contents.len() > 10 {
+            contents[10] ^= 0xFF;
+        }
+        fs::write(&path, contents).unwrap();
+
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2, path);
+        let result = rdb2.load().await;
+        assert!(result.is_err());
+    }
 }
-*/ 
