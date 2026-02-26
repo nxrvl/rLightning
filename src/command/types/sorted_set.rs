@@ -330,12 +330,12 @@ pub async fn zrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             // If WITHSCORES option is present, add the score after each member as a separate array item
             if with_scores {
                 // Format score as string with proper format
-                let score_str = format!("{}", score);
+                let score_str = format_score(*score);
                 result.push(RespValue::BulkString(Some(score_str.into_bytes())));
             }
         }
     }
-    
+
     // ZRANGE always returns an array (Redis behavior)
     Ok(RespValue::Array(Some(result)))
 }
@@ -423,7 +423,7 @@ pub async fn zscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     for (score, m) in sorted_set.iter() {
         if m == member {
             // Convert score to string with proper formatting
-            let score_str = format!("{}", score);
+            let score_str = format_score(*score);
             return Ok(RespValue::BulkString(Some(score_str.into_bytes())));
         }
     }
@@ -468,28 +468,11 @@ pub async fn zcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let min_str = bytes_to_string(&args[1])?;
     let max_str = bytes_to_string(&args[2])?;
-    
-    // Parse min and max scores (supporting -inf and +inf)
-    let min_score = if min_str == "-inf" {
-        f64::NEG_INFINITY
-    } else if min_str == "+inf" {
-        f64::INFINITY
-    } else {
-        min_str.parse::<f64>().map_err(|_| {
-            CommandError::InvalidArgument("Min score is not a valid float".to_string())
-        })?
-    };
-    
-    let max_score = if max_str == "-inf" {
-        f64::NEG_INFINITY
-    } else if max_str == "+inf" {
-        f64::INFINITY
-    } else {
-        max_str.parse::<f64>().map_err(|_| {
-            CommandError::InvalidArgument("Max score is not a valid float".to_string())
-        })?
-    };
-    
+
+    // Parse min and max scores (supporting -inf, +inf, and exclusive bounds with '(' prefix)
+    let (min_score, min_exclusive) = parse_score_bound(&min_str)?;
+    let (max_score, max_exclusive) = parse_score_bound(&max_str)?;
+
     // Get the sorted set
     let sorted_set = match engine.get(key).await? {
         Some(data) => {
@@ -505,12 +488,16 @@ pub async fn zcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             return Ok(RespValue::Integer(0));
         },
     };
-    
-    // Count members within the score range
+
+    // Count members within the score range, respecting exclusive bounds
     let count = sorted_set.iter()
-        .filter(|(score, _)| *score >= min_score && *score <= max_score)
+        .filter(|(score, _)| {
+            let above_min = if min_exclusive { *score > min_score } else { *score >= min_score };
+            let below_max = if max_exclusive { *score < max_score } else { *score <= max_score };
+            above_min && below_max
+        })
         .count();
-    
+
     Ok(RespValue::Integer(count as i64))
 }
 
@@ -637,7 +624,7 @@ pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
             // If WITHSCORES option is present, add the score after each member as a separate array item
             if with_scores {
                 // Format score as string with proper format
-                let score_str = format!("{}", score);
+                let score_str = format_score(*score);
                 result.push(RespValue::BulkString(Some(score_str.into_bytes())));
             }
         }
