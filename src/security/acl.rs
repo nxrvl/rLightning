@@ -1346,44 +1346,7 @@ impl AclManager {
     }
 }
 
-/// Simple glob pattern matching (supports * and ?) using iterative algorithm.
-/// Uses a two-pointer approach with O(n*m) worst-case instead of exponential backtracking.
-fn glob_match(pattern: &str, string: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = string.chars().collect();
-    let (plen, slen) = (p.len(), s.len());
-
-    let mut pi = 0;
-    let mut si = 0;
-    let mut star_pi: Option<usize> = None;
-    let mut star_si = 0;
-
-    while si < slen {
-        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if pi < plen && p[pi] == '*' {
-            // Record star position for backtracking
-            star_pi = Some(pi);
-            star_si = si;
-            pi += 1;
-        } else if let Some(sp) = star_pi {
-            // Backtrack: advance star match by one character
-            pi = sp + 1;
-            star_si += 1;
-            si = star_si;
-        } else {
-            return false;
-        }
-    }
-
-    // Consume trailing * patterns
-    while pi < plen && p[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == plen
-}
+use crate::utils::glob::glob_match;
 
 /// Hash a password using SHA256 for ACL password storage (Redis-compatible).
 pub fn hash_password(password: &str) -> String {

@@ -198,13 +198,13 @@ Replace panic-on-poison pattern with graceful recovery across all 11 .expect() c
 
 Eliminate massive code duplication in server dispatch and 6x duplicated glob_match.
 
-- [ ] Extract shared glob_match into `src/utils/glob.rs` with generic implementation supporting both `&str` and `&[u8]` inputs
-- [ ] Replace all 6 duplicated glob_match implementations with calls to shared module
-- [ ] Refactor server.rs: extract common dispatch logic (auth check, ACL check, pub/sub routing, sentinel routing, replication routing, transaction handling) into shared functions
-- [ ] Make fast path parse into same Command struct as slow path, then call unified dispatch
-- [ ] Verify no behavior changes in dispatch after refactor
-- [ ] Write test: glob_match edge cases (wildcards, character classes, escape sequences)
-- [ ] Run project test suite - must pass before task 11
+- [x] Extract shared glob_match into `src/utils/glob.rs` with generic implementation supporting both `&str` and `&[u8]` inputs
+- [x] Replace all 6 duplicated glob_match implementations with calls to shared module
+- [x] Refactor server.rs: extract common dispatch logic (auth check, ACL check, pub/sub routing, sentinel routing, replication routing, transaction handling) into shared functions
+- [x] Make fast path parse into same Command struct as slow path, then call unified dispatch
+- [x] Verify no behavior changes in dispatch after refactor
+- [x] Write test: glob_match edge cases (wildcards, character classes, escape sequences)
+- [x] Run project test suite - must pass before task 11
 
 ### Task 11: Compiler Warnings, CLIENT LIST, and Minor Fixes
 

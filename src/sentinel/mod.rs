@@ -1061,45 +1061,7 @@ fn generate_sentinel_id() -> String {
     combined[..40].to_string()
 }
 
-/// Simple glob-style pattern matching (supports * and ?)
-fn glob_match(pattern: &str, text: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-
-    glob_match_inner(&p, &t, 0, 0)
-}
-
-fn glob_match_inner(pattern: &[char], text: &[char], mut pi: usize, mut ti: usize) -> bool {
-    // Iterative two-pointer algorithm to avoid exponential backtracking
-    let mut star_pi: Option<usize> = None;
-    let mut star_ti: usize = 0;
-
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star_pi = Some(pi);
-            star_ti = ti;
-            pi += 1;
-        } else if let Some(sp) = star_pi {
-            pi = sp + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
-}
+use crate::utils::glob::glob_match;
 
 /// SENTINEL HELP response
 fn sentinel_help() -> RespValue {
