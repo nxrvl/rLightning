@@ -462,32 +462,30 @@ fn aof_rewrite_commands_for_item(key: &Vec<u8>, item: &StorageItem) -> Vec<Vec<V
             }
         }
         RedisDataType::ZSet => {
-            // SortedSet is stored as Vec<(f64, Vec<u8>)> - (score, member) pairs
-            if let Ok(ss) = bincode::deserialize::<Vec<(f64, Vec<u8>)>>(&item.value) {
+            // SortedSetData: BTreeSet<(OrderedFloat<f64>, Vec<u8>)> + HashMap<Vec<u8>, f64>
+            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(&item.value) {
                 if !ss.is_empty() {
-                    // Emit ZADD key score1 member1 score2 member2 ...
                     let mut args = vec![b"ZADD".to_vec(), key.clone()];
-                    for (score, member) in ss {
+                    for (member, score) in &ss.scores {
                         args.push(score.to_string().into_bytes());
-                        args.push(member);
+                        args.push(member.clone());
                     }
                     commands.push(args);
                 }
             }
         }
         RedisDataType::Hash => {
-            // Hash fields are stored as composite keys (key:field) in the global keyspace,
-            // so individual hash field entries appear as String type items.
-            // A key marked as Hash type shouldn't normally appear in snapshot,
-            // but emit SET as fallback to avoid data loss.
-            let mut args = vec![b"SET".to_vec(), key.clone(), item.value.clone()];
-            if let Some(ttl) = item.ttl() {
-                if ttl.as_millis() > 0 {
-                    args.push(b"PX".to_vec());
-                    args.push(ttl.as_millis().to_string().into_bytes());
+            // Hash stored as bincode-serialized HashMap<Vec<u8>, Vec<u8>>
+            if let Ok(hash) = bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value) {
+                if !hash.is_empty() {
+                    let mut args = vec![b"HSET".to_vec(), key.clone()];
+                    for (field, value) in hash {
+                        args.push(field);
+                        args.push(value);
+                    }
+                    commands.push(args);
                 }
             }
-            commands.push(args);
         }
         RedisDataType::Stream => {
             if let Ok(stream) = bincode::deserialize::<crate::storage::stream::StreamData>(&item.value) {
@@ -642,4 +640,254 @@ mod resp_parser {
             }
         }
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use crate::storage::engine::StorageEngine;
+    use crate::storage::item::RedisDataType;
+    use crate::command::types::sorted_set::SortedSetData;
+
+    fn create_test_engine() -> Arc<StorageEngine> {
+        StorageEngine::new(Default::default())
+    }
+
+    fn make_item(value: Vec<u8>, data_type: RedisDataType) -> StorageItem {
+        StorageItem::new_with_type(value, data_type)
+    }
+
+    #[test]
+    fn test_aof_rewrite_string() {
+        let key = b"mykey".to_vec();
+        let item = make_item(b"myval".to_vec(), RedisDataType::String);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"SET");
+        assert_eq!(cmds[0][1], b"mykey");
+        assert_eq!(cmds[0][2], b"myval");
+    }
+
+    #[test]
+    fn test_aof_rewrite_list() {
+        let key = b"mylist".to_vec();
+        let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        let item = make_item(bincode::serialize(&list).unwrap(), RedisDataType::List);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"RPUSH");
+        assert_eq!(cmds[0][1], b"mylist");
+        assert_eq!(cmds[0][2], b"a");
+        assert_eq!(cmds[0][3], b"b");
+        assert_eq!(cmds[0][4], b"c");
+    }
+
+    #[test]
+    fn test_aof_rewrite_set() {
+        let key = b"myset".to_vec();
+        let mut set = HashSet::new();
+        set.insert(b"x".to_vec());
+        set.insert(b"y".to_vec());
+        let item = make_item(bincode::serialize(&set).unwrap(), RedisDataType::Set);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"SADD");
+        assert_eq!(cmds[0][1], b"myset");
+        assert_eq!(cmds[0].len(), 4); // SADD + key + 2 members
+    }
+
+    #[test]
+    fn test_aof_rewrite_sorted_set() {
+        let key = b"myzset".to_vec();
+        let mut zset = SortedSetData::new();
+        zset.insert(1.5, b"alice".to_vec());
+        zset.insert(2.0, b"bob".to_vec());
+        let item = make_item(bincode::serialize(&zset).unwrap(), RedisDataType::ZSet);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"ZADD");
+        assert_eq!(cmds[0][1], b"myzset");
+        // ZADD key score member score member -> 6 args
+        assert_eq!(cmds[0].len(), 6);
+    }
+
+    #[test]
+    fn test_aof_rewrite_hash() {
+        let key = b"myhash".to_vec();
+        let mut hash = HashMap::new();
+        hash.insert(b"f1".to_vec(), b"v1".to_vec());
+        hash.insert(b"f2".to_vec(), b"v2".to_vec());
+        let item = make_item(bincode::serialize(&hash).unwrap(), RedisDataType::Hash);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"HSET");
+        assert_eq!(cmds[0][1], b"myhash");
+        // HSET key field val field val -> 6 args
+        assert_eq!(cmds[0].len(), 6);
+    }
+
+    #[test]
+    fn test_aof_rewrite_stream() {
+        let key = b"mystream".to_vec();
+        let mut stream = crate::storage::stream::StreamData::new();
+        let entry = crate::storage::stream::StreamEntry {
+            id: crate::storage::stream::StreamEntryId::new(1000, 0),
+            fields: vec![(b"temp".to_vec(), b"25".to_vec())],
+        };
+        stream.entries.insert(entry.id.clone(), entry);
+        stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
+        let item = make_item(bincode::serialize(&stream).unwrap(), RedisDataType::Stream);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(cmds[0][1], b"mystream");
+        assert_eq!(cmds[0].len(), 5); // XADD key id field value
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_rpush() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"RPUSH".to_vec(),
+            args: vec![b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let val = engine.get(b"mylist").await.unwrap().unwrap();
+        let list: Vec<Vec<u8>> = bincode::deserialize(&val).unwrap();
+        assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(engine.get_type(b"mylist").await.unwrap(), "list");
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_sadd() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"SADD".to_vec(),
+            args: vec![b"myset".to_vec(), b"x".to_vec(), b"y".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let val = engine.get(b"myset").await.unwrap().unwrap();
+        let set: HashSet<Vec<u8>> = bincode::deserialize(&val).unwrap();
+        assert!(set.contains(&b"x".to_vec()));
+        assert!(set.contains(&b"y".to_vec()));
+        assert_eq!(engine.get_type(b"myset").await.unwrap(), "set");
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_zadd() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"ZADD".to_vec(),
+            args: vec![b"myzset".to_vec(), b"1.5".to_vec(), b"alice".to_vec(), b"2.0".to_vec(), b"bob".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let val = engine.get(b"myzset").await.unwrap().unwrap();
+        let zset: SortedSetData = bincode::deserialize(&val).unwrap();
+        assert_eq!(zset.len(), 2);
+        assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&1.5));
+        assert_eq!(zset.scores.get(&b"bob".to_vec()), Some(&2.0));
+        assert_eq!(engine.get_type(b"myzset").await.unwrap(), "zset");
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_hset() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"HSET".to_vec(),
+            args: vec![b"myhash".to_vec(), b"f1".to_vec(), b"v1".to_vec(), b"f2".to_vec(), b"v2".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let fields = engine.hash_getall(b"myhash").unwrap();
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_xadd() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"XADD".to_vec(),
+            args: vec![b"mystream".to_vec(), b"1000-0".to_vec(), b"temp".to_vec(), b"25".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let val = engine.get(b"mystream").await.unwrap().unwrap();
+        let stream: crate::storage::stream::StreamData = bincode::deserialize(&val).unwrap();
+        assert_eq!(stream.entries.len(), 1);
+        assert_eq!(engine.get_type(b"mystream").await.unwrap(), "stream");
+    }
+
+    #[tokio::test]
+    async fn test_aof_replay_set_with_px() {
+        let engine = create_test_engine();
+        let cmd = RespCommand {
+            name: b"SET".to_vec(),
+            args: vec![b"k".to_vec(), b"v".to_vec(), b"PX".to_vec(), b"60000".to_vec()],
+        };
+        engine.process_command(&cmd).await.unwrap();
+        let val = engine.get(b"k").await.unwrap();
+        assert_eq!(val, Some(b"v".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_aof_round_trip_all_types() {
+        let engine = create_test_engine();
+
+        // String
+        let str_item = make_item(b"hello".to_vec(), RedisDataType::String);
+        for args in aof_rewrite_commands_for_item(&b"str".to_vec(), &str_item) {
+            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+        }
+
+        // List
+        let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
+        let list_item = make_item(bincode::serialize(&list).unwrap(), RedisDataType::List);
+        for args in aof_rewrite_commands_for_item(&b"lst".to_vec(), &list_item) {
+            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+        }
+
+        // Set
+        let mut set = HashSet::new();
+        set.insert(b"a".to_vec());
+        set.insert(b"b".to_vec());
+        let set_item = make_item(bincode::serialize(&set).unwrap(), RedisDataType::Set);
+        for args in aof_rewrite_commands_for_item(&b"st".to_vec(), &set_item) {
+            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+        }
+
+        // Hash
+        let mut hash = HashMap::new();
+        hash.insert(b"f".to_vec(), b"v".to_vec());
+        let hash_item = make_item(bincode::serialize(&hash).unwrap(), RedisDataType::Hash);
+        for args in aof_rewrite_commands_for_item(&b"hs".to_vec(), &hash_item) {
+            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+        }
+
+        // Sorted set
+        let mut zset = SortedSetData::new();
+        zset.insert(1.0, b"m1".to_vec());
+        zset.insert(2.0, b"m2".to_vec());
+        let zset_item = make_item(bincode::serialize(&zset).unwrap(), RedisDataType::ZSet);
+        for args in aof_rewrite_commands_for_item(&b"zs".to_vec(), &zset_item) {
+            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+        }
+
+        // Verify all restored correctly
+        assert_eq!(engine.get(b"str").await.unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(engine.get_type(b"str").await.unwrap(), "string");
+
+        let list_val = engine.get(b"lst").await.unwrap().unwrap();
+        let loaded_list: Vec<Vec<u8>> = bincode::deserialize(&list_val).unwrap();
+        assert_eq!(loaded_list, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+
+        let set_val = engine.get(b"st").await.unwrap().unwrap();
+        let loaded_set: HashSet<Vec<u8>> = bincode::deserialize(&set_val).unwrap();
+        assert!(loaded_set.contains(&b"a".to_vec()));
+
+        let hash_fields = engine.hash_getall(b"hs").unwrap();
+        assert_eq!(hash_fields.len(), 1);
+
+        let zset_val = engine.get(b"zs").await.unwrap().unwrap();
+        let loaded_zset: SortedSetData = bincode::deserialize(&zset_val).unwrap();
+        assert_eq!(loaded_zset.len(), 2);
+    }
+}

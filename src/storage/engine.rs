@@ -908,28 +908,35 @@ impl StorageEngine {
 
     /// Process a command (for AOF replay)
     pub async fn process_command(&self, command: &RespCommand) -> StorageResult<()> {
-        // This is a simplified implementation just to handle basic commands
-        // In a real implementation, you would invoke your command handler
-        
-        match command.name.as_slice() {
+        let upper_name: Vec<u8> = command.name.iter().map(|b| b.to_ascii_uppercase()).collect();
+
+        match upper_name.as_slice() {
             b"SET" => {
                 if command.args.len() >= 2 {
                     let key = &command.args[0];
                     let value = &command.args[1];
-                    
-                    // Check for EX argument
+
                     let mut ttl = None;
-                    for i in 2..command.args.len() - 1 {
-                        if command.args[i] == b"EX" {
-                            if let Ok(secs) = std::str::from_utf8(&command.args[i+1]) {
-                                if let Ok(secs_val) = secs.parse::<u64>() {
-                                    ttl = Some(Duration::from_secs(secs_val));
+                    let mut i = 2;
+                    while i < command.args.len() {
+                        let flag: Vec<u8> = command.args[i].iter().map(|b| b.to_ascii_uppercase()).collect();
+                        match flag.as_slice() {
+                            b"EX" if i + 1 < command.args.len() => {
+                                if let Ok(s) = std::str::from_utf8(&command.args[i+1]) {
+                                    if let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_secs(v)); }
                                 }
+                                i += 2;
                             }
-                            break;
+                            b"PX" if i + 1 < command.args.len() => {
+                                if let Ok(s) = std::str::from_utf8(&command.args[i+1]) {
+                                    if let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_millis(v)); }
+                                }
+                                i += 2;
+                            }
+                            _ => { i += 1; }
                         }
                     }
-                    
+
                     self.set(key.clone(), value.clone(), ttl).await?;
                 }
             },
@@ -940,34 +947,127 @@ impl StorageEngine {
             },
             b"EXPIRE" => {
                 if command.args.len() >= 2 {
-                    let key = &command.args[0];
-                    
                     if let Ok(secs) = std::str::from_utf8(&command.args[1]) {
-                        if let Ok(secs_val) = secs.parse::<u64>() {
-                            let ttl = Some(Duration::from_secs(secs_val));
-                            self.expire(key, ttl).await?;
+                        if let Ok(v) = secs.parse::<u64>() {
+                            self.expire(&command.args[0], Some(Duration::from_secs(v))).await?;
                         }
                     }
                 }
             },
             b"PEXPIRE" => {
                 if command.args.len() >= 2 {
-                    let key = &command.args[0];
-                    
                     if let Ok(millis) = std::str::from_utf8(&command.args[1]) {
-                        if let Ok(millis_val) = millis.parse::<u64>() {
-                            let ttl = Some(Duration::from_millis(millis_val));
-                            self.expire(key, ttl).await?;
+                        if let Ok(v) = millis.parse::<u64>() {
+                            self.expire(&command.args[0], Some(Duration::from_millis(v))).await?;
                         }
                     }
                 }
             },
+            b"RPUSH" => {
+                if command.args.len() >= 2 {
+                    let key = &command.args[0];
+                    let elements = &command.args[1..];
+                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::List, |existing| {
+                        let mut list: Vec<Vec<u8>> = existing
+                            .as_deref()
+                            .and_then(|v| bincode::deserialize(v).ok())
+                            .unwrap_or_default();
+                        for elem in elements {
+                            list.push(elem.clone());
+                        }
+                        Ok((Some(bincode::serialize(&list).unwrap()), ()))
+                    })?;
+                }
+            },
+            b"SADD" => {
+                if command.args.len() >= 2 {
+                    let key = &command.args[0];
+                    let members = &command.args[1..];
+                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::Set, |existing| {
+                        let mut set: std::collections::HashSet<Vec<u8>> = existing
+                            .as_deref()
+                            .and_then(|v| bincode::deserialize(v).ok())
+                            .unwrap_or_default();
+                        for m in members {
+                            set.insert(m.clone());
+                        }
+                        Ok((Some(bincode::serialize(&set).unwrap()), ()))
+                    })?;
+                }
+            },
+            b"ZADD" => {
+                if command.args.len() >= 3 {
+                    let key = &command.args[0];
+                    let pairs = &command.args[1..];
+                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::ZSet, |existing| {
+                        let mut zset: crate::command::types::sorted_set::SortedSetData = existing
+                            .as_deref()
+                            .and_then(|v| bincode::deserialize(v).ok())
+                            .unwrap_or_else(|| crate::command::types::sorted_set::SortedSetData::new());
+                        let mut i = 0;
+                        while i + 1 < pairs.len() {
+                            if let Ok(score_str) = std::str::from_utf8(&pairs[i]) {
+                                if let Ok(score) = score_str.parse::<f64>() {
+                                    zset.insert(score, pairs[i+1].clone());
+                                }
+                            }
+                            i += 2;
+                        }
+                        Ok((Some(bincode::serialize(&zset).unwrap()), ()))
+                    })?;
+                }
+            },
+            b"HSET" => {
+                if command.args.len() >= 3 {
+                    let key = &command.args[0];
+                    let pairs = &command.args[1..];
+                    let mut fields = Vec::new();
+                    let mut i = 0;
+                    while i + 1 < pairs.len() {
+                        fields.push((pairs[i].as_slice(), pairs[i+1].as_slice()));
+                        i += 2;
+                    }
+                    let _ = self.hash_set(key, &fields);
+                }
+            },
+            b"XADD" => {
+                if command.args.len() >= 4 {
+                    let key = &command.args[0];
+                    let id_bytes = &command.args[1];
+                    let field_args = &command.args[2..];
+                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::Stream, |existing| {
+                        let mut stream: crate::storage::stream::StreamData = existing
+                            .as_deref()
+                            .and_then(|v| bincode::deserialize(v).ok())
+                            .unwrap_or_else(|| crate::storage::stream::StreamData::new());
+                        if let Ok(id_str) = std::str::from_utf8(id_bytes) {
+                            if let Some(id) = crate::storage::stream::StreamEntryId::parse(id_str) {
+                                let mut fields = Vec::new();
+                                let mut j = 0;
+                                while j + 1 < field_args.len() {
+                                    fields.push((field_args[j].clone(), field_args[j+1].clone()));
+                                    j += 2;
+                                }
+                                let entry = crate::storage::stream::StreamEntry { id: id.clone(), fields };
+                                stream.entries.insert(id.clone(), entry);
+                                if id > stream.last_id {
+                                    stream.last_id = id.clone();
+                                }
+                                stream.entries_added += 1;
+                                if stream.first_entry_id.is_none() {
+                                    stream.first_entry_id = Some(id);
+                                }
+                            }
+                        }
+                        Ok((Some(bincode::serialize(&stream).unwrap()), ()))
+                    })?;
+                }
+            },
             _ => {
-                // Log unknown command but don't fail
-                tracing::warn!("Unknown command during AOF replay: {:?}", command);
+                tracing::warn!("Unknown command during AOF replay: {:?}", String::from_utf8_lossy(&command.name));
             }
         }
-        
+
         Ok(())
     }
     
