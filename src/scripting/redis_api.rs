@@ -1,4 +1,7 @@
-use mlua::{Lua, MultiValue, Value, IntoLua};
+use mlua::{Lua, MultiValue, Value, IntoLua, HookTriggers, VmState};
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command::{Command, CommandError, CommandResult};
 use crate::command::handler::CommandHandler;
@@ -56,9 +59,21 @@ pub fn execute_in_lua(
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
     read_only: bool,
+    kill_flag: Option<Arc<AtomicBool>>,
 ) -> CommandResult {
     let lua = Lua::new();
     sandbox_lua(&lua);
+
+    // Install kill hook so SCRIPT KILL can interrupt running scripts
+    if let Some(flag) = kill_flag {
+        lua.set_hook(HookTriggers::new().every_nth_instruction(10000), move |_lua, _debug| {
+            if flag.load(Ordering::SeqCst) {
+                Err(mlua::Error::runtime("Script killed by user with SCRIPT KILL"))
+            } else {
+                Ok(VmState::Continue)
+            }
+        });
+    }
 
     setup_keys_argv(&lua, &keys, &args)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
@@ -85,9 +100,21 @@ pub fn execute_function_in_lua(
     handler: &CommandHandler,
     handle: &tokio::runtime::Handle,
     read_only: bool,
+    kill_flag: Option<Arc<AtomicBool>>,
 ) -> CommandResult {
     let lua = Lua::new();
     sandbox_lua(&lua);
+
+    // Install kill hook so SCRIPT KILL can interrupt running functions
+    if let Some(flag) = kill_flag {
+        lua.set_hook(HookTriggers::new().every_nth_instruction(10000), move |_lua, _debug| {
+            if flag.load(Ordering::SeqCst) {
+                Err(mlua::Error::runtime("Script killed by user with SCRIPT KILL"))
+            } else {
+                Ok(VmState::Continue)
+            }
+        });
+    }
 
     setup_redis_api(&lua, handler, handle, read_only)
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;

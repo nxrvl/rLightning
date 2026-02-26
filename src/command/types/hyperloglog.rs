@@ -4,7 +4,8 @@ use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
 
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
+#[allow(deprecated)]
+use std::hash::SipHasher;
 
 /// Number of registers in a dense HyperLogLog (2^14 = 16384)
 const HLL_P: u32 = 14;
@@ -59,8 +60,11 @@ fn hll_set_register(data: &mut [u8], index: usize, value: u8) -> bool {
 }
 
 /// Hash an element and return (register_index, count_of_leading_zeros + 1)
+/// Uses SipHasher with fixed keys (0, 0) for deterministic hashing across
+/// restarts and replicas, which is required for correct HLL merge and persistence.
+#[allow(deprecated)]
 fn hll_hash_element(element: &[u8]) -> (usize, u8) {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = SipHasher::new_with_keys(0, 0);
     element.hash(&mut hasher);
     let hash = hasher.finish();
 
