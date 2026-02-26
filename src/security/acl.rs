@@ -670,7 +670,15 @@ pub struct AclLogEntry {
     pub timestamp_ms: u64,
 }
 
-/// The ACL Manager handles user management and permission checking
+/// The ACL Manager handles user management and permission checking.
+///
+/// Uses std::sync::RwLock (not tokio::sync::RwLock) because all lock-holding
+/// critical sections are short, synchronous HashMap operations with no async work.
+/// All lock acquisitions use `unwrap_or_else(|e| e.into_inner())` to gracefully
+/// recover from lock poisoning instead of panicking.
+///
+/// Lock ordering: methods that need multiple locks always drop the first before
+/// acquiring the second to prevent deadlocks.
 pub struct AclManager {
     /// Map of username -> AclUser
     users: Arc<RwLock<HashMap<String, AclUser>>>,
@@ -749,7 +757,7 @@ impl AclManager {
         drop(users);
 
         // Register session
-        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.insert(client_addr.to_string(), username.to_string());
         debug!(
             client_addr = %client_addr,
@@ -765,19 +773,19 @@ impl AclManager {
         if !self.require_auth {
             return true;
         }
-        let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.contains_key(client_addr)
     }
 
     /// Get the username for a client session
     pub fn get_username(&self, client_addr: &str) -> Option<String> {
-        let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.get(client_addr).cloned()
     }
 
     /// Remove a client session
     pub fn remove_client(&self, client_addr: &str) {
-        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.remove(client_addr);
         debug!(client_addr = %client_addr, "Client removed from ACL sessions");
     }
@@ -785,7 +793,7 @@ impl AclManager {
     /// Check if a command is allowed for the given client
     pub fn check_command_permission(&self, client_addr: &str, cmd: &str) -> bool {
         let username = {
-            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             sessions.get(client_addr).cloned()
         };
 
@@ -801,7 +809,7 @@ impl AclManager {
             }
         };
 
-        let users = self.users.read().expect("ACL users lock poisoned");
+        let users = self.users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(user) = users.get(&username) {
             return user.can_execute_command(cmd);
         }
@@ -811,7 +819,7 @@ impl AclManager {
     /// Check if a key access is allowed for the given client
     pub fn check_key_permission(&self, client_addr: &str, key: &[u8]) -> bool {
         let username = {
-            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             sessions.get(client_addr).cloned()
         };
 
@@ -826,7 +834,7 @@ impl AclManager {
             }
         };
 
-        let users = self.users.read().expect("ACL users lock poisoned");
+        let users = self.users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(user) = users.get(&username) {
             return user.can_access_key(key);
         }
@@ -836,7 +844,7 @@ impl AclManager {
     /// Check if a channel access is allowed for the given client
     pub fn check_channel_permission(&self, client_addr: &str, channel: &[u8]) -> bool {
         let username = {
-            let sessions = self.sessions.read().expect("ACL sessions lock poisoned");
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             sessions.get(client_addr).cloned()
         };
 
@@ -851,7 +859,7 @@ impl AclManager {
             }
         };
 
-        let users = self.users.read().expect("ACL users lock poisoned");
+        let users = self.users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(user) = users.get(&username) {
             return user.can_access_channel(channel);
         }
@@ -1059,7 +1067,7 @@ impl AclManager {
         }; // users lock dropped here
 
         // Now safely acquire sessions lock without holding users lock
-        let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.retain(|_, v| remaining_usernames.contains(v));
 
         Ok(RespValue::Integer(count))
@@ -2223,5 +2231,90 @@ mod tests {
         // Wrong password for alice
         let result = mgr.authenticate("c3", "alice", "wrong");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_acl_operations_survive_poisoned_sessions_lock() {
+        let mgr = AclManager::new(true, Some("pass"));
+
+        // Authenticate a client first
+        mgr.authenticate("client:1", "default", "pass").unwrap();
+        assert!(mgr.is_authenticated("client:1"));
+
+        // Poison the sessions lock by panicking while holding it
+        let sessions_lock = Arc::clone(&mgr.sessions);
+        let handle = std::thread::spawn(move || {
+            let _guard = sessions_lock.write().unwrap();
+            panic!("intentional panic to poison sessions lock");
+        });
+        // The thread panicked, so join returns Err
+        assert!(handle.join().is_err());
+
+        // Verify the sessions lock is actually poisoned
+        assert!(mgr.sessions.read().is_err());
+
+        // All these operations should still work (no panic) thanks to unwrap_or_else
+        assert!(mgr.is_authenticated("client:1"));
+        assert_eq!(mgr.get_username("client:1"), Some("default".to_string()));
+        assert!(mgr.check_command_permission("client:1", "get"));
+        assert!(mgr.check_key_permission("client:1", b"mykey"));
+        assert!(mgr.check_channel_permission("client:1", b"mychannel"));
+        mgr.remove_client("client:1");
+        assert!(!mgr.is_authenticated("client:1"));
+
+        // authenticate should still work (it uses unwrap_or_else for sessions)
+        let result = mgr.authenticate("client:2", "default", "pass");
+        assert!(result.is_ok());
+        assert!(mgr.is_authenticated("client:2"));
+    }
+
+    #[test]
+    fn test_acl_operations_survive_poisoned_users_lock() {
+        let mgr = AclManager::new(false, None);
+
+        // Poison the users lock by panicking while holding it
+        let users_lock = Arc::clone(&mgr.users);
+        let handle = std::thread::spawn(move || {
+            let _guard = users_lock.write().unwrap();
+            panic!("intentional panic to poison users lock");
+        });
+        assert!(handle.join().is_err());
+
+        // Verify the users lock is actually poisoned
+        assert!(mgr.users.read().is_err());
+
+        // check_command_permission uses users.read().unwrap_or_else - should not panic
+        // With no auth required, it uses "default" user and checks permission
+        let result = mgr.check_command_permission("client:1", "get");
+        // The default user should still allow all commands
+        assert!(result);
+
+        let result = mgr.check_key_permission("client:1", b"mykey");
+        assert!(result);
+
+        let result = mgr.check_channel_permission("client:1", b"mychannel");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_acl_handle_deluser_survives_poisoned_sessions_lock() {
+        let mgr = AclManager::new(false, None);
+
+        // Create a user to delete
+        mgr.handle_setuser(&[b"tempuser".to_vec(), b"on".to_vec()])
+            .unwrap();
+
+        // Poison the sessions lock
+        let sessions_lock = Arc::clone(&mgr.sessions);
+        let handle = std::thread::spawn(move || {
+            let _guard = sessions_lock.write().unwrap();
+            panic!("intentional panic to poison sessions lock");
+        });
+        assert!(handle.join().is_err());
+
+        // handle_deluser acquires sessions lock after users lock - should not panic
+        let result = mgr.handle_deluser(&[b"tempuser".to_vec()]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), RespValue::Integer(1));
     }
 }

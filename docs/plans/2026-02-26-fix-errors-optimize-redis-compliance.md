@@ -183,11 +183,11 @@ Ensure all data types survive restart via both RDB and AOF persistence.
 
 Replace panic-on-poison pattern with graceful recovery across all 11 .expect() call sites.
 
-- [ ] Replace all 11 `.expect("...")` on RwLock read()/write() with `.unwrap_or_else(|e| e.into_inner())` (consistent with scripting module pattern)
-- [ ] Audit all lock acquisitions for potential deadlock patterns (nested locks, lock ordering)
-- [ ] Consider migrating from std::sync::RwLock to tokio::sync::RwLock for async compatibility (evaluate if this is needed based on current usage patterns)
-- [ ] Write test: verify ACL operations don't panic on poisoned lock scenario
-- [ ] Run project test suite - must pass before task 10
+- [x] Replace all 11 `.expect("...")` on RwLock read()/write() with `.unwrap_or_else(|e| e.into_inner())` (consistent with scripting module pattern)
+- [x] Audit all lock acquisitions for potential deadlock patterns (nested locks, lock ordering)
+- [x] Consider migrating from std::sync::RwLock to tokio::sync::RwLock for async compatibility (evaluate if this is needed based on current usage patterns)
+- [x] Write test: verify ACL operations don't panic on poisoned lock scenario
+- [x] Run project test suite - must pass before task 10
 
 ### Task 10: Server Code Deduplication
 
