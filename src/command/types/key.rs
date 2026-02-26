@@ -876,7 +876,6 @@ pub async fn scan_with_type(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
 mod tests {
     use super::*;
     use crate::storage::engine::StorageConfig;
-    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]

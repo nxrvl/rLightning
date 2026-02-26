@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod monitor;
 pub mod failover;
 

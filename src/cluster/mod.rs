@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod gossip;
 pub mod migration;
 pub mod slot;

@@ -658,6 +658,7 @@ impl AclUser {
 
 /// An ACL log entry for denied commands
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AclLogEntry {
     pub count: u64,
     pub reason: String,
@@ -723,6 +724,7 @@ impl AclManager {
     }
 
     /// Whether authentication is required
+    #[allow(dead_code)]
     pub fn require_auth(&self) -> bool {
         self.require_auth
     }

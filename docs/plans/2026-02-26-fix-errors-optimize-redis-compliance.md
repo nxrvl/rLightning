@@ -215,15 +215,15 @@ Eliminate massive code duplication in server dispatch and 6x duplicated glob_mat
 
 Fix all 61 compiler warnings and implement real CLIENT LIST.
 
-- [ ] Run `cargo fix --bin rlightning` for automatic fixes (unused imports, etc.)
-- [ ] For dead_code warnings from unwired modules (cluster, sentinel): add appropriate `#[allow(dead_code)]` only where the code is genuinely planned for future use, remove truly dead code
-- [ ] Implement basic connection tracking in server.rs: maintain Arc<DashMap<u64, ClientInfo>> with client ID, address, db, subscription count, last command
-- [ ] Update CLIENT LIST to return real data from connection tracker
-- [ ] Update CLIENT INFO to return current connection's real data
-- [ ] Update CLIENT ID to return real connection ID
-- [ ] Update CLIENT SETNAME/GETNAME to store/retrieve per-connection name
-- [ ] Verify zero compiler warnings after fixes
-- [ ] Run project test suite - must pass before task 12
+- [x] Run `cargo fix --bin rlightning` for automatic fixes (unused imports, etc.)
+- [x] For dead_code warnings from unwired modules (cluster, sentinel): add appropriate `#[allow(dead_code)]` only where the code is genuinely planned for future use, remove truly dead code
+- [x] Implement basic connection tracking in server.rs: maintain Arc<DashMap<u64, ClientInfo>> with client ID, address, db, subscription count, last command
+- [x] Update CLIENT LIST to return real data from connection tracker
+- [x] Update CLIENT INFO to return current connection's real data
+- [x] Update CLIENT ID to return real connection ID
+- [x] Update CLIENT SETNAME/GETNAME to store/retrieve per-connection name
+- [x] Verify zero compiler warnings after fixes
+- [x] Run project test suite - must pass before task 12
 
 ### Task 12: Cluster and Sentinel Basic Wiring
 

@@ -4,6 +4,7 @@ use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
 /// Redis INFO command - Get information about the server
+#[allow(dead_code)]
 pub async fn info(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult {
     // Build a simple INFO response with some basic information
     let info_str = [
@@ -222,6 +223,7 @@ pub async fn monitor(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResul
 }
 
 /// Redis SCAN command - Incrementally iterate over keys
+#[allow(dead_code)]
 pub async fn scan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);

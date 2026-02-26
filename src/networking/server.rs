@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use bytes::BytesMut;
+use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Semaphore};
@@ -25,6 +28,59 @@ use crate::sentinel::SentinelManager;
 use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
 use crate::utils::logging;
 
+/// Information about a connected client, tracked for CLIENT LIST/INFO/ID
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    /// Unique client ID
+    pub id: u64,
+    /// Client socket address
+    pub addr: String,
+    /// Client-assigned name (via CLIENT SETNAME)
+    pub name: String,
+    /// Current database index
+    pub db: usize,
+    /// Number of channel subscriptions
+    pub sub: usize,
+    /// Number of pattern subscriptions
+    pub psub: usize,
+    /// Whether client is in MULTI state (-1 = no, otherwise queued count)
+    pub multi: i64,
+    /// Last command executed
+    pub last_cmd: String,
+    /// Connection creation time
+    pub created_at: Instant,
+}
+
+impl ClientInfo {
+    fn new(id: u64, addr: String) -> Self {
+        ClientInfo {
+            id,
+            addr,
+            name: String::new(),
+            db: 0,
+            sub: 0,
+            psub: 0,
+            multi: -1,
+            last_cmd: String::new(),
+            created_at: Instant::now(),
+        }
+    }
+
+    /// Format client info as Redis CLIENT LIST line
+    fn to_info_line(&self) -> String {
+        let age = self.created_at.elapsed().as_secs();
+        format!(
+            "id={} addr={} fd=0 name={} db={} sub={} psub={} multi={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd={} age={}\r\n",
+            self.id, self.addr, self.name, self.db, self.sub, self.psub, self.multi,
+            if self.last_cmd.is_empty() { "NULL" } else { &self.last_cmd },
+            age,
+        )
+    }
+}
+
+/// Global client ID counter
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+
 /// The Redis-compatible server
 pub struct Server {
     addr: SocketAddr,
@@ -37,6 +93,8 @@ pub struct Server {
     aof_sync_policy: AofSyncPolicy,
     connection_limit: Arc<Semaphore>,
     buffer_size: usize,
+    /// Active client connections tracked for CLIENT LIST/INFO/ID
+    connections: Arc<DashMap<u64, ClientInfo>>,
 }
 
 /// Outcome of dispatching a parsed command
@@ -64,6 +122,7 @@ impl Server {
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
             buffer_size: 64 * 1024,                              // 64KB initial buffer (grows on demand)
+            connections: Arc::new(DashMap::new()),
         }
     }
 
@@ -121,7 +180,8 @@ impl Server {
                     // Try to acquire a connection permit
                     match self.connection_limit.clone().try_acquire_owned() {
                         Ok(permit) => {
-                            info!(client_addr = %addr, "New client connected");
+                            let conn_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+                            info!(client_addr = %addr, client_id = conn_id, "New client connected");
                             let cmd_handler = Arc::clone(&self.command_handler);
                             let pubsub = Arc::clone(&self.pubsub);
                             let persistence = self.persistence.clone();
@@ -130,6 +190,10 @@ impl Server {
                             let sentinel = self.sentinel.clone();
                             let aof_sync_policy = self.aof_sync_policy;
                             let buffer_size = self.buffer_size;
+                            let connections = Arc::clone(&self.connections);
+
+                            // Register the connection
+                            connections.insert(conn_id, ClientInfo::new(conn_id, addr.to_string()));
 
                             // Spawn a task for each client
                             tokio::spawn(async move {
@@ -146,12 +210,16 @@ impl Server {
                                     sentinel,
                                     aof_sync_policy,
                                     buffer_size,
+                                    connections.clone(),
+                                    conn_id,
                                 )
                                 .await
                                 {
                                     error!(client_addr = %addr, "Error handling client: {}", e);
                                 }
-                                info!(client_addr = %addr, "Client disconnected");
+                                // Unregister the connection on disconnect
+                                connections.remove(&conn_id);
+                                info!(client_addr = %addr, client_id = conn_id, "Client disconnected");
                                 // Permit is automatically released when _permit is dropped
                             });
                         }
@@ -180,6 +248,8 @@ impl Server {
         sentinel: Option<Arc<SentinelManager>>,
         aof_sync_policy: AofSyncPolicy,
         buffer_size: usize,
+        connections: Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
     ) -> Result<(), NetworkError> {
         use crate::networking::resp::RespError;
         let client_addr = socket.peer_addr()?;
@@ -334,7 +404,7 @@ impl Server {
                                 &mut db_index, &mut protocol_version, &mut in_subscription_mode,
                                 &mut tx_state, &pubsub, client_id, &security, &sentinel,
                                 &replication, &command_handler, &persistence, aof_sync_policy,
-                                &client_addr_str,
+                                &client_addr_str, &connections, conn_id,
                             ).await? {
                                 DispatchAction::CloseConnection => {
                                     pubsub.unregister_client(client_id).await;
@@ -364,7 +434,7 @@ impl Server {
                                                 &mut db_index, &mut protocol_version, &mut in_subscription_mode,
                                                 &mut tx_state, &pubsub, client_id, &security, &sentinel,
                                                 &replication, &command_handler, &persistence, aof_sync_policy,
-                                                &client_addr_str,
+                                                &client_addr_str, &connections, conn_id,
                                             ).await? {
                                                 DispatchAction::CloseConnection => {
                                                     pubsub.unregister_client(client_id).await;
@@ -541,6 +611,8 @@ impl Server {
         persistence: &Option<Arc<PersistenceManager>>,
         aof_sync_policy: AofSyncPolicy,
         client_addr_str: &str,
+        connections: &Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
     ) -> Result<DispatchAction, NetworkError> {
         let cmd_lower = cmd.name.to_lowercase();
 
@@ -634,6 +706,22 @@ impl Server {
                         }
                     }
                 }
+            }
+            return Ok(DispatchAction::Continue);
+        }
+
+        // Update connection tracking state
+        if let Some(mut info) = connections.get_mut(&conn_id) {
+            info.last_cmd = cmd_lower.clone();
+            info.db = *db_index;
+            info.multi = if tx_state.in_multi { tx_state.queue.len() as i64 } else { -1 };
+        }
+
+        // CLIENT - connection management commands handled here with access to per-connection state
+        if cmd_lower == "client" {
+            let response = Self::handle_client_command(&cmd.args, connections, conn_id)?;
+            if let Ok(bytes) = response.serialize() {
+                response_buffer.extend_from_slice(&bytes);
             }
             return Ok(DispatchAction::Continue);
         }
@@ -920,6 +1008,167 @@ impl Server {
         }
 
         Ok(DispatchAction::Continue)
+    }
+
+    /// Handle CLIENT subcommands with access to real connection tracking data
+    fn handle_client_command(
+        args: &[Vec<u8>],
+        connections: &Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
+    ) -> Result<RespValue, NetworkError> {
+        use crate::command::utils::bytes_to_string;
+
+        if args.is_empty() {
+            return Ok(RespValue::Error("ERR wrong number of arguments for 'client' command".to_string()));
+        }
+
+        let subcmd = bytes_to_string(&args[0])
+            .map_err(|_| NetworkError::Serialization("Invalid UTF-8 in CLIENT subcommand".to_string()))?
+            .to_uppercase();
+
+        match subcmd.as_str() {
+            "LIST" => {
+                let mut output = String::new();
+                for entry in connections.iter() {
+                    output.push_str(&entry.value().to_info_line());
+                }
+                Ok(RespValue::BulkString(Some(output.into_bytes())))
+            }
+            "INFO" => {
+                if let Some(info) = connections.get(&conn_id) {
+                    Ok(RespValue::BulkString(Some(info.to_info_line().into_bytes())))
+                } else {
+                    Ok(RespValue::BulkString(Some(b"".to_vec())))
+                }
+            }
+            "ID" => {
+                Ok(RespValue::Integer(conn_id as i64))
+            }
+            "SETNAME" => {
+                if args.len() != 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|setname' command".to_string()));
+                }
+                let name = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8 in client name".to_string()))?;
+                // Redis disallows spaces in client names
+                if name.contains(' ') {
+                    return Ok(RespValue::Error("ERR Client names cannot contain spaces, newlines or special characters.".to_string()));
+                }
+                if let Some(mut info) = connections.get_mut(&conn_id) {
+                    info.name = name;
+                }
+                Ok(RespValue::SimpleString("OK".to_string()))
+            }
+            "GETNAME" => {
+                if let Some(info) = connections.get(&conn_id) {
+                    if info.name.is_empty() {
+                        Ok(RespValue::BulkString(None))
+                    } else {
+                        Ok(RespValue::BulkString(Some(info.name.as_bytes().to_vec())))
+                    }
+                } else {
+                    Ok(RespValue::BulkString(None))
+                }
+            }
+            "KILL" => {
+                if args.len() < 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|kill' command".to_string()));
+                }
+                Ok(RespValue::SimpleString("OK".to_string()))
+            }
+            "PAUSE" => {
+                if args.len() < 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|pause' command".to_string()));
+                }
+                Ok(RespValue::SimpleString("OK".to_string()))
+            }
+            "UNPAUSE" => {
+                Ok(RespValue::SimpleString("OK".to_string()))
+            }
+            "REPLY" => {
+                if args.len() != 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|reply' command".to_string()));
+                }
+                let mode = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
+                    .to_uppercase();
+                match mode.as_str() {
+                    "ON" | "OFF" | "SKIP" => Ok(RespValue::SimpleString("OK".to_string())),
+                    _ => Ok(RespValue::Error("ERR CLIENT REPLY mode must be ON, OFF, or SKIP".to_string())),
+                }
+            }
+            "NO-EVICT" => {
+                if args.len() != 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|no-evict' command".to_string()));
+                }
+                let mode = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
+                    .to_uppercase();
+                match mode.as_str() {
+                    "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
+                    _ => Ok(RespValue::Error("ERR CLIENT NO-EVICT must be ON or OFF".to_string())),
+                }
+            }
+            "NO-TOUCH" => {
+                if args.len() != 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|no-touch' command".to_string()));
+                }
+                let mode = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
+                    .to_uppercase();
+                match mode.as_str() {
+                    "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
+                    _ => Ok(RespValue::Error("ERR CLIENT NO-TOUCH must be ON or OFF".to_string())),
+                }
+            }
+            "TRACKING" => {
+                if args.len() < 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|tracking' command".to_string()));
+                }
+                let mode = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
+                    .to_uppercase();
+                match mode.as_str() {
+                    "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
+                    _ => Ok(RespValue::Error("ERR CLIENT TRACKING must be ON or OFF".to_string())),
+                }
+            }
+            "CACHING" => {
+                if args.len() != 2 {
+                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|caching' command".to_string()));
+                }
+                let mode = bytes_to_string(&args[1])
+                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
+                    .to_uppercase();
+                match mode.as_str() {
+                    "YES" | "NO" => Ok(RespValue::SimpleString("OK".to_string())),
+                    _ => Ok(RespValue::Error("ERR CLIENT CACHING must be YES or NO".to_string())),
+                }
+            }
+            "HELP" => {
+                let help = vec![
+                    RespValue::BulkString(Some(b"CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec())),
+                    RespValue::BulkString(Some(b"CACHING (YES|NO)".to_vec())),
+                    RespValue::BulkString(Some(b"GETNAME".to_vec())),
+                    RespValue::BulkString(Some(b"ID".to_vec())),
+                    RespValue::BulkString(Some(b"INFO".to_vec())),
+                    RespValue::BulkString(Some(b"KILL <option> ...".to_vec())),
+                    RespValue::BulkString(Some(b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)]".to_vec())),
+                    RespValue::BulkString(Some(b"NO-EVICT (ON|OFF)".to_vec())),
+                    RespValue::BulkString(Some(b"NO-TOUCH (ON|OFF)".to_vec())),
+                    RespValue::BulkString(Some(b"PAUSE <timeout> [WRITE|ALL]".to_vec())),
+                    RespValue::BulkString(Some(b"REPLY (ON|OFF|SKIP)".to_vec())),
+                    RespValue::BulkString(Some(b"SETNAME <connection-name>".to_vec())),
+                    RespValue::BulkString(Some(b"TRACKING (ON|OFF) [REDIRECT <id>] [PREFIX <prefix>] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]".to_vec())),
+                    RespValue::BulkString(Some(b"UNPAUSE".to_vec())),
+                ];
+                Ok(RespValue::Array(Some(help)))
+            }
+            _ => Ok(RespValue::Error(format!(
+                "ERR unknown subcommand or wrong number of arguments for 'client|{}' command",
+                subcmd.to_lowercase()
+            ))),
+        }
     }
 
     /// Process a command with transaction state handling.
@@ -1229,6 +1478,7 @@ impl Server {
     }
 
     /// Helper function to serialize and send a response
+    #[allow(dead_code)]
     async fn send_response(
         socket: &mut TcpStream,
         response: RespValue,
@@ -1258,6 +1508,7 @@ impl Server {
     }
 
     /// Helper function to serialize and send an error response string
+    #[allow(dead_code)]
     async fn send_error(
         socket: &mut TcpStream,
         error_message: String,
@@ -1707,5 +1958,172 @@ impl Server {
         };
 
         (response, new_version)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_connections() -> Arc<DashMap<u64, ClientInfo>> {
+        Arc::new(DashMap::new())
+    }
+
+    fn args(strs: &[&str]) -> Vec<Vec<u8>> {
+        strs.iter().map(|s| s.as_bytes().to_vec()).collect()
+    }
+
+    #[test]
+    fn test_client_id_returns_correct_id() {
+        let connections = make_connections();
+        let conn_id = 42;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        let result = Server::handle_client_command(&args(&["ID"]), &connections, conn_id).unwrap();
+        assert_eq!(result, RespValue::Integer(42));
+    }
+
+    #[test]
+    fn test_client_setname_and_getname() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        // GETNAME before setting returns nil
+        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // SETNAME
+        let result = Server::handle_client_command(&args(&["SETNAME", "myconn"]), &connections, conn_id).unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // GETNAME after setting returns the name
+        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"myconn".to_vec())));
+    }
+
+    #[test]
+    fn test_client_setname_rejects_spaces() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        let result = Server::handle_client_command(&args(&["SETNAME", "my conn"]), &connections, conn_id).unwrap();
+        match result {
+            RespValue::Error(msg) => assert!(msg.contains("cannot contain spaces")),
+            _ => panic!("Expected error for name with spaces"),
+        }
+    }
+
+    #[test]
+    fn test_client_list_includes_all_connections() {
+        let connections = make_connections();
+        connections.insert(1, ClientInfo::new(1, "127.0.0.1:1000".to_string()));
+        connections.insert(2, ClientInfo::new(2, "127.0.0.1:2000".to_string()));
+        connections.insert(3, ClientInfo::new(3, "127.0.0.1:3000".to_string()));
+
+        let result = Server::handle_client_command(&args(&["LIST"]), &connections, 1).unwrap();
+        match result {
+            RespValue::BulkString(Some(data)) => {
+                let output = String::from_utf8(data).unwrap();
+                assert!(output.contains("id=1"), "Should contain client 1");
+                assert!(output.contains("id=2"), "Should contain client 2");
+                assert!(output.contains("id=3"), "Should contain client 3");
+                assert!(output.contains("addr=127.0.0.1:1000"));
+                assert!(output.contains("addr=127.0.0.1:2000"));
+                assert!(output.contains("addr=127.0.0.1:3000"));
+                // Each entry should end with \r\n
+                let lines: Vec<&str> = output.trim().split("\r\n").collect();
+                assert_eq!(lines.len(), 3, "Should have 3 client lines");
+            }
+            _ => panic!("Expected BulkString for CLIENT LIST"),
+        }
+    }
+
+    #[test]
+    fn test_client_info_returns_current_connection() {
+        let connections = make_connections();
+        let conn_id = 7;
+        let mut info = ClientInfo::new(conn_id, "10.0.0.1:5555".to_string());
+        info.name = "worker".to_string();
+        info.db = 3;
+        connections.insert(conn_id, info);
+
+        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        match result {
+            RespValue::BulkString(Some(data)) => {
+                let output = String::from_utf8(data).unwrap();
+                assert!(output.contains("id=7"));
+                assert!(output.contains("addr=10.0.0.1:5555"));
+                assert!(output.contains("name=worker"));
+                assert!(output.contains("db=3"));
+            }
+            _ => panic!("Expected BulkString for CLIENT INFO"),
+        }
+    }
+
+    #[test]
+    fn test_client_list_reflects_state_updates() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()));
+
+        // Update state as dispatch_command would
+        if let Some(mut info) = connections.get_mut(&conn_id) {
+            info.last_cmd = "set".to_string();
+            info.db = 5;
+            info.multi = 2;
+        }
+
+        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        match result {
+            RespValue::BulkString(Some(data)) => {
+                let output = String::from_utf8(data).unwrap();
+                assert!(output.contains("cmd=set"));
+                assert!(output.contains("db=5"));
+                assert!(output.contains("multi=2"));
+            }
+            _ => panic!("Expected BulkString for CLIENT INFO"),
+        }
+    }
+
+    #[test]
+    fn test_client_no_args_returns_error() {
+        let connections = make_connections();
+        let result = Server::handle_client_command(&args(&[]), &connections, 1).unwrap();
+        match result {
+            RespValue::Error(msg) => assert!(msg.contains("wrong number of arguments")),
+            _ => panic!("Expected error for no args"),
+        }
+    }
+
+    #[test]
+    fn test_client_unknown_subcommand() {
+        let connections = make_connections();
+        connections.insert(1, ClientInfo::new(1, "127.0.0.1:1234".to_string()));
+
+        let result = Server::handle_client_command(&args(&["BADCMD"]), &connections, 1).unwrap();
+        match result {
+            RespValue::Error(msg) => assert!(msg.contains("unknown subcommand")),
+            _ => panic!("Expected error for unknown subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_connection_info_line_format() {
+        let info = ClientInfo::new(42, "127.0.0.1:6379".to_string());
+        let line = info.to_info_line();
+        assert!(line.starts_with("id=42 addr=127.0.0.1:6379"));
+        assert!(line.contains("db=0"));
+        assert!(line.contains("multi=-1"));
+        assert!(line.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn test_client_id_counter_increments() {
+        // Verify that NEXT_CLIENT_ID produces unique IDs
+        let id1 = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        let id2 = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        assert!(id2 > id1, "Client IDs should be monotonically increasing");
     }
 }

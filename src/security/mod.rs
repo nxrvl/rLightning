@@ -71,6 +71,7 @@ impl SecurityManager {
     }
 
     /// Authenticate a client with password only (default user)
+    #[allow(dead_code)]
     pub fn authenticate(&self, client_addr: &str, password: &[u8]) -> bool {
         if !self.require_auth() {
             return true;
