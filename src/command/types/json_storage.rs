@@ -77,7 +77,7 @@ impl JsonStorage {
         
         // Update memory stats
         {
-            let mut stats = self.memory_stats.lock().unwrap();
+            let mut stats = self.memory_stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.update_set(size);
         }
         
@@ -132,7 +132,7 @@ impl JsonStorage {
         
         // Try to delete from documents
         {
-            let mut docs = self.documents.write().unwrap();
+            let mut docs = self.documents.write().unwrap_or_else(|e| e.into_inner());
             if docs.contains(&key.to_string()) {
                 docs.pop(&key.to_string());
                 deleted = true;
@@ -141,7 +141,7 @@ impl JsonStorage {
         
         // Try to delete from fragments
         {
-            let mut frags = self.fragments.write().unwrap();
+            let mut frags = self.fragments.write().unwrap_or_else(|e| e.into_inner());
             if frags.contains_key(key) {
                 frags.remove(key);
                 deleted = true;
@@ -150,7 +150,7 @@ impl JsonStorage {
         
         // Update memory stats if deleted
         if deleted {
-            let mut stats = self.memory_stats.lock().unwrap();
+            let mut stats = self.memory_stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.update_delete();
         }
         
@@ -159,13 +159,13 @@ impl JsonStorage {
     
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> MemoryStats {
-        let stats = self.memory_stats.lock().unwrap();
+        let stats = self.memory_stats.lock().unwrap_or_else(|e| e.into_inner());
         stats.clone()
     }
     
     /// Run periodic cleanup and maintenance
     pub fn cleanup(&self) {
-        let mut last_cleanup = self.last_cleanup.lock().unwrap();
+        let mut last_cleanup = self.last_cleanup.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         
         // Only run cleanup every 60 seconds
@@ -186,10 +186,10 @@ impl JsonStorage {
     
     /// Get a document from the cache
     fn get_document(&self, key: &str) -> Option<Arc<JsonDocument>> {
-        let mut docs = self.documents.write().unwrap();
+        let mut docs = self.documents.write().unwrap_or_else(|e| e.into_inner());
         if let Some(doc) = docs.get(&key.to_string()) {
             // Update memory stats
-            let mut stats = self.memory_stats.lock().unwrap();
+            let mut stats = self.memory_stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.update_get(doc.size_bytes());
             
             return Some(doc.clone());
@@ -203,7 +203,7 @@ impl JsonStorage {
         let size = doc.size_bytes();
         let doc_arc = Arc::new(doc);
         
-        let mut docs = self.documents.write().unwrap();
+        let mut docs = self.documents.write().unwrap_or_else(|e| e.into_inner());
         docs.put(key.to_string(), doc_arc);
         
         true
@@ -211,7 +211,7 @@ impl JsonStorage {
     
     /// Get a fragmented document
     fn get_fragmented(&self, key: &str) -> Option<Value> {
-        let frags = self.fragments.read().unwrap();
+        let frags = self.fragments.read().unwrap_or_else(|e| e.into_inner());
         if let Some(fragments) = frags.get(key) {
             // Combine fragments into a single value
             let mut result_str = String::new();
@@ -223,7 +223,7 @@ impl JsonStorage {
             match serde_json::from_str(&result_str) {
                 Ok(value) => {
                     // Update memory stats
-                    let mut stats = self.memory_stats.lock().unwrap();
+                    let mut stats = self.memory_stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.update_get(result_str.len());
                     
                     return Some(value);
@@ -273,7 +273,7 @@ impl JsonStorage {
         }
         
         // Store fragments
-        let mut frags = self.fragments.write().unwrap();
+        let mut frags = self.fragments.write().unwrap_or_else(|e| e.into_inner());
         frags.insert(key.to_string(), fragments);
         
         true
@@ -282,7 +282,7 @@ impl JsonStorage {
     /// Clean up expired fragments
     fn cleanup_fragments(&self) {
         let now = Instant::now();
-        let mut frags = self.fragments.write().unwrap();
+        let mut frags = self.fragments.write().unwrap_or_else(|e| e.into_inner());
         
         // Find keys with expired fragments
         let expired_keys: Vec<String> = frags.iter()

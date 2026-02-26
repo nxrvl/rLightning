@@ -477,7 +477,7 @@ pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec
     let funcs_clone = functions.clone();
     let register_fn = lua
         .create_function(move |_, args: MultiValue| {
-            let mut funcs = funcs_clone.lock().unwrap();
+            let mut funcs = funcs_clone.lock().unwrap_or_else(|e| e.into_inner());
             let args_vec: Vec<Value> = args.into_iter().collect();
 
             if args_vec.len() >= 2 {
@@ -527,7 +527,7 @@ pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec
         .exec()
         .map_err(|e| CommandError::InternalError(format!("ERR Error compiling function: {}", e)))?;
 
-    let funcs = functions.lock().unwrap();
+    let funcs = functions.lock().unwrap_or_else(|e| e.into_inner());
     if funcs.is_empty() {
         return Err(CommandError::InternalError(
             "ERR No functions registered".to_string(),
