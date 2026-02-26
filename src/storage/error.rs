@@ -19,6 +19,10 @@ pub enum StorageError {
     ValueTooLarge,
     #[error("Memory limit exceeded")]
     MemoryLimitExceeded,
+    #[error("Value is not an integer or out of range")]
+    NotANumber,
+    #[error("Value is not a valid float")]
+    NotAFloat,
     #[error("Internal error: {0}")]
     #[allow(dead_code)]
     InternalError(String),
@@ -36,6 +40,10 @@ impl From<StorageError> for crate::command::error::CommandError {
                 command::CommandError::InternalError("Memory limit exceeded".to_string()),
             StorageError::KeyExists => 
                 command::CommandError::InvalidArgument("Key already exists".to_string()),
+            StorageError::NotANumber =>
+                command::CommandError::InvalidArgument("value is not an integer or out of range".to_string()),
+            StorageError::NotAFloat =>
+                command::CommandError::InvalidArgument("value is not a valid float".to_string()),
             StorageError::InternalError(msg) => command::CommandError::InternalError(msg),
         }
     }
