@@ -1107,30 +1107,14 @@ impl StorageEngine {
             return Ok(false);
         };
 
-        // Check if destination exists
-        if !replace && self.data.contains_key(&dst) {
+        // Check if destination exists (non-expired) and we're not replacing
+        if !replace {
             if let Some(entry) = self.data.get(&dst) {
                 if !entry.value().is_expired() {
                     return Ok(false);
                 }
             }
         }
-
-        // Store the copy
-        let is_new_key = !self.data.contains_key(&dst);
-        let old_size = if let Some(entry) = self.data.get(&dst) {
-            Self::calculate_size(&dst, &entry.value)
-        } else {
-            0
-        };
-
-        let required_size = Self::calculate_size(&dst, &src_item.value);
-        self.maybe_evict(required_size).await?;
-
-        if old_size > 0 {
-            self.current_memory.fetch_sub(old_size as u64, Ordering::Relaxed);
-        }
-        self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
 
         // Clone with fresh timestamps but same TTL
         let mut new_item = StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
@@ -1143,11 +1127,24 @@ impl StorageEngine {
             }
         }
 
-        self.data.insert(dst.clone(), new_item);
+        let required_size = Self::calculate_size(&dst, &src_item.value);
+        self.maybe_evict(required_size).await?;
 
-        if is_new_key {
-            self.update_prefix_indices(&dst, true).await;
-            self.key_count.fetch_add(1, Ordering::Relaxed);
+        // Use entry API for atomic insert-or-replace with correct memory/key accounting
+        use dashmap::mapref::entry::Entry;
+        match self.data.entry(dst.clone()) {
+            Entry::Occupied(mut occ) => {
+                let old_size = Self::calculate_size(&dst, &occ.get().value) as u64;
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
+                occ.insert(new_item);
+            }
+            Entry::Vacant(vac) => {
+                self.current_memory.fetch_add(required_size as u64, Ordering::Relaxed);
+                vac.insert(new_item);
+                self.update_prefix_indices(&dst, true).await;
+                self.key_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         // Bump key version for WATCH support

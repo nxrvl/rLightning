@@ -216,11 +216,15 @@ impl ClusterMessage {
             let node_id = String::from_utf8_lossy(&data[pos..pos + eid_end]).to_string();
             pos += 40;
 
-            // Address
+            // Address (null-terminated, max 256 bytes)
             if pos >= data.len() {
                 break;
             }
-            let eaddr_end = data[pos..].iter().position(|&b| b == 0).unwrap_or(0);
+            let search_limit = std::cmp::min(data.len() - pos, 256);
+            let eaddr_end = match data[pos..pos + search_limit].iter().position(|&b| b == 0) {
+                Some(end) => end,
+                None => break, // Malformed: no null terminator found
+            };
             let addr = String::from_utf8_lossy(&data[pos..pos + eaddr_end]).to_string();
             pos += eaddr_end + 1;
 
