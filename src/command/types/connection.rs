@@ -247,7 +247,7 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
                         vec![]
                     }
                 }
-                "mget" | "mset" | "del" => {
+                "mget" | "mset" => {
                     args[2..].iter().map(|a| RespValue::BulkString(Some(a.clone()))).collect()
                 }
                 _ => {

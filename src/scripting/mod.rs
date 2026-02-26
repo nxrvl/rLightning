@@ -1,7 +1,7 @@
 pub mod redis_api;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::RwLock;
 
 use crate::command::handler::CommandHandler;
@@ -36,8 +36,8 @@ pub struct ScriptingEngine {
     function_index: RwLock<HashMap<String, String>>,
     /// Flag to request script termination
     kill_requested: AtomicBool,
-    /// Flag indicating a script is currently running
-    script_running: AtomicBool,
+    /// Counter of currently running scripts (supports concurrent execution)
+    scripts_running: AtomicUsize,
 }
 
 impl ScriptingEngine {
@@ -47,7 +47,7 @@ impl ScriptingEngine {
             function_libraries: RwLock::new(HashMap::new()),
             function_index: RwLock::new(HashMap::new()),
             kill_requested: AtomicBool::new(false),
-            script_running: AtomicBool::new(false),
+            scripts_running: AtomicUsize::new(0),
         }
     }
 
@@ -87,9 +87,9 @@ impl ScriptingEngine {
         self.kill_requested.store(true, Ordering::SeqCst);
     }
 
-    /// Check if a script is currently running
+    /// Check if any script is currently running
     pub fn is_script_running(&self) -> bool {
-        self.script_running.load(Ordering::SeqCst)
+        self.scripts_running.load(Ordering::SeqCst) > 0
     }
 
     /// Execute a Lua script with the given keys and args
@@ -101,8 +101,7 @@ impl ScriptingEngine {
         handler: &CommandHandler,
         read_only: bool,
     ) -> CommandResult {
-        self.script_running.store(true, Ordering::SeqCst);
-        self.kill_requested.store(false, Ordering::SeqCst);
+        self.scripts_running.fetch_add(1, Ordering::SeqCst);
 
         let handler = handler.clone();
         let script = script.to_string();
@@ -113,8 +112,11 @@ impl ScriptingEngine {
         })
         .await;
 
-        self.script_running.store(false, Ordering::SeqCst);
-        self.kill_requested.store(false, Ordering::SeqCst);
+        let prev = self.scripts_running.fetch_sub(1, Ordering::SeqCst);
+        // Clear kill flag only when no more scripts are running
+        if prev == 1 {
+            self.kill_requested.store(false, Ordering::SeqCst);
+        }
 
         match result {
             Ok(r) => r,
@@ -147,8 +149,7 @@ impl ScriptingEngine {
             lib.code.clone()
         };
 
-        self.script_running.store(true, Ordering::SeqCst);
-        self.kill_requested.store(false, Ordering::SeqCst);
+        self.scripts_running.fetch_add(1, Ordering::SeqCst);
 
         let handler = handler.clone();
         let func_name = func_name.to_string();
@@ -167,8 +168,10 @@ impl ScriptingEngine {
         })
         .await;
 
-        self.script_running.store(false, Ordering::SeqCst);
-        self.kill_requested.store(false, Ordering::SeqCst);
+        let prev = self.scripts_running.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            self.kill_requested.store(false, Ordering::SeqCst);
+        }
 
         match result {
             Ok(r) => r,

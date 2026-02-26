@@ -4,7 +4,7 @@ use crate::storage::engine::StorageEngine;
 use crate::command::utils::parse_ttl;
 
 // List commands
-pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lpos, lmove, rpoplpush, lmpop, blpop, brpop, blmove, blmpop};
+pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lrem, lpos, lmove, rpoplpush, lmpop, blpop, brpop, blmove, blmpop};
 
 // Blocking infrastructure
 pub use crate::command::types::blocking::BlockingManager;
