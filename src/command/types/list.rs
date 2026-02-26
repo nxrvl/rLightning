@@ -2280,4 +2280,33 @@ mod tests {
             panic!("Expected array");
         }
     }
+
+    #[tokio::test]
+    async fn test_concurrent_lpush_same_list() {
+        // Two clients racing LPUSH on the same list - no elements should be lost
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                for j in 0..10 {
+                    let args = vec![
+                        b"race_list".to_vec(),
+                        format!("val_{}_{}", i, j).into_bytes(),
+                    ];
+                    lpush(&eng, &args).await.unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 100 elements should be present
+        let result = llen(&engine, &[b"race_list".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(100));
+    }
 }

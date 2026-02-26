@@ -3,39 +3,106 @@ use crate::command::utils::bytes_to_string;
 use crate::command::types::blocking::BlockingManager;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
+use crate::storage::error::StorageError;
 use crate::storage::item::RedisDataType;
 use futures::future::select_all;
+use ordered_float::OrderedFloat;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
-// We'll use a vector to store score-member pairs, sorted by score
-type SortedSet = Vec<(f64, Vec<u8>)>;
+/// Sorted set data structure using BTreeSet for ordered iteration and HashMap for O(1) lookups
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SortedSetData {
+    pub entries: BTreeSet<(OrderedFloat<f64>, Vec<u8>)>,
+    pub scores: HashMap<Vec<u8>, f64>,
+}
 
-/// Helper: load and sort a sorted set from the engine
-async fn load_sorted_set(engine: &StorageEngine, key: &[u8]) -> Result<Option<SortedSet>, CommandError> {
+impl SortedSetData {
+    pub fn new() -> Self {
+        SortedSetData {
+            entries: BTreeSet::new(),
+            scores: HashMap::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.scores.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scores.is_empty()
+    }
+
+    pub fn insert(&mut self, score: f64, member: Vec<u8>) -> bool {
+        if let Some(&old_score) = self.scores.get(&member) {
+            if old_score != score {
+                self.entries.remove(&(OrderedFloat(old_score), member.clone()));
+                self.entries.insert((OrderedFloat(score), member.clone()));
+                self.scores.insert(member, score);
+            }
+            false
+        } else {
+            self.entries.insert((OrderedFloat(score), member.clone()));
+            self.scores.insert(member, score);
+            true
+        }
+    }
+
+    pub fn remove(&mut self, member: &[u8]) -> bool {
+        if let Some(score) = self.scores.remove(member) {
+            self.entries.remove(&(OrderedFloat(score), member.to_vec()));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_score(&self, member: &[u8]) -> Option<f64> {
+        self.scores.get(member).copied()
+    }
+
+    pub fn rank(&self, member: &[u8]) -> Option<usize> {
+        let score = self.scores.get(member)?;
+        let target = (OrderedFloat(*score), member.to_vec());
+        Some(self.entries.range(..&target).count())
+    }
+
+    pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
+        let score = self.scores.get(member)?;
+        let target = (OrderedFloat(*score), member.to_vec());
+        Some(self.entries.len() - 1 - self.entries.range(..&target).count())
+    }
+}
+
+fn deserialize_ss(existing: Option<&[u8]>) -> Result<SortedSetData, StorageError> {
+    match existing {
+        Some(bytes) => bincode::deserialize::<SortedSetData>(bytes)
+            .map_err(|_| StorageError::WrongType),
+        None => Ok(SortedSetData::new()),
+    }
+}
+
+fn serialize_ss(ss: &SortedSetData) -> Result<Option<Vec<u8>>, StorageError> {
+    if ss.is_empty() {
+        Ok(None)
+    } else {
+        bincode::serialize(ss)
+            .map(Some)
+            .map_err(|e| StorageError::InternalError(e.to_string()))
+    }
+}
+
+async fn load_sorted_set_readonly(engine: &StorageEngine, key: &[u8]) -> Result<Option<SortedSetData>, CommandError> {
     match engine.get(key).await? {
         Some(data) => {
-            let mut ss = bincode::deserialize::<SortedSet>(&data)
+            let ss = bincode::deserialize::<SortedSetData>(&data)
                 .map_err(|_| CommandError::WrongType)?;
-            ss.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
             Ok(Some(ss))
         }
         None => Ok(None),
     }
 }
 
-/// Helper: save a sorted set back to the engine (deletes key if empty)
-async fn save_sorted_set(engine: &StorageEngine, key: &[u8], ss: &SortedSet) -> Result<(), CommandError> {
-    if ss.is_empty() {
-        engine.del(key).await?;
-    } else {
-        let serialized = bincode::serialize(ss)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::ZSet).await?;
-    }
-    Ok(())
-}
-
-/// Helper: format a score as a string matching Redis behavior
 fn format_score(score: f64) -> String {
     if score == f64::INFINITY {
         "inf".to_string()
@@ -48,8 +115,6 @@ fn format_score(score: f64) -> String {
     }
 }
 
-/// Parse a score boundary string like "-inf", "+inf", "(3.5", "3.5"
-/// Returns (score, exclusive)
 fn parse_score_bound(s: &str) -> Result<(f64, bool), CommandError> {
     if s == "-inf" {
         return Ok((f64::NEG_INFINITY, false));
@@ -68,8 +133,6 @@ fn parse_score_bound(s: &str) -> Result<(f64, bool), CommandError> {
     Ok((val, exclusive))
 }
 
-/// Parse a lex boundary string like "-", "+", "[a", "(a"
-/// Returns (bound_bytes, exclusive, is_unbounded_min, is_unbounded_max)
 fn parse_lex_bound(s: &str) -> Result<(Vec<u8>, bool, bool, bool), CommandError> {
     if s == "-" {
         return Ok((vec![], false, true, false));
@@ -86,19 +149,16 @@ fn parse_lex_bound(s: &str) -> Result<(Vec<u8>, bool, bool, bool), CommandError>
     Err(CommandError::InvalidArgument("min or max not valid string range item".to_string()))
 }
 
-/// Check if a member is within lex bounds
 fn in_lex_range(member: &[u8], min: &(Vec<u8>, bool, bool, bool), max: &(Vec<u8>, bool, bool, bool)) -> bool {
-    // Check min bound
-    if !min.2 { // not unbounded min
-        if min.1 { // exclusive
+    if !min.2 {
+        if min.1 {
             if member <= min.0.as_slice() { return false; }
         } else {
             if member < min.0.as_slice() { return false; }
         }
     }
-    // Check max bound
-    if !max.3 { // not unbounded max
-        if max.1 { // exclusive
+    if !max.3 {
+        if max.1 {
             if member >= max.0.as_slice() { return false; }
         } else {
             if member > max.0.as_slice() { return false; }
@@ -107,611 +167,363 @@ fn in_lex_range(member: &[u8], min: &(Vec<u8>, bool, bool, bool), max: &(Vec<u8>
     true
 }
 
-/// Redis ZADD command - Add members to a sorted set with scores
+fn score_in_range(score: f64, min_score: f64, min_exclusive: bool, max_score: f64, max_exclusive: bool) -> bool {
+    let above_min = if min_exclusive { score > min_score } else { score >= min_score };
+    let below_max = if max_exclusive { score < max_score } else { score <= max_score };
+    above_min && below_max
+}
+
+fn glob_match(pattern: &str, s: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = s.chars().collect();
+    let (plen, slen) = (p.len(), s.len());
+    let mut pi = 0;
+    let mut si = 0;
+    let mut star_pi: Option<usize> = None;
+    let mut star_si: usize = 0;
+    while si < slen {
+        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < plen && p[pi] == '*' {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < plen && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == plen
+}
+
+fn normalize_indices(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
+    let len_i64 = len as i64;
+    let start_idx = if start < 0 { (len_i64 + start).max(0) as usize } else { start as usize };
+    let stop_idx = if stop < 0 { (len_i64 + stop).max(0) as usize } else { stop.min(len_i64 - 1) as usize };
+    if start_idx <= stop_idx && start_idx < len {
+        Some((start_idx, stop_idx.min(len - 1)))
+    } else {
+        None
+    }
+}
+
+fn aggregate_scores(existing: f64, new: f64, aggregate: &str) -> f64 {
+    match aggregate {
+        "SUM" => existing + new,
+        "MIN" => existing.min(new),
+        "MAX" => existing.max(new),
+        _ => existing + new,
+    }
+}
+
+fn parse_weights_aggregate(args: &[Vec<u8>], start: usize, numkeys: usize) -> Result<(Vec<f64>, String, bool, usize), CommandError> {
+    let mut weights: Vec<f64> = vec![1.0; numkeys];
+    let mut aggregate = "SUM".to_string();
+    let mut with_scores = false;
+    let mut i = start;
+    while i < args.len() {
+        let opt = bytes_to_string(&args[i])?.to_uppercase();
+        match opt.as_str() {
+            "WEIGHTS" => {
+                if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+                for j in 0..numkeys {
+                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
+                        CommandError::InvalidArgument("weight value is not a float".to_string())
+                    })?;
+                    if w.is_nan() {
+                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
+                    }
+                    weights[j] = w;
+                }
+                i += 1 + numkeys;
+            }
+            "AGGREGATE" => {
+                if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+                aggregate = bytes_to_string(&args[i + 1])?.to_uppercase();
+                if !matches!(aggregate.as_str(), "SUM" | "MIN" | "MAX") {
+                    return Err(CommandError::InvalidArgument("aggregate must be SUM, MIN, or MAX".to_string()));
+                }
+                i += 2;
+            }
+            "WITHSCORES" => { with_scores = true; i += 1; }
+            _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
+        }
+    }
+    Ok((weights, aggregate, with_scores, i))
+}
+
+/// Redis ZADD command
 pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
     let key = &args[0];
-    
-    // Parse options - check for NX, XX, GT, LT, CH
-    let mut only_if_new = false; // NX option
-    let mut only_if_exists = false; // XX option
-    let mut only_if_greater = false; // GT option
-    let mut only_if_less = false; // LT option
-    let mut return_changed = false; // CH option
+    let mut only_if_new = false;
+    let mut only_if_exists = false;
+    let mut only_if_greater = false;
+    let mut only_if_less = false;
+    let mut return_changed = false;
     let mut i = 1;
-
-    // Process options
     while i < args.len() {
         let option = bytes_to_string(&args[i])?;
         match option.to_uppercase().as_str() {
-            "NX" => {
-                only_if_new = true;
-                i += 1;
-            },
-            "XX" => {
-                only_if_exists = true;
-                i += 1;
-            },
-            "GT" => {
-                only_if_greater = true;
-                i += 1;
-            },
-            "LT" => {
-                only_if_less = true;
-                i += 1;
-            },
-            "CH" => {
-                return_changed = true;
-                i += 1;
-            },
-            _ => {
-                // Not an option, continue to score-member pairs
-                break;
-            }
+            "NX" => { only_if_new = true; i += 1; },
+            "XX" => { only_if_exists = true; i += 1; },
+            "GT" => { only_if_greater = true; i += 1; },
+            "LT" => { only_if_less = true; i += 1; },
+            "CH" => { return_changed = true; i += 1; },
+            _ => break,
         }
     }
-
-    // Check for conflicting options
     if only_if_new && only_if_exists {
         return Err(CommandError::InvalidArgument("NX and XX options cannot be used together".to_string()));
     }
     if only_if_new && (only_if_greater || only_if_less) {
         return Err(CommandError::InvalidArgument("GT/LT options cannot be used with NX".to_string()));
     }
-    
-    // Now check that we have score-member pairs
     if (args.len() - i) < 2 || (args.len() - i) % 2 != 0 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    // Get the current sorted set or create a new one
-    let mut sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            bincode::deserialize::<SortedSet>(&data).unwrap_or_default()
-        },
-        None => Vec::new(),
-    };
-    
-    // Track how many new members were added and changed
-    let mut added = 0;
-    let mut changed = 0;
-
-    // Process score-member pairs
+    let mut pairs: Vec<(f64, Vec<u8>)> = Vec::new();
     while i < args.len() {
-        if i + 1 >= args.len() {
-            return Err(CommandError::WrongNumberOfArguments);
-        }
-
-        let score_bytes = &args[i];
-        let member = args[i + 1].clone();
-        i += 2;
-
-        // Parse the score
-        let score_str = bytes_to_string(score_bytes)?;
+        if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+        let score_str = bytes_to_string(&args[i])?;
         let score = score_str.parse::<f64>().map_err(|_| {
             CommandError::InvalidArgument("Score is not a valid float".to_string())
         })?;
-
-        // Reject NaN scores (Redis returns ERR for NaN)
         if score.is_nan() {
             return Err(CommandError::InvalidArgument("Score is not a valid float".to_string()));
         }
+        pairs.push((score, args[i + 1].clone()));
+        i += 2;
+    }
 
-        // Check if member already exists
-        let existing_index = sorted_set.iter().position(|(_, m)| m == &member);
-
-        if let Some(index) = existing_index {
-            // Member exists already
-            if !only_if_new {
-                let old_score = sorted_set[index].0;
-                let mut should_update = true;
-
-                // Apply GT/LT conditions
-                if only_if_greater && score <= old_score {
-                    should_update = false;
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut added = 0i64;
+        let mut changed = 0i64;
+        for (score, member) in &pairs {
+            let existing_score = ss.get_score(member);
+            if let Some(old_score) = existing_score {
+                if !only_if_new {
+                    let mut should_update = true;
+                    if only_if_greater && *score <= old_score { should_update = false; }
+                    if only_if_less && *score >= old_score { should_update = false; }
+                    if should_update && old_score != *score {
+                        ss.insert(*score, member.clone());
+                        changed += 1;
+                    }
                 }
-                if only_if_less && score >= old_score {
-                    should_update = false;
-                }
-
-                if should_update && old_score != score {
-                    sorted_set[index].0 = score;
-                    changed += 1;
-                }
-            }
-            // With NX, we skip updating existing members
-        } else {
-            // Member doesn't exist
-            if !only_if_exists {
-                // Add new member if XX is not set
-                sorted_set.push((score, member));
+            } else if !only_if_exists {
+                ss.insert(*score, member.clone());
                 added += 1;
             }
-            // With XX, we skip adding new members
         }
-    }
-    
-    // Sort the set by score
-    sorted_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    
-    // Serialize and save the sorted set
-    let serialized = bincode::serialize(&sorted_set).map_err(|e| {
-        CommandError::InternalError(format!("Serialization error: {}", e))
+        let ret = if return_changed { added + changed } else { added };
+        let serialized = serialize_ss(&ss)?;
+        Ok((serialized, ret))
     })?;
-    
-    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
-    
-    // CH flag: return added + changed instead of just added
-    let result = if return_changed { added + changed } else { added };
     Ok(RespValue::Integer(result))
 }
 
-/// Redis ZRANGE command - Return a range of members in a sorted set by index
+/// Redis ZRANGE command
 pub async fn zrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 3 || args.len() > 4 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
     let key = &args[0];
-    
-    // Parse start and stop indices
-    let start_str = bytes_to_string(&args[1])?;
-    let stop_str = bytes_to_string(&args[2])?;
-    
-    let start = start_str.parse::<i64>().map_err(|_| {
+    let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
-    
-    let stop = stop_str.parse::<i64>().map_err(|_| {
+    let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
-    
-    // Check for WITHSCORES option
-    let with_scores = args.len() == 4 && 
+    let with_scores = args.len() == 4 &&
         bytes_to_string(&args[3]).map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false);
-    
-    // Get the sorted set
-    let sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(mut sorted_set) => {
-                    // Sort by score for consistency with Redis
-                    sorted_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                    sorted_set
-                },
-                Err(_) => {
-                    return Err(CommandError::WrongType);
+
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((preserved, Vec::new())); }
+        let mut output = Vec::new();
+        if let Some((si, ei)) = normalize_indices(start, stop, ss.len()) {
+            let rlen = ei - si + 1;
+            output = Vec::with_capacity(if with_scores { rlen * 2 } else { rlen });
+            for (score, member) in ss.entries.iter().skip(si).take(rlen) {
+                output.push(RespValue::BulkString(Some(member.clone())));
+                if with_scores {
+                    output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
                 }
             }
-        },
-        None => {
-            // Sorted set doesn't exist, return empty array (Redis behavior)
-            return Ok(RespValue::Array(Some(vec![])));
-        },
-    };
-    
-    // Get the total number of elements
-    let len = sorted_set.len() as i64;
-    
-    // Convert indices to zero-based array indices
-    let start_idx = if start < 0 {
-        // Negative index means count from the end
-        (len + start).max(0) as usize
-    } else {
-        start as usize
-    };
-    
-    let stop_idx = if stop < 0 {
-        // Negative index means count from the end
-        (len + stop).min(len - 1) as usize
-    } else {
-        stop.min(len - 1) as usize
-    };
-    
-    // Get the elements in the range
-    let mut result = Vec::new();
-    if start_idx <= stop_idx && start_idx < sorted_set.len() {
-        // Calculate the actual range length
-        let actual_stop_idx = stop_idx.min(sorted_set.len() - 1);
-        
-        // Pre-allocate vector with appropriate capacity
-        // If with_scores is true, we'll have twice as many items
-        let range_len = actual_stop_idx - start_idx + 1;
-        let capacity = if with_scores { range_len * 2 } else { range_len };
-        result = Vec::with_capacity(capacity);
-        
-        for (score, member) in sorted_set.iter().take(actual_stop_idx + 1).skip(start_idx) {
-            // Always add the member
-            result.push(RespValue::BulkString(Some(member.clone())));
-            
-            // If WITHSCORES option is present, add the score after each member as a separate array item
-            if with_scores {
-                // Format score as string with proper format
-                let score_str = format_score(*score);
-                result.push(RespValue::BulkString(Some(score_str.into_bytes())));
-            }
         }
-    }
-
-    // ZRANGE always returns an array (Redis behavior)
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZREM command - Remove members from a sorted set
+/// Redis ZREM command
 pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let members = &args[1..];
-    
-    // Get the current sorted set
-    let mut sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => {
-            // Sorted set doesn't exist, nothing to remove
-            return Ok(RespValue::Integer(0));
-        },
-    };
-    
-    // Track how many members were removed
-    let mut removed = 0;
-    
-    // Remove each member
-    for member in members {
-        let old_len = sorted_set.len();
-        sorted_set.retain(|(_, m)| m != member);
-        if sorted_set.len() < old_len {
-            removed += 1;
-        }
-    }
-    
-    if removed > 0 {
-        // If the sorted set is now empty, remove the key
-        if sorted_set.is_empty() {
-            engine.del(key).await?;
-        } else {
-            // Otherwise, update the sorted set
-            let serialized = bincode::serialize(&sorted_set).map_err(|e| {
-                CommandError::InternalError(format!("Serialization error: {}", e))
-            })?;
-            
-            engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
-        }
-    }
-    
-    Ok(RespValue::Integer(removed))
+    let members = args[1..].to_vec();
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, 0i64)); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut removed = 0i64;
+        for member in &members { if ss.remove(member) { removed += 1; } }
+        let serialized = serialize_ss(&ss)?;
+        Ok((serialized, removed))
+    })?;
+    Ok(RespValue::Integer(result))
 }
 
-/// Redis ZSCORE command - Get the score of a member in a sorted set
+/// Redis ZSCORE command
 pub async fn zscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let member = &args[1];
-    
-    // Get the sorted set
-    let sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => {
-            // Sorted set doesn't exist
-            return Ok(RespValue::BulkString(None));
-        },
-    };
-    
-    // Find the score for this member
-    for (score, m) in sorted_set.iter() {
-        if m == member {
-            // Convert score to string with proper formatting
-            let score_str = format_score(*score);
-            return Ok(RespValue::BulkString(Some(score_str.into_bytes())));
-        }
+    let member = args[1].clone();
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        Ok((preserved, ss.get_score(&member)))
+    })?;
+    match result {
+        Some(score) => Ok(RespValue::BulkString(Some(format_score(score).into_bytes()))),
+        None => Ok(RespValue::BulkString(None)),
     }
-    
-    // Member not found
-    Ok(RespValue::BulkString(None))
 }
 
-/// Redis ZCARD command - Get the cardinality (number of members) of a sorted set
+/// Redis ZCARD command
 pub async fn zcard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 1 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() != 1 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    
-    // Get the sorted set
-    let sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => {
-            // Sorted set doesn't exist, return 0
-            return Ok(RespValue::Integer(0));
-        },
-    };
-    
-    Ok(RespValue::Integer(sorted_set.len() as i64))
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        Ok((preserved, ss.len() as i64))
+    })?;
+    Ok(RespValue::Integer(result))
 }
 
-/// Redis ZCOUNT command - Count members in a sorted set within a score range
+/// Redis ZCOUNT command
 pub async fn zcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-
-    // Parse min and max scores (supporting -inf, +inf, and exclusive bounds with '(' prefix)
-    let (min_score, min_exclusive) = parse_score_bound(&min_str)?;
-    let (max_score, max_exclusive) = parse_score_bound(&max_str)?;
-
-    // Get the sorted set
-    let sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => {
-            // Sorted set doesn't exist, return 0
-            return Ok(RespValue::Integer(0));
-        },
-    };
-
-    // Count members within the score range, respecting exclusive bounds
-    let count = sorted_set.iter()
-        .filter(|(score, _)| {
-            let above_min = if min_exclusive { *score > min_score } else { *score >= min_score };
-            let below_max = if max_exclusive { *score < max_score } else { *score <= max_score };
-            above_min && below_max
-        })
-        .count();
-
-    Ok(RespValue::Integer(count as i64))
+    let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
+    let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let count = ss.entries.iter()
+            .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
+            .count();
+        Ok((preserved, count as i64))
+    })?;
+    Ok(RespValue::Integer(result))
 }
 
-/// Redis ZRANK command - Get the rank (index) of a member in a sorted set
+/// Redis ZRANK command
 pub async fn zrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let member = &args[1];
-    
-    // Get the sorted set
-    let mut sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => {
-            // Sorted set doesn't exist
-            return Ok(RespValue::BulkString(None));
-        },
-    };
-    
-    // Sort by score (ascending order)
-    sorted_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    
-    // Find the rank (0-based index) of the member
-    for (index, (_, m)) in sorted_set.iter().enumerate() {
-        if m == member {
-            return Ok(RespValue::Integer(index as i64));
-        }
+    let member = args[1].clone();
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        if existing.is_none() { return Ok((preserved, None)); }
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        Ok((preserved, ss.rank(&member)))
+    })?;
+    match result {
+        Some(rank) => Ok(RespValue::Integer(rank as i64)),
+        None => Ok(RespValue::BulkString(None)),
     }
-    
-    // Member not found
-    Ok(RespValue::BulkString(None))
 }
 
-/// Redis ZREVRANGE command - Return a range of members in a sorted set by index (in reverse order)
-pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 || args.len() > 4 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+/// Redis ZREVRANK command
+pub async fn zrevrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    
-    // Parse start and stop indices
-    let start_str = bytes_to_string(&args[1])?;
-    let stop_str = bytes_to_string(&args[2])?;
-    
-    let start = start_str.parse::<i64>().map_err(|_| {
+    let member = args[1].clone();
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        if existing.is_none() { return Ok((preserved, None)); }
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        Ok((preserved, ss.rev_rank(&member)))
+    })?;
+    match result {
+        Some(rank) => Ok(RespValue::Integer(rank as i64)),
+        None => Ok(RespValue::BulkString(None)),
+    }
+}
+
+/// Redis ZREVRANGE command
+pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 3 || args.len() > 4 { return Err(CommandError::WrongNumberOfArguments); }
+    let key = &args[0];
+    let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
-    
-    let stop = stop_str.parse::<i64>().map_err(|_| {
+    let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
-    
-    // Check for WITHSCORES option
-    let with_scores = args.len() == 4 && 
+    let with_scores = args.len() == 4 &&
         bytes_to_string(&args[3]).map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false);
-    
-    // Get the sorted set
-    let mut sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(mut sorted_set) => {
-                    // Sort by score for consistency with Redis
-                    sorted_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                    sorted_set
-                },
-                Err(_) => {
-                    return Err(CommandError::WrongType);
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((preserved, Vec::new())); }
+        let mut output = Vec::new();
+        if let Some((si, ei)) = normalize_indices(start, stop, ss.len()) {
+            let rlen = ei - si + 1;
+            output = Vec::with_capacity(if with_scores { rlen * 2 } else { rlen });
+            let entries_vec: Vec<_> = ss.entries.iter().rev().skip(si).take(rlen).collect();
+            for (score, member) in entries_vec {
+                output.push(RespValue::BulkString(Some(member.clone())));
+                if with_scores {
+                    output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
                 }
             }
-        },
-        None => {
-            // Sorted set doesn't exist, return empty array (Redis behavior)
-            return Ok(RespValue::Array(Some(vec![])));
-        },
-    };
-    
-    // Reverse the sorted set for descending order
-    sorted_set.reverse();
-    
-    // Get the total number of elements
-    let len = sorted_set.len() as i64;
-    
-    // Convert indices to zero-based array indices
-    let start_idx = if start < 0 {
-        // Negative index means count from the end
-        (len + start).max(0) as usize
-    } else {
-        start as usize
-    };
-    
-    let stop_idx = if stop < 0 {
-        // Negative index means count from the end
-        (len + stop).min(len - 1) as usize
-    } else {
-        stop.min(len - 1) as usize
-    };
-    
-    // Get the elements in the range
-    let mut result = Vec::new();
-    if start_idx <= stop_idx && start_idx < sorted_set.len() {
-        // Calculate the actual range length
-        let actual_stop_idx = stop_idx.min(sorted_set.len() - 1);
-        
-        // Pre-allocate vector with appropriate capacity
-        // If with_scores is true, we'll have twice as many items
-        let range_len = actual_stop_idx - start_idx + 1;
-        let capacity = if with_scores { range_len * 2 } else { range_len };
-        result = Vec::with_capacity(capacity);
-        
-        for (score, member) in sorted_set.iter().take(actual_stop_idx + 1).skip(start_idx) {
-            // Always add the member
-            result.push(RespValue::BulkString(Some(member.clone())));
-            
-            // If WITHSCORES option is present, add the score after each member as a separate array item
-            if with_scores {
-                // Format score as string with proper format
-                let score_str = format_score(*score);
-                result.push(RespValue::BulkString(Some(score_str.into_bytes())));
-            }
         }
-    }
-    
-    // ZREVRANGE always returns an array (Redis behavior)
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZINCRBY command - Increment the score of a member in a sorted set
+/// Redis ZINCRBY command
 pub async fn zincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let increment_str = bytes_to_string(&args[1])?;
-    let member = &args[2];
-    
-    // Parse the increment value
-    let increment = increment_str.parse::<f64>().map_err(|_| {
+    let increment = bytes_to_string(&args[1])?.parse::<f64>().map_err(|_| {
         CommandError::InvalidArgument("Increment is not a valid float".to_string())
     })?;
-
-    // Reject NaN increments (Redis returns ERR for NaN)
     if increment.is_nan() {
         return Err(CommandError::InvalidArgument("Increment is not a valid float".to_string()));
     }
-
-    // Get the current sorted set or create a new one
-    let mut sorted_set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<SortedSet>(&data) {
-                Ok(sorted_set) => sorted_set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
-            }
-        },
-        None => Vec::new(),
-    };
-    
-    // Find if member already exists and update its score
-    let mut found = false;
-    let mut new_score = increment;
-    
-    for (score, m) in sorted_set.iter_mut() {
-        if m == member {
-            *score += increment;
-            new_score = *score;
-            found = true;
-            break;
-        }
-    }
-    
-    // If member doesn't exist, add it with the increment as its score
-    if !found {
-        sorted_set.push((increment, member.clone()));
-        new_score = increment;
-    }
-    
-    // Sort the set by score
-    sorted_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    
-    // Serialize and save the sorted set
-    let serialized = bincode::serialize(&sorted_set).map_err(|e| {
-        CommandError::InternalError(format!("Serialization error: {}", e))
+    let member = args[2].clone();
+    let new_score = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let old_score = ss.get_score(&member).unwrap_or(0.0);
+        let new_score = old_score + increment;
+        ss.insert(new_score, member.clone());
+        let serialized = serialize_ss(&ss)?;
+        Ok((serialized, new_score))
     })?;
-    
-    engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::ZSet).await?;
-    
-    // Return the new score
-    let score_str = format_score(new_score);
-    Ok(RespValue::BulkString(Some(score_str.into_bytes())))
+    Ok(RespValue::BulkString(Some(format_score(new_score).into_bytes())))
 }
 
-/// Redis ZRANGEBYSCORE command - Return members with scores in range
+/// Redis ZRANGEBYSCORE command
 pub async fn zrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-    let (min_score, min_exclusive) = parse_score_bound(&min_str)?;
-    let (max_score, max_exclusive) = parse_score_bound(&max_str)?;
-
+    let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
+    let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
     let mut with_scores = false;
     let mut offset: usize = 0;
     let mut count: Option<usize> = None;
@@ -734,43 +546,28 @@ pub async fn zrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
             _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
         }
     }
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let filtered: Vec<&(f64, Vec<u8>)> = sorted_set.iter()
-        .filter(|(score, _)| {
-            let above_min = if min_exclusive { *score > min_score } else { *score >= min_score };
-            let below_max = if max_exclusive { *score < max_score } else { *score <= max_score };
-            above_min && below_max
-        })
-        .skip(offset)
-        .take(count.unwrap_or(usize::MAX))
-        .collect();
-
-    let mut result = Vec::new();
-    for (score, member) in filtered {
-        result.push(RespValue::BulkString(Some(member.clone())));
-        if with_scores {
-            result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut output = Vec::new();
+        for (score, member) in ss.entries.iter()
+            .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
+            .skip(offset).take(count.unwrap_or(usize::MAX))
+        {
+            output.push(RespValue::BulkString(Some(member.clone())));
+            if with_scores { output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
         }
-    }
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZREVRANGEBYSCORE command - Return members with scores in range (high to low)
+/// Redis ZREVRANGEBYSCORE command
 pub async fn zrevrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let max_str = bytes_to_string(&args[1])?;
-    let min_str = bytes_to_string(&args[2])?;
-    let (max_score, max_exclusive) = parse_score_bound(&max_str)?;
-    let (min_score, min_exclusive) = parse_score_bound(&min_str)?;
-
+    let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
+    let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
     let mut with_scores = false;
     let mut offset: usize = 0;
     let mut count: Option<usize> = None;
@@ -793,43 +590,28 @@ pub async fn zrevrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
             _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
         }
     }
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let filtered: Vec<&(f64, Vec<u8>)> = sorted_set.iter().rev()
-        .filter(|(score, _)| {
-            let above_min = if min_exclusive { *score > min_score } else { *score >= min_score };
-            let below_max = if max_exclusive { *score < max_score } else { *score <= max_score };
-            above_min && below_max
-        })
-        .skip(offset)
-        .take(count.unwrap_or(usize::MAX))
-        .collect();
-
-    let mut result = Vec::new();
-    for (score, member) in filtered {
-        result.push(RespValue::BulkString(Some(member.clone())));
-        if with_scores {
-            result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut output = Vec::new();
+        for (score, member) in ss.entries.iter().rev()
+            .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
+            .skip(offset).take(count.unwrap_or(usize::MAX))
+        {
+            output.push(RespValue::BulkString(Some(member.clone())));
+            if with_scores { output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
         }
-    }
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZRANGEBYLEX command - Return members in lex range (all same score assumed)
+/// Redis ZRANGEBYLEX command
 pub async fn zrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-    let min = parse_lex_bound(&min_str)?;
-    let max = parse_lex_bound(&max_str)?;
-
+    let min = parse_lex_bound(&bytes_to_string(&args[1])?)?;
+    let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
     let mut offset: usize = 0;
     let mut count: Option<usize> = None;
     let mut i = 3;
@@ -849,33 +631,25 @@ pub async fn zrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt)));
         }
     }
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let result: Vec<RespValue> = sorted_set.iter()
-        .filter(|(_, member)| in_lex_range(member, &min, &max))
-        .skip(offset)
-        .take(count.unwrap_or(usize::MAX))
-        .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
-        .collect();
-
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let output: Vec<RespValue> = ss.entries.iter()
+            .filter(|(_, member)| in_lex_range(member, &min, &max))
+            .skip(offset).take(count.unwrap_or(usize::MAX))
+            .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
+            .collect();
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZREVRANGEBYLEX command - Return members in reverse lex range
+/// Redis ZREVRANGEBYLEX command
 pub async fn zrevrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let max_str = bytes_to_string(&args[1])?;
-    let min_str = bytes_to_string(&args[2])?;
-    let max = parse_lex_bound(&max_str)?;
-    let min = parse_lex_bound(&min_str)?;
-
+    let max = parse_lex_bound(&bytes_to_string(&args[1])?)?;
+    let min = parse_lex_bound(&bytes_to_string(&args[2])?)?;
     let mut offset: usize = 0;
     let mut count: Option<usize> = None;
     let mut i = 3;
@@ -895,27 +669,22 @@ pub async fn zrevrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt)));
         }
     }
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let result: Vec<RespValue> = sorted_set.iter().rev()
-        .filter(|(_, member)| in_lex_range(member, &min, &max))
-        .skip(offset)
-        .take(count.unwrap_or(usize::MAX))
-        .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
-        .collect();
-
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let output: Vec<RespValue> = ss.entries.iter().rev()
+            .filter(|(_, member)| in_lex_range(member, &min, &max))
+            .skip(offset).take(count.unwrap_or(usize::MAX))
+            .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
+            .collect();
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZREMRANGEBYRANK command - Remove members by rank range
+/// Redis ZREMRANGEBYRANK command
 pub async fn zremrangebyrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
@@ -923,596 +692,351 @@ pub async fn zremrangebyrank(engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
     let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-
-    let mut sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let len = sorted_set.len() as i64;
-    let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
-    let stop_idx = if stop < 0 { (len + stop).max(0) as usize } else { stop.min(len - 1) as usize };
-
-    if start_idx > stop_idx || start_idx >= sorted_set.len() {
-        return Ok(RespValue::Integer(0));
-    }
-
-    let actual_stop = stop_idx.min(sorted_set.len() - 1);
-    let removed = actual_stop - start_idx + 1;
-    sorted_set.drain(start_idx..=actual_stop);
-    save_sorted_set(engine, key, &sorted_set).await?;
-    Ok(RespValue::Integer(removed as i64))
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, 0i64)); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((None, 0i64)); }
+        match normalize_indices(start, stop, ss.len()) {
+            None => { let s = serialize_ss(&ss)?; Ok((s, 0i64)) }
+            Some((si, ei)) => {
+                let to_remove: Vec<_> = ss.entries.iter().skip(si).take(ei - si + 1).cloned().collect();
+                let removed = to_remove.len() as i64;
+                for (score, member) in to_remove {
+                    ss.entries.remove(&(score, member.clone()));
+                    ss.scores.remove(&member);
+                }
+                let s = serialize_ss(&ss)?;
+                Ok((s, removed))
+            }
+        }
+    })?;
+    Ok(RespValue::Integer(result))
 }
 
-/// Redis ZREMRANGEBYSCORE command - Remove members by score range
+/// Redis ZREMRANGEBYSCORE command
 pub async fn zremrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-    let (min_score, min_exclusive) = parse_score_bound(&min_str)?;
-    let (max_score, max_exclusive) = parse_score_bound(&max_str)?;
-
-    let mut sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let old_len = sorted_set.len();
-    sorted_set.retain(|(score, _)| {
-        let above_min = if min_exclusive { *score > min_score } else { *score >= min_score };
-        let below_max = if max_exclusive { *score < max_score } else { *score <= max_score };
-        !(above_min && below_max)
-    });
-    let removed = old_len - sorted_set.len();
-    save_sorted_set(engine, key, &sorted_set).await?;
-    Ok(RespValue::Integer(removed as i64))
-}
-
-/// Redis ZREMRANGEBYLEX command - Remove members by lex range
-pub async fn zremrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-    let min = parse_lex_bound(&min_str)?;
-    let max = parse_lex_bound(&max_str)?;
-
-    let mut sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let old_len = sorted_set.len();
-    sorted_set.retain(|(_, member)| !in_lex_range(member, &min, &max));
-    let removed = old_len - sorted_set.len();
-    save_sorted_set(engine, key, &sorted_set).await?;
-    Ok(RespValue::Integer(removed as i64))
-}
-
-/// Redis ZLEXCOUNT command - Count members in lex range
-pub async fn zlexcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let key = &args[0];
-    let min_str = bytes_to_string(&args[1])?;
-    let max_str = bytes_to_string(&args[2])?;
-    let min = parse_lex_bound(&min_str)?;
-    let max = parse_lex_bound(&max_str)?;
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let count = sorted_set.iter()
-        .filter(|(_, member)| in_lex_range(member, &min, &max))
-        .count();
-    Ok(RespValue::Integer(count as i64))
-}
-
-/// Redis ZREVRANK command - Get the reverse rank of a member
-pub async fn zrevrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() != 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let key = &args[0];
-    let member = &args[1];
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::BulkString(None)),
-    };
-
-    let len = sorted_set.len();
-    for (index, (_, m)) in sorted_set.iter().enumerate() {
-        if m == member {
-            return Ok(RespValue::Integer((len - 1 - index) as i64));
+    let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
+    let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, 0i64)); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let to_remove: Vec<_> = ss.entries.iter()
+            .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
+            .cloned().collect();
+        let removed = to_remove.len() as i64;
+        for (score, member) in to_remove {
+            ss.entries.remove(&(score, member.clone()));
+            ss.scores.remove(&member);
         }
-    }
-    Ok(RespValue::BulkString(None))
+        let s = serialize_ss(&ss)?;
+        Ok((s, removed))
+    })?;
+    Ok(RespValue::Integer(result))
 }
 
-/// Redis ZINTERSTORE command - Store intersection of sorted sets
+/// Redis ZREMRANGEBYLEX command
+pub async fn zremrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
+    let key = &args[0];
+    let min = parse_lex_bound(&bytes_to_string(&args[1])?)?;
+    let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, 0i64)); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let to_remove: Vec<_> = ss.entries.iter()
+            .filter(|(_, member)| in_lex_range(member, &min, &max))
+            .cloned().collect();
+        let removed = to_remove.len() as i64;
+        for (score, member) in to_remove {
+            ss.entries.remove(&(score, member.clone()));
+            ss.scores.remove(&member);
+        }
+        let s = serialize_ss(&ss)?;
+        Ok((s, removed))
+    })?;
+    Ok(RespValue::Integer(result))
+}
+
+/// Redis ZLEXCOUNT command
+pub async fn zlexcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 3 { return Err(CommandError::WrongNumberOfArguments); }
+    let key = &args[0];
+    let min = parse_lex_bound(&bytes_to_string(&args[1])?)?;
+    let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let count = ss.entries.iter()
+            .filter(|(_, member)| in_lex_range(member, &min, &max))
+            .count();
+        Ok((preserved, count as i64))
+    })?;
+    Ok(RespValue::Integer(result))
+}
+
+/// Redis ZINTERSTORE command
 pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let dest = &args[0];
     let numkeys = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || args.len() < 2 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if numkeys == 0 || args.len() < 2 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
+    let (weights, aggregate, _, _) = parse_weights_aggregate(args, 2 + numkeys, numkeys)?;
 
-    let keys = &args[2..2 + numkeys];
-    let mut i = 2 + numkeys;
-    let mut weights: Vec<f64> = vec![1.0; numkeys];
-    let mut aggregate = "SUM".to_string();
-
-    while i < args.len() {
-        let opt = bytes_to_string(&args[i])?.to_uppercase();
-        match opt.as_str() {
-            "WEIGHTS" => {
-                if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                for j in 0..numkeys {
-                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
-                        CommandError::InvalidArgument("weight value is not a float".to_string())
-                    })?;
-                    if w.is_nan() {
-                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
-                    }
-                    weights[j] = w;
-                }
-                i += 1 + numkeys;
-            }
-            "AGGREGATE" => {
-                if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                aggregate = bytes_to_string(&args[i + 1])?.to_uppercase();
-                if !matches!(aggregate.as_str(), "SUM" | "MIN" | "MAX") {
-                    return Err(CommandError::InvalidArgument("aggregate must be SUM, MIN, or MAX".to_string()));
-                }
-                i += 2;
-            }
-            _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
-        }
-    }
-
-    // Load all sets
-    let mut sets: Vec<SortedSet> = Vec::with_capacity(numkeys);
-    for key in keys {
-        match load_sorted_set(engine, key).await? {
+    let mut sets: Vec<SortedSetData> = Vec::with_capacity(numkeys);
+    for key in &keys {
+        match load_sorted_set_readonly(engine, key).await? {
             Some(ss) => sets.push(ss),
-            None => sets.push(Vec::new()),
+            None => sets.push(SortedSetData::new()),
         }
     }
-
-    // Intersection: members present in all sets
     if sets.is_empty() || sets.iter().any(|s| s.is_empty()) {
-        save_sorted_set(engine, dest, &Vec::new()).await?;
+        engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((None, ())))?;
         return Ok(RespValue::Integer(0));
     }
-
-    let mut result: SortedSet = Vec::new();
-    for (score, member) in &sets[0] {
+    let mut result_ss = SortedSetData::new();
+    for (score, member) in &sets[0].entries {
         let mut in_all = true;
-        let mut agg_score = *score * weights[0];
+        let mut agg_score = score.0 * weights[0];
         for (idx, set) in sets.iter().enumerate().skip(1) {
-            if let Some((s, _)) = set.iter().find(|(_, m)| m == member) {
-                let weighted = *s * weights[idx];
-                agg_score = match aggregate.as_str() {
-                    "SUM" => agg_score + weighted,
-                    "MIN" => agg_score.min(weighted),
-                    "MAX" => agg_score.max(weighted),
-                    _ => agg_score + weighted,
-                };
-            } else {
-                in_all = false;
-                break;
-            }
+            if let Some(s) = set.get_score(member) {
+                agg_score = aggregate_scores(agg_score, s * weights[idx], &aggregate);
+            } else { in_all = false; break; }
         }
-        if in_all {
-            result.push((agg_score, member.clone()));
-        }
+        if in_all { result_ss.insert(agg_score, member.clone()); }
     }
-
-    result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
-    let count = result.len() as i64;
-    save_sorted_set(engine, dest, &result).await?;
+    let count = result_ss.len() as i64;
+    engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
+        let s = serialize_ss(&result_ss)?;
+        Ok((s, ()))
+    })?;
     Ok(RespValue::Integer(count))
 }
 
-/// Redis ZUNIONSTORE command - Store union of sorted sets
+/// Redis ZUNIONSTORE command
 pub async fn zunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let dest = &args[0];
     let numkeys = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || args.len() < 2 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if numkeys == 0 || args.len() < 2 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
+    let (weights, aggregate, _, _) = parse_weights_aggregate(args, 2 + numkeys, numkeys)?;
 
-    let keys = &args[2..2 + numkeys];
-    let mut i = 2 + numkeys;
-    let mut weights: Vec<f64> = vec![1.0; numkeys];
-    let mut aggregate = "SUM".to_string();
-
-    while i < args.len() {
-        let opt = bytes_to_string(&args[i])?.to_uppercase();
-        match opt.as_str() {
-            "WEIGHTS" => {
-                if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                for j in 0..numkeys {
-                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
-                        CommandError::InvalidArgument("weight value is not a float".to_string())
-                    })?;
-                    if w.is_nan() {
-                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
-                    }
-                    weights[j] = w;
-                }
-                i += 1 + numkeys;
-            }
-            "AGGREGATE" => {
-                if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                aggregate = bytes_to_string(&args[i + 1])?.to_uppercase();
-                if !matches!(aggregate.as_str(), "SUM" | "MIN" | "MAX") {
-                    return Err(CommandError::InvalidArgument("aggregate must be SUM, MIN, or MAX".to_string()));
-                }
-                i += 2;
-            }
-            _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
-        }
-    }
-
-    // Union: collect all members, aggregate scores
-    let mut member_scores: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
-    let mut member_seen: std::collections::HashMap<Vec<u8>, bool> = std::collections::HashMap::new();
-
+    let mut member_scores: HashMap<Vec<u8>, f64> = HashMap::new();
     for (idx, key) in keys.iter().enumerate() {
-        let set = match load_sorted_set(engine, key).await? {
-            Some(ss) => ss,
-            None => continue,
-        };
-        for (score, member) in &set {
-            let weighted = *score * weights[idx];
-            if let Some(existing) = member_scores.get_mut(member) {
-                *existing = match aggregate.as_str() {
-                    "SUM" => *existing + weighted,
-                    "MIN" => existing.min(weighted),
-                    "MAX" => existing.max(weighted),
-                    _ => *existing + weighted,
-                };
-            } else {
-                member_scores.insert(member.clone(), weighted);
-            }
-            member_seen.insert(member.clone(), true);
-        }
-    }
-
-    let mut result: SortedSet = member_scores.into_iter()
-        .map(|(member, score)| (score, member))
-        .collect();
-    result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
-    let count = result.len() as i64;
-    save_sorted_set(engine, dest, &result).await?;
-    Ok(RespValue::Integer(count))
-}
-
-/// Redis ZINTER command - Return intersection without storing
-pub async fn zinter(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
-        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-    })?;
-    if numkeys == 0 || args.len() < 1 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-
-    let keys = &args[1..1 + numkeys];
-    let mut i = 1 + numkeys;
-    let mut weights: Vec<f64> = vec![1.0; numkeys];
-    let mut aggregate = "SUM".to_string();
-    let mut with_scores = false;
-
-    while i < args.len() {
-        let opt = bytes_to_string(&args[i])?.to_uppercase();
-        match opt.as_str() {
-            "WEIGHTS" => {
-                if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                for j in 0..numkeys {
-                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
-                        CommandError::InvalidArgument("weight value is not a float".to_string())
-                    })?;
-                    if w.is_nan() {
-                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
-                    }
-                    weights[j] = w;
-                }
-                i += 1 + numkeys;
-            }
-            "AGGREGATE" => {
-                if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                aggregate = bytes_to_string(&args[i + 1])?.to_uppercase();
-                i += 2;
-            }
-            "WITHSCORES" => { with_scores = true; i += 1; }
-            _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
-        }
-    }
-
-    let mut sets: Vec<SortedSet> = Vec::new();
-    for key in keys {
-        match load_sorted_set(engine, key).await? {
-            Some(ss) => sets.push(ss),
-            None => return Ok(RespValue::Array(Some(vec![]))),
-        }
-    }
-
-    let mut result_set: SortedSet = Vec::new();
-    for (score, member) in &sets[0] {
-        let mut in_all = true;
-        let mut agg_score = *score * weights[0];
-        for (idx, set) in sets.iter().enumerate().skip(1) {
-            if let Some((s, _)) = set.iter().find(|(_, m)| m == member) {
-                let weighted = *s * weights[idx];
-                agg_score = match aggregate.as_str() {
-                    "SUM" => agg_score + weighted,
-                    "MIN" => agg_score.min(weighted),
-                    "MAX" => agg_score.max(weighted),
-                    _ => agg_score + weighted,
-                };
-            } else {
-                in_all = false;
-                break;
-            }
-        }
-        if in_all {
-            result_set.push((agg_score, member.clone()));
-        }
-    }
-    result_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
-
-    let mut result = Vec::new();
-    for (score, member) in &result_set {
-        result.push(RespValue::BulkString(Some(member.clone())));
-        if with_scores {
-            result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
-        }
-    }
-    Ok(RespValue::Array(Some(result)))
-}
-
-/// Redis ZUNION command - Return union without storing
-pub async fn zunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
-        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-    })?;
-    if numkeys == 0 || args.len() < 1 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-
-    let keys = &args[1..1 + numkeys];
-    let mut i = 1 + numkeys;
-    let mut weights: Vec<f64> = vec![1.0; numkeys];
-    let mut aggregate = "SUM".to_string();
-    let mut with_scores = false;
-
-    while i < args.len() {
-        let opt = bytes_to_string(&args[i])?.to_uppercase();
-        match opt.as_str() {
-            "WEIGHTS" => {
-                if i + numkeys >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                for j in 0..numkeys {
-                    let w = bytes_to_string(&args[i + 1 + j])?.parse::<f64>().map_err(|_| {
-                        CommandError::InvalidArgument("weight value is not a float".to_string())
-                    })?;
-                    if w.is_nan() {
-                        return Err(CommandError::InvalidArgument("weight value is not a float".to_string()));
-                    }
-                    weights[j] = w;
-                }
-                i += 1 + numkeys;
-            }
-            "AGGREGATE" => {
-                if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                aggregate = bytes_to_string(&args[i + 1])?.to_uppercase();
-                i += 2;
-            }
-            "WITHSCORES" => { with_scores = true; i += 1; }
-            _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
-        }
-    }
-
-    let mut member_scores: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
-    for (idx, key) in keys.iter().enumerate() {
-        if let Some(set) = load_sorted_set(engine, key).await? {
-            for (score, member) in &set {
-                let weighted = *score * weights[idx];
+        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+            for (score, member) in &set.entries {
+                let weighted = score.0 * weights[idx];
                 member_scores.entry(member.clone())
-                    .and_modify(|e| {
-                        *e = match aggregate.as_str() {
-                            "SUM" => *e + weighted,
-                            "MIN" => e.min(weighted),
-                            "MAX" => e.max(weighted),
-                            _ => *e + weighted,
-                        };
-                    })
+                    .and_modify(|e| { *e = aggregate_scores(*e, weighted, &aggregate); })
                     .or_insert(weighted);
             }
         }
     }
-
-    let mut result_set: SortedSet = member_scores.into_iter()
-        .map(|(member, score)| (score, member))
-        .collect();
-    result_set.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
-
-    let mut result = Vec::new();
-    for (score, member) in &result_set {
-        result.push(RespValue::BulkString(Some(member.clone())));
-        if with_scores {
-            result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
-        }
-    }
-    Ok(RespValue::Array(Some(result)))
+    let mut result_ss = SortedSetData::new();
+    for (member, score) in member_scores { result_ss.insert(score, member); }
+    let count = result_ss.len() as i64;
+    engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
+        let s = serialize_ss(&result_ss)?;
+        Ok((s, ()))
+    })?;
+    Ok(RespValue::Integer(count))
 }
 
-/// Redis ZDIFF command - Return difference without storing
-pub async fn zdiff(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+/// Redis ZINTER command
+pub async fn zinter(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
     let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || args.len() < 1 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
+    if numkeys == 0 || args.len() < 1 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[1..1 + numkeys].to_vec();
+    let (weights, aggregate, with_scores, _) = parse_weights_aggregate(args, 1 + numkeys, numkeys)?;
+
+    let mut sets: Vec<SortedSetData> = Vec::new();
+    for key in &keys {
+        match load_sorted_set_readonly(engine, key).await? {
+            Some(ss) => sets.push(ss),
+            None => return Ok(RespValue::Array(Some(vec![]))),
+        }
     }
+    let mut result_set = SortedSetData::new();
+    for (score, member) in &sets[0].entries {
+        let mut in_all = true;
+        let mut agg_score = score.0 * weights[0];
+        for (idx, set) in sets.iter().enumerate().skip(1) {
+            if let Some(s) = set.get_score(member) {
+                agg_score = aggregate_scores(agg_score, s * weights[idx], &aggregate);
+            } else { in_all = false; break; }
+        }
+        if in_all { result_set.insert(agg_score, member.clone()); }
+    }
+    let mut result = Vec::new();
+    for (score, member) in &result_set.entries {
+        result.push(RespValue::BulkString(Some(member.clone())));
+        if with_scores { result.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
+    }
+    Ok(RespValue::Array(Some(result)))
+}
 
-    let keys = &args[1..1 + numkeys];
-    let with_scores = args.len() > 1 + numkeys && bytes_to_string(&args[1 + numkeys])?.to_uppercase() == "WITHSCORES";
+/// Redis ZUNION command
+pub async fn zunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
+    let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    if numkeys == 0 || args.len() < 1 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[1..1 + numkeys].to_vec();
+    let (weights, aggregate, with_scores, _) = parse_weights_aggregate(args, 1 + numkeys, numkeys)?;
 
-    let first_set = match load_sorted_set(engine, &keys[0]).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    // Collect members from other sets
-    let mut other_members: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    for key in keys.iter().skip(1) {
-        if let Some(set) = load_sorted_set(engine, key).await? {
-            for (_, member) in &set {
-                other_members.insert(member.clone());
+    let mut member_scores: HashMap<Vec<u8>, f64> = HashMap::new();
+    for (idx, key) in keys.iter().enumerate() {
+        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+            for (score, member) in &set.entries {
+                let weighted = score.0 * weights[idx];
+                member_scores.entry(member.clone())
+                    .and_modify(|e| { *e = aggregate_scores(*e, weighted, &aggregate); })
+                    .or_insert(weighted);
             }
         }
     }
-
+    let mut result_set = SortedSetData::new();
+    for (member, score) in member_scores { result_set.insert(score, member); }
     let mut result = Vec::new();
-    for (score, member) in &first_set {
+    for (score, member) in &result_set.entries {
+        result.push(RespValue::BulkString(Some(member.clone())));
+        if with_scores { result.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
+    }
+    Ok(RespValue::Array(Some(result)))
+}
+
+/// Redis ZDIFF command
+pub async fn zdiff(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
+    let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    if numkeys == 0 || args.len() < 1 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[1..1 + numkeys].to_vec();
+    let with_scores = args.len() > 1 + numkeys && bytes_to_string(&args[1 + numkeys])?.to_uppercase() == "WITHSCORES";
+
+    let first_set = match load_sorted_set_readonly(engine, &keys[0]).await? {
+        Some(ss) => ss,
+        None => return Ok(RespValue::Array(Some(vec![]))),
+    };
+    let mut other_members: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for key in keys.iter().skip(1) {
+        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+            for (_, member) in &set.entries { other_members.insert(member.clone()); }
+        }
+    }
+    let mut result = Vec::new();
+    for (score, member) in &first_set.entries {
         if !other_members.contains(member) {
             result.push(RespValue::BulkString(Some(member.clone())));
-            if with_scores {
-                result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
-            }
+            if with_scores { result.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
         }
     }
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZDIFFSTORE command - Store difference of sorted sets
+/// Redis ZDIFFSTORE command
 pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let dest = &args[0];
     let numkeys = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || args.len() < 2 + numkeys {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-
-    let keys = &args[2..2 + numkeys];
-    let first_set = match load_sorted_set(engine, &keys[0]).await? {
+    if numkeys == 0 || args.len() < 2 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
+    let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
+    let first_set = match load_sorted_set_readonly(engine, &keys[0]).await? {
         Some(ss) => ss,
         None => {
-            save_sorted_set(engine, dest, &Vec::new()).await?;
+            engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((None, ())))?;
             return Ok(RespValue::Integer(0));
         }
     };
-
     let mut other_members: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     for key in keys.iter().skip(1) {
-        if let Some(set) = load_sorted_set(engine, key).await? {
-            for (_, member) in &set {
-                other_members.insert(member.clone());
-            }
+        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+            for (_, member) in &set.entries { other_members.insert(member.clone()); }
         }
     }
-
-    let result: SortedSet = first_set.into_iter()
-        .filter(|(_, member)| !other_members.contains(member))
-        .collect();
-    let count = result.len() as i64;
-    save_sorted_set(engine, dest, &result).await?;
+    let mut result_ss = SortedSetData::new();
+    for (score, member) in &first_set.entries {
+        if !other_members.contains(member) { result_ss.insert(score.0, member.clone()); }
+    }
+    let count = result_ss.len() as i64;
+    engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
+        let s = serialize_ss(&result_ss)?;
+        Ok((s, ()))
+    })?;
     Ok(RespValue::Integer(count))
 }
 
-/// Redis ZPOPMIN command - Remove and return members with lowest scores
+/// Redis ZPOPMIN command
 pub async fn zpopmin(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.is_empty() || args.len() > 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.is_empty() || args.len() > 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let count = if args.len() == 2 {
         bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?
-    } else {
-        1
-    };
+    } else { 1 };
 
-    let mut sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let take = count.min(sorted_set.len());
-    let popped: Vec<(f64, Vec<u8>)> = sorted_set.drain(..take).collect();
-    save_sorted_set(engine, key, &sorted_set).await?;
-
-    let mut result = Vec::with_capacity(take * 2);
-    for (score, member) in popped {
-        result.push(RespValue::BulkString(Some(member)));
-        result.push(RespValue::BulkString(Some(format_score(score).into_bytes())));
-    }
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, Vec::new())); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((None, Vec::new())); }
+        let take = count.min(ss.len());
+        let mut popped = Vec::with_capacity(take * 2);
+        for _ in 0..take {
+            if let Some((score, member)) = ss.entries.iter().next().cloned() {
+                ss.entries.remove(&(score, member.clone()));
+                ss.scores.remove(&member);
+                popped.push(RespValue::BulkString(Some(member)));
+                popped.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
+            }
+        }
+        let s = serialize_ss(&ss)?;
+        Ok((s, popped))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZPOPMAX command - Remove and return members with highest scores
+/// Redis ZPOPMAX command
 pub async fn zpopmax(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.is_empty() || args.len() > 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.is_empty() || args.len() > 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let count = if args.len() == 2 {
         bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?
-    } else {
-        1
-    };
+    } else { 1 };
 
-    let mut sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
-
-    let take = count.min(sorted_set.len());
-    let start = sorted_set.len() - take;
-    let popped: Vec<(f64, Vec<u8>)> = sorted_set.drain(start..).collect();
-    save_sorted_set(engine, key, &sorted_set).await?;
-
-    let mut result = Vec::with_capacity(take * 2);
-    for (score, member) in popped.into_iter().rev() {
-        result.push(RespValue::BulkString(Some(member)));
-        result.push(RespValue::BulkString(Some(format_score(score).into_bytes())));
-    }
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok((None, Vec::new())); }
+        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((None, Vec::new())); }
+        let take = count.min(ss.len());
+        let mut popped = Vec::with_capacity(take * 2);
+        for _ in 0..take {
+            if let Some((score, member)) = ss.entries.iter().next_back().cloned() {
+                ss.entries.remove(&(score, member.clone()));
+                ss.scores.remove(&member);
+                popped.push(RespValue::BulkString(Some(member)));
+                popped.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
+            }
+        }
+        let s = serialize_ss(&ss)?;
+        Ok((s, popped))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -1524,75 +1048,48 @@ async fn blocking_zpop(
     pop_min: bool,
     blocking_mgr: &BlockingManager,
 ) -> CommandResult {
-    // Try immediate pop first
     for key in keys {
-        if let Some(ss) = load_sorted_set(engine, key).await? {
+        if let Some(ss) = load_sorted_set_readonly(engine, key).await? {
             if !ss.is_empty() {
                 let pop_args = vec![key.clone()];
-                let result = if pop_min {
-                    zpopmin(engine, &pop_args).await?
-                } else {
-                    zpopmax(engine, &pop_args).await?
-                };
+                let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
                 if let RespValue::Array(Some(ref items)) = result {
                     if items.len() >= 2 {
                         return Ok(RespValue::Array(Some(vec![
                             RespValue::BulkString(Some(key.clone())),
-                            items[0].clone(),
-                            items[1].clone(),
+                            items[0].clone(), items[1].clone(),
                         ])));
                     }
                 }
             }
         }
     }
-
-    let deadline = if timeout_secs > 0.0 {
-        Some(Instant::now() + Duration::from_secs_f64(timeout_secs))
-    } else {
-        None
-    };
-
+    let deadline = if timeout_secs > 0.0 { Some(Instant::now() + Duration::from_secs_f64(timeout_secs)) } else { None };
     loop {
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
-
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
         for key in keys {
-            if let Some(ss) = load_sorted_set(engine, key).await? {
+            if let Some(ss) = load_sorted_set_readonly(engine, key).await? {
                 if !ss.is_empty() {
                     let pop_args = vec![key.clone()];
-                    let result = if pop_min {
-                        zpopmin(engine, &pop_args).await?
-                    } else {
-                        zpopmax(engine, &pop_args).await?
-                    };
+                    let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
                     if let RespValue::Array(Some(ref items)) = result {
                         if items.len() >= 2 {
                             return Ok(RespValue::Array(Some(vec![
                                 RespValue::BulkString(Some(key.clone())),
-                                items[0].clone(),
-                                items[1].clone(),
+                                items[0].clone(), items[1].clone(),
                             ])));
                         }
                     }
                 }
             }
         }
-
         let futs: Vec<_> = receivers.into_iter()
             .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
             .collect();
-
-        if futs.is_empty() {
-            return Ok(RespValue::Array(None));
-        }
-
+        if futs.is_empty() { return Ok(RespValue::Array(None)); }
         if let Some(deadline) = deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(RespValue::Array(None));
-            }
+            if remaining.is_zero() { return Ok(RespValue::Array(None)); }
             if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
                 return Ok(RespValue::Array(None));
             }
@@ -1602,62 +1099,51 @@ async fn blocking_zpop(
     }
 }
 
-/// Redis BZPOPMIN command - Blocking pop of member with lowest score
+/// Redis BZPOPMIN command
 pub async fn bzpopmin(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let timeout_str = bytes_to_string(args.last().unwrap())?;
-    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
+    let timeout_secs = bytes_to_string(args.last().unwrap())?.parse::<f64>().map_err(|_| {
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
-    if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
-    }
-    let keys = &args[..args.len() - 1];
-    blocking_zpop(engine, keys, timeout_secs, true, blocking_mgr).await
+    if timeout_secs < 0.0 { return Err(CommandError::InvalidArgument("timeout is negative".to_string())); }
+    blocking_zpop(engine, &args[..args.len() - 1], timeout_secs, true, blocking_mgr).await
 }
 
-/// Redis BZPOPMAX command - Blocking pop of member with highest score
+/// Redis BZPOPMAX command
 pub async fn bzpopmax(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let timeout_str = bytes_to_string(args.last().unwrap())?;
-    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
+    let timeout_secs = bytes_to_string(args.last().unwrap())?.parse::<f64>().map_err(|_| {
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
-    if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
-    }
-    let keys = &args[..args.len() - 1];
-    blocking_zpop(engine, keys, timeout_secs, false, blocking_mgr).await
+    if timeout_secs < 0.0 { return Err(CommandError::InvalidArgument("timeout is negative".to_string())); }
+    blocking_zpop(engine, &args[..args.len() - 1], timeout_secs, false, blocking_mgr).await
 }
 
-/// Redis ZRANDMEMBER command - Return random members
+/// Redis ZRANDMEMBER command
 pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.is_empty() || args.len() > 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.is_empty() || args.len() > 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
 
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => {
-            if args.len() == 1 {
-                return Ok(RespValue::BulkString(None));
-            }
-            return Ok(RespValue::Array(Some(vec![])));
-        }
-    };
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        // Return (preserved, (is_empty, ss_entries_as_vec)) so we can work with it outside
+        let entries: Vec<(f64, Vec<u8>)> = ss.entries.iter().map(|(s, m)| (s.0, m.clone())).collect();
+        Ok((preserved, entries))
+    })?;
+
+    let entries = result;
+    if entries.is_empty() {
+        if args.len() == 1 { return Ok(RespValue::BulkString(None)); }
+        return Ok(RespValue::Array(Some(vec![])));
+    }
 
     if args.len() == 1 {
-        // Return single random member
         let idx = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .subsec_nanos() as usize) % sorted_set.len();
-        return Ok(RespValue::BulkString(Some(sorted_set[idx].1.clone())));
+            .subsec_nanos() as usize) % entries.len();
+        return Ok(RespValue::BulkString(Some(entries[idx].1.clone())));
     }
 
     let count_val = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
@@ -1665,17 +1151,13 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     })?;
     let with_scores = args.len() == 3 && bytes_to_string(&args[2])?.to_uppercase() == "WITHSCORES";
 
-    let mut result = Vec::new();
+    let mut output = Vec::new();
     if count_val > 0 {
-        // Unique random members, up to count or set size
-        let count = (count_val as usize).min(sorted_set.len());
-        // Simple selection: take first `count` after a pseudo-random shuffle
+        let count = (count_val as usize).min(entries.len());
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as usize;
-        let mut indices: Vec<usize> = (0..sorted_set.len()).collect();
-        // Fisher-Yates with simple PRNG
+            .unwrap_or_default().subsec_nanos() as usize;
+        let mut indices: Vec<usize> = (0..entries.len()).collect();
         let mut rng = seed;
         for i in (1..indices.len()).rev() {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1683,194 +1165,140 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             indices.swap(i, j);
         }
         for &idx in indices.iter().take(count) {
-            result.push(RespValue::BulkString(Some(sorted_set[idx].1.clone())));
-            if with_scores {
-                result.push(RespValue::BulkString(Some(format_score(sorted_set[idx].0).into_bytes())));
-            }
+            output.push(RespValue::BulkString(Some(entries[idx].1.clone())));
+            if with_scores { output.push(RespValue::BulkString(Some(format_score(entries[idx].0).into_bytes()))); }
         }
     } else if count_val < 0 {
-        // Allow duplicates
         let count = (-count_val) as usize;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as usize;
+            .unwrap_or_default().subsec_nanos() as usize;
         let mut rng = seed;
         for _ in 0..count {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let idx = rng % sorted_set.len();
-            result.push(RespValue::BulkString(Some(sorted_set[idx].1.clone())));
-            if with_scores {
-                result.push(RespValue::BulkString(Some(format_score(sorted_set[idx].0).into_bytes())));
-            }
+            let idx = rng % entries.len();
+            output.push(RespValue::BulkString(Some(entries[idx].1.clone())));
+            if with_scores { output.push(RespValue::BulkString(Some(format_score(entries[idx].0).into_bytes()))); }
         }
     }
-    Ok(RespValue::Array(Some(result)))
+    Ok(RespValue::Array(Some(output)))
 }
 
-/// Redis ZMSCORE command - Get scores of multiple members
+/// Redis ZMSCORE command
 pub async fn zmscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let members = &args[1..];
-
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => {
-            let result: Vec<RespValue> = members.iter().map(|_| RespValue::BulkString(None)).collect();
-            return Ok(RespValue::Array(Some(result)));
-        }
-    };
-
-    let result: Vec<RespValue> = members.iter().map(|member| {
-        match sorted_set.iter().find(|(_, m)| m == member) {
-            Some((score, _)) => RespValue::BulkString(Some(format_score(*score).into_bytes())),
-            None => RespValue::BulkString(None),
-        }
-    }).collect();
+    let members: Vec<Vec<u8>> = args[1..].to_vec();
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let scores: Vec<RespValue> = members.iter().map(|member| {
+            match ss.get_score(member) {
+                Some(score) => RespValue::BulkString(Some(format_score(score).into_bytes())),
+                None => RespValue::BulkString(None),
+            }
+        }).collect();
+        Ok((preserved, scores))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
-/// Redis ZMPOP command - Pop from multiple sorted sets
+/// Redis ZMPOP command
 pub async fn zmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let numkeys = bytes_to_string(&args[0])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || args.len() < 1 + numkeys + 1 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-
+    if numkeys == 0 || args.len() < 1 + numkeys + 1 { return Err(CommandError::WrongNumberOfArguments); }
     let keys = &args[1..1 + numkeys];
     let direction = bytes_to_string(&args[1 + numkeys])?.to_uppercase();
     if !matches!(direction.as_str(), "MIN" | "MAX") {
         return Err(CommandError::InvalidArgument("syntax error".to_string()));
     }
-
     let count = if args.len() > 2 + numkeys {
         let count_opt = bytes_to_string(&args[2 + numkeys])?.to_uppercase();
         if count_opt == "COUNT" {
-            if args.len() <= 3 + numkeys {
-                return Err(CommandError::WrongNumberOfArguments);
-            }
+            if args.len() <= 3 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
             bytes_to_string(&args[3 + numkeys])?.parse::<usize>().map_err(|_| {
                 CommandError::InvalidArgument("value is not an integer or out of range".to_string())
             })?
-        } else {
-            1
-        }
-    } else {
-        1
-    };
+        } else { 1 }
+    } else { 1 };
 
     for key in keys {
-        let mut sorted_set = match load_sorted_set(engine, key).await? {
-            Some(ss) if !ss.is_empty() => ss,
-            _ => continue,
-        };
+        let pop_result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+            if existing.is_none() { return Ok((None, None)); }
+            let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+            if ss.is_empty() { return Ok((None, None)); }
+            let take = count.min(ss.len());
+            let mut elements = Vec::with_capacity(take * 2);
+            for _ in 0..take {
+                let entry = if direction == "MIN" {
+                    ss.entries.iter().next().cloned()
+                } else {
+                    ss.entries.iter().next_back().cloned()
+                };
+                if let Some((score, member)) = entry {
+                    ss.entries.remove(&(score, member.clone()));
+                    ss.scores.remove(&member);
+                    elements.push(RespValue::BulkString(Some(member)));
+                    elements.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
+                }
+            }
+            let s = serialize_ss(&ss)?;
+            Ok((s, Some(elements)))
+        })?;
 
-        let take = count.min(sorted_set.len());
-        let popped: Vec<(f64, Vec<u8>)> = if direction == "MIN" {
-            sorted_set.drain(..take).collect()
-        } else {
-            let start = sorted_set.len() - take;
-            let mut p: Vec<(f64, Vec<u8>)> = sorted_set.drain(start..).collect();
-            p.reverse();
-            p
-        };
-        save_sorted_set(engine, key, &sorted_set).await?;
-
-        let mut elements = Vec::with_capacity(take * 2);
-        for (score, member) in popped {
-            elements.push(RespValue::BulkString(Some(member)));
-            elements.push(RespValue::BulkString(Some(format_score(score).into_bytes())));
+        if let Some(elements) = pop_result {
+            return Ok(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(key.clone())),
+                RespValue::Array(Some(elements)),
+            ])));
         }
-        return Ok(RespValue::Array(Some(vec![
-            RespValue::BulkString(Some(key.clone())),
-            RespValue::Array(Some(elements)),
-        ])));
     }
-
     Ok(RespValue::Array(None))
 }
 
-/// Redis BZMPOP command - Blocking ZMPOP
+/// Redis BZMPOP command
 pub async fn bzmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
-    if args.len() < 4 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
-    let timeout_str = bytes_to_string(&args[0])?;
-    let timeout_secs = timeout_str.parse::<f64>().map_err(|_| {
+    if args.len() < 4 { return Err(CommandError::WrongNumberOfArguments); }
+    let timeout_secs = bytes_to_string(&args[0])?.parse::<f64>().map_err(|_| {
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
-    if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
-    }
-
+    if timeout_secs < 0.0 { return Err(CommandError::InvalidArgument("timeout is negative".to_string())); }
     let zmpop_args = &args[1..];
 
-    // Try immediately
     let result = zmpop(engine, zmpop_args).await?;
-    if result != RespValue::Array(None) {
-        return Ok(result);
-    }
+    if result != RespValue::Array(None) { return Ok(result); }
 
-    // Parse keys for subscription
     let numkeys = bytes_to_string(&zmpop_args[0])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    if numkeys == 0 || zmpop_args.len() < 1 + numkeys + 1 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if numkeys == 0 || zmpop_args.len() < 1 + numkeys + 1 { return Err(CommandError::WrongNumberOfArguments); }
     let keys = &zmpop_args[1..1 + numkeys];
 
-    let deadline = if timeout_secs > 0.0 {
-        Some(Instant::now() + Duration::from_secs_f64(timeout_secs))
-    } else {
-        None
-    };
-
+    let deadline = if timeout_secs > 0.0 { Some(Instant::now() + Duration::from_secs_f64(timeout_secs)) } else { None };
     loop {
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
-
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
         let result = zmpop(engine, zmpop_args).await?;
-        if result != RespValue::Array(None) {
-            return Ok(result);
-        }
-
+        if result != RespValue::Array(None) { return Ok(result); }
         let futs: Vec<_> = receivers.into_iter()
             .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
             .collect();
-
-        if futs.is_empty() {
-            return Ok(RespValue::Array(None));
-        }
-
+        if futs.is_empty() { return Ok(RespValue::Array(None)); }
         if let Some(deadline) = deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(RespValue::Array(None));
-            }
+            if remaining.is_zero() { return Ok(RespValue::Array(None)); }
             if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
                 return Ok(RespValue::Array(None));
             }
-        } else {
-            let _ = select_all(futs).await;
-        }
+        } else { let _ = select_all(futs).await; }
     }
 }
 
-/// Redis ZRANGESTORE command - Store the result of ZRANGE into a destination key
+/// Redis ZRANGESTORE command
 pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 4 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 4 { return Err(CommandError::WrongNumberOfArguments); }
     let dst = &args[0];
     let src = &args[1];
     let min_str = bytes_to_string(&args[2])?;
@@ -1903,100 +1331,76 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     }
 
-    let sorted_set = match load_sorted_set(engine, src).await? {
+    let src_ss = match load_sorted_set_readonly(engine, src).await? {
         Some(ss) => ss,
         None => {
-            save_sorted_set(engine, dst, &Vec::new()).await?;
+            engine.atomic_modify(dst, RedisDataType::ZSet, |_| Ok((None, ())))?;
             return Ok(RespValue::Integer(0));
         }
     };
 
-    let result: SortedSet = if by_score {
-        let (min_score, min_excl) = if rev {
-            parse_score_bound(&max_str)?
+    let selected: Vec<(f64, Vec<u8>)> = if by_score {
+        let (min_score, min_excl) = if rev { parse_score_bound(&max_str)? } else { parse_score_bound(&min_str)? };
+        let (max_score, max_excl) = if rev { parse_score_bound(&min_str)? } else { parse_score_bound(&max_str)? };
+        let iter: Box<dyn Iterator<Item = &(OrderedFloat<f64>, Vec<u8>)>> = if rev {
+            Box::new(src_ss.entries.iter().rev())
         } else {
-            parse_score_bound(&min_str)?
+            Box::new(src_ss.entries.iter())
         };
-        let (max_score, max_excl) = if rev {
-            parse_score_bound(&min_str)?
-        } else {
-            parse_score_bound(&max_str)?
-        };
-        let iter: Box<dyn Iterator<Item = &(f64, Vec<u8>)>> = if rev {
-            Box::new(sorted_set.iter().rev())
-        } else {
-            Box::new(sorted_set.iter())
-        };
-        iter.filter(|(score, _)| {
-            let above = if min_excl { *score > min_score } else { *score >= min_score };
-            let below = if max_excl { *score < max_score } else { *score <= max_score };
-            above && below
-        })
-        .skip(limit_offset)
-        .take(limit_count.unwrap_or(usize::MAX))
-        .cloned()
-        .collect()
+        iter.filter(|(s, _)| score_in_range(s.0, min_score, min_excl, max_score, max_excl))
+            .skip(limit_offset).take(limit_count.unwrap_or(usize::MAX))
+            .map(|(s, m)| (s.0, m.clone())).collect()
     } else if by_lex {
         let min_bound = if rev { parse_lex_bound(&max_str)? } else { parse_lex_bound(&min_str)? };
         let max_bound = if rev { parse_lex_bound(&min_str)? } else { parse_lex_bound(&max_str)? };
-        let iter: Box<dyn Iterator<Item = &(f64, Vec<u8>)>> = if rev {
-            Box::new(sorted_set.iter().rev())
+        let iter: Box<dyn Iterator<Item = &(OrderedFloat<f64>, Vec<u8>)>> = if rev {
+            Box::new(src_ss.entries.iter().rev())
         } else {
-            Box::new(sorted_set.iter())
+            Box::new(src_ss.entries.iter())
         };
         iter.filter(|(_, member)| in_lex_range(member, &min_bound, &max_bound))
-            .skip(limit_offset)
-            .take(limit_count.unwrap_or(usize::MAX))
-            .cloned()
-            .collect()
+            .skip(limit_offset).take(limit_count.unwrap_or(usize::MAX))
+            .map(|(s, m)| (s.0, m.clone())).collect()
     } else {
-        // By rank (index)
-        let len = sorted_set.len() as i64;
+        let len = src_ss.len();
         let start = min_str.parse::<i64>().map_err(|_| {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
         let stop = max_str.parse::<i64>().map_err(|_| {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
-
-        if rev {
-            let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
-            let stop_idx = if stop < 0 { (len + stop).max(0) as usize } else { stop.min(len - 1) as usize };
-            if start_idx <= stop_idx && start_idx < sorted_set.len() {
-                let actual_stop = stop_idx.min(sorted_set.len() - 1);
-                sorted_set[start_idx..=actual_stop].iter().rev().cloned().collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
-            let stop_idx = if stop < 0 { (len + stop).max(0) as usize } else { stop.min(len - 1) as usize };
-            if start_idx <= stop_idx && start_idx < sorted_set.len() {
-                let actual_stop = stop_idx.min(sorted_set.len() - 1);
-                sorted_set[start_idx..=actual_stop].to_vec()
-            } else {
-                Vec::new()
+        match normalize_indices(start, stop, len) {
+            None => Vec::new(),
+            Some((si, ei)) => {
+                let rlen = ei - si + 1;
+                if rev {
+                    src_ss.entries.iter().skip(si).take(rlen).rev().map(|(s, m)| (s.0, m.clone())).collect()
+                } else {
+                    src_ss.entries.iter().skip(si).take(rlen).map(|(s, m)| (s.0, m.clone())).collect()
+                }
             }
         }
     };
 
-    let count = result.len() as i64;
-    save_sorted_set(engine, dst, &result).await?;
+    let mut result_ss = SortedSetData::new();
+    for (score, member) in &selected { result_ss.insert(*score, member.clone()); }
+    let count = result_ss.len() as i64;
+    engine.atomic_modify(dst, RedisDataType::ZSet, |_| {
+        let s = serialize_ss(&result_ss)?;
+        Ok((s, ()))
+    })?;
     Ok(RespValue::Integer(count))
 }
 
-/// Redis ZSCAN command - Incrementally iterate sorted set members
+/// Redis ZSCAN command
 pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let cursor = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-
     let mut pattern: Option<String> = None;
-    let mut count: usize = 10;
+    let mut scan_count: usize = 10;
     let mut i = 2;
     while i < args.len() {
         let opt = bytes_to_string(&args[i])?.to_uppercase();
@@ -2008,7 +1412,7 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
             "COUNT" => {
                 if i + 1 >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
-                count = bytes_to_string(&args[i + 1])?.parse::<usize>().map_err(|_| {
+                scan_count = bytes_to_string(&args[i + 1])?.parse::<usize>().map_err(|_| {
                     CommandError::InvalidArgument("value is not an integer or out of range".to_string())
                 })?;
                 i += 2;
@@ -2017,89 +1421,46 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => {
-            return Ok(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(b"0".to_vec())),
-                RespValue::Array(Some(vec![])),
-            ])));
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() {
+            return Ok((preserved, (0usize, Vec::new())));
         }
-    };
-
-    let mut elements = Vec::new();
-    let mut new_cursor = 0usize;
-    let mut scanned = 0;
-
-    for (idx, (score, member)) in sorted_set.iter().enumerate().skip(cursor) {
-        let member_str = String::from_utf8_lossy(member);
-        let matches = match &pattern {
-            Some(pat) => glob_match(pat, &member_str),
-            None => true,
-        };
-        if matches {
-            elements.push(RespValue::BulkString(Some(member.clone())));
-            elements.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
-        }
-        scanned += 1;
-        if scanned >= count {
-            new_cursor = idx + 1;
-            if new_cursor >= sorted_set.len() {
-                new_cursor = 0;
+        let mut elements = Vec::new();
+        let mut new_cursor = 0usize;
+        let mut scanned = 0;
+        for (idx, (score, member)) in ss.entries.iter().enumerate().skip(cursor) {
+            let member_str = String::from_utf8_lossy(member);
+            let matches = match &pattern {
+                Some(pat) => glob_match(pat, &member_str),
+                None => true,
+            };
+            if matches {
+                elements.push(RespValue::BulkString(Some(member.clone())));
+                elements.push(RespValue::BulkString(Some(format_score(score.0).into_bytes())));
             }
-            break;
+            scanned += 1;
+            if scanned >= scan_count {
+                new_cursor = idx + 1;
+                if new_cursor >= ss.len() { new_cursor = 0; }
+                break;
+            }
         }
-    }
+        if scanned < scan_count { new_cursor = 0; }
+        Ok((preserved, (new_cursor, elements)))
+    })?;
 
-    if scanned < count {
-        new_cursor = 0; // Scan complete
-    }
-
+    let (new_cursor, elements) = result;
     Ok(RespValue::Array(Some(vec![
         RespValue::BulkString(Some(new_cursor.to_string().into_bytes())),
         RespValue::Array(Some(elements)),
     ])))
 }
 
-/// Simple glob pattern matching (supports * and ?) using O(1) memory iterative algorithm
-fn glob_match(pattern: &str, s: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    let (plen, slen) = (p.len(), s.len());
-    let mut pi = 0;
-    let mut si = 0;
-    let mut star_pi: Option<usize> = None;
-    let mut star_si: usize = 0;
-
-    while si < slen {
-        if pi < plen && (p[pi] == '?' || p[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if pi < plen && p[pi] == '*' {
-            star_pi = Some(pi);
-            star_si = si;
-            pi += 1;
-        } else if let Some(sp) = star_pi {
-            pi = sp + 1;
-            star_si += 1;
-            si = star_si;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < plen && p[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == plen
-}
-
-/// Redis unified ZRANGE command (Redis 6.2+) with BYSCORE, BYLEX, REV, LIMIT options
+/// Redis unified ZRANGE command (Redis 6.2+)
 pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+    if args.len() < 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let min_str = bytes_to_string(&args[1])?;
     let max_str = bytes_to_string(&args[2])?;
@@ -2133,89 +1494,81 @@ pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         }
     }
 
-    // Detect if unified options are used; if not, fall back to original ZRANGE behavior
+    // Fall back to original ZRANGE for plain index-based
     if !by_score && !by_lex && !rev && limit_count.is_none() {
-        // Original ZRANGE behavior (index-based)
         let mut orig_args = vec![args[0].clone(), args[1].clone(), args[2].clone()];
-        if with_scores {
-            orig_args.push(b"WITHSCORES".to_vec());
-        }
+        if with_scores { orig_args.push(b"WITHSCORES".to_vec()); }
         return zrange(engine, &orig_args).await;
     }
 
-    let sorted_set = match load_sorted_set(engine, key).await? {
-        Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
+        let preserved = existing.as_deref().map(|v| v.to_vec());
+        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok((preserved, Vec::new())); }
 
-    let selected: Vec<(f64, Vec<u8>)> = if by_score {
-        let (min_score, min_excl) = if rev {
-            parse_score_bound(&max_str)?
-        } else {
-            parse_score_bound(&min_str)?
-        };
-        let (max_score, max_excl) = if rev {
-            parse_score_bound(&min_str)?
-        } else {
-            parse_score_bound(&max_str)?
-        };
-        let iter: Box<dyn Iterator<Item = &(f64, Vec<u8>)>> = if rev {
-            Box::new(sorted_set.iter().rev())
-        } else {
-            Box::new(sorted_set.iter())
-        };
-        iter.filter(|(score, _)| {
-            let above = if min_excl { *score > min_score } else { *score >= min_score };
-            let below = if max_excl { *score < max_score } else { *score <= max_score };
-            above && below
-        })
-        .skip(limit_offset)
-        .take(limit_count.unwrap_or(usize::MAX))
-        .cloned()
-        .collect()
-    } else if by_lex {
-        let min_bound = if rev { parse_lex_bound(&max_str)? } else { parse_lex_bound(&min_str)? };
-        let max_bound = if rev { parse_lex_bound(&min_str)? } else { parse_lex_bound(&max_str)? };
-        let iter: Box<dyn Iterator<Item = &(f64, Vec<u8>)>> = if rev {
-            Box::new(sorted_set.iter().rev())
-        } else {
-            Box::new(sorted_set.iter())
-        };
-        iter.filter(|(_, member)| in_lex_range(member, &min_bound, &max_bound))
-            .skip(limit_offset)
-            .take(limit_count.unwrap_or(usize::MAX))
-            .cloned()
-            .collect()
-    } else {
-        // REV with index-based
-        let len = sorted_set.len() as i64;
-        let start = min_str.parse::<i64>().map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
-        let stop = max_str.parse::<i64>().map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
-        let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
-        let stop_idx = if stop < 0 { (len + stop).max(0) as usize } else { stop.min(len - 1) as usize };
-        if start_idx <= stop_idx && start_idx < sorted_set.len() {
-            let actual_stop = stop_idx.min(sorted_set.len() - 1);
-            if rev {
-                sorted_set[start_idx..=actual_stop].iter().rev().cloned().collect()
+        let selected: Vec<(f64, Vec<u8>)> = if by_score {
+            let (min_score, min_excl) = if rev {
+                parse_score_bound(&max_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
             } else {
-                sorted_set[start_idx..=actual_stop].to_vec()
-            }
+                parse_score_bound(&min_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            };
+            let (max_score, max_excl) = if rev {
+                parse_score_bound(&min_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            } else {
+                parse_score_bound(&max_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            };
+            let iter: Box<dyn Iterator<Item = &(OrderedFloat<f64>, Vec<u8>)>> = if rev {
+                Box::new(ss.entries.iter().rev())
+            } else {
+                Box::new(ss.entries.iter())
+            };
+            iter.filter(|(s, _)| score_in_range(s.0, min_score, min_excl, max_score, max_excl))
+                .skip(limit_offset).take(limit_count.unwrap_or(usize::MAX))
+                .map(|(s, m)| (s.0, m.clone())).collect()
+        } else if by_lex {
+            let min_bound = if rev {
+                parse_lex_bound(&max_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            } else {
+                parse_lex_bound(&min_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            };
+            let max_bound = if rev {
+                parse_lex_bound(&min_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            } else {
+                parse_lex_bound(&max_str).map_err(|e| StorageError::InternalError(format!("{}", e)))?
+            };
+            let iter: Box<dyn Iterator<Item = &(OrderedFloat<f64>, Vec<u8>)>> = if rev {
+                Box::new(ss.entries.iter().rev())
+            } else {
+                Box::new(ss.entries.iter())
+            };
+            iter.filter(|(_, member)| in_lex_range(member, &min_bound, &max_bound))
+                .skip(limit_offset).take(limit_count.unwrap_or(usize::MAX))
+                .map(|(s, m)| (s.0, m.clone())).collect()
         } else {
-            Vec::new()
-        }
-    };
+            // REV with index-based
+            let len = ss.len();
+            let start = min_str.parse::<i64>().map_err(|_| StorageError::InternalError("not an integer".to_string()))?;
+            let stop = max_str.parse::<i64>().map_err(|_| StorageError::InternalError("not an integer".to_string()))?;
+            match normalize_indices(start, stop, len) {
+                None => Vec::new(),
+                Some((si, ei)) => {
+                    let rlen = ei - si + 1;
+                    if rev {
+                        ss.entries.iter().skip(si).take(rlen).rev().map(|(s, m)| (s.0, m.clone())).collect()
+                    } else {
+                        ss.entries.iter().skip(si).take(rlen).map(|(s, m)| (s.0, m.clone())).collect()
+                    }
+                }
+            }
+        };
 
-    let mut result = Vec::new();
-    for (score, member) in &selected {
-        result.push(RespValue::BulkString(Some(member.clone())));
-        if with_scores {
-            result.push(RespValue::BulkString(Some(format_score(*score).into_bytes())));
+        let mut output = Vec::new();
+        for (score, member) in &selected {
+            output.push(RespValue::BulkString(Some(member.clone())));
+            if with_scores { output.push(RespValue::BulkString(Some(format_score(*score).into_bytes()))); }
         }
-    }
+        Ok((preserved, output))
+    })?;
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -2262,22 +1615,16 @@ mod tests {
     async fn test_zrangebyscore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d"), (5.0, b"e")]).await;
-
-        // Basic range
         let result = zrangebyscore(&engine, &[b"zs".to_vec(), b"2".to_vec(), b"4".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
             assert_eq!(items[2], RespValue::BulkString(Some(b"d".to_vec())));
         } else { panic!("Expected array"); }
-
-        // Exclusive bounds
         let result = zrangebyscore(&engine, &[b"zs".to_vec(), b"(1".to_vec(), b"(5".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 3); // b, c, d
+            assert_eq!(items.len(), 3);
         } else { panic!("Expected array"); }
-
-        // With LIMIT
         let result = zrangebyscore(&engine, &[
             b"zs".to_vec(), b"-inf".to_vec(), b"+inf".to_vec(),
             b"LIMIT".to_vec(), b"1".to_vec(), b"2".to_vec(),
@@ -2286,16 +1633,12 @@ mod tests {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
         } else { panic!("Expected array"); }
-
-        // WITHSCORES
         let result = zrangebyscore(&engine, &[
             b"zs".to_vec(), b"1".to_vec(), b"2".to_vec(), b"WITHSCORES".to_vec(),
         ]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4);
         } else { panic!("Expected array"); }
-
-        // Nonexistent key
         let result = zrangebyscore(&engine, &[b"nokey".to_vec(), b"-inf".to_vec(), b"+inf".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
@@ -2304,7 +1647,6 @@ mod tests {
     async fn test_zrevrangebyscore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
         let result = zrevrangebyscore(&engine, &[b"zs".to_vec(), b"4".to_vec(), b"2".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
@@ -2317,20 +1659,15 @@ mod tests {
     async fn test_zrangebylex() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(0.0, b"a"), (0.0, b"b"), (0.0, b"c"), (0.0, b"d"), (0.0, b"e")]).await;
-
         let result = zrangebylex(&engine, &[b"zs".to_vec(), b"[b".to_vec(), b"[d".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
         } else { panic!("Expected array"); }
-
-        // Exclusive
         let result = zrangebylex(&engine, &[b"zs".to_vec(), b"(a".to_vec(), b"(d".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 2); // b, c
+            assert_eq!(items.len(), 2);
         } else { panic!("Expected array"); }
-
-        // Unbounded
         let result = zrangebylex(&engine, &[b"zs".to_vec(), b"-".to_vec(), b"+".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 5);
@@ -2341,7 +1678,6 @@ mod tests {
     async fn test_zrevrangebylex() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(0.0, b"a"), (0.0, b"b"), (0.0, b"c"), (0.0, b"d")]).await;
-
         let result = zrevrangebylex(&engine, &[b"zs".to_vec(), b"[d".to_vec(), b"[b".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
@@ -2353,10 +1689,8 @@ mod tests {
     async fn test_zremrangebyrank() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
         let result = zremrangebyrank(&engine, &[b"zs".to_vec(), b"1".to_vec(), b"2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let result = zrange(&engine, &[b"zs".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
@@ -2369,10 +1703,8 @@ mod tests {
     async fn test_zremrangebyscore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
         let result = zremrangebyscore(&engine, &[b"zs".to_vec(), b"2".to_vec(), b"3".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let card = zcard(&engine, &[b"zs".to_vec()]).await.unwrap();
         assert_eq!(card, RespValue::Integer(2));
     }
@@ -2381,10 +1713,8 @@ mod tests {
     async fn test_zremrangebylex() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(0.0, b"a"), (0.0, b"b"), (0.0, b"c"), (0.0, b"d")]).await;
-
         let result = zremrangebylex(&engine, &[b"zs".to_vec(), b"[b".to_vec(), b"[c".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let card = zcard(&engine, &[b"zs".to_vec()]).await.unwrap();
         assert_eq!(card, RespValue::Integer(2));
     }
@@ -2393,10 +1723,8 @@ mod tests {
     async fn test_zlexcount() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(0.0, b"a"), (0.0, b"b"), (0.0, b"c"), (0.0, b"d"), (0.0, b"e")]).await;
-
         let result = zlexcount(&engine, &[b"zs".to_vec(), b"[b".to_vec(), b"[d".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
-
         let result = zlexcount(&engine, &[b"zs".to_vec(), b"-".to_vec(), b"+".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(5));
     }
@@ -2405,7 +1733,6 @@ mod tests {
     async fn test_zrevrank() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zrevrank(&engine, &[b"zs".to_vec(), b"a".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
         let result = zrevrank(&engine, &[b"zs".to_vec(), b"c".to_vec()]).await.unwrap();
@@ -2419,12 +1746,10 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b"), (20.0, b"c"), (30.0, b"d")]).await;
-
         let result = zinterstore(&engine, &[
             b"out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(),
         ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let result = zrange(&engine, &[b"out".to_vec(), b"0".to_vec(), b"-1".to_vec(), b"WITHSCORES".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4);
@@ -2438,14 +1763,11 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"a"), (20.0, b"b")]).await;
-
         let result = zinterstore(&engine, &[
             b"out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(),
             b"WEIGHTS".to_vec(), b"2".to_vec(), b"3".to_vec(),
         ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
-        // a: 1*2 + 10*3 = 32, b: 2*2 + 20*3 = 64
         let result = zscore(&engine, &[b"out".to_vec(), b"a".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"32".to_vec())));
     }
@@ -2455,12 +1777,10 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b"), (20.0, b"c")]).await;
-
         let result = zunionstore(&engine, &[
             b"out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(),
         ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
-
         let result = zscore(&engine, &[b"out".to_vec(), b"b".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"12".to_vec())));
     }
@@ -2470,12 +1790,11 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b"), (20.0, b"c"), (30.0, b"d")]).await;
-
         let result = zinter(&engine, &[
             b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(), b"WITHSCORES".to_vec(),
         ]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 4); // b+score, c+score
+            assert_eq!(items.len(), 4);
         } else { panic!("Expected array"); }
     }
 
@@ -2484,12 +1803,11 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b"), (20.0, b"c")]).await;
-
         let result = zunion(&engine, &[
             b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(), b"WITHSCORES".to_vec(),
         ]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 6); // a, b, c with scores
+            assert_eq!(items.len(), 6);
         } else { panic!("Expected array"); }
     }
 
@@ -2498,10 +1816,9 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b"), (20.0, b"d")]).await;
-
         let result = zdiff(&engine, &[b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 2); // a, c
+            assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"a".to_vec())));
             assert_eq!(items[1], RespValue::BulkString(Some(b"c".to_vec())));
         } else { panic!("Expected array"); }
@@ -2512,7 +1829,6 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"b")]).await;
-
         let result = zdiffstore(&engine, &[b"out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
     }
@@ -2521,21 +1837,16 @@ mod tests {
     async fn test_zpopmin() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zpopmin(&engine, &[b"zs".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"a".to_vec())));
             assert_eq!(items[1], RespValue::BulkString(Some(b"1".to_vec())));
         } else { panic!("Expected array"); }
-
-        // Pop 2
         let result = zpopmin(&engine, &[b"zs".to_vec(), b"2".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4);
         } else { panic!("Expected array"); }
-
-        // Empty
         let result = zpopmin(&engine, &[b"zs".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
@@ -2544,7 +1855,6 @@ mod tests {
     async fn test_zpopmax() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zpopmax(&engine, &[b"zs".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
@@ -2558,10 +1868,9 @@ mod tests {
         let engine = setup_engine().await;
         let blocking_mgr = BlockingManager::new();
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b")]).await;
-
         let result = bzpopmin(&engine, &[b"zs".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 3); // key, member, score
+            assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"zs".to_vec())));
             assert_eq!(items[1], RespValue::BulkString(Some(b"a".to_vec())));
             assert_eq!(items[2], RespValue::BulkString(Some(b"1".to_vec())));
@@ -2572,7 +1881,6 @@ mod tests {
     async fn test_bzpopmin_timeout() {
         let engine = setup_engine().await;
         let blocking_mgr = BlockingManager::new();
-
         let result = bzpopmin(&engine, &[b"emptykey".to_vec(), b"0.1".to_vec()], &blocking_mgr).await.unwrap();
         assert_eq!(result, RespValue::Array(None));
     }
@@ -2582,7 +1890,6 @@ mod tests {
         let engine = setup_engine().await;
         let blocking_mgr = BlockingManager::new();
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b")]).await;
-
         let result = bzpopmax(&engine, &[b"zs".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
@@ -2595,32 +1902,14 @@ mod tests {
     async fn test_zrandmember() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
-        // Single random member
         let result = zrandmember(&engine, &[b"zs".to_vec()]).await.unwrap();
-        if let RespValue::BulkString(Some(_)) = result {
-            // OK, got some member
-        } else { panic!("Expected bulk string"); }
-
-        // Positive count (unique)
+        if let RespValue::BulkString(Some(_)) = result {} else { panic!("Expected bulk string"); }
         let result = zrandmember(&engine, &[b"zs".to_vec(), b"2".to_vec()]).await.unwrap();
-        if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 2);
-        } else { panic!("Expected array"); }
-
-        // Negative count (with duplicates)
+        if let RespValue::Array(Some(items)) = result { assert_eq!(items.len(), 2); } else { panic!("Expected array"); }
         let result = zrandmember(&engine, &[b"zs".to_vec(), b"-5".to_vec()]).await.unwrap();
-        if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 5);
-        } else { panic!("Expected array"); }
-
-        // Count larger than set - returns all unique
+        if let RespValue::Array(Some(items)) = result { assert_eq!(items.len(), 5); } else { panic!("Expected array"); }
         let result = zrandmember(&engine, &[b"zs".to_vec(), b"10".to_vec()]).await.unwrap();
-        if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 3);
-        } else { panic!("Expected array"); }
-
-        // Nonexistent key
+        if let RespValue::Array(Some(items)) = result { assert_eq!(items.len(), 3); } else { panic!("Expected array"); }
         let result = zrandmember(&engine, &[b"nokey".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
@@ -2629,7 +1918,6 @@ mod tests {
     async fn test_zmscore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zmscore(&engine, &[b"zs".to_vec(), b"a".to_vec(), b"x".to_vec(), b"c".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
@@ -2643,22 +1931,17 @@ mod tests {
     async fn test_zmpop() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zmpop(&engine, &[b"1".to_vec(), b"zs1".to_vec(), b"MIN".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 2); // key, array of elements
+            assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"zs1".to_vec())));
         } else { panic!("Expected array"); }
-
-        // With COUNT
         let result = zmpop(&engine, &[
             b"1".to_vec(), b"zs1".to_vec(), b"MAX".to_vec(), b"COUNT".to_vec(), b"2".to_vec(),
         ]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
         } else { panic!("Expected array"); }
-
-        // Empty key
         let result = zmpop(&engine, &[b"1".to_vec(), b"emptykey".to_vec(), b"MIN".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Array(None));
     }
@@ -2668,7 +1951,6 @@ mod tests {
         let engine = setup_engine().await;
         let blocking_mgr = BlockingManager::new();
         add_members(&engine, b"zs1", &[(1.0, b"a"), (2.0, b"b")]).await;
-
         let result = bzmpop(&engine, &[
             b"1".to_vec(), b"1".to_vec(), b"zs1".to_vec(), b"MIN".to_vec(),
         ], &blocking_mgr).await.unwrap();
@@ -2681,7 +1963,6 @@ mod tests {
     async fn test_bzmpop_timeout() {
         let engine = setup_engine().await;
         let blocking_mgr = BlockingManager::new();
-
         let result = bzmpop(&engine, &[
             b"0.1".to_vec(), b"1".to_vec(), b"emptykey".to_vec(), b"MIN".to_vec(),
         ], &blocking_mgr).await.unwrap();
@@ -2692,18 +1973,13 @@ mod tests {
     async fn test_zrangestore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
-        // By rank
         let result = zrangestore(&engine, &[b"dst".to_vec(), b"zs".to_vec(), b"1".to_vec(), b"2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let result = zrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec(), b"WITHSCORES".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
         } else { panic!("Expected array"); }
-
-        // By score
         let result = zrangestore(&engine, &[
             b"dst2".to_vec(), b"zs".to_vec(), b"2".to_vec(), b"3".to_vec(), b"BYSCORE".to_vec(),
         ]).await.unwrap();
@@ -2714,25 +1990,19 @@ mod tests {
     async fn test_zscan() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"alpha"), (2.0, b"beta"), (3.0, b"gamma")]).await;
-
-        // Scan all
         let result = zscan(&engine, &[b"zs".to_vec(), b"0".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 2); // cursor + array
+            assert_eq!(items.len(), 2);
             if let RespValue::Array(Some(elements)) = &items[1] {
-                assert_eq!(elements.len(), 6); // 3 members * 2 (member+score)
+                assert_eq!(elements.len(), 6);
             } else { panic!("Expected inner array"); }
         } else { panic!("Expected array"); }
-
-        // Scan with MATCH
         let result = zscan(&engine, &[b"zs".to_vec(), b"0".to_vec(), b"MATCH".to_vec(), b"*eta".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::Array(Some(elements)) = &items[1] {
-                assert_eq!(elements.len(), 2); // beta + score
+                assert_eq!(elements.len(), 2);
             } else { panic!("Expected inner array"); }
         } else { panic!("Expected array"); }
-
-        // Nonexistent key
         let result = zscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items[0], RespValue::BulkString(Some(b"0".to_vec())));
@@ -2743,7 +2013,6 @@ mod tests {
     async fn test_zrange_unified_byscore() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
         let result = zrange_unified(&engine, &[
             b"zs".to_vec(), b"1".to_vec(), b"3".to_vec(), b"BYSCORE".to_vec(),
         ]).await.unwrap();
@@ -2751,8 +2020,6 @@ mod tests {
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"a".to_vec())));
         } else { panic!("Expected array"); }
-
-        // REV + BYSCORE
         let result = zrange_unified(&engine, &[
             b"zs".to_vec(), b"3".to_vec(), b"1".to_vec(), b"BYSCORE".to_vec(), b"REV".to_vec(),
         ]).await.unwrap();
@@ -2766,7 +2033,6 @@ mod tests {
     async fn test_zrange_unified_bylex() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(0.0, b"a"), (0.0, b"b"), (0.0, b"c"), (0.0, b"d")]).await;
-
         let result = zrange_unified(&engine, &[
             b"zs".to_vec(), b"[b".to_vec(), b"[d".to_vec(), b"BYLEX".to_vec(),
         ]).await.unwrap();
@@ -2779,7 +2045,6 @@ mod tests {
     async fn test_zrange_unified_rev() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zrange_unified(&engine, &[
             b"zs".to_vec(), b"0".to_vec(), b"-1".to_vec(), b"REV".to_vec(),
         ]).await.unwrap();
@@ -2794,7 +2059,6 @@ mod tests {
     async fn test_zrange_withscores_format() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.5, b"one"), (2.5, b"two"), (3.5, b"three")]).await;
-
         let result = zrange(&engine, &[b"zs".to_vec(), b"0".to_vec(), b"-1".to_vec(), b"WITHSCORES".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 6);
@@ -2834,8 +2098,6 @@ mod tests {
         let engine = setup_engine().await;
         add_members(&engine, b"zs1", &[(1.0, b"a"), (5.0, b"b")]).await;
         add_members(&engine, b"zs2", &[(10.0, b"a"), (2.0, b"b")]).await;
-
-        // MIN
         zinterstore(&engine, &[
             b"min_out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(),
             b"AGGREGATE".to_vec(), b"MIN".to_vec(),
@@ -2844,8 +2106,6 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"1".to_vec())));
         let result = zscore(&engine, &[b"min_out".to_vec(), b"b".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"2".to_vec())));
-
-        // MAX
         zinterstore(&engine, &[
             b"max_out".to_vec(), b"2".to_vec(), b"zs1".to_vec(), b"zs2".to_vec(),
             b"AGGREGATE".to_vec(), b"MAX".to_vec(),
@@ -2865,10 +2125,9 @@ mod tests {
     async fn test_zpopmax_count_larger_than_set() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b")]).await;
-
         let result = zpopmax(&engine, &[b"zs".to_vec(), b"10".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 4); // 2 members * 2
+            assert_eq!(items.len(), 4);
         } else { panic!("Expected array"); }
     }
 
@@ -2876,11 +2135,8 @@ mod tests {
     async fn test_zremrangebyrank_negative_indices() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c"), (4.0, b"d")]).await;
-
-        // Remove last two: -2 to -1
         let result = zremrangebyrank(&engine, &[b"zs".to_vec(), b"-2".to_vec(), b"-1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-
         let card = zcard(&engine, &[b"zs".to_vec()]).await.unwrap();
         assert_eq!(card, RespValue::Integer(2));
     }
@@ -2889,10 +2145,95 @@ mod tests {
     async fn test_zrangebyscore_exclusive_inf() {
         let engine = setup_engine().await;
         add_members(&engine, b"zs", &[(1.0, b"a"), (2.0, b"b"), (3.0, b"c")]).await;
-
         let result = zrangebyscore(&engine, &[b"zs".to_vec(), b"-inf".to_vec(), b"+inf".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
         } else { panic!("Expected array"); }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_zadd_same_sorted_set() {
+        // Two clients racing ZADD on the same sorted set - no members should be lost
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                for j in 0..10 {
+                    let score = format!("{}", i * 10 + j);
+                    let member = format!("member_{}_{}", i, j);
+                    let args = vec![
+                        b"race_zset".to_vec(),
+                        score.into_bytes(),
+                        member.into_bytes(),
+                    ];
+                    zadd(&eng, &args).await.unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 100 unique members should be present
+        let result = zcard(&engine, &[b"race_zset".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(100));
+    }
+
+    #[tokio::test]
+    async fn test_sorted_set_performance_large() {
+        // Performance test: ZADD/ZRANGE on sorted set with 1000 members
+        // Verifies BTreeSet O(log N) data structure works correctly at scale.
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+        let n: i64 = 1000;
+
+        for i in 0..n {
+            let score = format!("{}", i);
+            let member = format!("member_{:05}", i);
+            let args = vec![
+                b"perf_zset".to_vec(),
+                score.into_bytes(),
+                member.into_bytes(),
+            ];
+            zadd(&engine, &args).await.unwrap();
+        }
+
+        // Verify cardinality
+        let result = zcard(&engine, &[b"perf_zset".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(n));
+
+        // Test ZRANGE on large set
+        let result = zrange(&engine, &[
+            b"perf_zset".to_vec(), b"0".to_vec(), b"9".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 10);
+        } else { panic!("Expected array"); }
+
+        // Test ZRANGEBYSCORE on large set
+        let result = zrangebyscore(&engine, &[
+            b"perf_zset".to_vec(), b"500".to_vec(), b"510".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 11); // 500..=510
+        } else { panic!("Expected array"); }
+
+        // Test ZSCORE lookup on large set
+        let result = zscore(&engine, &[
+            b"perf_zset".to_vec(), b"member_00500".to_vec(),
+        ]).await.unwrap();
+        if let RespValue::BulkString(Some(score)) = result {
+            assert_eq!(String::from_utf8_lossy(&score), "500");
+        } else { panic!("Expected bulk string"); }
+
+        // Test ZRANK on large set
+        let result = zrank(&engine, &[
+            b"perf_zset".to_vec(), b"member_00500".to_vec(),
+        ]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(500));
     }
 }
