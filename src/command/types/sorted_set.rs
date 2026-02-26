@@ -98,15 +98,20 @@ fn serialize_ss(ss: &SortedSetData) -> Result<Option<Vec<u8>>, StorageError> {
     }
 }
 
-async fn load_sorted_set_readonly(engine: &StorageEngine, key: &[u8]) -> Result<Option<SortedSetData>, CommandError> {
-    match engine.get(key).await? {
-        Some(data) => {
-            let ss = bincode::deserialize::<SortedSetData>(&data)
-                .map_err(|_| CommandError::WrongType)?;
-            Ok(Some(ss))
+fn load_sorted_set_readonly(engine: &StorageEngine, key: &[u8]) -> Result<Option<SortedSetData>, CommandError> {
+    engine.atomic_read(key, RedisDataType::ZSet, |data| {
+        match data {
+            Some(bytes) => {
+                let ss = bincode::deserialize::<SortedSetData>(bytes)
+                    .map_err(|_| StorageError::WrongType)?;
+                Ok(Some(ss))
+            }
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    }).map_err(|e| match e {
+        StorageError::WrongType => CommandError::WrongType,
+        other => CommandError::StorageError(other.to_string()),
+    })
 }
 
 fn format_score(score: f64) -> String {
@@ -751,7 +756,7 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
 
     let mut sets: Vec<SortedSetData> = Vec::with_capacity(numkeys);
     for key in &keys {
-        match load_sorted_set_readonly(engine, key).await? {
+        match load_sorted_set_readonly(engine, key)? {
             Some(ss) => sets.push(ss),
             None => sets.push(SortedSetData::new()),
         }
@@ -792,7 +797,7 @@ pub async fn zunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
 
     let mut member_scores: HashMap<Vec<u8>, f64> = HashMap::new();
     for (idx, key) in keys.iter().enumerate() {
-        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+        if let Some(set) = load_sorted_set_readonly(engine, key)? {
             for (score, member) in &set.entries {
                 let weighted = score.0 * weights[idx];
                 member_scores.entry(member.clone())
@@ -823,7 +828,7 @@ pub async fn zinter(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let mut sets: Vec<SortedSetData> = Vec::new();
     for key in &keys {
-        match load_sorted_set_readonly(engine, key).await? {
+        match load_sorted_set_readonly(engine, key)? {
             Some(ss) => sets.push(ss),
             None => return Ok(RespValue::Array(Some(vec![]))),
         }
@@ -859,7 +864,7 @@ pub async fn zunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let mut member_scores: HashMap<Vec<u8>, f64> = HashMap::new();
     for (idx, key) in keys.iter().enumerate() {
-        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+        if let Some(set) = load_sorted_set_readonly(engine, key)? {
             for (score, member) in &set.entries {
                 let weighted = score.0 * weights[idx];
                 member_scores.entry(member.clone())
@@ -888,13 +893,13 @@ pub async fn zdiff(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let keys: Vec<Vec<u8>> = args[1..1 + numkeys].to_vec();
     let with_scores = args.len() > 1 + numkeys && bytes_to_string(&args[1 + numkeys])?.to_uppercase() == "WITHSCORES";
 
-    let first_set = match load_sorted_set_readonly(engine, &keys[0]).await? {
+    let first_set = match load_sorted_set_readonly(engine, &keys[0])? {
         Some(ss) => ss,
         None => return Ok(RespValue::Array(Some(vec![]))),
     };
     let mut other_members: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     for key in keys.iter().skip(1) {
-        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+        if let Some(set) = load_sorted_set_readonly(engine, key)? {
             for (_, member) in &set.entries { other_members.insert(member.clone()); }
         }
     }
@@ -917,7 +922,7 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     })?;
     if numkeys == 0 || args.len() < 2 + numkeys { return Err(CommandError::WrongNumberOfArguments); }
     let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
-    let first_set = match load_sorted_set_readonly(engine, &keys[0]).await? {
+    let first_set = match load_sorted_set_readonly(engine, &keys[0])? {
         Some(ss) => ss,
         None => {
             engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((None, ())))?;
@@ -926,7 +931,7 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     };
     let mut other_members: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     for key in keys.iter().skip(1) {
-        if let Some(set) = load_sorted_set_readonly(engine, key).await? {
+        if let Some(set) = load_sorted_set_readonly(engine, key)? {
             for (_, member) in &set.entries { other_members.insert(member.clone()); }
         }
     }
@@ -1011,7 +1016,7 @@ async fn blocking_zpop(
     blocking_mgr: &BlockingManager,
 ) -> CommandResult {
     for key in keys {
-        if let Some(ss) = load_sorted_set_readonly(engine, key).await?
+        if let Some(ss) = load_sorted_set_readonly(engine, key)?
             && !ss.is_empty() {
                 let pop_args = vec![key.clone()];
                 let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
@@ -1028,7 +1033,7 @@ async fn blocking_zpop(
     loop {
         let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
         for key in keys {
-            if let Some(ss) = load_sorted_set_readonly(engine, key).await?
+            if let Some(ss) = load_sorted_set_readonly(engine, key)?
                 && !ss.is_empty() {
                     let pop_args = vec![key.clone()];
                     let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
@@ -1164,7 +1169,9 @@ pub async fn zmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             bytes_to_string(&args[3 + numkeys])?.parse::<usize>().map_err(|_| {
                 CommandError::InvalidArgument("value is not an integer or out of range".to_string())
             })?
-        } else { 1 }
+        } else {
+            return Err(CommandError::InvalidArgument("syntax error".to_string()));
+        }
     } else { 1 };
 
     for key in keys {
@@ -1273,7 +1280,7 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     }
 
-    let src_ss = match load_sorted_set_readonly(engine, src).await? {
+    let src_ss = match load_sorted_set_readonly(engine, src)? {
         Some(ss) => ss,
         None => {
             engine.atomic_modify(dst, RedisDataType::ZSet, |_| Ok((None, ())))?;

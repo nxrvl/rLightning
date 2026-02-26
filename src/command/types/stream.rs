@@ -1445,9 +1445,9 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
         let mut acked = 0i64;
         for id in &ids {
-            if group.pel.remove(id).is_some() {
+            if let Some(pe) = group.pel.remove(id) {
                 acked += 1;
-                for consumer in group.consumers.values_mut() {
+                if let Some(consumer) = group.consumers.get_mut(&pe.consumer) {
                     consumer.pending.retain(|pid| pid != id);
                 }
             }
@@ -1650,18 +1650,21 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         match arg_upper.as_str() {
             "IDLE" => {
                 idx += 1;
+                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 idle_ms = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
                     CommandError::InvalidArgument("value is not an integer or out of range".to_string())
                 })?);
             }
             "TIME" => {
                 idx += 1;
+                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 time_ms = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
                     CommandError::InvalidArgument("value is not an integer or out of range".to_string())
                 })?);
             }
             "RETRYCOUNT" => {
                 idx += 1;
+                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
                 retry_count = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
                     CommandError::InvalidArgument("value is not an integer or out of range".to_string())
                 })?);

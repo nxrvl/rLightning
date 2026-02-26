@@ -227,10 +227,15 @@ impl StorageEngine {
                 };
                 if should_remove
                     && let Some((k, item)) = self.data.remove(&expired_entry.key) {
-                        let size = Self::calculate_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
-                        removed_count += 1;
+                        if !item.is_expired() {
+                            // Key was refreshed concurrently — put it back
+                            self.data.insert(k, item);
+                        } else {
+                            let size = Self::calculate_size(&k, &item.value) as u64;
+                            self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                            self.key_count.fetch_sub(1, Ordering::AcqRel);
+                            removed_count += 1;
+                        }
                     }
                 
                 // Limit removals per cycle to avoid blocking
