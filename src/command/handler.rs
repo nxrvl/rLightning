@@ -413,8 +413,10 @@ impl CommandHandler {
             "time" => commands::time(&self.storage, &command.args).await,
             "lolwut" => commands::lolwut(&self.storage, &command.args).await,
 
-            // Cluster commands
-            "cluster" => commands::cluster_command(&self.storage, &command.args, None).await,
+            // Cluster commands are handled at the server level (needs access to ClusterManager)
+            "cluster" => {
+                Ok(RespValue::Error("ERR Cluster commands must be handled at the server level".to_string()))
+            },
             "asking" => commands::asking(&self.storage, &command.args).await,
             "readonly" => commands::readonly(&self.storage, &command.args).await,
             "readwrite" => commands::readwrite(&self.storage, &command.args).await,

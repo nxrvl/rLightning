@@ -29,6 +29,7 @@ mod sentinel;
 mod storage;
 mod utils;
 
+use crate::cluster::{ClusterConfig, ClusterManager};
 use crate::networking::server::Server;
 use crate::persistence::PersistenceManager;
 use crate::persistence::config::{AofSyncPolicy, PersistenceConfig, PersistenceMode};
@@ -111,6 +112,7 @@ struct AppSettings {
     persistence: PersistenceSettings,
     replication: ReplicationSettings,
     sentinel: SentinelSettings,
+    cluster: ClusterSettings,
     logging: LoggingSettings,
     // Removed keys section for simplicity, storage section has relevant limits
 }
@@ -133,6 +135,32 @@ impl Default for SentinelSettings {
             failover_timeout_ms: 180000,
             ping_period_ms: 1000,
             parallel_syncs: 1,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct ClusterSettings {
+    enabled: bool,
+    node_timeout_ms: u64,
+    replicas_per_master: usize,
+    allow_reads_when_down: bool,
+    announce_ip: Option<String>,
+    announce_port: Option<u16>,
+    announce_bus_port: Option<u16>,
+}
+
+impl Default for ClusterSettings {
+    fn default() -> Self {
+        ClusterSettings {
+            enabled: false,
+            node_timeout_ms: 15000,
+            replicas_per_master: 1,
+            allow_reads_when_down: false,
+            announce_ip: None,
+            announce_port: None,
+            announce_bus_port: None,
         }
     }
 }
@@ -521,12 +549,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sentinel = SentinelManager::new(Arc::clone(&storage), sentinel_config);
     sentinel.init().await;
 
-    // Initialize the server with replication and sentinel support
+    // Create cluster configuration and manager
+    let cluster_config = ClusterConfig {
+        enabled: settings.cluster.enabled,
+        node_timeout_ms: settings.cluster.node_timeout_ms,
+        replicas_per_master: settings.cluster.replicas_per_master,
+        allow_reads_when_down: settings.cluster.allow_reads_when_down,
+        announce_ip: settings.cluster.announce_ip.clone(),
+        announce_port: settings.cluster.announce_port,
+        announce_bus_port: settings.cluster.announce_bus_port,
+    };
+    let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    if cluster.is_enabled() {
+        cluster.init(addr).await;
+        info!("Cluster mode enabled, node initialized at {}", addr);
+    }
+
+    // Initialize the server with replication, sentinel, and cluster support
     let server = Server::new(addr, Arc::clone(&storage))
         .with_persistence(Arc::new(persistence), settings.persistence.aof_sync_policy)
         .with_security(security)
         .with_replication(replication)
-        .with_sentinel(sentinel);
+        .with_sentinel(sentinel)
+        .with_cluster(cluster);
 
     // Start the server (this will block until shutdown)
     if let Err(e) = server.start().await {
