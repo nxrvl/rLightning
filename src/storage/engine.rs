@@ -1463,7 +1463,7 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let inserted = match self.active_db().entry(key.clone()) {
+        let (inserted, replaced_expired) = match self.active_db().entry(key.clone()) {
             Entry::Occupied(occ) => {
                 // Key exists - check if expired
                 if occ.get().is_expired() {
@@ -1472,15 +1472,16 @@ impl StorageEngine {
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                     occ.insert(item);
-                    true
+                    // Replaced expired key - DashMap entry already exists, don't increment key_count
+                    (true, true)
                 } else {
-                    false
+                    (false, false)
                 }
             }
             Entry::Vacant(vac) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 vac.insert(item);
-                true
+                (true, false)
             }
         };
 
@@ -1489,7 +1490,9 @@ impl StorageEngine {
                 self.add_to_expiration_queue(key.clone(), expires_at).await;
             }
             self.update_prefix_indices(&key, true).await;
-            self.key_count.fetch_add(1, Ordering::AcqRel);
+            if !replaced_expired {
+                self.key_count.fetch_add(1, Ordering::AcqRel);
+            }
             self.bump_key_version(&key);
             self.increment_write_counters().await;
         }
