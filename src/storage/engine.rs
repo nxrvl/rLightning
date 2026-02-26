@@ -128,6 +128,12 @@ impl Default for StorageConfig {
     }
 }
 
+/// Guard that holds per-key locks acquired during MULTI/EXEC transactions.
+/// Locks are released automatically when the guard is dropped.
+pub struct KeyLockGuard {
+    _guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 /// Main storage engine for the in-memory key-value store
 pub struct StorageEngine {
     data: DashMap<Vec<u8>, StorageItem>,
@@ -148,6 +154,8 @@ pub struct StorageEngine {
     key_versions: DashMap<Vec<u8>, u64>,
     /// Global version counter for generating unique version numbers
     global_version: AtomicU64,
+    /// Per-key mutexes for transaction-level locking (MULTI/EXEC isolation)
+    key_locks: DashMap<Vec<u8>, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl StorageEngine {
@@ -170,6 +178,7 @@ impl StorageEngine {
             extra_dbs,
             key_versions: DashMap::with_capacity(256),
             global_version: AtomicU64::new(1),
+            key_locks: DashMap::with_capacity(256),
         });
         
         // Start the expiration task
@@ -852,7 +861,29 @@ impl StorageEngine {
     pub fn get_key_version(&self, key: &[u8]) -> u64 {
         self.key_versions.get(key).map(|v| *v).unwrap_or(0)
     }
-    
+
+    /// Lock multiple keys in sorted order for transaction isolation.
+    /// Keys are sorted and deduplicated to prevent deadlocks.
+    /// Returns a KeyLockGuard that releases all locks when dropped.
+    pub async fn lock_keys(&self, keys: &[Vec<u8>]) -> KeyLockGuard {
+        let mut sorted_keys: Vec<Vec<u8>> = keys.to_vec();
+        sorted_keys.sort();
+        sorted_keys.dedup();
+
+        let mut guards = Vec::with_capacity(sorted_keys.len());
+        for key in &sorted_keys {
+            let mutex = self
+                .key_locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .value()
+                .clone();
+            guards.push(mutex.lock_owned().await);
+        }
+
+        KeyLockGuard { _guards: guards }
+    }
+
     /// Process a command (for AOF replay)
     pub async fn process_command(&self, command: &RespCommand) -> StorageResult<()> {
         // This is a simplified implementation just to handle basic commands
