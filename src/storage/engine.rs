@@ -714,6 +714,7 @@ impl StorageEngine {
     }
     
     /// Get all keys in the storage engine
+    #[allow(dead_code)]
     pub async fn all_keys(&self) -> StorageResult<Vec<Vec<u8>>> {
         let keys: Vec<Vec<u8>> = self.active_db().iter()
             .filter(|item| !item.value().is_expired())
@@ -1076,6 +1077,7 @@ impl StorageEngine {
     }
 
     /// Get the key count for a specific database
+    #[allow(dead_code)]
     pub fn get_db_key_count(&self, db_index: usize) -> u64 {
         if db_index == 0 {
             self.data.len() as u64
@@ -1459,6 +1461,7 @@ impl StorageEngine {
 
     /// Atomically set a key only if it does NOT exist (SET NX).
     /// Returns true if the key was set, false if it already existed.
+    #[allow(dead_code)]
     pub async fn set_nx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<bool> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -1515,6 +1518,7 @@ impl StorageEngine {
 
     /// Atomically set a key only if it DOES exist (SET XX).
     /// Returns true if the key was set, false if it did not exist.
+    #[allow(dead_code)]
     pub async fn set_xx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<bool> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -2580,10 +2584,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_set_nx() {
-        let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
-        // Unwrap the inner Arc since StorageEngine::new returns Arc<Self>
-        // Actually StorageEngine::new returns Arc<Self>, so storage is already Arc<Arc<StorageEngine>>
-        // Let me fix this - we need the Arc<StorageEngine> directly
         let storage = StorageEngine::new(StorageConfig::default());
 
         let mut handles = vec![];

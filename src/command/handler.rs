@@ -28,6 +28,7 @@ impl CommandHandler {
     }
 
     /// Create a new CommandHandler with a shared blocking manager
+    #[allow(dead_code)]
     pub fn new_with_blocking(storage: Arc<StorageEngine>, blocking_mgr: Arc<BlockingManager>) -> Self {
         Self::start_blocking_cleanup_task(Arc::clone(&blocking_mgr));
         CommandHandler {
@@ -49,6 +50,7 @@ impl CommandHandler {
     }
 
     /// Get a reference to the blocking manager
+    #[allow(dead_code)]
     pub fn blocking_mgr(&self) -> &Arc<BlockingManager> {
         &self.blocking_mgr
     }
@@ -59,6 +61,7 @@ impl CommandHandler {
     }
 
     /// Get a reference to the scripting engine
+    #[allow(dead_code)]
     pub fn scripting(&self) -> &Arc<ScriptingEngine> {
         &self.scripting
     }

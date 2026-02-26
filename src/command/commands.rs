@@ -7,7 +7,6 @@ use crate::command::utils::parse_ttl;
 pub use crate::command::types::list::{lpush, rpush, lpop, rpop, lindex, llen, lrange, ltrim, lpushx, rpushx, linsert, lset, lrem, lpos, lmove, rpoplpush, lmpop, blpop, brpop, blmove, blmpop};
 
 // Blocking infrastructure
-pub use crate::command::types::blocking::BlockingManager;
 
 // String commands
 pub use crate::command::types::string::{set, get, mget, mset, msetnx, incr, decr, incrby, decrby, incrbyfloat, append, strlen, getrange, setrange, getset, setnx, setex, pexpire, pttl, getex, getdel, psetex, lcs, substr};
@@ -19,7 +18,7 @@ pub use crate::command::types::hash::{hset, hget, hgetall, hdel, hexists, hmset,
 pub use crate::command::types::set::{sadd, srem, smembers, sismember, scard, spop, srandmember, sinter, sinterstore, sunion, sunionstore, sdiff, sdiffstore, smove, sintercard, smismember, sscan};
 
 // Sorted Set commands
-pub use crate::command::types::sorted_set::{zadd, zrem, zscore, zrange, zcard, zcount, zrank, zrevrange, zincrby, zrangebyscore, zrevrangebyscore, zrangebylex, zrevrangebylex, zremrangebyrank, zremrangebyscore, zremrangebylex, zlexcount, zrevrank, zinterstore, zunionstore, zinter, zunion, zdiff, zdiffstore, zpopmin, zpopmax, bzpopmin, bzpopmax, zrandmember, zmscore, zmpop, bzmpop, zrangestore, zscan, zrange_unified};
+pub use crate::command::types::sorted_set::{zadd, zrem, zscore, zcard, zcount, zrank, zrevrange, zincrby, zrangebyscore, zrevrangebyscore, zrangebylex, zrevrangebylex, zremrangebyrank, zremrangebyscore, zremrangebylex, zlexcount, zrevrank, zinterstore, zunionstore, zinter, zunion, zdiff, zdiffstore, zpopmin, zpopmax, bzpopmin, bzpopmax, zrandmember, zmscore, zmpop, bzmpop, zrangestore, zscan, zrange_unified};
 
 // JSON commands
 pub use crate::command::types::json::{json_get, json_set, json_type, json_arrappend, json_arrtrim, json_resp, json_del, json_objkeys, json_objlen, json_arrlen, json_numincrby, json_mget, json_arrindex};
@@ -40,7 +39,7 @@ pub use crate::command::types::geo::{geoadd, geodist, geohash, geopos, geosearch
 pub use crate::command::types::stream::{xadd, xlen, xrange, xrevrange, xread, xtrim, xdel, xinfo, xgroup, xreadgroup, xack, xpending, xclaim, xautoclaim};
 
 // Server commands
-pub use crate::command::types::server::{info, auth, config, keys, rename, renamenx, flushall, flushdb, monitor, dbsize, randomkey};
+pub use crate::command::types::server::{auth, config, keys, rename, renamenx, flushall, flushdb, monitor, dbsize, randomkey};
 
 // Connection & server commands
 pub use crate::command::types::connection::{
@@ -53,7 +52,6 @@ pub use crate::command::types::connection::{
 pub use crate::command::types::cluster::{cluster_command, asking, readonly, readwrite, migrate};
 
 // Sentinel commands
-pub use crate::command::types::sentinel::sentinel_command;
 
 // Module commands
 pub use crate::command::types::module::module_command;

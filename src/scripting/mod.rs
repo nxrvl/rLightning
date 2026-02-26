@@ -18,6 +18,7 @@ pub struct FunctionInfo {
 
 /// A loaded function library
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FunctionLibrary {
     pub name: String,
     pub code: String,

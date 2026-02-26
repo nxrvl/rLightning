@@ -89,6 +89,7 @@ impl StatefulRespParser {
     }
 
     /// Reset parser state to command mode
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.state = ParserState::ReadingCommand;
     }

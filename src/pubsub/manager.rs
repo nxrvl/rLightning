@@ -15,6 +15,7 @@ pub type ClientId = u64;
 
 /// Messages sent to subscribers
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SubscriptionMessage {
     /// Confirmation of channel subscription: (channel, subscription_count)
     Subscribe {
@@ -412,12 +413,14 @@ impl PubSubManager {
     }
 
     /// Check if a client is registered
+    #[allow(dead_code)]
     pub async fn is_client_registered(&self, client_id: ClientId) -> bool {
         let clients = self.clients.read().await;
         clients.contains_key(&client_id)
     }
 
     /// Get receiver for a client (for receiving messages)
+    #[allow(dead_code)]
     pub async fn get_receiver(&self, client_id: ClientId) -> Option<broadcast::Receiver<SubscriptionMessage>> {
         let clients = self.clients.read().await;
         clients.get(&client_id).map(|c| c.tx.subscribe())

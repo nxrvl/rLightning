@@ -421,11 +421,10 @@ impl Clone for RdbPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap as StdHashMap, HashSet, BTreeSet};
+    use std::collections::{HashMap as StdHashMap, HashSet};
     use crate::storage::engine::StorageEngine;
     use crate::storage::item::RedisDataType;
     use crate::command::types::sorted_set::SortedSetData;
-    use ordered_float::OrderedFloat;
     use tempfile::NamedTempFile;
 
     fn create_test_engine() -> Arc<StorageEngine> {
