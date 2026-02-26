@@ -2,45 +2,22 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
-/// Redis HSET command - Set the value of a hash field
+/// Redis HSET command - Set the value of one or more hash fields
 pub async fn hset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 3 || args.len() % 2 == 0 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let fields_values = &args[1..];
-    
-    let mut new_fields_count = 0;
-    
-    // Process field-value pairs
-    for i in (0..fields_values.len()).step_by(2) {
-        if i + 1 >= fields_values.len() {
-            break; // Not enough arguments for this pair
-        }
-        
-        let field = &fields_values[i];
-        let value = &fields_values[i + 1];
-        
-        // Construct the hash key for this field
-        let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-        hash_key.extend_from_slice(key);
-        hash_key.push(b':'); // Use ':' as separator
-        hash_key.extend_from_slice(field);
-        
-        // Check if this field already exists in the hash
-        let field_exists = engine.exists(&hash_key).await?;
-        
-        // Set the field-value pair
-        engine.set(hash_key, value.clone(), None).await?;
-        
-        // Increment the counter for new fields
-        if !field_exists {
-            new_fields_count += 1;
-        }
-    }
-    
-    Ok(RespValue::Integer(new_fields_count))
+
+    let pairs: Vec<(&[u8], &[u8])> = fields_values
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0].as_slice(), chunk[1].as_slice()))
+        .collect();
+
+    let new_count = engine.hash_set(key, &pairs)?;
+    Ok(RespValue::Integer(new_count))
 }
 
 /// Redis HGET command - Get the value of a hash field
@@ -48,31 +25,13 @@ pub async fn hget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
-    
-    // First check if the key exists and is a hash
-    if engine.exists(key).await? {
-        // Get the type of the key
-        let key_type = engine.get_type(key).await?;
-        
-        // If the key exists but is not a hash type, return an error
-        if key_type != "hash" && !key_type.is_empty() {
-            return Err(CommandError::WrongType);
-        }
-    }
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':'); // Use ':' as separator
-    hash_key.extend_from_slice(field);
-    
-    // Get the field's value
-    match engine.get(&hash_key).await? {
+
+    match engine.hash_get(key, field)? {
         Some(value) => Ok(RespValue::BulkString(Some(value))),
-        None => Ok(RespValue::BulkString(None)), // Field not found
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -81,29 +40,16 @@ pub async fn hgetall(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let key_prefix = [key.as_slice(), b":"].concat();
-    
-    // Get all keys in the storage engine
-    let all_keys = engine.all_keys().await?;
-    
-    // Filter for keys that have our prefix
-    let mut result = Vec::new();
-    
-    for full_key in all_keys {
-        if full_key.starts_with(&key_prefix) {
-            // Extract the field name (remove the prefix)
-            let field = full_key[key_prefix.len()..].to_vec();
-            
-            // Get the value for this field
-            if let Some(value) = engine.get(&full_key).await? {
-                result.push(RespValue::BulkString(Some(field)));
-                result.push(RespValue::BulkString(Some(value)));
-            }
-        }
+    let pairs = engine.hash_getall(key)?;
+
+    let mut result = Vec::with_capacity(pairs.len() * 2);
+    for (field, value) in pairs {
+        result.push(RespValue::BulkString(Some(field)));
+        result.push(RespValue::BulkString(Some(value)));
     }
-    
+
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -112,30 +58,10 @@ pub async fn hdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let fields = &args[1..];
-    
-    let mut deleted = 0;
-    
-    // Construct the hash key format for each field and delete if exists
-    for field in fields {
-        // Construct the hash key for this field
-        let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-        hash_key.extend_from_slice(key);
-        hash_key.push(b':');
-        hash_key.extend_from_slice(field);
-        
-        // Check if the field exists before deleting
-        if engine.exists(&hash_key).await? {
-            // Delete the key and increment counter only if successful
-            if engine.del(&hash_key).await? {
-                deleted += 1;
-            }
-        }
-    }
-    
-    // Redis returns the number of fields actually deleted
+    let fields: Vec<&[u8]> = args[1..].iter().map(|f| f.as_slice()).collect();
+    let deleted = engine.hash_del(key, &fields)?;
     Ok(RespValue::Integer(deleted))
 }
 
@@ -144,19 +70,10 @@ pub async fn hexists(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':'); // Use ':' as separator
-    hash_key.extend_from_slice(field);
-    
-    // Check if the hash field exists
-    let exists = engine.exists(&hash_key).await?;
-    
+    let exists = engine.hash_exists(key, field)?;
     Ok(RespValue::Integer(if exists { 1 } else { 0 }))
 }
 
@@ -165,35 +82,16 @@ pub async fn hmset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 3 || args.len() % 2 != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
-    // First, check if the key exists and is the right type
-    if engine.exists(key).await? {
-        let key_type = engine.get_type(key).await?;
-        if key_type != "hash" && !key_type.is_empty() {
-            return Err(CommandError::WrongType);
-        }
-    }
-    
     let fields_values = &args[1..];
-    
-    // Process field-value pairs
-    for i in (0..fields_values.len()).step_by(2) {
-        let field = &fields_values[i];
-        let value = &fields_values[i + 1];
-        
-        // We'll use the key itself as the hash name, and store each field with a special separator format
-        let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-        hash_key.extend_from_slice(key);
-        hash_key.push(b':'); // Use ':' as separator
-        hash_key.extend_from_slice(field);
-        
-        // Set the value
-        engine.set(hash_key, value.clone(), None).await?;
-    }
-    
-    // HMSET always returns OK
+
+    let pairs: Vec<(&[u8], &[u8])> = fields_values
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0].as_slice(), chunk[1].as_slice()))
+        .collect();
+
+    engine.hash_set(key, &pairs)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -202,24 +100,13 @@ pub async fn hkeys(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let key_prefix = [key.as_slice(), b":"].concat();
-    
-    // Get all keys in the storage engine
-    let all_keys = engine.all_keys().await?;
-    
-    // Filter for keys that have our prefix and extract field names
-    let mut result = Vec::new();
-    
-    for full_key in all_keys {
-        if full_key.starts_with(&key_prefix) {
-            // Extract the field name (remove the prefix)
-            let field = full_key[key_prefix.len()..].to_vec();
-            result.push(RespValue::BulkString(Some(field)));
-        }
-    }
-    
+    let keys = engine.hash_keys(key)?;
+    let result: Vec<RespValue> = keys
+        .into_iter()
+        .map(|k| RespValue::BulkString(Some(k)))
+        .collect();
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -228,25 +115,13 @@ pub async fn hvals(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let key_prefix = [key.as_slice(), b":"].concat();
-    
-    // Get all keys in the storage engine
-    let all_keys = engine.all_keys().await?;
-    
-    // Filter for keys that have our prefix and get their values
-    let mut result = Vec::new();
-    
-    for full_key in all_keys {
-        if full_key.starts_with(&key_prefix) {
-            // Get the value for this field
-            if let Some(value) = engine.get(&full_key).await? {
-                result.push(RespValue::BulkString(Some(value)));
-            }
-        }
-    }
-    
+    let vals = engine.hash_vals(key)?;
+    let result: Vec<RespValue> = vals
+        .into_iter()
+        .map(|v| RespValue::BulkString(Some(v)))
+        .collect();
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -255,17 +130,10 @@ pub async fn hlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let key_prefix = [key.as_slice(), b":"].concat();
-    
-    // Get all keys in the storage engine
-    let all_keys = engine.all_keys().await?;
-    
-    // Count keys that have our prefix
-    let count = all_keys.iter().filter(|k| k.starts_with(&key_prefix)).count();
-    
-    Ok(RespValue::Integer(count as i64))
+    let len = engine.hash_len(key)?;
+    Ok(RespValue::Integer(len))
 }
 
 /// Redis HMGET command - Get values of multiple hash fields
@@ -273,26 +141,15 @@ pub async fn hmget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    let fields = &args[1..];
-    
-    let mut result = Vec::new();
-    
-    for field in fields {
-        // Construct the hash key for this field
-        let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-        hash_key.extend_from_slice(key);
-        hash_key.push(b':');
-        hash_key.extend_from_slice(field);
-        
-        // Get the field's value
-        match engine.get(&hash_key).await? {
-            Some(value) => result.push(RespValue::BulkString(Some(value))),
-            None => result.push(RespValue::BulkString(None)),
-        }
-    }
-    
+    let fields: Vec<&[u8]> = args[1..].iter().map(|f| f.as_slice()).collect();
+    let values = engine.hash_mget(key, &fields)?;
+
+    let result: Vec<RespValue> = values
+        .into_iter()
+        .map(|v| RespValue::BulkString(v))
+        .collect();
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -301,39 +158,15 @@ pub async fn hincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
-    
-    // Parse the increment value
     let increment = String::from_utf8_lossy(&args[2]).parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument("Increment amount is not a valid integer".to_string())
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':');
-    hash_key.extend_from_slice(field);
-    
-    // Get the current value or default to 0
-    let current_value = match engine.get(&hash_key).await? {
-        Some(data) => {
-            let str_value = String::from_utf8_lossy(&data);
-            str_value.parse::<i64>().map_err(|_| CommandError::WrongType)?
-        },
-        None => 0,
-    };
-    
-    // Increment the value
-    let new_value = current_value.checked_add(increment).ok_or_else(|| {
-        CommandError::InvalidArgument("Increment operation would overflow".to_string())
-    })?;
-    
-    // Store the new value
-    engine.set(hash_key, new_value.to_string().into_bytes(), None).await?;
-    
-    Ok(RespValue::Integer(new_value))
+
+    let new_val = engine.hash_incr_by(key, field, increment)?;
+    Ok(RespValue::Integer(new_val))
 }
 
 /// Redis HINCRBYFLOAT command - Increment the float value of a hash field by the given amount
@@ -341,48 +174,15 @@ pub async fn hincrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
-    
-    // Parse the increment value
     let increment = String::from_utf8_lossy(&args[2]).parse::<f64>().map_err(|_| {
-        CommandError::InvalidArgument("Increment amount is not a valid float".to_string())
+        CommandError::InvalidArgument("value is not a valid float".to_string())
     })?;
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':');
-    hash_key.extend_from_slice(field);
-    
-    // Get the current value or default to 0.0
-    let current_value = match engine.get(&hash_key).await? {
-        Some(data) => {
-            let str_value = String::from_utf8_lossy(&data);
-            str_value.parse::<f64>().map_err(|_| CommandError::WrongType)?
-        },
-        None => 0.0,
-    };
-    
-    // Increment the value
-    let new_value = current_value + increment;
-    
-    // Check for NaN or infinity
-    if !new_value.is_finite() {
-        return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
-    }
-    
-    // Store the new value with Redis-compatible formatting
-    let new_value_str = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
-        format!("{:.0}", new_value)
-    } else {
-        format!("{}", new_value)
-    };
-    
-    engine.set(hash_key, new_value_str.as_bytes().to_vec(), None).await?;
-    
-    Ok(RespValue::BulkString(Some(new_value_str.into_bytes())))
+
+    let new_val_str = engine.hash_incr_by_float(key, field, increment)?;
+    Ok(RespValue::BulkString(Some(new_val_str.into_bytes())))
 }
 
 /// Redis HSETNX command - Set the value of a hash field, only if the field does not exist
@@ -390,26 +190,13 @@ pub async fn hsetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
     let value = &args[2];
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':');
-    hash_key.extend_from_slice(field);
-    
-    // Check if the field already exists
-    if engine.exists(&hash_key).await? {
-        return Ok(RespValue::Integer(0)); // Field exists, don't set
-    }
-    
-    // Set the field value
-    engine.set(hash_key, value.clone(), None).await?;
-    
-    Ok(RespValue::Integer(1)) // Field was set
+
+    let was_set = engine.hash_set_nx(key, field, value)?;
+    Ok(RespValue::Integer(if was_set { 1 } else { 0 }))
 }
 
 /// Redis HSTRLEN command - Get the length of the value of a hash field
@@ -417,21 +204,11 @@ pub async fn hstrlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let field = &args[1];
-    
-    // Construct the hash key for this field
-    let mut hash_key = Vec::with_capacity(key.len() + 1 + field.len());
-    hash_key.extend_from_slice(key);
-    hash_key.push(b':');
-    hash_key.extend_from_slice(field);
-    
-    // Get the field's value and return its length
-    match engine.get(&hash_key).await? {
-        Some(value) => Ok(RespValue::Integer(value.len() as i64)),
-        None => Ok(RespValue::Integer(0)), // Field doesn't exist
-    }
+    let len = engine.hash_strlen(key, field)?;
+    Ok(RespValue::Integer(len))
 }
 
 fn glob_match(pattern: &str, input: &str) -> bool {
@@ -469,19 +246,9 @@ pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     }
 
     let key = &args[0];
-    let key_prefix = [key.as_slice(), b":"].concat();
 
-    // Collect all fields and values
-    let all_keys = engine.all_keys().await?;
-    let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for full_key in &all_keys {
-        if full_key.starts_with(&key_prefix) {
-            let field = full_key[key_prefix.len()..].to_vec();
-            if let Some(value) = engine.get(full_key).await? {
-                fields.push((field, value));
-            }
-        }
-    }
+    // Get all field-value pairs from the hash
+    let fields = engine.hash_randfield(key)?;
 
     if fields.is_empty() {
         if args.len() >= 2 {
@@ -517,7 +284,6 @@ pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     if count_val >= 0 {
         // Positive count: return up to count unique fields
         let actual_count = std::cmp::min(count_val as usize, fields.len());
-        // Use Fisher-Yates partial shuffle for uniqueness
         let mut indices: Vec<usize> = (0..fields.len()).collect();
         for i in 0..actual_count {
             let j = fastrand::usize(i..indices.len());
@@ -589,24 +355,18 @@ pub async fn hscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    let key_prefix = [key.as_slice(), b":"].concat();
-    let all_keys = engine.all_keys().await?;
+    // Get all field-value pairs from the hash
+    let all_pairs = engine.hash_getall(key)?;
 
-    // Collect field-value pairs
-    let mut field_values: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for full_key in &all_keys {
-        if full_key.starts_with(&key_prefix) {
-            let field = full_key[key_prefix.len()..].to_vec();
-            let field_str = String::from_utf8_lossy(&field);
-            if pattern == "*" || glob_match(&pattern, &field_str) {
-                if let Some(value) = engine.get(full_key).await? {
-                    field_values.push((field, value));
-                }
-            }
-        }
-    }
+    // Filter by pattern and sort for deterministic cursor behavior
+    let mut field_values: Vec<(Vec<u8>, Vec<u8>)> = all_pairs
+        .into_iter()
+        .filter(|(field, _)| {
+            let field_str = String::from_utf8_lossy(field);
+            pattern == "*" || glob_match(&pattern, &field_str)
+        })
+        .collect();
 
-    // Sort for deterministic cursor behavior
     field_values.sort_by(|a, b| a.0.cmp(&b.0));
 
     let total = field_values.len();
@@ -636,67 +396,54 @@ mod tests {
     use super::*;
     use crate::storage::engine::StorageConfig;
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_hash_commands() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
-        
+        let engine = StorageEngine::new(config);
+
         // Test HSET
-        let hset_args = vec![
-            b"hash1".to_vec(),
-            b"field1".to_vec(),
-            b"value1".to_vec()
-        ];
-        let result = hset(&engine, &hset_args).await.unwrap();
+        let result = hset(&engine, &[
+            b"hash1".to_vec(), b"field1".to_vec(), b"value1".to_vec(),
+        ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
-        
+
         // Set another field
-        let hset_args = vec![
-            b"hash1".to_vec(),
-            b"field2".to_vec(), 
-            b"value2".to_vec()
-        ];
-        let result = hset(&engine, &hset_args).await.unwrap();
+        let result = hset(&engine, &[
+            b"hash1".to_vec(), b"field2".to_vec(), b"value2".to_vec(),
+        ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
-        
+
         // Update existing field
-        let hset_args = vec![
-            b"hash1".to_vec(),
-            b"field1".to_vec(),
-            b"new_value".to_vec()
-        ];
-        let result = hset(&engine, &hset_args).await.unwrap();
+        let result = hset(&engine, &[
+            b"hash1".to_vec(), b"field1".to_vec(), b"new_value".to_vec(),
+        ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Existing field
-        
+
         // Test HGET
-        let hget_args = vec![b"hash1".to_vec(), b"field1".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value".to_vec())));
-        
+
         // Test HGETALL
-        let hgetall_args = vec![b"hash1".to_vec()];
-        let result = hgetall(&engine, &hgetall_args).await.unwrap();
+        let result = hgetall(&engine, &[b"hash1".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4); // 2 fields * 2 (key + value)
-            
-            // We need to handle the fact that hash maps don't guarantee order
+
             let mut found_field1 = false;
             let mut found_field2 = false;
-            
+
             for i in (0..items.len()).step_by(2) {
                 if let RespValue::BulkString(Some(field)) = &items[i] {
                     if field == b"field1" {
                         found_field1 = true;
-                        if let RespValue::BulkString(Some(value)) = &items[i+1] {
+                        if let RespValue::BulkString(Some(value)) = &items[i + 1] {
                             assert_eq!(value, b"new_value");
                         } else {
                             panic!("Expected bulk string for field1 value");
                         }
                     } else if field == b"field2" {
                         found_field2 = true;
-                        if let RespValue::BulkString(Some(value)) = &items[i+1] {
+                        if let RespValue::BulkString(Some(value)) = &items[i + 1] {
                             assert_eq!(value, b"value2");
                         } else {
                             panic!("Expected bulk string for field2 value");
@@ -704,139 +451,118 @@ mod tests {
                     }
                 }
             }
-            
+
             assert!(found_field1, "field1 not found in HGETALL results");
             assert!(found_field2, "field2 not found in HGETALL results");
-            
         } else {
             panic!("Expected array response from HGETALL");
         }
-        
+
         // Test HEXISTS
-        let hexists_args = vec![b"hash1".to_vec(), b"field1".to_vec()];
-        let result = hexists(&engine, &hexists_args).await.unwrap();
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Exists
-        
-        let hexists_args = vec![b"hash1".to_vec(), b"nonexistent".to_vec()];
-        let result = hexists(&engine, &hexists_args).await.unwrap();
+
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"nonexistent".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Does not exist
-        
+
         // Test HDEL
-        let hdel_args = vec![b"hash1".to_vec(), b"field1".to_vec()];
-        let result = hdel(&engine, &hdel_args).await.unwrap();
+        let result = hdel(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Deleted 1 field
-        
+
         // Verify field is gone
-        let hexists_args = vec![b"hash1".to_vec(), b"field1".to_vec()];
-        let result = hexists(&engine, &hexists_args).await.unwrap();
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // No longer exists
     }
-    
+
     #[tokio::test]
     async fn test_hmset() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
-        
+        let engine = StorageEngine::new(config);
+
         // Test HMSET with multiple fields
-        let hmset_args = vec![
+        let result = hmset(&engine, &[
             b"hmset_hash".to_vec(),
             b"field1".to_vec(), b"value1".to_vec(),
             b"field2".to_vec(), b"value2".to_vec(),
             b"field3".to_vec(), b"value3".to_vec(),
-        ];
-        let result = hmset(&engine, &hmset_args).await.unwrap();
+        ]).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Verify fields were set
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field1".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
-        
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field2".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value2".to_vec())));
-        
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field3".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
-        
+
         // Test HMSET with existing fields (should overwrite)
-        let hmset_args = vec![
+        let result = hmset(&engine, &[
             b"hmset_hash".to_vec(),
             b"field1".to_vec(), b"new_value1".to_vec(),
             b"field2".to_vec(), b"new_value2".to_vec(),
-        ];
-        let result = hmset(&engine, &hmset_args).await.unwrap();
+        ]).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Verify fields were updated
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field1".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value1".to_vec())));
-        
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field2".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value2".to_vec())));
-        
+
         // Field3 should be unchanged
-        let hget_args = vec![b"hmset_hash".to_vec(), b"field3".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
     }
-    
+
     #[tokio::test]
     async fn test_hset_multiple_fields() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
-        
+        let engine = StorageEngine::new(config);
+
         // Test HSET with multiple fields in a single command
-        let hset_args = vec![
+        let result = hset(&engine, &[
             b"multi_hash".to_vec(),
             b"field1".to_vec(), b"value1".to_vec(),
             b"field2".to_vec(), b"value2".to_vec(),
             b"field3".to_vec(), b"value3".to_vec(),
-        ];
-        let result = hset(&engine, &hset_args).await.unwrap();
+        ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(3)); // 3 new fields
-        
+
         // Verify fields were set
-        let hget_args = vec![b"multi_hash".to_vec(), b"field1".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
-        
-        let hget_args = vec![b"multi_hash".to_vec(), b"field2".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value2".to_vec())));
-        
-        let hget_args = vec![b"multi_hash".to_vec(), b"field3".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
-        
+
         // Update a few fields
-        let hset_args = vec![
+        let result = hset(&engine, &[
             b"multi_hash".to_vec(),
             b"field1".to_vec(), b"updated1".to_vec(),
             b"field4".to_vec(), b"value4".to_vec(),
-        ];
-        let result = hset(&engine, &hset_args).await.unwrap();
+        ]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 new field, 1 updated field
-        
+
         // Verify updates
-        let hget_args = vec![b"multi_hash".to_vec(), b"field1".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"updated1".to_vec())));
 
-        let hget_args = vec![b"multi_hash".to_vec(), b"field4".to_vec()];
-        let result = hget(&engine, &hget_args).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field4".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value4".to_vec())));
     }
 
     #[tokio::test]
     async fn test_hrandfield_basic() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
-        // Set up a hash with 3 fields
         hset(&engine, &[
             b"myhash".to_vec(),
             b"f1".to_vec(), b"v1".to_vec(),
@@ -857,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn test_hrandfield_positive_count() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         hset(&engine, &[
             b"myhash2".to_vec(),
@@ -870,7 +596,6 @@ mod tests {
         let result = hrandfield(&engine, &[b"myhash2".to_vec(), b"2".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
-            // Verify all items are valid field names
             let mut seen = HashSet::new();
             for item in &items {
                 if let RespValue::BulkString(Some(field)) = item {
@@ -888,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn test_hrandfield_with_values() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         hset(&engine, &[
             b"myhash3".to_vec(),
@@ -896,7 +621,7 @@ mod tests {
             b"f2".to_vec(), b"v2".to_vec(),
         ]).await.unwrap();
 
-        // HRANDFIELD count 2 WITHVALUES - returns field-value pairs
+        // HRANDFIELD count 2 WITHVALUES
         let result = hrandfield(&engine, &[
             b"myhash3".to_vec(), b"2".to_vec(), b"WITHVALUES".to_vec(),
         ]).await.unwrap();
@@ -910,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn test_hrandfield_negative_count() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         hset(&engine, &[
             b"myhash4".to_vec(),
@@ -920,7 +645,7 @@ mod tests {
         // Negative count: can return repeats
         let result = hrandfield(&engine, &[b"myhash4".to_vec(), b"-5".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
-            assert_eq!(items.len(), 5); // Returns 5 items (all f1 since only 1 field)
+            assert_eq!(items.len(), 5);
         } else {
             panic!("Expected array");
         }
@@ -929,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn test_hrandfield_empty_hash() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         // No count on nonexistent key
         let result = hrandfield(&engine, &[b"nokey".to_vec()]).await.unwrap();
@@ -943,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn test_hscan_basic() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         hset(&engine, &[
             b"scanhash".to_vec(),
@@ -968,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn test_hscan_with_match() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         hset(&engine, &[
             b"scanhash2".to_vec(),
@@ -993,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn test_hscan_nonexistent_key() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         let result = hscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()]).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
@@ -1009,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn test_hscan_with_count() {
         let config = StorageConfig::default();
-        let engine = Arc::new(StorageEngine::new(config));
+        let engine = StorageEngine::new(config);
 
         // Add many fields
         for i in 0..15 {
@@ -1033,6 +758,125 @@ mod tests {
             if let RespValue::Array(Some(fv_pairs)) = &items[1] {
                 assert_eq!(fv_pairs.len(), 10); // 5 fields * 2 (field + value)
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_namespace_isolation() {
+        // Test that SET key:field and HSET key field don't collide
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Set a string key with composite name that looks like old hash format
+        engine.set(b"mykey:field1".to_vec(), b"string_value".to_vec(), None).await.unwrap();
+
+        // Set a hash key with the same base name
+        hset(&engine, &[
+            b"mykey".to_vec(), b"field1".to_vec(), b"hash_value".to_vec(),
+        ]).await.unwrap();
+
+        // The string key should still be accessible and unchanged
+        let string_val = engine.get(b"mykey:field1").await.unwrap();
+        assert_eq!(string_val, Some(b"string_value".to_vec()));
+
+        // The hash field should be independent
+        let result = hget(&engine, &[b"mykey".to_vec(), b"field1".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hash_value".to_vec())));
+
+        // TYPE should correctly identify them
+        let str_type = engine.get_type(b"mykey:field1").await.unwrap();
+        assert_eq!(str_type, "string");
+
+        let hash_type = engine.get_type(b"mykey").await.unwrap();
+        assert_eq!(hash_type, "hash");
+    }
+
+    #[tokio::test]
+    async fn test_hgetall_correctness() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Set multiple fields
+        hset(&engine, &[
+            b"test_hash".to_vec(),
+            b"a".to_vec(), b"1".to_vec(),
+            b"b".to_vec(), b"2".to_vec(),
+            b"c".to_vec(), b"3".to_vec(),
+        ]).await.unwrap();
+
+        // HGETALL should return all 3 field-value pairs
+        let result = hgetall(&engine, &[b"test_hash".to_vec()]).await.unwrap();
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 6);
+            let mut map = std::collections::HashMap::new();
+            for i in (0..items.len()).step_by(2) {
+                if let (RespValue::BulkString(Some(k)), RespValue::BulkString(Some(v))) = (&items[i], &items[i + 1]) {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            assert_eq!(map.get(&b"a".to_vec()), Some(&b"1".to_vec()));
+            assert_eq!(map.get(&b"b".to_vec()), Some(&b"2".to_vec()));
+            assert_eq!(map.get(&b"c".to_vec()), Some(&b"3".to_vec()));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_del_removes_entire_hash() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Create a hash with multiple fields
+        hset(&engine, &[
+            b"del_hash".to_vec(),
+            b"f1".to_vec(), b"v1".to_vec(),
+            b"f2".to_vec(), b"v2".to_vec(),
+            b"f3".to_vec(), b"v3".to_vec(),
+        ]).await.unwrap();
+
+        // DEL should remove the entire hash as a single key
+        let deleted = engine.del(b"del_hash").await.unwrap();
+        assert!(deleted);
+
+        // All fields should be gone
+        let result = hget(&engine, &[b"del_hash".to_vec(), b"f1".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        let result = hlen(&engine, &[b"del_hash".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_hset_hget() {
+        use std::sync::Arc;
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let mut handles = vec![];
+        for i in 0..10 {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let field = format!("field{}", i).into_bytes();
+                let value = format!("value{}", i).into_bytes();
+                hset(&eng, &[b"concurrent_hash".to_vec(), field, value]).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 10 fields should be present
+        let result = hlen(&engine, &[b"concurrent_hash".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(10));
+
+        // Verify each field
+        for i in 0..10 {
+            let field = format!("field{}", i).into_bytes();
+            let expected = format!("value{}", i).into_bytes();
+            let result = hget(&engine, &[b"concurrent_hash".to_vec(), field]).await.unwrap();
+            assert_eq!(result, RespValue::BulkString(Some(expected)));
         }
     }
 }

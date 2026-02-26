@@ -47,17 +47,17 @@ This is the foundation that enables fixing race conditions across all command ty
 
 Migrate from flat composite `key:field` keys to single-key HashMap storage, fixing namespace collisions and O(N) HGETALL.
 
-- [ ] Define hash storage format: bincode-serialized `HashMap<Vec<u8>, Vec<u8>>` stored as single key with `RedisDataType::Hash`
-- [ ] Add hash-specific storage methods: `hash_set(key, fields)`, `hash_get(key, field)`, `hash_del(key, fields)`, `hash_getall(key)`, `hash_exists(key, field)`, `hash_len(key)` - all using `atomic_modify` for thread safety
-- [ ] Rewrite HSET/HSETNX/HMSET to use new hash storage
-- [ ] Rewrite HGET/HMGET/HGETALL/HKEYS/HVALS/HLEN to use new hash storage
-- [ ] Rewrite HDEL/HEXISTS/HRANDFIELD/HSCAN to use new hash storage
-- [ ] Rewrite HINCRBY/HINCRBYFLOAT to use atomic hash modification
-- [ ] Verify DEL, EXPIRE, TTL, RENAME, TYPE, OBJECT ENCODING now work correctly for hash keys (single key instead of scattered composite keys)
-- [ ] Verify KEYS and SCAN patterns correctly match hash keys (no false positives from old composite keys)
-- [ ] Remove or repurpose the unused HashItem struct in src/storage/types/hash.rs
-- [ ] Write tests: namespace isolation (SET key:field value + HSET key field value2 must not collide), HGETALL correctness, concurrent HSET/HGET, DEL removes entire hash
-- [ ] Run project test suite - must pass before task 3
+- [x] Define hash storage format: bincode-serialized `HashMap<Vec<u8>, Vec<u8>>` stored as single key with `RedisDataType::Hash`
+- [x] Add hash-specific storage methods: `hash_set(key, fields)`, `hash_get(key, field)`, `hash_del(key, fields)`, `hash_getall(key)`, `hash_exists(key, field)`, `hash_len(key)` - all using `atomic_modify` for thread safety
+- [x] Rewrite HSET/HSETNX/HMSET to use new hash storage
+- [x] Rewrite HGET/HMGET/HGETALL/HKEYS/HVALS/HLEN to use new hash storage
+- [x] Rewrite HDEL/HEXISTS/HRANDFIELD/HSCAN to use new hash storage
+- [x] Rewrite HINCRBY/HINCRBYFLOAT to use atomic hash modification
+- [x] Verify DEL, EXPIRE, TTL, RENAME, TYPE, OBJECT ENCODING now work correctly for hash keys (single key instead of scattered composite keys)
+- [x] Verify KEYS and SCAN patterns correctly match hash keys (no false positives from old composite keys)
+- [x] Remove or repurpose the unused HashItem struct in src/storage/types/hash.rs
+- [x] Write tests: namespace isolation (SET key:field value + HSET key field value2 must not collide), HGETALL correctness, concurrent HSET/HGET, DEL removes entire hash
+- [x] Run project test suite - must pass before task 3
 
 ### Task 3: String Command Atomicity
 

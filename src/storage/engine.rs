@@ -1809,6 +1809,209 @@ impl StorageEngine {
         self.increment_write_counters().await;
         Ok(old_value)
     }
+
+    // ========== Hash Primitives ==========
+    // Hash data is stored as a single key with RedisDataType::Hash.
+    // The value is a bincode-serialized HashMap<Vec<u8>, Vec<u8>>.
+
+    /// Deserialize hash data from bytes. Returns empty HashMap if bytes is None.
+    fn hash_deserialize(data: Option<&Vec<u8>>) -> HashMap<Vec<u8>, Vec<u8>> {
+        match data {
+            Some(bytes) if !bytes.is_empty() => {
+                bincode::deserialize(bytes).unwrap_or_default()
+            }
+            _ => HashMap::new(),
+        }
+    }
+
+    /// Serialize hash data to bytes.
+    fn hash_serialize(map: &HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
+        bincode::serialize(map).unwrap_or_default()
+    }
+
+    /// Set one or more fields in a hash. Returns the number of NEW fields added.
+    pub fn hash_set(&self, key: &[u8], fields: &[(&[u8], &[u8])]) -> StorageResult<i64> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let mut map = Self::hash_deserialize(existing.as_deref());
+            let mut new_count = 0i64;
+            for &(field, value) in fields {
+                if map.insert(field.to_vec(), value.to_vec()).is_none() {
+                    new_count += 1;
+                }
+            }
+            Ok((Some(Self::hash_serialize(&map)), new_count))
+        })
+    }
+
+    /// Set a field only if it does NOT exist. Returns true if the field was set.
+    pub fn hash_set_nx(&self, key: &[u8], field: &[u8], value: &[u8]) -> StorageResult<bool> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let mut map = Self::hash_deserialize(existing.as_deref());
+            if map.contains_key(field) {
+                Ok((Some(Self::hash_serialize(&map)), false))
+            } else {
+                map.insert(field.to_vec(), value.to_vec());
+                Ok((Some(Self::hash_serialize(&map)), true))
+            }
+        })
+    }
+
+    /// Get a single field from a hash.
+    pub fn hash_get(&self, key: &[u8], field: &[u8]) -> StorageResult<Option<Vec<u8>>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let val = map.get(field).cloned();
+            Ok((preserved, val))
+        })
+    }
+
+    /// Get multiple fields from a hash. Returns a Vec of Option<Vec<u8>> in order.
+    pub fn hash_mget(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<Vec<Option<Vec<u8>>>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let results: Vec<Option<Vec<u8>>> = fields.iter()
+                .map(|f| map.get(*f).cloned())
+                .collect();
+            Ok((preserved, results))
+        })
+    }
+
+    /// Get all field-value pairs from a hash.
+    pub fn hash_getall(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
+            Ok((preserved, pairs))
+        })
+    }
+
+    /// Delete one or more fields from a hash. Returns the number of fields removed.
+    pub fn hash_del(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<i64> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            if existing.is_none() {
+                return Ok((None, 0));
+            }
+            let mut map = Self::hash_deserialize(existing.as_deref());
+            let mut removed = 0i64;
+            for &field in fields {
+                if map.remove(field).is_some() {
+                    removed += 1;
+                }
+            }
+            if map.is_empty() {
+                Ok((None, removed))
+            } else {
+                Ok((Some(Self::hash_serialize(&map)), removed))
+            }
+        })
+    }
+
+    /// Check if a field exists in a hash.
+    pub fn hash_exists(&self, key: &[u8], field: &[u8]) -> StorageResult<bool> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let exists = map.contains_key(field);
+            Ok((preserved, exists))
+        })
+    }
+
+    /// Get the number of fields in a hash.
+    pub fn hash_len(&self, key: &[u8]) -> StorageResult<i64> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let len = map.len() as i64;
+            Ok((preserved, len))
+        })
+    }
+
+    /// Get all field names in a hash.
+    pub fn hash_keys(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let keys: Vec<Vec<u8>> = map.keys().cloned().collect();
+            Ok((preserved, keys))
+        })
+    }
+
+    /// Get all values in a hash.
+    pub fn hash_vals(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let vals: Vec<Vec<u8>> = map.values().cloned().collect();
+            Ok((preserved, vals))
+        })
+    }
+
+    /// Increment a hash field's integer value by delta. Returns the new value.
+    pub fn hash_incr_by(&self, key: &[u8], field: &[u8], delta: i64) -> StorageResult<i64> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let mut map = Self::hash_deserialize(existing.as_deref());
+            let current = match map.get(field) {
+                Some(v) => {
+                    let s = std::str::from_utf8(v).map_err(|_| StorageError::NotANumber)?;
+                    s.parse::<i64>().map_err(|_| StorageError::NotANumber)?
+                }
+                None => 0,
+            };
+            let new_val = current.checked_add(delta)
+                .ok_or(StorageError::NotANumber)?;
+            map.insert(field.to_vec(), new_val.to_string().into_bytes());
+            Ok((Some(Self::hash_serialize(&map)), new_val))
+        })
+    }
+
+    /// Increment a hash field's float value by delta. Returns the new value as string.
+    pub fn hash_incr_by_float(&self, key: &[u8], field: &[u8], delta: f64) -> StorageResult<String> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let mut map = Self::hash_deserialize(existing.as_deref());
+            let current = match map.get(field) {
+                Some(v) => {
+                    let s = std::str::from_utf8(v).map_err(|_| StorageError::NotAFloat)?;
+                    let f: f64 = s.parse().map_err(|_| StorageError::NotAFloat)?;
+                    if !f.is_finite() {
+                        return Err(StorageError::NotAFloat);
+                    }
+                    f
+                }
+                None => 0.0,
+            };
+            let new_val = current + delta;
+            if !new_val.is_finite() {
+                return Err(StorageError::NotAFloat);
+            }
+            let new_val_str = format_float(new_val);
+            map.insert(field.to_vec(), new_val_str.as_bytes().to_vec());
+            Ok((Some(Self::hash_serialize(&map)), new_val_str))
+        })
+    }
+
+    /// Get the string length of a hash field's value.
+    pub fn hash_strlen(&self, key: &[u8], field: &[u8]) -> StorageResult<i64> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let len = map.get(field).map(|v| v.len() as i64).unwrap_or(0);
+            Ok((preserved, len))
+        })
+    }
+
+    /// Get random fields from a hash. Returns (fields, values) pairs.
+    /// If the hash doesn't exist, returns empty vec.
+    pub fn hash_randfield(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.atomic_modify(key, RedisDataType::Hash, |existing| {
+            let preserved = existing.as_ref().map(|v| (*v).clone());
+            let map = Self::hash_deserialize(existing.as_deref());
+            let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
+            Ok((preserved, pairs))
+        })
+    }
 }
 
 /// Format a float value the way Redis does (remove trailing zeros, use integer form when possible)
