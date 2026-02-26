@@ -203,9 +203,15 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     let mut values = Vec::with_capacity(args.len());
     for key in args {
-        match engine.get(key).await? {
-            Some(value) => values.push(RespValue::BulkString(Some(value))),
-            None => values.push(RespValue::BulkString(None)),
+        // Redis MGET returns nil for non-string keys (never WRONGTYPE)
+        let key_type = engine.get_type(key).await?;
+        if key_type != "string" && key_type != "none" {
+            values.push(RespValue::BulkString(None));
+        } else {
+            match engine.get(key).await? {
+                Some(value) => values.push(RespValue::BulkString(Some(value))),
+                None => values.push(RespValue::BulkString(None)),
+            }
         }
     }
     
