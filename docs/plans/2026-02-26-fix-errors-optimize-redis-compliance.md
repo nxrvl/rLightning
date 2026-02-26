@@ -144,17 +144,17 @@ Implement real database switching so SELECT actually changes the active database
 
 Implement RESP3-specific response encoding so clients that negotiate RESP3 via HELLO receive correct wire format.
 
-- [ ] Remove underscore prefix from `_protocol_version` variable, make it a proper tracked state
-- [ ] Pass protocol_version through to response serialization (add parameter to serialize method or use per-connection context)
-- [ ] Implement RESP3 map type encoding (`%<count>\r\n` followed by key-value pairs) for HGETALL, CONFIG GET, etc.
-- [ ] Implement RESP3 set type encoding (`~<count>\r\n` followed by members) for SMEMBERS, etc.
-- [ ] Implement RESP3 double/big number types where applicable
-- [ ] Implement RESP3 null type (`_\r\n`) instead of RESP2 null bulk string (`$-1\r\n`)
-- [ ] Implement RESP3 boolean type (`#t\r\n`/`#f\r\n`) where applicable
-- [ ] Implement RESP3 push type (`><count>\r\n`) for pub/sub and client tracking
-- [ ] Ensure RESP2 clients continue receiving RESP2 format (backward compatibility)
-- [ ] Write tests: HELLO 3 negotiation then verify HGETALL returns map type, SMEMBERS returns set type, null returns RESP3 null
-- [ ] Run project test suite - must pass before task 8
+- [x] Remove underscore prefix from `_protocol_version` variable, make it a proper tracked state
+- [x] Pass protocol_version through to response serialization (add parameter to serialize method or use per-connection context)
+- [x] Implement RESP3 map type encoding (`%<count>\r\n` followed by key-value pairs) for HGETALL, CONFIG GET, etc.
+- [x] Implement RESP3 set type encoding (`~<count>\r\n` followed by members) for SMEMBERS, etc.
+- [x] Implement RESP3 double/big number types where applicable
+- [x] Implement RESP3 null type (`_\r\n`) instead of RESP2 null bulk string (`$-1\r\n`)
+- [x] Implement RESP3 boolean type (`#t\r\n`/`#f\r\n`) where applicable
+- [x] Implement RESP3 push type (`><count>\r\n`) for pub/sub and client tracking
+- [x] Ensure RESP2 clients continue receiving RESP2 format (backward compatibility)
+- [x] Write tests: HELLO 3 negotiation then verify HGETALL returns map type, SMEMBERS returns set type, null returns RESP3 null
+- [x] Run project test suite - must pass before task 8
 
 ### Task 8: Full Persistence Support (RDB + AOF)
 

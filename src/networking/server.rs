@@ -196,7 +196,7 @@ impl Server {
         let mut in_subscription_mode = false;
 
         // Track the per-connection protocol version (RESP2 by default)
-        let mut _protocol_version = ProtocolVersion::RESP2;
+        let mut protocol_version = ProtocolVersion::RESP2;
 
         // Per-connection transaction state for MULTI/EXEC/WATCH
         let mut tx_state = TransactionState::new();
@@ -215,6 +215,12 @@ impl Server {
                         match msg_result {
                             Ok(msg) => {
                                 let response = subscription_message_to_resp(&msg);
+                                // Convert to RESP3 Push type if client uses RESP3
+                                let response = if protocol_version == ProtocolVersion::RESP3 {
+                                    response.convert_to_push()
+                                } else {
+                                    response
+                                };
                                 if let Ok(bytes) = response.serialize() {
                                     if let Err(e) = socket_writer.write_all(&bytes).await {
                                         error!(client_addr = %client_addr_str, "Failed to write pub/sub message: {}", e);
@@ -250,6 +256,7 @@ impl Server {
                                     &client_addr_str,
                                     &mut in_subscription_mode,
                                     &security,
+                                    protocol_version,
                                 ).await;
 
                                 if let Err(e) = result {
@@ -319,8 +326,8 @@ impl Server {
 
                             // Check for HELLO command (protocol negotiation)
                             if cmd_lower == "hello" {
-                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version, &security, &client_addr_str);
-                                _protocol_version = new_version;
+                                let (response, new_version) = Self::handle_hello_command(&cmd.args, protocol_version, &security, &client_addr_str);
+                                protocol_version = new_version;
                                 if let Ok(bytes) = response.serialize() {
                                     response_buffer.extend_from_slice(&bytes);
                                 }
@@ -454,6 +461,7 @@ impl Server {
                                     match responses {
                                         Ok(resp_list) => {
                                             for resp in resp_list {
+                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                 if let Ok(bytes) = resp.serialize() {
                                                     response_buffer.extend_from_slice(&bytes);
                                                 }
@@ -482,6 +490,7 @@ impl Server {
                                     match responses {
                                         Ok(resp_list) => {
                                             for resp in resp_list {
+                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                 if let Ok(bytes) = resp.serialize() {
                                                     response_buffer.extend_from_slice(&bytes);
                                                 }
@@ -534,6 +543,7 @@ impl Server {
                                     match responses {
                                         Ok(resp_list) => {
                                             for resp in resp_list {
+                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                 if let Ok(bytes) = resp.serialize() {
                                                     response_buffer.extend_from_slice(&bytes);
                                                 }
@@ -863,6 +873,12 @@ impl Server {
                                             repl.propagate_command(&resp_cmd).await;
                                         }
                                     }
+                                    // Apply RESP3 conversion if client negotiated RESP3
+                                    let response = if protocol_version == ProtocolVersion::RESP3 {
+                                        response.convert_for_resp3(&cmd_lower)
+                                    } else {
+                                        response
+                                    };
                                     if let Ok(bytes) = response.serialize() {
                                         response_buffer.extend_from_slice(&bytes);
                                     } else {
@@ -893,8 +909,8 @@ impl Server {
 
                                             // Check for HELLO command (protocol negotiation)
                                             if cmd_lower == "hello" {
-                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, _protocol_version, &security, &client_addr_str);
-                                                _protocol_version = new_version;
+                                                let (response, new_version) = Self::handle_hello_command(&cmd.args, protocol_version, &security, &client_addr_str);
+                                                protocol_version = new_version;
                                                 if let Ok(bytes) = response.serialize() {
                                                     response_buffer.extend_from_slice(&bytes);
                                                 }
@@ -1027,6 +1043,7 @@ impl Server {
                                                     match responses {
                                                         Ok(resp_list) => {
                                                             for resp in resp_list {
+                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                                 if let Ok(bytes) = resp.serialize() {
                                                                     response_buffer.extend_from_slice(&bytes);
                                                                 }
@@ -1055,6 +1072,7 @@ impl Server {
                                                     match responses {
                                                         Ok(resp_list) => {
                                                             for resp in resp_list {
+                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                                 if let Ok(bytes) = resp.serialize() {
                                                                     response_buffer.extend_from_slice(&bytes);
                                                                 }
@@ -1107,6 +1125,7 @@ impl Server {
                                                     match responses {
                                                         Ok(resp_list) => {
                                                             for resp in resp_list {
+                                                                let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                                                 if let Ok(bytes) = resp.serialize() {
                                                                     response_buffer.extend_from_slice(&bytes);
                                                                 }
@@ -1300,6 +1319,12 @@ impl Server {
                                                             repl.propagate_command(&resp_cmd).await;
                                                         }
                                                     }
+                                                    // Apply RESP3 conversion if client negotiated RESP3
+                                                    let response = if protocol_version == ProtocolVersion::RESP3 {
+                                                        response.convert_for_resp3(&cmd_lower)
+                                                    } else {
+                                                        response
+                                                    };
                                                     if let Ok(bytes) = response.serialize() {
                                                         response_buffer.extend_from_slice(&bytes);
                                                     } else {
@@ -1596,6 +1621,7 @@ impl Server {
         client_addr_str: &str,
         in_subscription_mode: &mut bool,
         security: &Option<Arc<SecurityManager>>,
+        protocol_version: ProtocolVersion,
     ) -> Result<(), NetworkError> {
         // Combine partial buffer if needed
         if !partial_command_buffer.is_empty() {
@@ -1628,6 +1654,7 @@ impl Server {
                                     }
                                     if let Ok(responses) = pubsub_commands::subscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
@@ -1637,6 +1664,7 @@ impl Server {
                                 "unsubscribe" => {
                                     if let Ok(responses) = pubsub_commands::unsubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
@@ -1663,6 +1691,7 @@ impl Server {
                                     }
                                     if let Ok(responses) = pubsub_commands::psubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
@@ -1672,6 +1701,7 @@ impl Server {
                                 "punsubscribe" => {
                                     if let Ok(responses) = pubsub_commands::punsubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
@@ -1698,6 +1728,7 @@ impl Server {
                                     }
                                     if let Ok(responses) = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
@@ -1707,6 +1738,7 @@ impl Server {
                                 "sunsubscribe" => {
                                     if let Ok(responses) = pubsub_commands::sunsubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
+                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
