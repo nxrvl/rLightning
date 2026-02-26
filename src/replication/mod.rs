@@ -121,17 +121,27 @@ impl ReplicationBacklog {
 
     /// Append data to the backlog, trimming old data if needed
     pub fn append(&mut self, data: &[u8]) {
-        // If adding this data would exceed max_size, trim from the front
-        let total_after = self.buffer.len() + data.len();
-        if total_after > self.max_size {
-            let to_remove = total_after - self.max_size;
-            let actual_remove = to_remove.min(self.buffer.len());
-            self.buffer.drain(..actual_remove);
-            self.first_byte_offset += actual_remove as u64;
-        }
+        self.current_offset += data.len() as u64;
+
+        // If the data itself exceeds max_size, only keep the tail
+        let data = if data.len() > self.max_size {
+            self.buffer.clear();
+            let skip = data.len() - self.max_size;
+            self.first_byte_offset = self.current_offset - self.max_size as u64;
+            &data[skip..]
+        } else {
+            // Trim from the front to make room
+            let total_after = self.buffer.len() + data.len();
+            if total_after > self.max_size {
+                let to_remove = total_after - self.max_size;
+                let actual_remove = to_remove.min(self.buffer.len());
+                self.buffer.drain(..actual_remove);
+                self.first_byte_offset += actual_remove as u64;
+            }
+            data
+        };
 
         self.buffer.extend(data);
-        self.current_offset += data.len() as u64;
     }
 
     /// Get data from the backlog starting at a given offset.
@@ -282,13 +292,21 @@ impl ReplicationManager {
         // Update master offset
         self.master_repl_offset.fetch_add(serialized.len() as u64, Ordering::SeqCst);
 
-        // Send to all connected replicas
+        // Send to all connected replicas using try_send to avoid blocking
+        // the write path if a replica's channel buffer is full
         let senders = self.replica_senders.read().await;
         let mut failed_ids = Vec::new();
 
         for sender in senders.iter() {
-            if sender.tx.send(serialized.clone()).await.is_err() {
-                failed_ids.push(sender.id.clone());
+            match sender.tx.try_send(serialized.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("Replica {} channel full, disconnecting to force resync", sender.id);
+                    failed_ids.push(sender.id.clone());
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    failed_ids.push(sender.id.clone());
+                }
             }
         }
 
@@ -470,8 +488,20 @@ impl ReplicationManager {
         // Wait briefly for replicas to catch up
         let _count = self.wait_for_replicas(1, Duration::from_secs(5)).await;
 
-        // In a real implementation, we'd promote the best replica
-        // For now, just acknowledge the failover was initiated
+        // Spawn a background timeout to abort failover if it doesn't complete.
+        // If the node is still a master after the timeout, reset read_only so
+        // writes are no longer blocked indefinitely.
+        let read_only = self.read_only.clone();
+        let state_ref = self.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let state = state_ref.read().await;
+            if state.role == ReplicationRole::Master && read_only.load(Ordering::SeqCst) {
+                tracing::warn!("FAILOVER timeout: resetting read-only mode on master");
+                read_only.store(false, Ordering::SeqCst);
+            }
+        });
+
         Ok(RespValue::SimpleString("OK".to_string()))
     }
 
