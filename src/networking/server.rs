@@ -903,7 +903,9 @@ impl Server {
                             "transaction", "scripting", "server",
                         ].into_iter().map(|s| RespValue::BulkString(Some(s.as_bytes().to_vec()))).collect())),
                         Some("genpass") => {
-                            let pass: String = (0..64).map(|_| format!("{:x}", fastrand::u8(..))).collect();
+                            let mut bytes = [0u8; 32];
+                            getrandom::fill(&mut bytes).expect("OS RNG unavailable");
+                            let pass: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                             RespValue::BulkString(Some(pass.into_bytes()))
                         }
                         Some("log") => RespValue::Array(Some(vec![])),
