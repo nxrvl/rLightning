@@ -136,15 +136,13 @@ async fn check_hll_type(engine: &StorageEngine, key: &[u8]) -> Result<(), Comman
     match key_type.as_str() {
         "none" | "string" => {
             // If it exists as string, verify it's either empty-ish or valid HLL data
-            if key_type == "string" {
-                if let Some(data) = engine.get(key).await? {
-                    if !data.is_empty() && !hll_is_valid(&data) {
+            if key_type == "string"
+                && let Some(data) = engine.get(key).await?
+                    && !data.is_empty() && !hll_is_valid(&data) {
                         return Err(CommandError::InvalidArgument(
                             "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
                         ));
                     }
-                }
-            }
             Ok(())
         }
         _ => Err(CommandError::WrongType),

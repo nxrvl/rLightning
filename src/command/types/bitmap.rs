@@ -299,9 +299,10 @@ pub async fn bitpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             return Ok(RespValue::Integer(-1));
         }
 
-        for byte_idx in start_byte..=end_byte {
+        for (i, &byte_val) in bitmap[start_byte..=end_byte].iter().enumerate() {
+            let byte_idx = start_byte + i;
             for bit_idx in (0..8).rev() {
-                let bit = (bitmap[byte_idx] >> bit_idx) & 1;
+                let bit = (byte_val >> bit_idx) & 1;
                 if bit == target_bit {
                     let pos = byte_idx * 8 + (7 - bit_idx as usize);
                     return Ok(RespValue::Integer(pos as i64));
@@ -729,7 +730,7 @@ fn parse_bitfield_ops(
 }
 
 fn ensure_bitmap_size(bitmap: &mut Vec<u8>, bit_count: u64) {
-    let needed_bytes = ((bit_count + 7) / 8) as usize;
+    let needed_bytes = bit_count.div_ceil(8) as usize;
     if bitmap.len() < needed_bytes {
         bitmap.resize(needed_bytes, 0);
     }

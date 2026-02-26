@@ -215,11 +215,10 @@ impl ReplicationManager {
     /// Initialize the replication manager
     pub async fn init(&self) -> Result<(), error::ReplicationError> {
         // If we're configured as a replica, connect to the master
-        if let Some(master_host) = &self.config.master_host {
-            if let Some(master_port) = self.config.master_port {
+        if let Some(master_host) = &self.config.master_host
+            && let Some(master_port) = self.config.master_port {
                 self.connect_to_master(master_host.clone(), master_port).await?;
             }
-        }
 
         Ok(())
     }

@@ -4,7 +4,7 @@ use crate::storage::engine::StorageEngine;
 
 /// Redis HSET command - Set the value of one or more hash fields
 pub async fn hset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 3 || args.len() % 2 == 0 {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
@@ -148,7 +148,7 @@ pub async fn hmget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result: Vec<RespValue> = values
         .into_iter()
-        .map(|v| RespValue::BulkString(v))
+        .map(RespValue::BulkString)
         .collect();
     Ok(RespValue::Array(Some(result)))
 }
@@ -263,8 +263,7 @@ pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             let j = fastrand::usize(i..indices.len());
             indices.swap(i, j);
         }
-        for i in 0..actual_count {
-            let idx = indices[i];
+        for &idx in &indices[..actual_count] {
             result.push(RespValue::BulkString(Some(fields[idx].0.clone())));
             if with_values {
                 result.push(RespValue::BulkString(Some(fields[idx].1.clone())));

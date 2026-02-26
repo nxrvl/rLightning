@@ -71,7 +71,9 @@ impl CommandHandler {
         CURRENT_DB_INDEX.scope(db_index, async move {
         let cmd_lowercase = command.name.to_lowercase();
 
-        let result = match cmd_lowercase.as_str() {
+        
+
+        match cmd_lowercase.as_str() {
             // Key expiration/TTL commands
             "expire" => commands::expire(&self.storage, &command.args).await,
             "pexpire" => commands::pexpire(&self.storage, &command.args).await,
@@ -173,29 +175,26 @@ impl CommandHandler {
             },
             "lpushx" => {
                 let result = commands::lpushx(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result {
-                    if *n > 0 && !command.args.is_empty() {
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0 && !command.args.is_empty() {
                         self.blocking_mgr.notify_key(&command.args[0]);
                     }
-                }
                 result
             },
             "rpushx" => {
                 let result = commands::rpushx(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result {
-                    if *n > 0 && !command.args.is_empty() {
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0 && !command.args.is_empty() {
                         self.blocking_mgr.notify_key(&command.args[0]);
                     }
-                }
                 result
             },
             "linsert" => {
                 let result = commands::linsert(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result {
-                    if *n > 0 && !command.args.is_empty() {
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0 && !command.args.is_empty() {
                         self.blocking_mgr.notify_key(&command.args[0]);
                     }
-                }
                 result
             },
             "lpop" => commands::lpop(&self.storage, &command.args).await,
@@ -210,21 +209,19 @@ impl CommandHandler {
             "lmove" => {
                 let result = commands::lmove(&self.storage, &command.args).await;
                 // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2 {
-                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                if result.is_ok() && command.args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result {
                         self.blocking_mgr.notify_key(&command.args[1]);
                     }
-                }
                 result
             },
             "rpoplpush" => {
                 let result = commands::rpoplpush(&self.storage, &command.args).await;
                 // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2 {
-                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                if result.is_ok() && command.args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result {
                         self.blocking_mgr.notify_key(&command.args[1]);
                     }
-                }
                 result
             },
             "lmpop" => commands::lmpop(&self.storage, &command.args).await,
@@ -233,11 +230,10 @@ impl CommandHandler {
             "blmove" => {
                 let result = commands::blmove(&self.storage, &command.args, &self.blocking_mgr).await;
                 // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2 {
-                    if let Ok(RespValue::BulkString(Some(_))) = &result {
+                if result.is_ok() && command.args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result {
                         self.blocking_mgr.notify_key(&command.args[1]);
                     }
-                }
                 result
             },
             "blmpop" => commands::blmpop(&self.storage, &command.args, &self.blocking_mgr).await,
@@ -445,11 +441,9 @@ impl CommandHandler {
 
             // Unknown command
             _ => {
-                return Err(CommandError::UnknownCommand(command.name))
+                Err(CommandError::UnknownCommand(command.name))
             }
-        };
-
-        result
+        }
         }).await
     }
 }

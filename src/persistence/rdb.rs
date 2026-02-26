@@ -119,6 +119,7 @@ impl RdbPersistence {
             hasher.update(&[version]);
             
             // Read data: (key, value, data_type, ttl)
+            #[allow(clippy::type_complexity)]
             let mut data: Vec<(Vec<u8>, Vec<u8>, RedisDataType, Option<Duration>)> = Vec::new();
 
             loop {

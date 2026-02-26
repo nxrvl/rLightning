@@ -24,16 +24,13 @@ pub enum RespError {
 
 /// RESP protocol version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ProtocolVersion {
+    #[default]
     RESP2,
     RESP3,
 }
 
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        ProtocolVersion::RESP2
-    }
-}
 
 /// RESP protocol data types (supports both RESP2 and RESP3)
 #[derive(Debug, Clone, PartialEq)]
@@ -750,7 +747,7 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
                 return Some(crlf_pos + 2);
             }
 
-            if count < 0 || count > 1_000_000 {
+            if !(0..=1_000_000).contains(&count) {
                 return None;
             }
 
@@ -779,7 +776,7 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
             let length_str = std::str::from_utf8(&buffer[1..crlf_pos]).ok()?;
             let count = length_str.parse::<i64>().ok()?;
 
-            if count < 0 || count > 500_000 {
+            if !(0..=500_000).contains(&count) {
                 return None;
             }
 
@@ -932,7 +929,7 @@ fn parse_big_number(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespErro
         if line.is_empty() {
             return Err(RespError::InvalidFormatDetails("Empty big number".to_string()));
         }
-        let check = if line.starts_with('-') { &line[1..] } else { &line };
+        let check = line.strip_prefix('-').unwrap_or(&line);
         if check.is_empty() || !check.chars().all(|c| c.is_ascii_digit()) {
             return Err(RespError::InvalidFormatDetails(format!("Invalid big number: {}", line)));
         }

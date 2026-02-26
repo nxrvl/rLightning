@@ -61,13 +61,11 @@ pub fn key_hash_slot(key: &[u8]) -> u16 {
 /// Extract the hash tag from a key.
 /// Returns the substring between first '{' and next '}', or the whole key if no valid tag.
 fn extract_hash_tag(key: &[u8]) -> &[u8] {
-    if let Some(start) = key.iter().position(|&b| b == b'{') {
-        if let Some(end) = key[start + 1..].iter().position(|&b| b == b'}') {
-            if end > 0 {
+    if let Some(start) = key.iter().position(|&b| b == b'{')
+        && let Some(end) = key[start + 1..].iter().position(|&b| b == b'}')
+            && end > 0 {
                 return &key[start + 1..start + 1 + end];
             }
-        }
-    }
     key
 }
 

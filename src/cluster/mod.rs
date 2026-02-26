@@ -485,11 +485,10 @@ impl ClusterManager {
             if slot >= CLUSTER_SLOTS {
                 return Err(format!("ERR Invalid or out of range slot '{}'", slot));
             }
-            if let Some(owner) = &state.slot_owners[slot as usize] {
-                if owner != &my_id {
+            if let Some(owner) = &state.slot_owners[slot as usize]
+                && owner != &my_id {
                     return Err(format!("ERR Slot {} is already busy", slot));
                 }
-            }
         }
 
         if let Some(node) = state.nodes.get_mut(&my_id) {
@@ -619,21 +618,19 @@ impl ClusterManager {
         }
 
         // Check if target is a master
-        if let Some(master_node) = state.nodes.get(master_id) {
-            if master_node.flags.role != NodeRole::Master {
+        if let Some(master_node) = state.nodes.get(master_id)
+            && master_node.flags.role != NodeRole::Master {
                 return Err("ERR I can only replicate a master, not a replica.".to_string());
             }
-        }
 
         // Check if we have slots assigned (can't become replica with slots)
-        if let Some(my_node) = state.nodes.get(&my_id) {
-            if !my_node.slots.is_empty() {
+        if let Some(my_node) = state.nodes.get(&my_id)
+            && !my_node.slots.is_empty() {
                 return Err(
                     "ERR To set a master the node must be empty and without assigned slots."
                         .to_string(),
                 );
             }
-        }
 
         // Update our role to replica
         if let Some(my_node) = state.nodes.get_mut(&my_id) {
@@ -730,7 +727,7 @@ impl ClusterManager {
                 if !state
                     .nodes
                     .get(&my_id)
-                    .map_or(false, |n| n.owns_slot(slot))
+                    .is_some_and(|n| n.owns_slot(slot))
                 {
                     return Err(
                         "ERR I'm not the owner of hash slot".to_string()
@@ -789,9 +786,7 @@ impl ClusterManager {
                 }
             }
             _ => {
-                return Err(format!(
-                    "ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP"
-                ));
+                return Err("ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP".to_string());
             }
         }
 
@@ -939,17 +934,16 @@ impl ClusterManager {
             let should_mark_fail = state
                 .nodes
                 .get(&node_id)
-                .map_or(false, |n| {
+                .is_some_and(|n| {
                     n.count_failure_reports() >= quorum && n.flags.pfail && !n.flags.fail
                 });
 
-            if should_mark_fail {
-                if let Some(node) = state.nodes.get_mut(&node_id) {
+            if should_mark_fail
+                && let Some(node) = state.nodes.get_mut(&node_id) {
                     node.flags.fail = true;
                     node.flags.pfail = false;
                     warn!(node_id = %node_id, "Node marked as FAIL");
                 }
-            }
         }
     }
 
@@ -977,7 +971,7 @@ impl ClusterManager {
         let master_failed = state
             .nodes
             .get(&master_id)
-            .map_or(false, |n| n.flags.fail);
+            .is_some_and(|n| n.flags.fail);
 
         if !master_failed {
             return;
@@ -1224,15 +1218,14 @@ impl ClusterManager {
 
         // Normal case: check if slot owner is us
         if let Some(owner_id) = state.get_slot_owner(slot) {
-            if owner_id != state.my_id {
-                if let Some(owner_node) = state.nodes.get(owner_id) {
+            if owner_id != state.my_id
+                && let Some(owner_node) = state.nodes.get(owner_id) {
                     return Some(RedirectInfo {
                         redirect_type: RedirectType::Moved,
                         slot,
                         addr: owner_node.addr,
                     });
                 }
-            }
         } else {
             // Slot is unassigned - cluster state is FAIL
             return None;

@@ -2,6 +2,7 @@ use bytes::BytesMut;
 
 /// Parser state to distinguish between command mode and data mode
 #[derive(Debug, Clone, PartialEq, Default)]
+#[allow(clippy::enum_variant_names)]
 pub enum ParserState {
     /// Reading command headers (RESP protocol commands)
     #[default]

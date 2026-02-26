@@ -95,6 +95,7 @@ pub fn execute_in_lua(
 
 /// Execute a named function from a library.
 /// This runs inside a spawn_blocking context.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_function_in_lua(
     library_code: &str,
     func_name: &str,
@@ -311,7 +312,7 @@ fn redis_call_impl(
     }
 
     // First argument is the command name
-    let cmd_name = match args.get(0) {
+    let cmd_name = match args.front() {
         Some(Value::String(s)) => s
             .to_str()
             .map_err(|e| mlua::Error::external(format!("ERR invalid command name: {}", e)))?
@@ -340,8 +341,8 @@ fn redis_call_impl(
     }
 
     // Enforce read-only mode: block write commands in EVAL_RO/FCALL_RO
-    if read_only {
-        if WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
+    if read_only
+        && WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
             let msg = format!("ERR Write commands are not allowed from read-only scripts. Command '{}' is a write command.", cmd_name);
             if protected {
                 let table = lua.create_table()?;
@@ -350,7 +351,6 @@ fn redis_call_impl(
             }
             return Err(mlua::Error::external(msg));
         }
-    }
 
     // Convert remaining arguments to byte vectors
     let cmd_args: Vec<Vec<u8>> = args
@@ -472,17 +472,15 @@ pub fn lua_to_resp(value: &Value) -> RespValue {
         Value::Nil => RespValue::BulkString(None),
         Value::Table(t) => {
             // Check for error table: {err = "message"}
-            if let Ok(err) = t.get::<mlua::String>("err") {
-                if let Ok(s) = err.to_str() {
+            if let Ok(err) = t.get::<mlua::String>("err")
+                && let Ok(s) = err.to_str() {
                     return RespValue::Error(s.to_string());
                 }
-            }
             // Check for status table: {ok = "message"}
-            if let Ok(ok) = t.get::<mlua::String>("ok") {
-                if let Ok(s) = ok.to_str() {
+            if let Ok(ok) = t.get::<mlua::String>("ok")
+                && let Ok(s) = ok.to_str() {
                     return RespValue::SimpleString(s.to_string());
                 }
-            }
 
             // Regular array table
             let len = t.raw_len();
@@ -500,6 +498,7 @@ pub fn lua_to_resp(value: &Value) -> RespValue {
 
 /// Discover function names from a library's Lua code.
 /// Creates a temporary Lua state and evaluates the library to find registered functions.
+#[allow(clippy::type_complexity)]
 pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec<String>)>, CommandError> {
     let lua = Lua::new();
     sandbox_lua(&lua);
@@ -513,11 +512,10 @@ pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec
 
             if args_vec.len() >= 2 {
                 // Simple form: redis.register_function('name', callback)
-                if let Value::String(ref s) = args_vec[0] {
-                    if let Ok(name) = s.to_str() {
+                if let Value::String(ref s) = args_vec[0]
+                    && let Ok(name) = s.to_str() {
                         funcs.push((name.to_string(), None, vec![]));
                     }
-                }
             } else if let Some(Value::Table(t)) = args_vec.first() {
                 // Table form: redis.register_function{function_name=..., callback=...}
                 if let Ok(name) = t.get::<String>("function_name") {

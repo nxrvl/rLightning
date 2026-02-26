@@ -427,73 +427,68 @@ impl Clone for AofPersistence {
 /// Returns a Vec of commands, where each command is a Vec of byte arguments.
 /// For collection types, we emit the appropriate Redis command to reconstruct the data.
 /// If a key has a TTL, we append a PEXPIRE command.
-fn aof_rewrite_commands_for_item(key: &Vec<u8>, item: &StorageItem) -> Vec<Vec<Vec<u8>>> {
+fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<u8>>> {
     let mut commands: Vec<Vec<Vec<u8>>> = Vec::new();
 
     match item.data_type {
         RedisDataType::String => {
-            let mut args = vec![b"SET".to_vec(), key.clone(), item.value.clone()];
-            if let Some(ttl) = item.ttl() {
-                if ttl.as_millis() > 0 {
+            let mut args = vec![b"SET".to_vec(), key.to_vec(), item.value.clone()];
+            if let Some(ttl) = item.ttl()
+                && ttl.as_millis() > 0 {
                     args.push(b"PX".to_vec());
                     args.push(ttl.as_millis().to_string().into_bytes());
                 }
-            }
             commands.push(args);
         }
         RedisDataType::List => {
-            if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&item.value) {
-                if !list.is_empty() {
+            if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&item.value)
+                && !list.is_empty() {
                     // Emit RPUSH key elem1 elem2 ...
-                    let mut args = vec![b"RPUSH".to_vec(), key.clone()];
+                    let mut args = vec![b"RPUSH".to_vec(), key.to_vec()];
                     args.extend(list);
                     commands.push(args);
                 }
-            }
         }
         RedisDataType::Set => {
-            if let Ok(set) = bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(&item.value) {
-                if !set.is_empty() {
+            if let Ok(set) = bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(&item.value)
+                && !set.is_empty() {
                     // Emit SADD key member1 member2 ...
-                    let mut args = vec![b"SADD".to_vec(), key.clone()];
-                    args.extend(set.into_iter());
+                    let mut args = vec![b"SADD".to_vec(), key.to_vec()];
+                    args.extend(set);
                     commands.push(args);
                 }
-            }
         }
         RedisDataType::ZSet => {
             // SortedSetData: BTreeSet<(OrderedFloat<f64>, Vec<u8>)> + HashMap<Vec<u8>, f64>
-            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(&item.value) {
-                if !ss.is_empty() {
-                    let mut args = vec![b"ZADD".to_vec(), key.clone()];
+            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(&item.value)
+                && !ss.is_empty() {
+                    let mut args = vec![b"ZADD".to_vec(), key.to_vec()];
                     for (member, score) in &ss.scores {
                         args.push(score.to_string().into_bytes());
                         args.push(member.clone());
                     }
                     commands.push(args);
                 }
-            }
         }
         RedisDataType::Hash => {
             // Hash stored as bincode-serialized HashMap<Vec<u8>, Vec<u8>>
-            if let Ok(hash) = bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value) {
-                if !hash.is_empty() {
-                    let mut args = vec![b"HSET".to_vec(), key.clone()];
+            if let Ok(hash) = bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value)
+                && !hash.is_empty() {
+                    let mut args = vec![b"HSET".to_vec(), key.to_vec()];
                     for (field, value) in hash {
                         args.push(field);
                         args.push(value);
                     }
                     commands.push(args);
                 }
-            }
         }
         RedisDataType::Stream => {
             if let Ok(stream) = bincode::deserialize::<crate::storage::stream::StreamData>(&item.value) {
                 // Emit XADD for each entry in the stream
-                for (_id, entry) in &stream.entries {
+                for entry in stream.entries.values() {
                     let mut args = vec![
                         b"XADD".to_vec(),
-                        key.clone(),
+                        key.to_vec(),
                         entry.id.to_string().into_bytes(),
                     ];
                     for (field, value) in &entry.fields {
@@ -507,17 +502,15 @@ fn aof_rewrite_commands_for_item(key: &Vec<u8>, item: &StorageItem) -> Vec<Vec<V
     }
 
     // For non-string types, append a PEXPIRE command if TTL is set
-    if item.data_type != RedisDataType::String {
-        if let Some(ttl) = item.ttl() {
-            if ttl.as_millis() > 0 {
+    if item.data_type != RedisDataType::String
+        && let Some(ttl) = item.ttl()
+            && ttl.as_millis() > 0 {
                 commands.push(vec![
                     b"PEXPIRE".to_vec(),
-                    key.clone(),
+                    key.to_vec(),
                     ttl.as_millis().to_string().into_bytes(),
                 ]);
             }
-        }
-    }
 
     commands
 }
@@ -548,11 +541,10 @@ fn is_read_only_command(command: &[u8]) -> bool {
 /// Helper function to ensure a directory exists
 fn ensure_dir_exists<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             fs::create_dir_all(parent)?;
         }
-    }
     Ok(())
 }
 

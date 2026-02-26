@@ -7,7 +7,7 @@
 /// - `[^abc]` or `[!abc]` matches any character NOT in the brackets
 /// - `[a-z]` matches any character in the range
 /// - `\x` matches the literal character x (escape)
-
+///
 /// Match a glob pattern against a string.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_bytes(pattern.as_bytes(), text.as_bytes())
@@ -35,13 +35,12 @@ pub fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
                     continue;
                 }
                 b'[' => {
-                    if let Some((matched, new_pi)) = match_char_class(pattern, pi, text[ti]) {
-                        if matched {
+                    if let Some((matched, new_pi)) = match_char_class(pattern, pi, text[ti])
+                        && matched {
                             pi = new_pi;
                             ti += 1;
                             continue;
                         }
-                    }
                 }
                 b'\\' if pi + 1 < pattern.len() => {
                     if pattern[pi + 1] == text[ti] {

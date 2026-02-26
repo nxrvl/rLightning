@@ -295,6 +295,7 @@ impl Default for LoggingSettings {
 
 // --- Configuration Loading Function ---
 
+#[allow(clippy::result_large_err)]
 fn load_settings(args: &Args) -> Result<AppSettings, FigmentError> {
     let mut figment = Figment::new().merge(Serialized::defaults(AppSettings::default()));
 
@@ -531,8 +532,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize replication if needed
     if let Err(e) = replication.init().await {
         error!("Failed to initialize replication: {}", e);
-        return Err(Box::<dyn std::error::Error>::from(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(Box::<dyn std::error::Error>::from(std::io::Error::other(
             format!("Replication initialization error: {}", e),
         )));
     }

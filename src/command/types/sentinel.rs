@@ -22,7 +22,7 @@ pub async fn sentinel_command(
         Some(mgr) => {
             mgr.handle_sentinel_command(args)
                 .await
-                .map_err(|e| CommandError::InternalError(e))
+                .map_err(CommandError::InternalError)
         }
         None => {
             let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();

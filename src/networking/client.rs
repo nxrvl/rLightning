@@ -95,11 +95,10 @@ impl Client {
             let n = self.stream.read_buf(&mut self.buffer).await?;
             if n == 0 {
                 // Connection closed - try to parse what we have one more time
-                if !self.buffer.is_empty() {
-                    if let Some(value) = RespValue::parse(&mut self.buffer)? {
+                if !self.buffer.is_empty()
+                    && let Some(value) = RespValue::parse(&mut self.buffer)? {
                         return Ok(value);
                     }
-                }
                 return Err("Connection closed by server".into());
             }
         }

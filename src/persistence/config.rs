@@ -5,8 +5,11 @@ use serde::Deserialize;
 /// Persistence mode options
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum PersistenceMode {
     /// No persistence
+    #[default]
     None,
     /// RDB snapshot persistence
     RDB,
@@ -16,11 +19,6 @@ pub enum PersistenceMode {
     Hybrid,
 }
 
-impl Default for PersistenceMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for PersistenceMode {
@@ -56,20 +54,17 @@ impl std::str::FromStr for PersistenceMode {
 /// Policy for AOF fsync operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AofSyncPolicy {
     /// Sync on every write
     Always,
     /// Sync every second
+    #[default]
     EverySecond,
     /// Let OS handle syncing
     None,
 }
 
-impl Default for AofSyncPolicy {
-    fn default() -> Self {
-        Self::EverySecond
-    }
-}
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for AofSyncPolicy {

@@ -341,15 +341,12 @@ impl ReplicationServer {
                                     if cmd.name.to_uppercase() == "REPLCONF" {
                                         // Process REPLCONF arguments
                                         for i in 0..cmd.args.len() - 1 {
-                                            if let Ok(arg) = std::str::from_utf8(&cmd.args[i]) {
-                                                if arg.to_lowercase() == "listening-port" {
-                                                    if let Ok(port_str) = std::str::from_utf8(&cmd.args[i + 1]) {
-                                                        if let Ok(port) = port_str.parse::<u16>() {
+                                            if let Ok(arg) = std::str::from_utf8(&cmd.args[i])
+                                                && arg.to_lowercase() == "listening-port"
+                                                    && let Ok(port_str) = std::str::from_utf8(&cmd.args[i + 1])
+                                                        && let Ok(port) = port_str.parse::<u16>() {
                                                             replica_port = port;
                                                         }
-                                                    }
-                                                }
-                                            }
                                         }
                                         
                                         // Respond with OK
@@ -433,18 +430,16 @@ impl ReplicationServer {
             if let Ok(arg) = std::str::from_utf8(&args[i]) {
                 match arg.to_lowercase().as_str() {
                     "ack" => {
-                        if let Ok(offset_str) = std::str::from_utf8(&args[i + 1]) {
-                            if let Ok(offset) = offset_str.parse::<u64>() {
+                        if let Ok(offset_str) = std::str::from_utf8(&args[i + 1])
+                            && let Ok(offset) = offset_str.parse::<u64>() {
                                 replica_info.offset = offset;
                             }
-                        }
                     }
                     "listening-port" => {
-                        if let Ok(port_str) = std::str::from_utf8(&args[i + 1]) {
-                            if let Ok(port) = port_str.parse::<u16>() {
+                        if let Ok(port_str) = std::str::from_utf8(&args[i + 1])
+                            && let Ok(port) = port_str.parse::<u16>() {
                                 replica_info.port = port;
                             }
-                        }
                     }
                     _ => {
                         // Ignore unknown arguments

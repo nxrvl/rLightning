@@ -47,12 +47,12 @@ fn convert_redis_path_to_pointer(path: &str) -> Result<String, CommandError> {
     }
 
     // Remove leading `.` or `$`
-    let path = if path.starts_with('.') {
-        &path[1..]
-    } else if path.starts_with("$.") {
-        &path[2..]
-    } else if path.starts_with('$') {
-        &path[1..]
+    let path = if let Some(rest) = path.strip_prefix('.') {
+        rest
+    } else if let Some(rest) = path.strip_prefix("$.") {
+        rest
+    } else if let Some(rest) = path.strip_prefix('$') {
+        rest
     } else {
         path // Path without leading . or $ (e.g., "name.first")
     };
@@ -395,16 +395,14 @@ fn get_array_at_path_mut<'a>(doc: &'a mut Value, path: &str) -> Result<&'a mut V
             } else {
                 return Err(CommandError::InvalidArgument("Cannot use array index on non-array".to_string()));
             }
-        } else {
-            if let Value::Object(obj) = current {
-                if let Some(val) = obj.get_mut(*segment) {
-                    current = val;
-                } else {
-                    return Err(CommandError::InvalidArgument("Path not found".to_string()));
-                }
+        } else if let Value::Object(obj) = current {
+            if let Some(val) = obj.get_mut(*segment) {
+                current = val;
             } else {
-                return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
+                return Err(CommandError::InvalidArgument("Path not found".to_string()));
             }
+        } else {
+            return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
         }
     }
 
@@ -828,8 +826,8 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
         if is_last {
             // Get mutable reference to the number
             if let Ok(index) = segment.parse::<usize>() {
-                if let Value::Array(arr) = current {
-                    if index < arr.len() {
+                if let Value::Array(arr) = current
+                    && index < arr.len() {
                         if let Value::Number(num) = &arr[index] {
                             let current_value = num.as_f64().unwrap_or(0.0);
                             let new_value = current_value + increment;
@@ -849,11 +847,10 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
                             return Err(CommandError::InvalidArgument("Value at path is not a number".to_string()));
                         }
                     }
-                }
                 return Err(CommandError::InvalidArgument("Array index out of bounds".to_string()));
             } else {
-                if let Value::Object(obj) = current {
-                    if let Some(Value::Number(num)) = obj.get(*segment) {
+                if let Value::Object(obj) = current
+                    && let Some(Value::Number(num)) = obj.get(*segment) {
                         let current_value = num.as_f64().unwrap_or(0.0);
                         let new_value = current_value + increment;
 
@@ -870,7 +867,6 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
                         obj.insert(segment.to_string(), new_val);
                         return Ok(new_value);
                     }
-                }
                 return Err(CommandError::InvalidArgument("Value at path is not a number".to_string()));
             }
         } else {
@@ -885,16 +881,14 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
                 } else {
                     return Err(CommandError::InvalidArgument("Cannot use array index on non-array".to_string()));
                 }
-            } else {
-                if let Value::Object(obj) = current {
-                    if let Some(val) = obj.get_mut(*segment) {
-                        current = val;
-                    } else {
-                        return Err(CommandError::InvalidArgument("Path not found".to_string()));
-                    }
+            } else if let Value::Object(obj) = current {
+                if let Some(val) = obj.get_mut(*segment) {
+                    current = val;
                 } else {
-                    return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
+                    return Err(CommandError::InvalidArgument("Path not found".to_string()));
                 }
+            } else {
+                return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
             }
         }
     }
