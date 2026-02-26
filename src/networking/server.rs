@@ -1142,7 +1142,8 @@ impl Server {
                                 RespValue::Array(Some(items))
                             }
                         } else {
-                            response // nil (WATCH abort) passes through
+                            // WATCH abort returns nil; convert to RESP3 Null
+                            response.convert_for_resp3("exec")
                         }
                     } else {
                         response.convert_for_resp3(&cmd_lower)

@@ -18,8 +18,8 @@ pub fn parse_ttl(bytes: &[u8]) -> Result<Option<Duration>, CommandError> {
         CommandError::InvalidArgument(format!("ERR value is not an integer or out of range: '{}'", ttl_str))
     })?;
     
-    if ttl_seconds < 0 {
-        // Negative TTL means delete the key
+    if ttl_seconds <= 0 {
+        // Zero or negative TTL means delete the key immediately
         return Ok(None);
     }
     
