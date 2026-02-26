@@ -1126,7 +1126,27 @@ impl Server {
                 }
                 // RESP3 conversion
                 let response = if *protocol_version == ProtocolVersion::RESP3 {
-                    response.convert_for_resp3(&cmd_lower)
+                    if cmd_lower == "exec" {
+                        // Convert each inner sub-result using its original command name
+                        if let RespValue::Array(Some(items)) = response {
+                            if items.len() == queued_for_repl.len() {
+                                let converted: Vec<RespValue> = items.into_iter()
+                                    .zip(queued_for_repl.iter())
+                                    .map(|(item, cmd)| {
+                                        let sub_cmd = cmd.name.to_lowercase();
+                                        item.convert_for_resp3(&sub_cmd)
+                                    })
+                                    .collect();
+                                RespValue::Array(Some(converted))
+                            } else {
+                                RespValue::Array(Some(items))
+                            }
+                        } else {
+                            response // nil (WATCH abort) passes through
+                        }
+                    } else {
+                        response.convert_for_resp3(&cmd_lower)
+                    }
                 } else {
                     response
                 };
