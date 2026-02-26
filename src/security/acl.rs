@@ -737,7 +737,7 @@ impl AclManager {
         username: &str,
         password: &str,
     ) -> Result<String, String> {
-        let users = self.users.read().map_err(|_| "Internal error".to_string())?;
+        let users = self.users.read().unwrap_or_else(|e| e.into_inner());
 
         let user = match users.get(username) {
             Some(u) => u,
