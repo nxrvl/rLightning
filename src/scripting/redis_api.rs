@@ -11,7 +11,6 @@ fn sandbox_lua(lua: &Lua) {
         "io", "os", "loadfile", "dofile", "debug", "require", "package",
         "load", "loadstring",
         "setfenv", "getfenv", "newproxy",
-        "rawget", "rawset", "rawequal", "collectgarbage",
     ];
     for name in &globals_to_disable {
         let _ = lua.globals().set(*name, Value::Nil);

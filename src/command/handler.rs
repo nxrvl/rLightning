@@ -18,20 +18,34 @@ pub struct CommandHandler {
 impl CommandHandler {
     /// Create a new CommandHandler with the given storage engine
     pub fn new(storage: Arc<StorageEngine>) -> Self {
+        let blocking_mgr = Arc::new(BlockingManager::new());
+        Self::start_blocking_cleanup_task(Arc::clone(&blocking_mgr));
         CommandHandler {
             storage,
-            blocking_mgr: Arc::new(BlockingManager::new()),
+            blocking_mgr,
             scripting: Arc::new(ScriptingEngine::new()),
         }
     }
 
     /// Create a new CommandHandler with a shared blocking manager
     pub fn new_with_blocking(storage: Arc<StorageEngine>, blocking_mgr: Arc<BlockingManager>) -> Self {
+        Self::start_blocking_cleanup_task(Arc::clone(&blocking_mgr));
         CommandHandler {
             storage,
             blocking_mgr,
             scripting: Arc::new(ScriptingEngine::new()),
         }
+    }
+
+    /// Start periodic cleanup of stale blocking manager entries
+    fn start_blocking_cleanup_task(blocking_mgr: Arc<BlockingManager>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                blocking_mgr.cleanup_stale_entries();
+            }
+        });
     }
 
     /// Get a reference to the blocking manager
@@ -187,6 +201,7 @@ impl CommandHandler {
             "llen" => commands::llen(&self.storage, &command.args).await,
             "ltrim" => commands::ltrim(&self.storage, &command.args).await,
             "lset" => commands::lset(&self.storage, &command.args).await,
+            "lrem" => commands::lrem(&self.storage, &command.args).await,
             "lpos" => commands::lpos(&self.storage, &command.args).await,
             "lmove" => {
                 let result = commands::lmove(&self.storage, &command.args).await;

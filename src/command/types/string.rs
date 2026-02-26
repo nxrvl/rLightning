@@ -515,9 +515,16 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     
     // Get the current value or create an empty one
     let mut current_value = engine.get(&key).await?.unwrap_or_default();
-    
+
     // Extend the current value if necessary
     let required_len = offset + value_to_set.len();
+    // Redis limits strings to 512MB
+    const MAX_STRING_SIZE: usize = 512 * 1024 * 1024;
+    if required_len > MAX_STRING_SIZE {
+        return Err(CommandError::InvalidArgument(
+            "string exceeds maximum allowed size (512MB)".to_string(),
+        ));
+    }
     if current_value.len() < required_len {
         current_value.resize(required_len, 0); // Pad with null bytes
     }

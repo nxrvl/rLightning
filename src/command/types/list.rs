@@ -702,6 +702,80 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
+/// Redis LREM command - Remove elements from a list
+/// LREM key count element
+/// count > 0: Remove count elements equal to element, moving from head to tail.
+/// count < 0: Remove |count| elements equal to element, moving from tail to head.
+/// count = 0: Remove all elements equal to element.
+pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+    if args.len() != 3 {
+        return Err(CommandError::WrongNumberOfArguments);
+    }
+    let key = &args[0];
+    let count = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let element = &args[2];
+
+    let key_type = engine.get_type(key).await?;
+    if key_type != "list" && key_type != "none" {
+        return Err(CommandError::WrongType);
+    }
+
+    let mut list = match engine.get(key).await? {
+        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
+            .map_err(|_| CommandError::WrongType)?,
+        None => return Ok(RespValue::Integer(0)),
+    };
+
+    let mut removed = 0i64;
+    let max_removals = if count == 0 {
+        list.len() as i64
+    } else {
+        count.abs()
+    };
+
+    if count >= 0 {
+        // Remove from head to tail
+        list.retain(|e| {
+            if removed >= max_removals {
+                return true;
+            }
+            if e == element {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+    } else {
+        // Remove from tail to head: reverse, remove from head, reverse back
+        list.reverse();
+        list.retain(|e| {
+            if removed >= max_removals {
+                return true;
+            }
+            if e == element {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        list.reverse();
+    }
+
+    if list.is_empty() {
+        engine.del(key).await?;
+    } else {
+        let serialized = bincode::serialize(&list)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        engine.set_with_type_preserve_ttl(key.clone(), serialized, RedisDataType::List).await?;
+    }
+
+    Ok(RespValue::Integer(removed))
+}
+
 /// Redis LPOS command - Return the index of matching elements in a list
 pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
