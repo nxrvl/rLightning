@@ -1439,6 +1439,7 @@ impl StorageEngine {
         nx: bool,
         xx: bool,
         get_old: bool,
+        keepttl: bool,
     ) -> StorageResult<SetResult> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -1451,7 +1452,7 @@ impl StorageEngine {
         self.maybe_evict(required_size).await?;
 
         let mut item = StorageItem::new(value);
-        let expires_at = if let Some(ttl) = ttl {
+        let new_expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
             Some(Instant::now() + ttl)
         } else {
@@ -1459,7 +1460,7 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let (did_set, old_value, is_new_key) = match self.data.entry(key.clone()) {
+        let (did_set, old_value, is_new_key, final_expires_at) = match self.data.entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
                 let effectively_exists = !expired;
@@ -1467,7 +1468,7 @@ impl StorageEngine {
                 if nx && effectively_exists {
                     // NX: don't set if key exists
                     let old = if get_old { Some(occ.get().value.clone()) } else { None };
-                    (false, old, false)
+                    (false, old, false, None)
                 } else if xx && !effectively_exists {
                     // XX: don't set if key doesn't exist
                     if expired {
@@ -1476,7 +1477,7 @@ impl StorageEngine {
                         occ.remove();
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                     }
-                    (false, None, false)
+                    (false, None, false, None)
                 } else {
                     // Set the value
                     let old = if get_old && effectively_exists {
@@ -1484,27 +1485,42 @@ impl StorageEngine {
                     } else {
                         None
                     };
+                    // KEEPTTL: preserve old expiration if key exists and keepttl is set
+                    let preserved_expires = if keepttl && effectively_exists {
+                        occ.get().expires_at
+                    } else {
+                        None
+                    };
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                    if keepttl && effectively_exists {
+                        // Preserve the old TTL by copying expires_at
+                        item.expires_at = preserved_expires;
+                    }
                     occ.insert(item);
-                    (true, old, expired) // if was expired, it's effectively a new key
+                    let effective_expires = if keepttl && effectively_exists {
+                        preserved_expires.map(|ea| ea)
+                    } else {
+                        new_expires_at
+                    };
+                    (true, old, expired, effective_expires)
                 }
             }
             Entry::Vacant(vac) => {
                 if xx {
                     // XX: key must exist
-                    (false, None, false)
+                    (false, None, false, None)
                 } else {
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                     vac.insert(item);
-                    (true, None, true)
+                    (true, None, true, new_expires_at)
                 }
             }
         };
 
         if did_set {
-            if let Some(expires_at) = expires_at {
+            if let Some(expires_at) = final_expires_at {
                 self.add_to_expiration_queue(key.clone(), expires_at).await;
             }
             if is_new_key {
@@ -2243,13 +2259,13 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         let result = storage.set_with_options(
-            b"opt_key".to_vec(), b"v1".to_vec(), None, true, false, false
+            b"opt_key".to_vec(), b"v1".to_vec(), None, true, false, false, false
         ).await.unwrap();
         assert_eq!(result, SetResult::Ok);
 
         // NX should fail on existing key
         let result = storage.set_with_options(
-            b"opt_key".to_vec(), b"v2".to_vec(), None, true, false, false
+            b"opt_key".to_vec(), b"v2".to_vec(), None, true, false, false, false
         ).await.unwrap();
         assert_eq!(result, SetResult::NotSet);
     }
@@ -2260,13 +2276,13 @@ mod tests {
 
         // GET on non-existent key
         let result = storage.set_with_options(
-            b"get_key".to_vec(), b"v1".to_vec(), None, false, false, true
+            b"get_key".to_vec(), b"v1".to_vec(), None, false, false, true, false
         ).await.unwrap();
         assert_eq!(result, SetResult::OldValue(None));
 
         // GET on existing key
         let result = storage.set_with_options(
-            b"get_key".to_vec(), b"v2".to_vec(), None, false, false, true
+            b"get_key".to_vec(), b"v2".to_vec(), None, false, false, true, false
         ).await.unwrap();
         assert_eq!(result, SetResult::OldValue(Some(b"v1".to_vec())));
     }

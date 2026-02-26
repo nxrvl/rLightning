@@ -96,23 +96,25 @@ async fn test_redis_nested_data_structures() -> Result<(), Box<dyn std::error::E
     
     // ======== TEST MULTI-LEVEL HASH EMULATION ========
     println!("Testing multi-level hash emulation");
-    
-    // Create individual config keys instead of a single hash for better compatibility
-    client.send_command_str("SET", &["config:server:host", "localhost"]).await?;
-    client.send_command_str("SET", &["config:server:port", "6379"]).await?;
-    client.send_command_str("SET", &["config:server:timeout", "30"]).await?;
-    client.send_command_str("SET", &["config:client:max_connections", "1000"]).await?;
-    client.send_command_str("SET", &["config:client:timeout", "10"]).await?;
-    client.send_command_str("SET", &["config:database:name", "mydb"]).await?;
-    client.send_command_str("SET", &["config:database:max_size", "1GB"]).await?;
-    
+
+    // Use HSET to create a proper hash with nested-style field names
+    // (In real Redis, SET and HSET are completely different - SET creates string keys,
+    // HSET creates hash fields within a single key)
+    client.send_command_str("HSET", &["config", "server:host", "localhost"]).await?;
+    client.send_command_str("HSET", &["config", "server:port", "6379"]).await?;
+    client.send_command_str("HSET", &["config", "server:timeout", "30"]).await?;
+    client.send_command_str("HSET", &["config", "client:max_connections", "1000"]).await?;
+    client.send_command_str("HSET", &["config", "client:timeout", "10"]).await?;
+    client.send_command_str("HSET", &["config", "database:name", "mydb"]).await?;
+    client.send_command_str("HSET", &["config", "database:max_size", "1GB"]).await?;
+
     // Get specific nested fields
     let response = client.send_command_str("HGET", &["config", "server:port"]).await?;
     assert_eq!(response, RespValue::BulkString(Some(b"6379".to_vec())));
-    
+
     let response = client.send_command_str("HGET", &["config", "database:max_size"]).await?;
     assert_eq!(response, RespValue::BulkString(Some(b"1GB".to_vec())));
-    
+
     // Get all fields that match a pattern
     let keys_to_fetch = ["server:host", "server:port", "server:timeout"];
     for key in keys_to_fetch {

@@ -1,17 +1,18 @@
 use crate::command::{CommandError, CommandResult};
 use crate::command::utils::{bytes_to_string, parse_ttl};
 use crate::networking::resp::RespValue;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{SetResult, StorageEngine};
 
 /// Redis SET command - Set the string value of a key
+/// Uses set_with_options() for atomic NX/XX/GET handling
 pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let value = args[1].clone();
-    
+
     // Check for options: EX seconds, PX milliseconds, NX, XX
     let mut ttl = None;
     let mut nx = false;
@@ -19,10 +20,10 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut keepttl = false;
     let mut get_old = false;
     let mut i = 2;
-    
+
     while i < args.len() {
         let option = bytes_to_string(&args[i])?.to_uppercase();
-        
+
         match option.as_str() {
             "EX" => {
                 if i + 1 >= args.len() {
@@ -123,68 +124,46 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
     }
-    
+
     // KEEPTTL and EX/PX are mutually exclusive
     if keepttl && ttl.is_some() {
         return Err(CommandError::InvalidArgument(
             "KEEPTTL and EX/PX options cannot be used together".to_string()
         ));
     }
-    
+
     // NX and XX options are mutually exclusive
     if nx && xx {
         return Err(CommandError::InvalidArgument(
             "NX and XX options cannot be used together".to_string()
         ));
     }
-    
-    // Check key existence for NX/XX conditions
-    let exists = engine.exists(&key).await?;
-
-    // Fetch old value before NX/XX early returns if GET option was specified
-    let old_value = if get_old {
-        engine.get(&key).await?
-    } else {
-        None
-    };
-
-    // NX: Only set the key if it does not already exist
-    if nx && exists {
-        if get_old {
-            return Ok(RespValue::BulkString(old_value));
-        }
-        return Ok(RespValue::BulkString(None)); // Key exists, don't set
-    }
-
-    // XX: Only set the key if it already exists
-    if xx && !exists {
-        return Ok(RespValue::BulkString(None)); // Key doesn't exist, don't set
-    }
-
-    // Handle KEEPTTL: Get the current TTL if we're keeping it and the key exists
-    if keepttl && exists {
-        ttl = engine.ttl(&key).await?;
-    }
 
     // For large values, add debug logging
-    if value.len() > 10240 {  // Log details for values > 10KB
+    if value.len() > 10240 {
         tracing::debug!("SET command with large value: key length={}, value length={}",
                         key.len(), value.len());
     }
 
-    // Perform the SET operation
-    match engine.set(key, value, ttl).await {
-        Ok(_) => {
+    // Use atomic set_with_options for NX/XX/GET/KEEPTTL - single atomic operation
+    match engine.set_with_options(key, value, ttl, nx, xx, get_old, keepttl).await? {
+        SetResult::OldValue(old_val) => {
+            // GET flag was specified
+            Ok(RespValue::BulkString(old_val))
+        }
+        SetResult::Ok => {
+            Ok(RespValue::SimpleString("OK".to_string()))
+        }
+        SetResult::NotSet => {
+            // NX/XX condition not met
             if get_old {
-                // Return the old value (or nil if key didn't exist)
-                Ok(RespValue::BulkString(old_value))
+                // SET ... NX GET on existing key returns the old value via OldValue above,
+                // but if NX fails and GET is set, set_with_options returns OldValue.
+                // This branch handles plain NX/XX without GET.
+                Ok(RespValue::BulkString(None))
             } else {
-                Ok(RespValue::SimpleString("OK".to_string()))
+                Ok(RespValue::BulkString(None))
             }
-        },
-        Err(e) => {
-            tracing::error!("SET command failed: {}", e);
-            Err(CommandError::InvalidArgument(format!("SET operation failed: {}", e)))
         }
     }
 }
@@ -248,174 +227,66 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis INCR command - Increment the integer value of a key by one
+/// Uses atomic_incr for thread-safe read-modify-write
 pub async fn incr(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    
-    // Get the current value or default to 0
-    let value = match engine.get(&key).await? {
-        Some(data) => {
-            // Try to parse the value as an integer
-            let str_value = bytes_to_string(&data)?;
-            str_value.parse::<i64>().map_err(|_| {
-                CommandError::WrongType
-            })?
-        },
-        None => 0,
-    };
-    
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
 
-    // Increment the value
-    let new_value = value.checked_add(1).ok_or_else(|| {
-        CommandError::InvalidArgument("Increment operation would overflow".to_string())
-    })?;
-
-    // Store the new value, preserving TTL
-    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
-
+    let new_value = engine.atomic_incr(&args[0], 1)?;
     Ok(RespValue::Integer(new_value))
 }
 
 /// Redis INCRBY command - Increment the integer value of a key by the given amount
+/// Uses atomic_incr for thread-safe read-modify-write
 pub async fn incrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    
-    // Parse the increment value
+
     let increment = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument("Increment amount is not a valid integer".to_string())
-    })?;
-    
-    // Get the current value or default to 0
-    let value = match engine.get(&key).await? {
-        Some(data) => {
-            // Try to parse the value as an integer
-            let str_value = bytes_to_string(&data)?;
-            str_value.parse::<i64>().map_err(|_| {
-                CommandError::WrongType
-            })?
-        },
-        None => 0,
-    };
-    
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
-
-    // Increment the value by the given amount
-    let new_value = value.checked_add(increment).ok_or_else(|| {
-        CommandError::InvalidArgument("Increment operation would overflow".to_string())
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
 
-    // Store the new value, preserving TTL
-    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
-
+    let new_value = engine.atomic_incr(&args[0], increment)?;
     Ok(RespValue::Integer(new_value))
 }
 
 /// Redis DECR command - Decrement the integer value of a key by one
+/// Uses atomic_incr with -1 delta for thread-safe read-modify-write
 pub async fn decr(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    
-    // Get the current value or default to 0
-    let value = match engine.get(&key).await? {
-        Some(data) => {
-            // Try to parse the value as an integer
-            let str_value = bytes_to_string(&data)?;
-            str_value.parse::<i64>().map_err(|_| {
-                CommandError::WrongType
-            })?
-        },
-        None => 0,
-    };
-    
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
 
-    // Decrement the value
-    let new_value = value.checked_sub(1).ok_or_else(|| {
-        CommandError::InvalidArgument("Decrement operation would underflow".to_string())
-    })?;
-
-    // Store the new value, preserving TTL
-    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
-
+    let new_value = engine.atomic_incr(&args[0], -1)?;
     Ok(RespValue::Integer(new_value))
 }
 
 /// Redis DECRBY command - Decrement the integer value of a key by the given amount
+/// Uses atomic_incr with negated delta for thread-safe read-modify-write
 pub async fn decrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    
-    // Parse the decrement value
+
     let decrement = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument("Decrement amount is not a valid integer".to_string())
-    })?;
-    
-    // Get the current value or default to 0
-    let value = match engine.get(&key).await? {
-        Some(data) => {
-            // Try to parse the value as an integer
-            let str_value = bytes_to_string(&data)?;
-            str_value.parse::<i64>().map_err(|_| {
-                CommandError::WrongType
-            })?
-        },
-        None => 0,
-    };
-    
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
-
-    // Decrement the value by the given amount
-    let new_value = value.checked_sub(decrement).ok_or_else(|| {
-        CommandError::InvalidArgument("Decrement operation would underflow".to_string())
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
 
-    // Store the new value, preserving TTL
-    engine.set(key, new_value.to_string().into_bytes(), existing_ttl).await?;
-
+    let new_value = engine.atomic_incr(&args[0], -decrement)?;
     Ok(RespValue::Integer(new_value))
 }
 
 /// Redis APPEND command - Append a value to a key
+/// Uses atomic_append for thread-safe read-modify-write
 pub async fn append(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    let value = args[1].clone();
-    
-    // Get the current value
-    let mut current_value = engine.get(&key).await?.unwrap_or_default();
 
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
-
-    // Append the new value
-    current_value.extend_from_slice(&value);
-
-    // Store the result, preserving TTL
-    engine.set(key, current_value.clone(), existing_ttl).await?;
-    
-    // Return the new length
-    Ok(RespValue::Integer(current_value.len() as i64))
+    let new_len = engine.atomic_append(&args[0], &args[1])?;
+    Ok(RespValue::Integer(new_len as i64))
 }
 
 /// Redis STRLEN command - Get the length of the value stored in a key
@@ -543,123 +414,103 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 }
 
 /// Redis GETSET command - Set the string value of a key and return its old value
+/// Uses atomic_getset for thread-safe get-and-replace
 pub async fn getset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let new_value = args[1].clone();
-    
-    // Check if the key exists and get its type
-    let key_type = engine.get_type(&key).await?;
-    
-    // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
-        return Err(CommandError::WrongType);
-    }
-    
-    // Get the old value
-    let old_value = engine.get(&key).await?;
-    
-    // Set the new value
-    engine.set(key, new_value, None).await?;
-    
-    // Return the old value
-    match old_value {
-        Some(value) => Ok(RespValue::BulkString(Some(value))),
-        None => Ok(RespValue::BulkString(None)),
-    }
+
+    let old_value = engine.atomic_getset(key, new_value).await?;
+    Ok(RespValue::BulkString(old_value))
 }
 
 /// Redis MSETNX command - Set multiple key-value pairs, only if none of the keys exist
+/// Uses set_with_options NX for each key. If any key exists, none are set.
 pub async fn msetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 || args.len() % 2 != 0 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    // Check if any of the keys already exist
+
+    // First pass: check if any key exists (without setting)
     for i in (0..args.len()).step_by(2) {
         if engine.exists(&args[i]).await? {
-            return Ok(RespValue::Integer(0)); // At least one key exists
+            return Ok(RespValue::Integer(0));
         }
     }
-    
-    // Set all key-value pairs
+
+    // Second pass: set all keys using NX to ensure atomicity per-key.
+    // If a concurrent client creates a key between our check and set,
+    // the NX flag will prevent overwriting it.
+    let mut all_set = true;
+    let mut set_keys = Vec::new();
     for i in (0..args.len()).step_by(2) {
-        engine.set(args[i].clone(), args[i+1].clone(), None).await?;
+        match engine.set_with_options(
+            args[i].clone(), args[i+1].clone(), None, true, false, false, false
+        ).await? {
+            SetResult::Ok => {
+                set_keys.push(args[i].clone());
+            }
+            SetResult::NotSet => {
+                // A key was created concurrently; roll back what we set
+                all_set = false;
+                break;
+            }
+            _ => {}
+        }
     }
-    
+
+    if !all_set {
+        // Roll back: delete keys we already set
+        for key in &set_keys {
+            let _ = engine.del(key).await;
+        }
+        return Ok(RespValue::Integer(0));
+    }
+
     Ok(RespValue::Integer(1))
 }
 
 /// Redis INCRBYFLOAT command - Increment the float value of a key by the given amount
+/// Uses atomic_incr_float for thread-safe read-modify-write
 pub async fn incrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    let key = args[0].clone();
-    
-    // Parse the increment value
+
     let increment = bytes_to_string(&args[1])?.parse::<f64>().map_err(|_| {
-        CommandError::InvalidArgument("Increment amount is not a valid float".to_string())
+        CommandError::InvalidArgument("value is not a valid float".to_string())
     })?;
-    
-    // Get the current value or default to 0.0
-    let value = match engine.get(&key).await? {
-        Some(data) => {
-            // Try to parse the value as a float
-            let str_value = bytes_to_string(&data)?;
-            str_value.parse::<f64>().map_err(|_| {
-                CommandError::WrongType
-            })?
-        },
-        None => 0.0,
-    };
-    
-    // Preserve existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
 
-    // Increment the value by the given amount
-    let new_value = value + increment;
+    let new_value = engine.atomic_incr_float(&args[0], increment)?;
 
-    // Check for NaN or infinity
-    if !new_value.is_finite() {
-        return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
-    }
-
-    // Store the new value
+    // Format using the same logic as the storage engine's format_float
     let new_value_str = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
-        // If it's a whole number, format without decimal
         format!("{:.0}", new_value)
     } else {
-        // Otherwise, use Redis-compatible float formatting
         format!("{}", new_value)
     };
 
-    engine.set(key, new_value_str.as_bytes().to_vec(), existing_ttl).await?;
-    
     Ok(RespValue::BulkString(Some(new_value_str.into_bytes())))
 }
 
 /// Redis SETNX command - Set the value of a key, only if the key does not exist
+/// Uses set_with_options with NX flag for atomic check-and-set
 pub async fn setnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let value = args[1].clone();
-    
-    // Check if the key already exists
-    if engine.exists(&key).await? {
-        return Ok(RespValue::Integer(0)); // Key exists, operation failed
+
+    match engine.set_with_options(key, value, None, true, false, false, false).await? {
+        SetResult::Ok => Ok(RespValue::Integer(1)),
+        SetResult::NotSet => Ok(RespValue::Integer(0)),
+        _ => Ok(RespValue::Integer(0)),
     }
-    
-    // Set the key since it doesn't exist
-    engine.set(key, value, None).await?;
-    Ok(RespValue::Integer(1)) // Operation succeeded
 }
 
 /// Redis SETEX command - Set the value and expiration of a key
@@ -888,6 +739,7 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis GETDEL command - Get the value of a key and delete it
+/// Uses atomic_getdel for thread-safe get-and-delete
 pub async fn getdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -895,7 +747,7 @@ pub async fn getdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Check type
+    // Check type before atomic operation
     if engine.exists(key).await? {
         let key_type = engine.get_type(key).await?;
         if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
@@ -903,18 +755,8 @@ pub async fn getdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    // Get the value
-    let value = engine.get(key).await?;
-
-    // If the key exists, delete it
-    if value.is_some() {
-        engine.del(key).await?;
-    }
-
-    match value {
-        Some(v) => Ok(RespValue::BulkString(Some(v))),
-        None => Ok(RespValue::BulkString(None)),
-    }
+    let value = engine.atomic_getdel(key);
+    Ok(RespValue::BulkString(value))
 }
 
 /// Redis PSETEX command - Set key to hold string value with millisecond expiration
@@ -1796,5 +1638,296 @@ mod tests {
         let args = vec![b"nonexistent".to_vec(), b"0".to_vec(), b"10".to_vec()];
         let result = substr(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(Vec::new())));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_set_nx_single_winner() {
+        // Two clients racing SET NX on the same key - exactly one should succeed
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+        let success_count = Arc::new(std::sync::atomic::AtomicI64::new(0));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let eng = engine.clone();
+            let count = success_count.clone();
+            handles.push(tokio::spawn(async move {
+                let args = vec![
+                    b"contested_key".to_vec(),
+                    format!("value_{}", i).into_bytes(),
+                    b"NX".to_vec(),
+                ];
+                let result = set(&eng, &args).await.unwrap();
+                if result == RespValue::SimpleString("OK".to_string()) {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Exactly one SET NX should succeed
+        assert_eq!(success_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The key should exist with some value
+        assert!(engine.exists(b"contested_key").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_incr_no_lost_updates() {
+        // Multiple clients racing INCR on the same key - no updates should be lost
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let num_tasks = 100;
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let args = vec![b"atomic_counter".to_vec()];
+                incr(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All increments should be accounted for
+        let val = engine.get(b"atomic_counter").await.unwrap().unwrap();
+        let final_val: i64 = String::from_utf8(val).unwrap().parse().unwrap();
+        assert_eq!(final_val, num_tasks);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_incrby_correctness() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let num_tasks = 50;
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let args = vec![b"incrby_counter".to_vec(), b"10".to_vec()];
+                incrby(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let val = engine.get(b"incrby_counter").await.unwrap().unwrap();
+        let final_val: i64 = String::from_utf8(val).unwrap().parse().unwrap();
+        assert_eq!(final_val, num_tasks * 10);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_decr_correctness() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Start from 1000
+        engine.set(b"decr_counter".to_vec(), b"1000".to_vec(), None).await.unwrap();
+
+        let num_tasks = 100;
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let args = vec![b"decr_counter".to_vec()];
+                decr(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let val = engine.get(b"decr_counter").await.unwrap().unwrap();
+        let final_val: i64 = String::from_utf8(val).unwrap().parse().unwrap();
+        assert_eq!(final_val, 1000 - num_tasks);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_append_correctness() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let num_tasks = 50;
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let args = vec![b"append_key".to_vec(), b"x".to_vec()];
+                append(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All appends should be captured - length should be 50
+        let val = engine.get(b"append_key").await.unwrap().unwrap();
+        assert_eq!(val.len(), num_tasks as usize);
+    }
+
+    #[tokio::test]
+    async fn test_msetnx_atomicity() {
+        // MSETNX should be all-or-nothing
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Set one key that will block the MSETNX
+        engine.set(b"ms_key2".to_vec(), b"existing".to_vec(), None).await.unwrap();
+
+        // MSETNX should fail because ms_key2 exists
+        let args = vec![
+            b"ms_key1".to_vec(), b"val1".to_vec(),
+            b"ms_key2".to_vec(), b"val2".to_vec(),
+            b"ms_key3".to_vec(), b"val3".to_vec(),
+        ];
+        let result = msetnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // ms_key1 and ms_key3 should NOT have been set
+        assert!(!engine.exists(b"ms_key1").await.unwrap());
+        assert!(!engine.exists(b"ms_key3").await.unwrap());
+
+        // ms_key2 should still have its original value
+        let val = engine.get(b"ms_key2").await.unwrap().unwrap();
+        assert_eq!(val, b"existing");
+    }
+
+    #[tokio::test]
+    async fn test_msetnx_success() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // MSETNX with no existing keys should succeed
+        let args = vec![
+            b"msnx_a".to_vec(), b"v1".to_vec(),
+            b"msnx_b".to_vec(), b"v2".to_vec(),
+        ];
+        let result = msetnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        assert_eq!(engine.get(b"msnx_a").await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(engine.get(b"msnx_b").await.unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_setnx_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // First SETNX should succeed
+        let args = vec![b"setnx_key".to_vec(), b"first".to_vec()];
+        let result = setnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // Second SETNX on same key should fail
+        let args = vec![b"setnx_key".to_vec(), b"second".to_vec()];
+        let result = setnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // Value should be the first one
+        let val = engine.get(b"setnx_key").await.unwrap().unwrap();
+        assert_eq!(val, b"first");
+    }
+
+    #[tokio::test]
+    async fn test_getset_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // GETSET on non-existent key returns nil
+        let args = vec![b"gs_key".to_vec(), b"val1".to_vec()];
+        let result = getset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // GETSET returns old value and sets new
+        let args = vec![b"gs_key".to_vec(), b"val2".to_vec()];
+        let result = getset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+
+        // Verify new value is set
+        let val = engine.get(b"gs_key").await.unwrap().unwrap();
+        assert_eq!(val, b"val2");
+    }
+
+    #[tokio::test]
+    async fn test_getdel_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        engine.set(b"gd_key".to_vec(), b"myval".to_vec(), None).await.unwrap();
+
+        let args = vec![b"gd_key".to_vec()];
+        let result = getdel(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"myval".to_vec())));
+
+        // Key should be gone
+        assert!(!engine.exists(b"gd_key").await.unwrap());
+
+        // Second GETDEL returns nil
+        let result = getdel(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_set_keepttl() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Set with TTL
+        let args = vec![
+            b"kt_key".to_vec(), b"val1".to_vec(),
+            b"EX".to_vec(), b"100".to_vec(),
+        ];
+        set(&engine, &args).await.unwrap();
+
+        // Verify TTL is set
+        let ttl = engine.ttl(b"kt_key").await.unwrap();
+        assert!(ttl.is_some());
+
+        // SET with KEEPTTL should preserve the TTL
+        let args = vec![
+            b"kt_key".to_vec(), b"val2".to_vec(),
+            b"KEEPTTL".to_vec(),
+        ];
+        set(&engine, &args).await.unwrap();
+
+        // Value should be updated
+        let val = engine.get(b"kt_key").await.unwrap().unwrap();
+        assert_eq!(val, b"val2");
+
+        // TTL should be preserved (still close to 100s)
+        let ttl = engine.ttl(b"kt_key").await.unwrap();
+        assert!(ttl.is_some());
+        assert!(ttl.unwrap().as_secs() >= 95);
+    }
+
+    #[tokio::test]
+    async fn test_set_get_flag_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // SET with GET on non-existent key returns nil
+        let args = vec![b"sg_key".to_vec(), b"val1".to_vec(), b"GET".to_vec()];
+        let result = set(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // SET with GET on existing key returns old value
+        let args = vec![b"sg_key".to_vec(), b"val2".to_vec(), b"GET".to_vec()];
+        let result = set(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+
+        // Value should be updated to val2
+        let val = engine.get(b"sg_key").await.unwrap().unwrap();
+        assert_eq!(val, b"val2");
     }
 } 
