@@ -547,8 +547,8 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         CommandError::InvalidArgument("PEXPIRE value must be a valid integer".to_string())
     })?;
 
-    let ttl = if millis < 0 {
-        None // Negative TTL means delete the key
+    let ttl = if millis <= 0 {
+        None // Zero or negative TTL means delete the key immediately
     } else {
         Some(std::time::Duration::from_millis(millis as u64))
     };

@@ -322,10 +322,9 @@ pub async fn zrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let with_scores = args.len() == 4 &&
         bytes_to_string(&args[3]).map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false);
 
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        if ss.is_empty() { return Ok((preserved, Vec::new())); }
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok(Vec::new()); }
         let mut output = Vec::new();
         if let Some((si, ei)) = normalize_indices(start, stop, ss.len()) {
             let rlen = ei - si + 1;
@@ -337,7 +336,7 @@ pub async fn zrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             }
         }
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -363,10 +362,9 @@ pub async fn zscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let member = args[1].clone();
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        Ok((preserved, ss.get_score(&member)))
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        Ok(ss.get_score(&member))
     })?;
     match result {
         Some(score) => Ok(RespValue::BulkString(Some(format_score(score).into_bytes()))),
@@ -378,10 +376,9 @@ pub async fn zscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 pub async fn zcard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        Ok((preserved, ss.len() as i64))
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        Ok(ss.len() as i64)
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -392,13 +389,12 @@ pub async fn zcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
     let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let count = ss.entries.iter()
             .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
             .count();
-        Ok((preserved, count as i64))
+        Ok(count as i64)
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -408,11 +404,10 @@ pub async fn zrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let member = args[1].clone();
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        if existing.is_none() { return Ok((preserved, None)); }
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        Ok((preserved, ss.rank(&member)))
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok(None); }
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        Ok(ss.rank(&member))
     })?;
     match result {
         Some(rank) => Ok(RespValue::Integer(rank as i64)),
@@ -425,11 +420,10 @@ pub async fn zrevrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     if args.len() != 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let member = args[1].clone();
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        if existing.is_none() { return Ok((preserved, None)); }
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        Ok((preserved, ss.rev_rank(&member)))
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        if existing.is_none() { return Ok(None); }
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        Ok(ss.rev_rank(&member))
     })?;
     match result {
         Some(rank) => Ok(RespValue::Integer(rank as i64)),
@@ -449,10 +443,9 @@ pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     })?;
     let with_scores = args.len() == 4 &&
         bytes_to_string(&args[3]).map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false);
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        if ss.is_empty() { return Ok((preserved, Vec::new())); }
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok(Vec::new()); }
         let mut output = Vec::new();
         if let Some((si, ei)) = normalize_indices(start, stop, ss.len()) {
             let rlen = ei - si + 1;
@@ -465,7 +458,7 @@ pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                 }
             }
         }
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -520,9 +513,8 @@ pub async fn zrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
             _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
         }
     }
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let mut output = Vec::new();
         for (score, member) in ss.entries.iter()
             .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
@@ -531,7 +523,7 @@ pub async fn zrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
             output.push(RespValue::BulkString(Some(member.clone())));
             if with_scores { output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
         }
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -564,9 +556,8 @@ pub async fn zrevrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
             _ => return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt))),
         }
     }
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let mut output = Vec::new();
         for (score, member) in ss.entries.iter().rev()
             .filter(|(s, _)| score_in_range(s.0, min_score, min_exclusive, max_score, max_exclusive))
@@ -575,7 +566,7 @@ pub async fn zrevrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
             output.push(RespValue::BulkString(Some(member.clone())));
             if with_scores { output.push(RespValue::BulkString(Some(format_score(score.0).into_bytes()))); }
         }
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -605,15 +596,14 @@ pub async fn zrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt)));
         }
     }
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let output: Vec<RespValue> = ss.entries.iter()
             .filter(|(_, member)| in_lex_range(member, &min, &max))
             .skip(offset).take(count.unwrap_or(usize::MAX))
             .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
             .collect();
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -643,15 +633,14 @@ pub async fn zrevrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             return Err(CommandError::InvalidArgument(format!("unsupported option: {}", opt)));
         }
     }
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let output: Vec<RespValue> = ss.entries.iter().rev()
             .filter(|(_, member)| in_lex_range(member, &min, &max))
             .skip(offset).take(count.unwrap_or(usize::MAX))
             .map(|(_, member)| RespValue::BulkString(Some(member.clone())))
             .collect();
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -739,13 +728,12 @@ pub async fn zlexcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     let key = &args[0];
     let min = parse_lex_bound(&bytes_to_string(&args[1])?)?;
     let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let count = ss.entries.iter()
             .filter(|(_, member)| in_lex_range(member, &min, &max))
             .count();
-        Ok((preserved, count as i64))
+        Ok(count as i64)
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -1094,12 +1082,10 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if args.is_empty() || args.len() > 3 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
 
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        // Return (preserved, (is_empty, ss_entries_as_vec)) so we can work with it outside
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let entries: Vec<(f64, Vec<u8>)> = ss.entries.iter().map(|(s, m)| (s.0, m.clone())).collect();
-        Ok((preserved, entries))
+        Ok(entries)
     })?;
 
     let entries = result;
@@ -1146,16 +1132,15 @@ pub async fn zmscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() < 2 { return Err(CommandError::WrongNumberOfArguments); }
     let key = &args[0];
     let members: Vec<Vec<u8>> = args[1..].to_vec();
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         let scores: Vec<RespValue> = members.iter().map(|member| {
             match ss.get_score(member) {
                 Some(score) => RespValue::BulkString(Some(format_score(score).into_bytes())),
                 None => RespValue::BulkString(None),
             }
         }).collect();
-        Ok((preserved, scores))
+        Ok(scores)
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -1378,11 +1363,10 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
         if ss.is_empty() {
-            return Ok((preserved, (0usize, Vec::new())));
+            return Ok((0usize, Vec::new()));
         }
         let mut elements = Vec::new();
         let mut new_cursor = 0usize;
@@ -1405,7 +1389,7 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
         if scanned < scan_count { new_cursor = 0; }
-        Ok((preserved, (new_cursor, elements)))
+        Ok((new_cursor, elements))
     })?;
 
     let (new_cursor, elements) = result;
@@ -1458,10 +1442,9 @@ pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         return zrange(engine, &orig_args).await;
     }
 
-    let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let preserved = existing.as_deref().map(|v| v.to_vec());
-        let ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
-        if ss.is_empty() { return Ok((preserved, Vec::new())); }
+    let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
+        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        if ss.is_empty() { return Ok(Vec::new()); }
 
         let selected: Vec<(f64, Vec<u8>)> = if by_score {
             let (min_score, min_excl) = if rev {
@@ -1524,7 +1507,7 @@ pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             output.push(RespValue::BulkString(Some(member.clone())));
             if with_scores { output.push(RespValue::BulkString(Some(format_score(*score).into_bytes()))); }
         }
-        Ok((preserved, output))
+        Ok(output)
     })?;
     Ok(RespValue::Array(Some(result)))
 }

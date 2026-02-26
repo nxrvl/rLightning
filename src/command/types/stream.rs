@@ -205,16 +205,13 @@ pub async fn xlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let key = &args[0];
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Integer(0))),
+            None => return Ok(RespValue::Integer(0)),
         };
-        let len = stream.len() as i64;
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Integer(len)))
+        Ok(RespValue::Integer(stream.len() as i64))
     })?;
 
     Ok(result)
@@ -250,18 +247,16 @@ pub async fn xrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Array(Some(vec![])))),
+            None => return Ok(RespValue::Array(Some(vec![]))),
         };
 
         let entries = stream.range(&start, &end, count);
         let resp: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Array(Some(resp))))
+        Ok(RespValue::Array(Some(resp)))
     })?;
 
     Ok(result)
@@ -293,18 +288,16 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         }
     }
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Array(Some(vec![])))),
+            None => return Ok(RespValue::Array(Some(vec![]))),
         };
 
         let entries = stream.rev_range(&end, &start, count);
         let resp: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Array(Some(resp))))
+        Ok(RespValue::Array(Some(resp)))
     })?;
 
     Ok(result)
@@ -633,7 +626,7 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     }
     let key = &args[0];
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
@@ -678,9 +671,7 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             last_entry,
         ]));
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), resp))
+        Ok(resp)
     });
 
     match result {
@@ -698,7 +689,7 @@ async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     }
     let key = &args[0];
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
@@ -728,9 +719,7 @@ async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             ])));
         }
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Array(Some(groups))))
+        Ok(RespValue::Array(Some(groups)))
     });
 
     match result {
@@ -750,7 +739,7 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let group_name = bytes_to_string(&args[1])?;
     let key_str = String::from_utf8_lossy(key).to_string();
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
@@ -776,9 +765,7 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             ])));
         }
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Array(Some(consumers))))
+        Ok(RespValue::Array(Some(consumers)))
     });
 
     match result {
@@ -1542,7 +1529,7 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         None
     };
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
             Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                 .map_err(|_| StorageError::WrongType)?,
@@ -1615,9 +1602,7 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             }
         };
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), resp))
+        Ok(resp)
     });
 
     match result {
