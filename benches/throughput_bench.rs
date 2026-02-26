@@ -47,7 +47,7 @@ fn bench_string_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(set_cmd).await.unwrap());
+                                black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -105,7 +105,7 @@ fn bench_hash_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, field, value],
                                 };
                                 
-                                black_box(handler_ref.process(hset_cmd).await.unwrap());
+                                black_box(handler_ref.process(hset_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -162,7 +162,7 @@ fn bench_list_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(lpush_cmd).await.unwrap());
+                                black_box(handler_ref.process(lpush_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -219,7 +219,7 @@ fn bench_set_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, member],
                                 };
                                 
-                                black_box(handler_ref.process(sadd_cmd).await.unwrap());
+                                black_box(handler_ref.process(sadd_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -277,7 +277,7 @@ fn bench_sorted_set_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, score, member],
                                 };
                                 
-                                black_box(handler_ref.process(zadd_cmd).await.unwrap());
+                                black_box(handler_ref.process(zadd_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -326,7 +326,7 @@ fn bench_mixed_workload_throughput(c: &mut Criterion) {
                                 args: vec![key, value],
                             };
                             
-                            handler.process(set_cmd).await.unwrap();
+                            handler.process(set_cmd, 0).await.unwrap();
                         }
                         
                         let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -405,7 +405,7 @@ fn bench_mixed_workload_throughput(c: &mut Criterion) {
                                     _ => unreachable!()
                                 };
                                 
-                                black_box(handler_ref.process(cmd).await.unwrap());
+                                black_box(handler_ref.process(cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -462,7 +462,7 @@ fn bench_expiry_performance(c: &mut Criterion) {
                                     name: "set".to_string(),
                                     args: vec![key.clone(), value],
                                 };
-                                handler_ref.process(set_cmd).await.unwrap();
+                                handler_ref.process(set_cmd, 0).await.unwrap();
                                 
                                 // Then EXPIRE it
                                 let expire_cmd = Command {
@@ -470,7 +470,7 @@ fn bench_expiry_performance(c: &mut Criterion) {
                                     args: vec![key, ttl],
                                 };
                                 
-                                black_box(handler_ref.process(expire_cmd).await.unwrap());
+                                black_box(handler_ref.process(expire_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -527,7 +527,7 @@ fn bench_large_values_throughput(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(set_cmd).await.unwrap());
+                                black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -587,7 +587,7 @@ fn bench_json_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, path, json_value],
                                 };
                                 
-                                black_box(handler_ref.process(json_set_cmd).await.unwrap());
+                                black_box(handler_ref.process(json_set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -647,7 +647,7 @@ fn bench_memory_usage_patterns(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(set_cmd).await.unwrap());
+                                black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);

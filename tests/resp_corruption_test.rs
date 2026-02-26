@@ -18,7 +18,7 @@ async fn test_no_data_corruption_with_json_storage() {
         args: vec![b"json_key".to_vec(), json_data.as_bytes().to_vec()],
     };
 
-    let response = handler.process(set_cmd).await;
+    let response = handler.process(set_cmd, 0).await;
     assert!(response.is_ok());
     assert_eq!(response.unwrap(), RespValue::SimpleString("OK".to_string()));
 
@@ -28,7 +28,7 @@ async fn test_no_data_corruption_with_json_storage() {
         args: vec![b"json_key".to_vec()],
     };
 
-    let response = handler.process(get_cmd).await;
+    let response = handler.process(get_cmd, 0).await;
     assert!(response.is_ok());
     assert_eq!(
         response.unwrap(),
@@ -49,7 +49,7 @@ async fn test_no_data_corruption_with_base64_data() {
         args: vec![b"b64_key".to_vec(), b64_data.as_bytes().to_vec()],
     };
 
-    let response = handler.process(set_cmd).await;
+    let response = handler.process(set_cmd, 0).await;
     assert!(response.is_ok());
     assert_eq!(response.unwrap(), RespValue::SimpleString("OK".to_string()));
 
@@ -59,7 +59,7 @@ async fn test_no_data_corruption_with_base64_data() {
         args: vec![b"b64_key".to_vec()],
     };
 
-    let response = handler.process(get_cmd).await;
+    let response = handler.process(get_cmd, 0).await;
     assert!(response.is_ok());
     assert_eq!(
         response.unwrap(),
@@ -99,7 +99,7 @@ async fn test_large_json_payload_handling() {
         args: vec![b"large_json".to_vec(), json_str.as_bytes().to_vec()],
     };
 
-    let response = handler.process(set_cmd).await;
+    let response = handler.process(set_cmd, 0).await;
     assert!(response.is_ok());
     assert_eq!(response.unwrap(), RespValue::SimpleString("OK".to_string()));
 
@@ -109,7 +109,7 @@ async fn test_large_json_payload_handling() {
         args: vec![b"large_json".to_vec()],
     };
 
-    let response = handler.process(get_cmd).await;
+    let response = handler.process(get_cmd, 0).await;
     assert!(response.is_ok());
 
     if let RespValue::BulkString(Some(data)) = response.unwrap() {

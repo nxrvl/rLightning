@@ -45,7 +45,7 @@ fn bench_stream_xadd(c: &mut Criterion) {
                                     format!("value:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -78,7 +78,7 @@ fn bench_stream_xread_xrange(c: &mut Criterion) {
                                 format!("val:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -91,7 +91,7 @@ fn bench_stream_xread_xrange(c: &mut Criterion) {
                                 b"+".to_vec(),
                             ],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -195,7 +195,7 @@ fn bench_transactions(c: &mut Criterion) {
                             format!("val:{}", i).into_bytes(),
                         ],
                     };
-                    black_box(handler.process(cmd).await.unwrap());
+                    black_box(handler.process(cmd, 0).await.unwrap());
                 }
             })
         });
@@ -227,7 +227,7 @@ fn bench_transactions(c: &mut Criterion) {
                     };
                     queue_command(&mut tx_state, cmd).unwrap();
                 }
-                black_box(handle_exec(&mut tx_state, &handler, &storage).await.unwrap());
+                black_box(handle_exec(&mut tx_state, &handler, &storage, 0).await.unwrap());
             })
         });
     });
@@ -262,7 +262,7 @@ fn bench_pipeline(c: &mut Criterion) {
                                         format!("val:{}", i).into_bytes(),
                                     ],
                                 };
-                                handler_ref.process(cmd).await.unwrap()
+                                handler_ref.process(cmd, 0).await.unwrap()
                             });
                         }
                         let results: Vec<_> =
@@ -310,7 +310,7 @@ fn bench_persistence(c: &mut Criterion) {
                                         format!("rdbvalue:{}", i).into_bytes(),
                                     ],
                                 };
-                                handler.process(cmd).await.unwrap();
+                                handler.process(cmd, 0).await.unwrap();
                             }
                         });
                         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -348,7 +348,7 @@ fn bench_persistence(c: &mut Criterion) {
                                 format!("loadvalue:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -488,7 +488,7 @@ fn bench_memory_efficiency(c: &mut Criterion) {
                     let handler = CommandHandler::new(Arc::clone(&storage));
                     for i in 0..1000 {
                         let cmd = cmd_fn(i);
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     }
                 })
             });
@@ -522,7 +522,7 @@ fn bench_concurrent_clients(c: &mut Criterion) {
                                 format!("concval:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -542,14 +542,14 @@ fn bench_concurrent_clients(c: &mut Criterion) {
                                         format!("clientval:{}", i).into_bytes(),
                                     ],
                                 };
-                                handler_ref.process(set_cmd).await.unwrap();
+                                handler_ref.process(set_cmd, 0).await.unwrap();
                                 let get_cmd = Command {
                                     name: "get".to_string(),
                                     args: vec![
                                         format!("conckey:{}", i % 100).into_bytes(),
                                     ],
                                 };
-                                black_box(handler_ref.process(get_cmd).await.unwrap());
+                                black_box(handler_ref.process(get_cmd, 0).await.unwrap());
                             });
                             handles.push(handle);
                         }
@@ -586,7 +586,7 @@ fn bench_latency(c: &mut Criterion) {
                         b"latvalue".to_vec(),
                     ],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -603,7 +603,7 @@ fn bench_latency(c: &mut Criterion) {
                         b"latvalue".to_vec(),
                     ],
                 };
-                handler.process(cmd).await.unwrap();
+                handler.process(cmd, 0).await.unwrap();
             }
         });
         let mut counter = 0u64;
@@ -614,7 +614,7 @@ fn bench_latency(c: &mut Criterion) {
                     name: "get".to_string(),
                     args: vec![format!("latgetkey:{}", counter % 1000).into_bytes()],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -634,7 +634,7 @@ fn bench_latency(c: &mut Criterion) {
                         b"latvalue".to_vec(),
                     ],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -654,7 +654,7 @@ fn bench_latency(c: &mut Criterion) {
                         format!("member:{}", counter).into_bytes(),
                     ],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -680,14 +680,14 @@ fn bench_blocking_commands(c: &mut Criterion) {
                     name: "lpush".to_string(),
                     args: vec![b"blpoplist".to_vec(), b"item".to_vec()],
                 };
-                handler.process(push_cmd).await.unwrap();
+                handler.process(push_cmd, 0).await.unwrap();
 
                 // BLPOP should return immediately since data is available
                 let blpop_cmd = Command {
                     name: "blpop".to_string(),
                     args: vec![b"blpoplist".to_vec(), b"0".to_vec()],
                 };
-                black_box(handler.process(blpop_cmd).await.unwrap());
+                black_box(handler.process(blpop_cmd, 0).await.unwrap());
             })
         });
     });
@@ -701,13 +701,13 @@ fn bench_blocking_commands(c: &mut Criterion) {
                     name: "rpush".to_string(),
                     args: vec![b"brpoplist".to_vec(), b"item".to_vec()],
                 };
-                handler.process(push_cmd).await.unwrap();
+                handler.process(push_cmd, 0).await.unwrap();
 
                 let brpop_cmd = Command {
                     name: "brpop".to_string(),
                     args: vec![b"brpoplist".to_vec(), b"0".to_vec()],
                 };
-                black_box(handler.process(brpop_cmd).await.unwrap());
+                black_box(handler.process(brpop_cmd, 0).await.unwrap());
             })
         });
     });
@@ -744,7 +744,7 @@ fn bench_lua_scripting(c: &mut Criterion) {
                     name: "eval".to_string(),
                     args: vec![b"return 1".to_vec(), b"0".to_vec()],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -766,7 +766,7 @@ fn bench_lua_scripting(c: &mut Criterion) {
                         b"scriptval".to_vec(),
                     ],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -779,7 +779,7 @@ fn bench_lua_scripting(c: &mut Criterion) {
                 name: "script".to_string(),
                 args: vec![b"load".to_vec(), b"return 42".to_vec()],
             };
-            let result = handler.process(cmd).await.unwrap();
+            let result = handler.process(cmd, 0).await.unwrap();
             // Extract SHA from BulkString response
             match result {
                 rlightning::networking::resp::RespValue::BulkString(Some(sha)) => sha,
@@ -792,7 +792,7 @@ fn bench_lua_scripting(c: &mut Criterion) {
                     name: "evalsha".to_string(),
                     args: vec![sha.clone(), b"0".to_vec()],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });
@@ -808,7 +808,7 @@ fn bench_lua_scripting(c: &mut Criterion) {
                     name: "eval".to_string(),
                     args: vec![script, b"0".to_vec()],
                 };
-                black_box(handler.process(cmd).await.unwrap());
+                black_box(handler.process(cmd, 0).await.unwrap());
             })
         });
     });

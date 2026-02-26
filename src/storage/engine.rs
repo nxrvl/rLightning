@@ -11,6 +11,12 @@ use crate::storage::error::StorageError;
 use crate::storage::item::{StorageItem, RedisDataType};
 use crate::networking::resp::RespCommand;
 
+tokio::task_local! {
+    /// The currently active database index for this task/connection.
+    /// Defaults to 0 (primary database) if not set.
+    pub static CURRENT_DB_INDEX: usize;
+}
+
 /// Number of databases supported (Redis default is 16)
 pub const NUM_DATABASES: usize = 16;
 
@@ -200,6 +206,19 @@ impl StorageEngine {
         });
     }
     
+    /// Returns a reference to the currently active database based on the task-local db index.
+    /// Falls back to database 0 if no task-local is set (e.g., background tasks).
+    pub fn active_db(&self) -> &DashMap<Vec<u8>, StorageItem> {
+        let idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+        if idx == 0 {
+            &self.data
+        } else if idx < NUM_DATABASES {
+            &self.extra_dbs[idx - 1]
+        } else {
+            &self.data // Fallback to DB 0 for invalid index
+        }
+    }
+
     /// Efficient expiration using priority queue + probabilistic sampling
     async fn process_expired_keys(&self) {
         let now = Instant::now();
@@ -294,10 +313,11 @@ impl StorageEngine {
     
     /// Helper method to remove expired key and update memory/counters
     async fn remove_expired_key(&self, key: &[u8]) {
-        if let Some((k, item)) = self.data.remove(key) {
+        let db = self.active_db();
+        if let Some((k, item)) = db.remove(key) {
             if !item.is_expired() {
                 // Key was refreshed concurrently — put it back
-                self.data.insert(k, item);
+                db.insert(k, item);
                 return;
             }
             // Use atomic operations for memory tracking
@@ -465,7 +485,7 @@ impl StorageEngine {
 
         // Use entry API for atomic read-modify-write to avoid TOCTOU races
         let is_new_key;
-        match self.data.entry(key.clone()) {
+        match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
@@ -507,23 +527,23 @@ impl StorageEngine {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
-        
+
         if value.len() > self.config.max_value_size {
             return Err(StorageError::ValueTooLarge);
         }
-        
+
         // For large values (likely JSON), do deeper validation
         if value.len() > 10240 { // 10KB
             // Log large SET operations for debugging
-            tracing::debug!("Large value SET operation: key={:?}, value_len={}, type={}", 
+            tracing::debug!("Large value SET operation: key={:?}, value_len={}, type={}",
                 String::from_utf8_lossy(&key), value.len(), data_type.as_str());
         }
-        
+
         let required_size = Self::calculate_size(&key, &value);
-        
+
         // Ensure we have enough memory
         self.maybe_evict(required_size).await?;
-        
+
         // Create a new item with explicit type
         let mut item = StorageItem::new_with_type(value, data_type);
         let expires_at = if let Some(ttl) = ttl {
@@ -535,7 +555,7 @@ impl StorageEngine {
 
         // Use entry API for atomic read-modify-write to avoid TOCTOU races
         let is_new_key;
-        match self.data.entry(key.clone()) {
+        match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
@@ -576,7 +596,7 @@ impl StorageEngine {
     /// where updating the value should not reset the key's expiration.
     pub async fn set_with_type_preserve_ttl(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType) -> StorageResult<()> {
         // Read existing TTL before overwriting
-        let existing_ttl = if let Some(entry) = self.data.get(&key) {
+        let existing_ttl = if let Some(entry) = self.active_db().get(&key) {
             if entry.value().is_expired() {
                 None
             } else {
@@ -590,33 +610,34 @@ impl StorageEngine {
 
     /// Get a value from the storage engine
     pub async fn get(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
-        let result = if let Some(mut entry) = self.data.get_mut(key) {
+        let db = self.active_db();
+        let result = if let Some(mut entry) = db.get_mut(key) {
             let item = entry.value_mut();
-            
+
             if item.is_expired() {
                 // We'll remove the key in a separate step
                 None
             } else {
                 // Update the last accessed time
                 item.touch();
-                
+
                 Some(item.value.clone())
             }
         } else {
             None
         };
-        
+
         // If the item was expired, remove it now using lazy expiration
-        if result.is_none() && self.data.contains_key(key) {
+        if result.is_none() && db.contains_key(key) {
             self.remove_expired_key(key).await;
         }
-        
+
         Ok(result)
     }
     
     /// Delete a key from the storage engine
     pub async fn del(&self, key: &[u8]) -> StorageResult<bool> {
-        if let Some((k, item)) = self.data.remove(key) {
+        if let Some((k, item)) = self.active_db().remove(key) {
             // Use atomic operations for memory tracking - much faster than write lock
             let size = Self::calculate_size(&k, &item.value) as u64;
             self.current_memory.fetch_sub(size, Ordering::AcqRel);
@@ -634,7 +655,7 @@ impl StorageEngine {
     /// Check if a key exists in the storage engine
     pub async fn exists(&self, key: &[u8]) -> StorageResult<bool> {
         // Check if the key exists and is not expired
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 // Use lazy expiration - remove expired key immediately
                 drop(entry); // Release the reference before removal
@@ -650,7 +671,7 @@ impl StorageEngine {
     
     /// Set the TTL (time-to-live) for a key
     pub async fn expire(&self, key: &[u8], ttl: Option<Duration>) -> StorageResult<bool> {
-        if let Some(mut entry) = self.data.get_mut(key) {
+        if let Some(mut entry) = self.active_db().get_mut(key) {
             let item = entry.value_mut();
 
             if item.is_expired() {
@@ -678,7 +699,7 @@ impl StorageEngine {
     
     /// Get the TTL (time-to-live) for a key
     pub async fn ttl(&self, key: &[u8]) -> StorageResult<Option<Duration>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 // Use lazy expiration - remove expired key and return None
                 drop(entry); // Release the reference before removal
@@ -694,7 +715,7 @@ impl StorageEngine {
     
     /// Get all keys in the storage engine
     pub async fn all_keys(&self) -> StorageResult<Vec<Vec<u8>>> {
-        let keys: Vec<Vec<u8>> = self.data.iter()
+        let keys: Vec<Vec<u8>> = self.active_db().iter()
             .filter(|item| !item.value().is_expired())
             .map(|item| item.key().clone())
             .collect();
@@ -704,6 +725,7 @@ impl StorageEngine {
     
     /// Get all keys matching a pattern
     pub async fn keys(&self, pattern: &str) -> StorageResult<Vec<Vec<u8>>> {
+        let db = self.active_db();
         // Try to use prefix index for common patterns
         if let Some(prefix) = self.extract_prefix_from_pattern(pattern) {
             let index = self.prefix_index.read().await;
@@ -712,7 +734,7 @@ impl StorageEngine {
                 let mut keys = Vec::new();
                 for key in indexed_keys {
                     // Check if key still exists and is not expired
-                    if let Some(entry) = self.data.get(key) {
+                    if let Some(entry) = db.get(key) {
                         if !entry.value().is_expired() {
                             if let Ok(key_str) = std::str::from_utf8(key) {
                                 if self.matches_pattern(key_str, pattern) {
@@ -725,11 +747,11 @@ impl StorageEngine {
                 return Ok(keys);
             }
         }
-        
+
         // Fall back to full scan for complex patterns or non-indexed prefixes
         let mut keys = Vec::new();
-        
-        for item in self.data.iter() {
+
+        for item in db.iter() {
             if item.value().is_expired() {
                 continue;
             }
@@ -806,29 +828,29 @@ impl StorageEngine {
         Ok(())
     }
     
-    /// Flush the current database (db0 only, not all databases)
+    /// Flush the current database (the active database, not all databases)
     pub async fn flush_db(&self) -> StorageResult<()> {
-        let size: u64 = self.data.iter()
+        let db = self.active_db();
+        let size: u64 = db.iter()
             .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
             .sum();
-        self.data.clear();
+        db.clear();
         self.current_memory.fetch_sub(size.min(self.current_memory.load(Ordering::Acquire)), Ordering::AcqRel);
-        // Recount keys across extra databases rather than blindly setting to 0
-        let remaining: u64 = self.extra_dbs.iter()
-            .map(|db| db.len() as u64)
-            .sum();
-        self.key_count.store(remaining, Ordering::Release);
+        // Recalculate total key count across all databases
+        let total: u64 = self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();
+        self.key_count.store(total, Ordering::Release);
         Ok(())
     }
     
-    /// Get a snapshot of the current data (database 0 only).
+    /// Get a snapshot of the current data (the active database).
     /// Note: Extra databases (1-15) are excluded because the persistence layer
     /// does not yet support per-database serialization, and merging all databases
     /// into a flat HashMap would silently lose data when keys share names across databases.
     pub async fn snapshot(&self) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
-        let mut snapshot = HashMap::with_capacity(self.data.len());
+        let db = self.active_db();
+        let mut snapshot = HashMap::with_capacity(db.len());
 
-        for item in self.data.iter() {
+        for item in db.iter() {
             if !item.value().is_expired() {
                 snapshot.insert(item.key().clone(), item.value().clone());
             }
@@ -952,7 +974,7 @@ impl StorageEngine {
     /// Get the type of a key
     pub async fn get_type(&self, key: &[u8]) -> StorageResult<String> {
         // Check if key exists and is not expired
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 return Ok("none".to_string());
             }
@@ -970,7 +992,7 @@ impl StorageEngine {
     /// Returns the raw data_type field from StorageItem, which is authoritative
     /// for keys created with the current storage format.
     pub async fn get_raw_data_type(&self, key: &[u8]) -> StorageResult<String> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -987,6 +1009,17 @@ impl StorageEngine {
         self.key_count.load(Ordering::Acquire)
     }
 
+    /// Get the key count for a specific database
+    pub fn get_db_key_count(&self, db_index: usize) -> u64 {
+        if db_index == 0 {
+            self.data.len() as u64
+        } else if db_index < NUM_DATABASES {
+            self.extra_dbs[db_index - 1].len() as u64
+        } else {
+            0
+        }
+    }
+
     /// Get the current memory usage in bytes
     pub fn get_used_memory(&self) -> u64 {
         self.current_memory.load(Ordering::Acquire)
@@ -994,8 +1027,9 @@ impl StorageEngine {
     
     /// Get a random key from the storage engine (O(1) operation for RANDOMKEY)
     pub async fn get_random_key(&self) -> StorageResult<Option<Vec<u8>>> {
+        let db = self.active_db();
         // Check if database is empty
-        if self.key_count.load(Ordering::Acquire) == 0 {
+        if db.is_empty() {
             return Ok(None);
         }
 
@@ -1005,7 +1039,7 @@ impl StorageEngine {
         let mut count = 0;
         let max_samples = 100; // Limit sampling to avoid long iterations
 
-        for entry in self.data.iter() {
+        for entry in db.iter() {
             // Skip expired keys
             if entry.value().is_expired() {
                 continue;
@@ -1040,7 +1074,7 @@ impl StorageEngine {
 
     /// Touch a key (update its last access time). Returns true if the key exists.
     pub async fn touch(&self, key: &[u8]) -> StorageResult<bool> {
-        if let Some(mut entry) = self.data.get_mut(key) {
+        if let Some(mut entry) = self.active_db().get_mut(key) {
             let item = entry.value_mut();
             if item.is_expired() {
                 drop(entry);
@@ -1084,7 +1118,7 @@ impl StorageEngine {
 
     /// Get the absolute Unix timestamp (seconds) when a key will expire
     pub async fn expiretime(&self, key: &[u8]) -> StorageResult<Option<i64>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1111,7 +1145,7 @@ impl StorageEngine {
 
     /// Get the absolute Unix timestamp (milliseconds) when a key will expire
     pub async fn pexpiretime(&self, key: &[u8]) -> StorageResult<Option<i64>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1137,8 +1171,9 @@ impl StorageEngine {
 
     /// Copy a key to a new destination key. Optionally replace existing destination.
     pub async fn copy_key(&self, src: &[u8], dst: Vec<u8>, replace: bool) -> StorageResult<bool> {
+        let db = self.active_db();
         // Get the source item
-        let src_item = if let Some(entry) = self.data.get(src) {
+        let src_item = if let Some(entry) = db.get(src) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(src).await;
@@ -1151,7 +1186,7 @@ impl StorageEngine {
 
         // Check if destination exists (non-expired) and we're not replacing
         if !replace {
-            if let Some(entry) = self.data.get(&dst) {
+            if let Some(entry) = db.get(&dst) {
                 if !entry.value().is_expired() {
                     return Ok(false);
                 }
@@ -1174,7 +1209,7 @@ impl StorageEngine {
 
         // Use entry API for atomic insert-or-replace with correct memory/key accounting
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(dst.clone()) {
+        match db.entry(dst.clone()) {
             Entry::Occupied(mut occ) => {
                 let old_size = Self::calculate_size(&dst, &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
@@ -1195,13 +1230,18 @@ impl StorageEngine {
         Ok(true)
     }
 
-    /// Move a key from the current database (0) to another database
+    /// Move a key from the current (active) database to another database
     pub async fn move_key(&self, key: &[u8], dst_db: usize) -> StorageResult<bool> {
-        if dst_db == 0 || dst_db >= NUM_DATABASES {
+        let src_db_idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+        if dst_db == src_db_idx {
+            return Ok(false);  // Cannot move to the same database
+        }
+        if dst_db >= NUM_DATABASES {
             return Ok(false);
         }
 
-        let dst = &self.extra_dbs[dst_db - 1];
+        let dst = self.get_db(dst_db).unwrap();
+        let src = self.active_db();
 
         // Check if key exists in destination
         if dst.contains_key(key) {
@@ -1209,7 +1249,7 @@ impl StorageEngine {
         }
 
         // Get the source item
-        let src_item = if let Some(entry) = self.data.get(key) {
+        let src_item = if let Some(entry) = src.get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1236,7 +1276,7 @@ impl StorageEngine {
 
     /// Get a raw StorageItem reference for OBJECT/DUMP commands
     pub async fn get_item(&self, key: &[u8]) -> StorageResult<Option<StorageItem>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1250,7 +1290,7 @@ impl StorageEngine {
 
     /// Get the idle time (seconds since last access) for a key
     pub async fn get_idle_time(&self, key: &[u8]) -> StorageResult<Option<u64>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1265,7 +1305,7 @@ impl StorageEngine {
 
     /// Get the encoding type string for a key (for OBJECT ENCODING)
     pub async fn get_encoding(&self, key: &[u8]) -> StorageResult<Option<String>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
                 drop(entry);
                 self.remove_expired_key(key).await;
@@ -1301,7 +1341,7 @@ impl StorageEngine {
     /// Restore a key from a serialized value (for RESTORE command)
     pub async fn restore_key(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType, ttl: Option<Duration>, replace: bool) -> StorageResult<bool> {
         // Check if key exists
-        if self.data.contains_key(&key) {
+        if self.active_db().contains_key(&key) {
             if !replace {
                 return Err(StorageError::KeyExists);
             }
@@ -1342,7 +1382,7 @@ impl StorageEngine {
 
     /// Dump a key's value as serialized bytes (for MIGRATE)
     pub async fn dump_key(&self, key: &[u8]) -> Option<Vec<u8>> {
-        if let Some(entry) = self.data.get(key) {
+        if let Some(entry) = self.active_db().get(key) {
             Some(entry.value.clone())
         } else {
             None
@@ -1373,7 +1413,7 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let inserted = match self.data.entry(key.clone()) {
+        let inserted = match self.active_db().entry(key.clone()) {
             Entry::Occupied(occ) => {
                 // Key exists - check if expired
                 if occ.get().is_expired() {
@@ -1429,7 +1469,7 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let updated = match self.data.entry(key.clone()) {
+        let updated = match self.active_db().entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     // Expired key doesn't count as existing
@@ -1491,7 +1531,7 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let (did_set, old_value, is_new_key, final_expires_at) = match self.data.entry(key.clone()) {
+        let (did_set, old_value, is_new_key, final_expires_at) = match self.active_db().entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
                 let effectively_exists = !expired;
@@ -1576,7 +1616,7 @@ impl StorageEngine {
     /// Returns the new value after increment.
     pub fn atomic_incr(&self, key: &[u8], delta: i64) -> StorageResult<i64> {
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(key.to_vec()) {
+        match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     // Treat expired as non-existent: set to delta
@@ -1632,7 +1672,7 @@ impl StorageEngine {
     /// Returns the new value after increment.
     pub fn atomic_incr_float(&self, key: &[u8], delta: f64) -> StorageResult<f64> {
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(key.to_vec()) {
+        match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
@@ -1690,7 +1730,7 @@ impl StorageEngine {
     /// Returns the length of the string after append.
     pub fn atomic_append(&self, key: &[u8], append_value: &[u8]) -> StorageResult<usize> {
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(key.to_vec()) {
+        match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
@@ -1742,7 +1782,7 @@ impl StorageEngine {
         F: FnOnce(Option<&mut Vec<u8>>) -> Result<(Option<Vec<u8>>, R), StorageError>,
     {
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(key.to_vec()) {
+        match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
                 if !expired && occ.get().data_type != data_type {
@@ -1797,7 +1837,7 @@ impl StorageEngine {
     /// Atomically get and delete a key. Returns the old value if it existed.
     pub fn atomic_getdel(&self, key: &[u8]) -> Option<Vec<u8>> {
         use dashmap::mapref::entry::Entry;
-        match self.data.entry(key.to_vec()) {
+        match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(occ) => {
                 if occ.get().is_expired() {
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
@@ -1833,7 +1873,7 @@ impl StorageEngine {
         self.maybe_evict(required_size).await?;
 
         use dashmap::mapref::entry::Entry;
-        let old_value = match self.data.entry(key.clone()) {
+        let old_value = match self.active_db().entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
                 let old = if expired { None } else { Some(occ.get().value.clone()) };

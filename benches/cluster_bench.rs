@@ -163,7 +163,7 @@ fn bench_cluster_topology(c: &mut Criterion) {
                         format!("val:{}", i).into_bytes(),
                     ],
                 };
-                handler.process(cmd).await.unwrap();
+                handler.process(cmd, 0).await.unwrap();
             }
         });
 

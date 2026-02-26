@@ -239,7 +239,7 @@ async fn test_cluster_info_via_handler() {
         .process(Command {
             name: "CLUSTER".to_string(),
             args: vec![b"INFO".to_vec()],
-        })
+        }, 0)
         .await
         .unwrap();
 
@@ -261,7 +261,7 @@ async fn test_cluster_keyslot_via_handler() {
         .process(Command {
             name: "CLUSTER".to_string(),
             args: vec![b"KEYSLOT".to_vec(), b"foo".to_vec()],
-        })
+        }, 0)
         .await
         .unwrap();
     assert_eq!(result, RespValue::Integer(12182));
@@ -270,7 +270,7 @@ async fn test_cluster_keyslot_via_handler() {
         .process(Command {
             name: "CLUSTER".to_string(),
             args: vec![b"KEYSLOT".to_vec(), b"{tag}key".to_vec()],
-        })
+        }, 0)
         .await
         .unwrap();
     let slot = match result {

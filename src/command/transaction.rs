@@ -340,6 +340,7 @@ pub async fn handle_exec(
     state: &mut TransactionState,
     handler: &CommandHandler,
     engine: &StorageEngine,
+    db_index: usize,
 ) -> CommandResult {
     if !state.in_multi {
         return Err(CommandError::InternalError(
@@ -374,7 +375,7 @@ pub async fn handle_exec(
     // Execute all queued commands while holding locks
     let mut results = Vec::with_capacity(commands.len());
     for cmd in commands {
-        match handler.process(cmd).await {
+        match handler.process(cmd, db_index).await {
             Ok(response) => results.push(response),
             Err(e) => results.push(RespValue::Error(e.to_string())),
         }
@@ -531,7 +532,7 @@ mod tests {
         let handler = CommandHandler::new(Arc::clone(&engine));
         let mut state = TransactionState::new();
 
-        let result = handle_exec(&mut state, &handler, &engine).await;
+        let result = handle_exec(&mut state, &handler, &engine, 0).await;
         assert!(result.is_err());
     }
 
@@ -542,7 +543,7 @@ mod tests {
         let mut state = TransactionState::new();
 
         handle_multi(&mut state).unwrap();
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
         assert!(!state.in_multi);
     }
@@ -573,7 +574,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         match result {
             RespValue::Array(Some(ref results)) => {
                 assert_eq!(results.len(), 2);
@@ -630,7 +631,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         match result {
             RespValue::Array(Some(ref results)) => {
                 assert_eq!(results.len(), 3);
@@ -681,7 +682,7 @@ mod tests {
         .unwrap();
 
         // EXEC should return nil (transaction aborted)
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // The key should still have the modified value, not the transaction value
@@ -716,7 +717,7 @@ mod tests {
         .unwrap();
 
         // EXEC should succeed
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         match result {
             RespValue::Array(Some(ref results)) => {
                 assert_eq!(results.len(), 1);
@@ -770,7 +771,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -790,7 +791,7 @@ mod tests {
         )
         .unwrap();
 
-        handle_exec(&mut state, &handler, &engine).await.unwrap();
+        handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
 
         // State should be fully reset
         assert!(!state.in_multi);
@@ -850,7 +851,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         match result {
             RespValue::Array(Some(ref results)) => {
                 assert_eq!(results.len(), 3);
@@ -888,7 +889,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -920,7 +921,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -952,7 +953,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let _ = handle_exec(&mut state, &handler, &engine1).await;
+                let _ = handle_exec(&mut state, &handler, &engine1, 0).await;
             }
         });
 
@@ -969,7 +970,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let _ = handle_exec(&mut state, &handler, &engine2).await;
+                let _ = handle_exec(&mut state, &handler, &engine2, 0).await;
             }
         });
 
@@ -1021,7 +1022,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let _ = handle_exec(&mut state, &handler, &engine1).await;
+                let _ = handle_exec(&mut state, &handler, &engine1, 0).await;
             }
         });
 
@@ -1047,7 +1048,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let _ = handle_exec(&mut state, &handler, &engine2).await;
+                let _ = handle_exec(&mut state, &handler, &engine2, 0).await;
             }
         });
 
@@ -1092,7 +1093,7 @@ mod tests {
             },
         )
         .unwrap();
-        let result2 = handle_exec(&mut state2, &handler2, &engine).await.unwrap();
+        let result2 = handle_exec(&mut state2, &handler2, &engine, 0).await.unwrap();
         // Client 2's transaction should succeed
         match result2 {
             RespValue::Array(Some(ref results)) => {
@@ -1112,7 +1113,7 @@ mod tests {
             },
         )
         .unwrap();
-        let result1 = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        let result1 = handle_exec(&mut state, &handler, &engine, 0).await.unwrap();
         // Should return nil (transaction aborted)
         assert_eq!(result1, RespValue::BulkString(None));
 

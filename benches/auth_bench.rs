@@ -73,7 +73,7 @@ fn bench_auth_command_overhead(c: &mut Criterion) {
                             name: "exists".to_string(),
                             args: vec![b"auth:enabled".to_vec()],
                         };
-                        let _auth_check = handler.process(auth_cmd).await.unwrap();
+                        let _auth_check = handler.process(auth_cmd, 0).await.unwrap();
                     }
                     
                     let set_cmd = Command {
@@ -81,7 +81,7 @@ fn bench_auth_command_overhead(c: &mut Criterion) {
                         args: vec![key, value],
                     };
                     
-                    black_box(handler.process(set_cmd).await.unwrap());
+                    black_box(handler.process(set_cmd, 0).await.unwrap());
                 }
             );
         });
@@ -223,7 +223,7 @@ fn bench_auth_concurrent_operations(c: &mut Criterion) {
                                 name: "get".to_string(),
                                 args: vec![session_key.into_bytes()],
                             };
-                            let _session_data = handler_ref.process(get_cmd).await.unwrap();
+                            let _session_data = handler_ref.process(get_cmd, 0).await.unwrap();
                             
                             // Execute authenticated command
                             let key = format!("auth_data_{}", i).into_bytes();
@@ -234,7 +234,7 @@ fn bench_auth_concurrent_operations(c: &mut Criterion) {
                                 args: vec![key, value],
                             };
                             
-                            black_box(handler_ref.process(set_cmd).await.unwrap());
+                            black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                         });
                         
                         handles.push(handle);

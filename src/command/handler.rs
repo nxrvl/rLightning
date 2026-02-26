@@ -5,7 +5,7 @@ use crate::command::commands;
 use crate::command::types::blocking::BlockingManager;
 use crate::networking::resp::RespValue;
 use crate::scripting::ScriptingEngine;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
 
 /// The CommandHandler routes incoming commands to their implementations
 #[derive(Clone)]
@@ -64,9 +64,10 @@ impl CommandHandler {
     }
     
     /// Process a command and return the result
-    pub async fn process(&self, command: Command) -> CommandResult {
+    pub async fn process(&self, command: Command, db_index: usize) -> CommandResult {
+        CURRENT_DB_INDEX.scope(db_index, async move {
         let cmd_lowercase = command.name.to_lowercase();
-        
+
         let result = match cmd_lowercase.as_str() {
             // Key expiration/TTL commands
             "expire" => commands::expire(&self.storage, &command.args).await,
@@ -442,8 +443,9 @@ impl CommandHandler {
                 return Err(CommandError::UnknownCommand(command.name))
             }
         };
-        
+
         result
+        }).await
     }
 }
 
@@ -466,7 +468,7 @@ mod tests {
             args: vec![],
         };
         
-        let result = handler.process(command).await.unwrap();
+        let result = handler.process(command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("PONG".to_string()));
         
         // Test PING with argument
@@ -475,7 +477,7 @@ mod tests {
             args: vec![b"hello".to_vec()],
         };
         
-        let result = handler.process(command).await.unwrap();
+        let result = handler.process(command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
     }
     
@@ -491,7 +493,7 @@ mod tests {
             args: vec![b"mykey".to_vec(), b"myvalue".to_vec()],
         };
         
-        let result = handler.process(set_command).await.unwrap();
+        let result = handler.process(set_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Test GET command
@@ -500,7 +502,7 @@ mod tests {
             args: vec![b"mykey".to_vec()],
         };
         
-        let result = handler.process(get_command).await.unwrap();
+        let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
         
         // Test GET for non-existent key
@@ -509,7 +511,7 @@ mod tests {
             args: vec![b"nonexistent".to_vec()],
         };
         
-        let result = handler.process(get_missing).await.unwrap();
+        let result = handler.process(get_missing, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
     
@@ -530,7 +532,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(set_ex_command).await.unwrap();
+        let result = handler.process(set_ex_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Check TTL
@@ -539,7 +541,7 @@ mod tests {
             args: vec![b"ex_key".to_vec()],
         };
         
-        let result = handler.process(ttl_command).await.unwrap();
+        let result = handler.process(ttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl > 0 && ttl <= 1);
         } else {
@@ -557,7 +559,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(set_px_command).await.unwrap();
+        let result = handler.process(set_px_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Verify that the key exists
@@ -566,7 +568,7 @@ mod tests {
             args: vec![b"px_key".to_vec()],
         };
         
-        let result = handler.process(get_command).await.unwrap();
+        let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"px_value".to_vec())));
         
         // Wait for expiration
@@ -578,7 +580,7 @@ mod tests {
             args: vec![b"px_key".to_vec()],
         };
         
-        let result = handler.process(get_command_after).await.unwrap();
+        let result = handler.process(get_command_after, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
     
@@ -597,7 +599,7 @@ mod tests {
                     format!("value{}", i).into_bytes(),
                 ],
             };
-            handler.process(set_command).await.unwrap();
+            handler.process(set_command, 0).await.unwrap();
         }
         
         // Test EXISTS command
@@ -610,7 +612,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(exists_command).await.unwrap();
+        let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
         
         // Test DEL command
@@ -623,7 +625,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(del_command).await.unwrap();
+        let result = handler.process(del_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
         
         // Verify keys are gone with EXISTS
@@ -635,7 +637,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(exists_command).await.unwrap();
+        let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
         
         // Verify delkey3 still exists
@@ -644,7 +646,7 @@ mod tests {
             args: vec![b"delkey3".to_vec()],
         };
         
-        let result = handler.process(exists_command).await.unwrap();
+        let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
     }
     
@@ -664,7 +666,7 @@ mod tests {
                     format!("mgetvalue{}", i+1).into_bytes(),
                 ],
             };
-            handler.process(set_command).await.unwrap();
+            handler.process(set_command, 0).await.unwrap();
         }
         
         // Test MGET command
@@ -678,7 +680,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(mget_command).await.unwrap();
+        let result = handler.process(mget_command, 0).await.unwrap();
         
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 4);
@@ -703,7 +705,7 @@ mod tests {
             args: vec![],
         };
         
-        let result = handler.process(unknown_command).await;
+        let result = handler.process(unknown_command, 0).await;
         
         // The result should be an error, not an unwrapped value
         assert!(result.is_err());
@@ -731,7 +733,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hset_cmd).await.unwrap();
+        let result = handler.process(hset_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
         
         // Test HSET again with the same field
@@ -744,7 +746,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hset_again_cmd).await.unwrap();
+        let result = handler.process(hset_again_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Field already existed
         
         // Add another field
@@ -757,7 +759,7 @@ mod tests {
             ],
         };
         
-        handler.process(hset_email_cmd).await.unwrap();
+        handler.process(hset_email_cmd, 0).await.unwrap();
         
         // Test HGET command
         let hget_cmd = Command {
@@ -768,7 +770,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hget_cmd).await.unwrap();
+        let result = handler.process(hget_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"Jane".to_vec())));
         
         // Test HGET for non-existent field
@@ -780,7 +782,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hget_missing_cmd).await.unwrap();
+        let result = handler.process(hget_missing_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
         
         // Test HEXISTS command
@@ -792,7 +794,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hexists_cmd).await.unwrap();
+        let result = handler.process(hexists_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Field exists
         
         // Test HEXISTS for non-existent field
@@ -804,7 +806,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hexists_missing_cmd).await.unwrap();
+        let result = handler.process(hexists_missing_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Field doesn't exist
         
         // Test HGETALL command
@@ -815,7 +817,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hgetall_cmd).await.unwrap();
+        let result = handler.process(hgetall_cmd, 0).await.unwrap();
         if let RespValue::Array(Some(fields_and_values)) = result {
             assert_eq!(fields_and_values.len(), 4); // 2 fields = 4 items (field + value pairs)
             
@@ -851,7 +853,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hdel_cmd).await.unwrap();
+        let result = handler.process(hdel_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 field deleted
         
         // Verify the field was deleted
@@ -863,7 +865,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hget_after_del_cmd).await.unwrap();
+        let result = handler.process(hget_after_del_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None)); // Field should be gone
         
         // Check HGETALL after deletion
@@ -874,7 +876,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hgetall_after_cmd).await.unwrap();
+        let result = handler.process(hgetall_after_cmd, 0).await.unwrap();
         if let RespValue::Array(Some(fields_and_values)) = result {
             assert_eq!(fields_and_values.len(), 2); // 1 field = 2 items (field + value)
             
@@ -904,7 +906,7 @@ mod tests {
             name: "del".to_string(),
             args: vec![list_key.clone()],
         };
-        let _ = handler.process(del_command).await.unwrap();
+        let _ = handler.process(del_command, 0).await.unwrap();
         
         // Initialize the key as a list using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
@@ -923,7 +925,7 @@ mod tests {
                 b"world".to_vec(),
             ],
         };
-        let result = handler.process(lpush_command).await.unwrap();
+        let result = handler.process(lpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
         
         // Test LPUSH again (prepends)
@@ -934,7 +936,7 @@ mod tests {
                 b"hello".to_vec(),
             ],
         };
-        let result = handler.process(lpush_command).await.unwrap();
+        let result = handler.process(lpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
         
         // Test RPUSH (appends)
@@ -945,7 +947,7 @@ mod tests {
                 b"!".to_vec(),
             ],
         };
-        let result = handler.process(rpush_command).await.unwrap();
+        let result = handler.process(rpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
         
         // Test LRANGE to get the entire list
@@ -957,7 +959,7 @@ mod tests {
                 b"-1".to_vec(),
             ],
         };
-        let result = handler.process(lrange_command).await.unwrap();
+        let result = handler.process(lrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"hello".to_vec())));
@@ -972,7 +974,7 @@ mod tests {
             name: "lpop".to_string(),
             args: vec![list_key.clone()],
         };
-        let result = handler.process(lpop_command).await.unwrap();
+        let result = handler.process(lpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
         
         // Test RPOP
@@ -980,7 +982,7 @@ mod tests {
             name: "rpop".to_string(),
             args: vec![list_key.clone()],
         };
-        let result = handler.process(rpop_command).await.unwrap();
+        let result = handler.process(rpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"!".to_vec())));
         
         // Verify the list now has only one element
@@ -992,7 +994,7 @@ mod tests {
                 b"-1".to_vec(),
             ],
         };
-        let result = handler.process(lrange_command).await.unwrap();
+        let result = handler.process(lrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0], RespValue::BulkString(Some(b"world".to_vec())));
@@ -1005,7 +1007,7 @@ mod tests {
             name: "lpop".to_string(),
             args: vec![list_key.clone()],
         };
-        let result = handler.process(lpop_command).await.unwrap();
+        let result = handler.process(lpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"world".to_vec())));
         
         // Test LPOP on empty list
@@ -1013,7 +1015,7 @@ mod tests {
             name: "lpop".to_string(),
             args: vec![list_key.clone()],
         };
-        let result = handler.process(lpop_command).await.unwrap();
+        let result = handler.process(lpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -1029,7 +1031,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"member1".to_vec(), b"member2".to_vec()],
         };
         
-        let result = handler.process(sadd_command).await.unwrap();
+        let result = handler.process(sadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2)); // 2 members added
         
         // Test SADD with duplicate member
@@ -1038,7 +1040,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"member2".to_vec(), b"member3".to_vec()],
         };
         
-        let result = handler.process(sadd_command).await.unwrap();
+        let result = handler.process(sadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Only 1 new member added
         
         // Test SISMEMBER with existing member
@@ -1047,7 +1049,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"member1".to_vec()],
         };
         
-        let result = handler.process(sismember_command).await.unwrap();
+        let result = handler.process(sismember_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Member exists
         
         // Test SISMEMBER with non-existing member
@@ -1056,7 +1058,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"nonexistent".to_vec()],
         };
         
-        let result = handler.process(sismember_command).await.unwrap();
+        let result = handler.process(sismember_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Member doesn't exist
         
         // Test SMEMBERS to get all members
@@ -1065,7 +1067,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec()],
         };
         
-        let result = handler.process(smembers_command).await.unwrap();
+        let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 3); // Should have 3 members
             
@@ -1091,7 +1093,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"member1".to_vec(), b"nonexistent".to_vec()],
         };
         
-        let result = handler.process(srem_command).await.unwrap();
+        let result = handler.process(srem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 member removed
         
         // Verify members after removal
@@ -1100,7 +1102,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec()],
         };
         
-        let result = handler.process(smembers_command).await.unwrap();
+        let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 2); // Should have 2 members now
             
@@ -1126,7 +1128,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec(), b"member2".to_vec(), b"member3".to_vec()],
         };
         
-        let result = handler.process(srem_command).await.unwrap();
+        let result = handler.process(srem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2)); // 2 members removed
         
         // Verify the set is empty
@@ -1135,7 +1137,7 @@ mod tests {
             args: vec![b"test_set_key".to_vec()],
         };
         
-        let result = handler.process(smembers_command).await.unwrap();
+        let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 0); // Set should be empty
         } else {
@@ -1160,7 +1162,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zadd_command).await.unwrap();
+        let result = handler.process(zadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(3)); // 3 members added
         
         // Test ZSCORE - Get score of a member
@@ -1172,7 +1174,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zscore_command).await.unwrap();
+        let result = handler.process(zscore_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"2".to_vec())));
         
         // Test ZRANGE - Get range of members by index
@@ -1185,7 +1187,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zrange_command).await.unwrap();
+        let result = handler.process(zrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 3);
             assert_eq!(members[0], RespValue::BulkString(Some(b"one".to_vec())));
@@ -1206,7 +1208,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zrange_with_scores_command).await.unwrap();
+        let result = handler.process(zrange_with_scores_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 6); // 3 members + 3 scores
             assert_eq!(members[0], RespValue::BulkString(Some(b"one".to_vec())));
@@ -1229,7 +1231,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zrem_command).await.unwrap();
+        let result = handler.process(zrem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 member removed
         
         // Verify after removal
@@ -1242,7 +1244,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zrange_after_command).await.unwrap();
+        let result = handler.process(zrange_after_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 2);
             assert_eq!(members[0], RespValue::BulkString(Some(b"one".to_vec())));
@@ -1279,7 +1281,7 @@ mod tests {
             args: vec![setnx_key.clone(), b"setnx_value".to_vec()],
         };
         
-        let result = handler.process(setnx_command).await.unwrap();
+        let result = handler.process(setnx_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Success, key was set
         
         // Test SETNX command - key exists
@@ -1288,7 +1290,7 @@ mod tests {
             args: vec![setnx_key.clone(), b"new_value".to_vec()],
         };
         
-        let result = handler.process(setnx_command).await.unwrap();
+        let result = handler.process(setnx_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Failed, key exists
         
         // Verify the value wasn't changed
@@ -1297,7 +1299,7 @@ mod tests {
             args: vec![setnx_key.clone()],
         };
         
-        let result = handler.process(get_command).await.unwrap();
+        let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"setnx_value".to_vec())));
         
         // Test SETEX command
@@ -1306,7 +1308,7 @@ mod tests {
             args: vec![setex_key.clone(), b"2".to_vec(), b"setex_value".to_vec()],
         };
         
-        let result = handler.process(setex_command).await.unwrap();
+        let result = handler.process(setex_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Check TTL directly via storage engine
@@ -1321,7 +1323,7 @@ mod tests {
             args: vec![setex_key.clone()],
         };
         
-        let result = handler.process(get_command).await.unwrap();
+        let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"setex_value".to_vec())));
         
         // Test HMSET command
@@ -1334,7 +1336,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(hmset_command).await.unwrap();
+        let result = handler.process(hmset_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Test HGET to verify
@@ -1343,7 +1345,7 @@ mod tests {
             args: vec![hash_key.clone(), b"field1".to_vec()],
         };
         
-        let result = handler.process(hget_command).await.unwrap();
+        let result = handler.process(hget_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
         
         // Test LTRIM command
@@ -1358,7 +1360,7 @@ mod tests {
             ],
         };
         
-        let _ = handler.process(lpush_command).await.unwrap();
+        let _ = handler.process(lpush_command, 0).await.unwrap();
         
         // Now trim the list
         let ltrim_command = Command {
@@ -1366,7 +1368,7 @@ mod tests {
             args: vec![list_key.clone(), b"0".to_vec(), b"1".to_vec()],
         };
         
-        let result = handler.process(ltrim_command).await.unwrap();
+        let result = handler.process(ltrim_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         
         // Check result with LRANGE
@@ -1375,7 +1377,7 @@ mod tests {
             args: vec![list_key.clone(), b"0".to_vec(), b"-1".to_vec()],
         };
         
-        let result = handler.process(lrange_command).await.unwrap();
+        let result = handler.process(lrange_command, 0).await.unwrap();
         
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
@@ -1397,7 +1399,7 @@ mod tests {
             ],
         };
         
-        let _ = handler.process(zadd_command).await.unwrap();
+        let _ = handler.process(zadd_command, 0).await.unwrap();
         
         // Now get the range with scores
         let zrange_command = Command {
@@ -1407,7 +1409,7 @@ mod tests {
             ],
         };
         
-        let result = handler.process(zrange_command).await.unwrap();
+        let result = handler.process(zrange_command, 0).await.unwrap();
         
         if let RespValue::Array(Some(items)) = result {
             // Check that we get 6 items (3 members + 3 scores)
@@ -1440,14 +1442,14 @@ mod tests {
             name: "set".to_string(),
             args: vec![b"pexpire_key".to_vec(), b"pexpire_value".to_vec()],
         };
-        handler.process(set_command).await.unwrap();
+        handler.process(set_command, 0).await.unwrap();
         
         let pexpire_command = Command {
             name: "pexpire".to_string(),
             args: vec![b"pexpire_key".to_vec(), b"2000".to_vec()], // 2000 milliseconds
         };
         
-        let result = handler.process(pexpire_command).await.unwrap();
+        let result = handler.process(pexpire_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
         
         // Check PTTL
@@ -1456,7 +1458,7 @@ mod tests {
             args: vec![b"pexpire_key".to_vec()],
         };
         
-        let result = handler.process(pttl_command).await.unwrap();
+        let result = handler.process(pttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl <= 2000 && ttl > 0);
         } else {
@@ -1469,7 +1471,7 @@ mod tests {
             args: vec![b"pexpire_key".to_vec()],
         };
         
-        let result = handler.process(ttl_command).await.unwrap();
+        let result = handler.process(ttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl <= 2 && ttl >= 1);
         } else {
@@ -1482,7 +1484,7 @@ mod tests {
             args: vec![b"nonexistent_key".to_vec()],
         };
         
-        let result = handler.process(pttl_nonexistent).await.unwrap();
+        let result = handler.process(pttl_nonexistent, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(-2)); // -2 means key does not exist
         
         // Test PTTL on key with no expiration
@@ -1490,14 +1492,342 @@ mod tests {
             name: "set".to_string(),
             args: vec![b"noexpire_key".to_vec(), b"value".to_vec()],
         };
-        handler.process(set_noexpire).await.unwrap();
+        handler.process(set_noexpire, 0).await.unwrap();
         
         let pttl_noexpire = Command {
             name: "pttl".to_string(),
             args: vec![b"noexpire_key".to_vec()],
         };
         
-        let result = handler.process(pttl_noexpire).await.unwrap();
+        let result = handler.process(pttl_noexpire, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(-1)); // -1 means key exists but has no expiration
     }
-} 
+
+    // ========== Multi-Database (SELECT) Tests ==========
+
+    #[tokio::test]
+    async fn test_select_database_isolation() {
+        // SELECT 1 then SET/GET should isolate from database 0
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // SET key in DB 0
+        let set_db0 = Command {
+            name: "set".to_string(),
+            args: vec![b"mykey".to_vec(), b"db0_value".to_vec()],
+        };
+        handler.process(set_db0, 0).await.unwrap();
+
+        // SET same key in DB 1 with different value
+        let set_db1 = Command {
+            name: "set".to_string(),
+            args: vec![b"mykey".to_vec(), b"db1_value".to_vec()],
+        };
+        handler.process(set_db1, 1).await.unwrap();
+
+        // GET key from DB 0 should return db0_value
+        let get_db0 = Command {
+            name: "get".to_string(),
+            args: vec![b"mykey".to_vec()],
+        };
+        let result = handler.process(get_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"db0_value".to_vec())));
+
+        // GET key from DB 1 should return db1_value
+        let get_db1 = Command {
+            name: "get".to_string(),
+            args: vec![b"mykey".to_vec()],
+        };
+        let result = handler.process(get_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"db1_value".to_vec())));
+
+        // GET key from DB 2 (never written) should return nil
+        let get_db2 = Command {
+            name: "get".to_string(),
+            args: vec![b"mykey".to_vec()],
+        };
+        let result = handler.process(get_db2, 2).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_move_between_databases() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // SET key in DB 0
+        let set_cmd = Command {
+            name: "set".to_string(),
+            args: vec![b"movekey".to_vec(), b"movevalue".to_vec()],
+        };
+        handler.process(set_cmd, 0).await.unwrap();
+
+        // MOVE key from DB 0 to DB 3
+        let move_cmd = Command {
+            name: "move".to_string(),
+            args: vec![b"movekey".to_vec(), b"3".to_vec()],
+        };
+        let result = handler.process(move_cmd, 0).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // Key should no longer exist in DB 0
+        let get_db0 = Command {
+            name: "get".to_string(),
+            args: vec![b"movekey".to_vec()],
+        };
+        let result = handler.process(get_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // Key should exist in DB 3
+        let get_db3 = Command {
+            name: "get".to_string(),
+            args: vec![b"movekey".to_vec()],
+        };
+        let result = handler.process(get_db3, 3).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"movevalue".to_vec())));
+
+        // MOVE from DB 1 to DB 5 (from non-zero source DB)
+        let set_db1 = Command {
+            name: "set".to_string(),
+            args: vec![b"key2".to_vec(), b"val2".to_vec()],
+        };
+        handler.process(set_db1, 1).await.unwrap();
+
+        let move_from_db1 = Command {
+            name: "move".to_string(),
+            args: vec![b"key2".to_vec(), b"5".to_vec()],
+        };
+        let result = handler.process(move_from_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // Key should exist in DB 5
+        let get_db5 = Command {
+            name: "get".to_string(),
+            args: vec![b"key2".to_vec()],
+        };
+        let result = handler.process(get_db5, 5).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val2".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_flushdb_only_flushes_selected_db() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // SET keys in DB 0
+        let set_db0 = Command {
+            name: "set".to_string(),
+            args: vec![b"key0".to_vec(), b"val0".to_vec()],
+        };
+        handler.process(set_db0, 0).await.unwrap();
+
+        // SET keys in DB 1
+        let set_db1 = Command {
+            name: "set".to_string(),
+            args: vec![b"key1".to_vec(), b"val1".to_vec()],
+        };
+        handler.process(set_db1, 1).await.unwrap();
+
+        // SET keys in DB 2
+        let set_db2 = Command {
+            name: "set".to_string(),
+            args: vec![b"key2".to_vec(), b"val2".to_vec()],
+        };
+        handler.process(set_db2, 2).await.unwrap();
+
+        // FLUSHDB on DB 1 only
+        let flush_cmd = Command {
+            name: "flushdb".to_string(),
+            args: vec![],
+        };
+        handler.process(flush_cmd, 1).await.unwrap();
+
+        // DB 0 key should still exist
+        let get_db0 = Command {
+            name: "get".to_string(),
+            args: vec![b"key0".to_vec()],
+        };
+        let result = handler.process(get_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val0".to_vec())));
+
+        // DB 1 key should be gone
+        let get_db1 = Command {
+            name: "get".to_string(),
+            args: vec![b"key1".to_vec()],
+        };
+        let result = handler.process(get_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+
+        // DB 2 key should still exist
+        let get_db2 = Command {
+            name: "get".to_string(),
+            args: vec![b"key2".to_vec()],
+        };
+        let result = handler.process(get_db2, 2).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val2".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_dbsize_respects_db_index() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // Add 3 keys to DB 0
+        for i in 0..3 {
+            let set_cmd = Command {
+                name: "set".to_string(),
+                args: vec![format!("k{}", i).into_bytes(), b"v".to_vec()],
+            };
+            handler.process(set_cmd, 0).await.unwrap();
+        }
+
+        // Add 1 key to DB 1
+        let set_db1 = Command {
+            name: "set".to_string(),
+            args: vec![b"only_key".to_vec(), b"v".to_vec()],
+        };
+        handler.process(set_db1, 1).await.unwrap();
+
+        // DBSIZE on DB 0 should be 3
+        let dbsize_db0 = Command {
+            name: "dbsize".to_string(),
+            args: vec![],
+        };
+        let result = handler.process(dbsize_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        // DBSIZE on DB 1 should be 1
+        let dbsize_db1 = Command {
+            name: "dbsize".to_string(),
+            args: vec![],
+        };
+        let result = handler.process(dbsize_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // DBSIZE on DB 2 should be 0
+        let dbsize_db2 = Command {
+            name: "dbsize".to_string(),
+            args: vec![],
+        };
+        let result = handler.process(dbsize_db2, 2).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_keys_scan_respect_db_index() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // Add keys to DB 0
+        let set_db0 = Command {
+            name: "set".to_string(),
+            args: vec![b"alpha".to_vec(), b"v".to_vec()],
+        };
+        handler.process(set_db0, 0).await.unwrap();
+
+        // Add different key to DB 1
+        let set_db1 = Command {
+            name: "set".to_string(),
+            args: vec![b"beta".to_vec(), b"v".to_vec()],
+        };
+        handler.process(set_db1, 1).await.unwrap();
+
+        // KEYS * on DB 0 should only find "alpha"
+        let keys_db0 = Command {
+            name: "keys".to_string(),
+            args: vec![b"*".to_vec()],
+        };
+        let result = handler.process(keys_db0, 0).await.unwrap();
+        if let RespValue::Array(Some(keys)) = result {
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0], RespValue::BulkString(Some(b"alpha".to_vec())));
+        } else {
+            panic!("Expected array response from KEYS");
+        }
+
+        // KEYS * on DB 1 should only find "beta"
+        let keys_db1 = Command {
+            name: "keys".to_string(),
+            args: vec![b"*".to_vec()],
+        };
+        let result = handler.process(keys_db1, 1).await.unwrap();
+        if let RespValue::Array(Some(keys)) = result {
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0], RespValue::BulkString(Some(b"beta".to_vec())));
+        } else {
+            panic!("Expected array response from KEYS");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_randomkey_respects_db_index() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // Add key to DB 0 only
+        let set_cmd = Command {
+            name: "set".to_string(),
+            args: vec![b"onlydb0".to_vec(), b"v".to_vec()],
+        };
+        handler.process(set_cmd, 0).await.unwrap();
+
+        // RANDOMKEY on DB 0 should return a key
+        let rk_db0 = Command {
+            name: "randomkey".to_string(),
+            args: vec![],
+        };
+        let result = handler.process(rk_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"onlydb0".to_vec())));
+
+        // RANDOMKEY on DB 1 (empty) should return nil
+        let rk_db1 = Command {
+            name: "randomkey".to_string(),
+            args: vec![],
+        };
+        let result = handler.process(rk_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_hash_operations_across_databases() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // HSET in DB 0
+        let hset_db0 = Command {
+            name: "hset".to_string(),
+            args: vec![b"myhash".to_vec(), b"field".to_vec(), b"val0".to_vec()],
+        };
+        handler.process(hset_db0, 0).await.unwrap();
+
+        // HSET same hash name in DB 1 with different value
+        let hset_db1 = Command {
+            name: "hset".to_string(),
+            args: vec![b"myhash".to_vec(), b"field".to_vec(), b"val1".to_vec()],
+        };
+        handler.process(hset_db1, 1).await.unwrap();
+
+        // HGET from DB 0
+        let hget_db0 = Command {
+            name: "hget".to_string(),
+            args: vec![b"myhash".to_vec(), b"field".to_vec()],
+        };
+        let result = handler.process(hget_db0, 0).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val0".to_vec())));
+
+        // HGET from DB 1
+        let hget_db1 = Command {
+            name: "hget".to_string(),
+            args: vec![b"myhash".to_vec(), b"field".to_vec()],
+        };
+        let result = handler.process(hget_db1, 1).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+    }
+}

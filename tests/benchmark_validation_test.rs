@@ -32,7 +32,7 @@ async fn test_bench_string_operations_complete() {
                 vec![b'x'; size],
             ],
         };
-        handler.process(cmd).await.unwrap();
+        handler.process(cmd, 0).await.unwrap();
     }
 
     // GET
@@ -41,7 +41,7 @@ async fn test_bench_string_operations_complete() {
             name: "get".to_string(),
             args: vec![format!("bench_str:{}", size).into_bytes()],
         };
-        handler.process(cmd).await.unwrap();
+        handler.process(cmd, 0).await.unwrap();
     }
 
     // MSET/MGET
@@ -50,19 +50,19 @@ async fn test_bench_string_operations_complete() {
         mset_args.push(format!("msetkey:{}", i).into_bytes());
         mset_args.push(format!("val:{}", i).into_bytes());
     }
-    handler.process(Command { name: "mset".to_string(), args: mset_args }).await.unwrap();
+    handler.process(Command { name: "mset".to_string(), args: mset_args }, 0).await.unwrap();
 
     let mget_args: Vec<Vec<u8>> = (0..10).map(|i| format!("msetkey:{}", i).into_bytes()).collect();
-    handler.process(Command { name: "mget".to_string(), args: mget_args }).await.unwrap();
+    handler.process(Command { name: "mget".to_string(), args: mget_args }, 0).await.unwrap();
 
     // INCR
-    handler.process(Command { name: "incr".to_string(), args: vec![b"counter".to_vec()] }).await.unwrap();
+    handler.process(Command { name: "incr".to_string(), args: vec![b"counter".to_vec()] }, 0).await.unwrap();
 
     // APPEND
     handler.process(Command {
         name: "append".to_string(),
         args: vec![b"appendkey".to_vec(), b"data".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -74,24 +74,24 @@ async fn test_bench_list_operations_complete() {
         handler.process(Command {
             name: "lpush".to_string(),
             args: vec![b"benchlist".to_vec(), format!("item:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
     for i in 0..50 {
         handler.process(Command {
             name: "rpush".to_string(),
             args: vec![b"benchlist2".to_vec(), format!("item:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // LPOP/RPOP
-    handler.process(Command { name: "lpop".to_string(), args: vec![b"benchlist".to_vec()] }).await.unwrap();
-    handler.process(Command { name: "rpop".to_string(), args: vec![b"benchlist".to_vec()] }).await.unwrap();
+    handler.process(Command { name: "lpop".to_string(), args: vec![b"benchlist".to_vec()] }, 0).await.unwrap();
+    handler.process(Command { name: "rpop".to_string(), args: vec![b"benchlist".to_vec()] }, 0).await.unwrap();
 
     // LRANGE
     handler.process(Command {
         name: "lrange".to_string(),
         args: vec![b"benchlist".to_vec(), b"0".to_vec(), b"-1".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -106,18 +106,18 @@ async fn test_bench_hash_operations_complete() {
                 format!("field:{}", i).into_bytes(),
                 format!("value:{}", i).into_bytes(),
             ],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     handler.process(Command {
         name: "hget".to_string(),
         args: vec![b"benchhash".to_vec(), b"field:50".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     handler.process(Command {
         name: "hgetall".to_string(),
         args: vec![b"benchhash".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -129,24 +129,24 @@ async fn test_bench_set_operations_complete() {
         handler.process(Command {
             name: "sadd".to_string(),
             args: vec![b"benchset1".to_vec(), format!("member:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
         handler.process(Command {
             name: "sadd".to_string(),
             args: vec![b"benchset2".to_vec(), format!("member:{}", i + 50).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // SINTER
     handler.process(Command {
         name: "sinter".to_string(),
         args: vec![b"benchset1".to_vec(), b"benchset2".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // SUNION
     handler.process(Command {
         name: "sunion".to_string(),
         args: vec![b"benchset1".to_vec(), b"benchset2".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -161,20 +161,20 @@ async fn test_bench_sorted_set_operations_complete() {
                 format!("{}", i as f64).into_bytes(),
                 format!("member:{}", i).into_bytes(),
             ],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // ZRANGE
     handler.process(Command {
         name: "zrange".to_string(),
         args: vec![b"benchzset".to_vec(), b"0".to_vec(), b"-1".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // ZRANGEBYSCORE
     handler.process(Command {
         name: "zrangebyscore".to_string(),
         args: vec![b"benchzset".to_vec(), b"25".to_vec(), b"75".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -191,20 +191,20 @@ async fn test_bench_stream_operations_complete() {
                 b"field".to_vec(),
                 format!("value:{}", i).into_bytes(),
             ],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // XLEN
     handler.process(Command {
         name: "xlen".to_string(),
         args: vec![b"benchstream".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // XRANGE
     handler.process(Command {
         name: "xrange".to_string(),
         args: vec![b"benchstream".to_vec(), b"-".to_vec(), b"+".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -253,7 +253,7 @@ async fn test_bench_transaction_operations_complete() {
     }
 
     // EXEC
-    let result = handle_exec(&mut tx_state, &handler, &storage).await;
+    let result = handle_exec(&mut tx_state, &handler, &storage, 0).await;
     assert!(result.is_ok());
 }
 
@@ -265,7 +265,7 @@ async fn test_bench_scripting_operations_complete() {
     handler.process(Command {
         name: "eval".to_string(),
         args: vec![b"return 1".to_vec(), b"0".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // EVAL with redis.call
     handler.process(Command {
@@ -276,19 +276,19 @@ async fn test_bench_scripting_operations_complete() {
             b"scriptkey".to_vec(),
             b"scriptval".to_vec(),
         ],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // SCRIPT LOAD + EVALSHA
     let result = handler.process(Command {
         name: "script".to_string(),
         args: vec![b"load".to_vec(), b"return 42".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     if let rlightning::networking::resp::RespValue::BulkString(Some(sha)) = result {
         handler.process(Command {
             name: "evalsha".to_string(),
             args: vec![sha, b"0".to_vec()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 }
 
@@ -311,7 +311,7 @@ async fn test_bench_persistence_operations_complete() {
                 format!("rdbkey:{}", i).into_bytes(),
                 format!("rdbval:{}", i).into_bytes(),
             ],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // RDB save
@@ -360,23 +360,23 @@ async fn test_bench_blocking_operations_complete() {
     handler.process(Command {
         name: "lpush".to_string(),
         args: vec![b"blpoplist".to_vec(), b"item".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     handler.process(Command {
         name: "blpop".to_string(),
         args: vec![b"blpoplist".to_vec(), b"0".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     // Push then BRPOP
     handler.process(Command {
         name: "rpush".to_string(),
         args: vec![b"brpoplist".to_vec(), b"item".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 
     handler.process(Command {
         name: "brpop".to_string(),
         args: vec![b"brpoplist".to_vec(), b"0".to_vec()],
-    }).await.unwrap();
+    }, 0).await.unwrap();
 }
 
 #[tokio::test]
@@ -415,7 +415,7 @@ async fn test_bench_concurrent_clients_complete() {
                 format!("conckey:{}", i).into_bytes(),
                 format!("concval:{}", i).into_bytes(),
             ],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 
     // Simulate concurrent access
@@ -429,11 +429,11 @@ async fn test_bench_concurrent_clients_complete() {
                     format!("clientkey:{}", i).into_bytes(),
                     format!("clientval:{}", i).into_bytes(),
                 ],
-            }).await.unwrap();
+            }, 0).await.unwrap();
             h.process(Command {
                 name: "get".to_string(),
                 args: vec![format!("conckey:{}", i % 10).into_bytes()],
-            }).await.unwrap();
+            }, 0).await.unwrap();
         });
         handles.push(handle);
     }
@@ -456,23 +456,23 @@ async fn test_bench_memory_efficiency_complete() {
         handler.process(Command {
             name: "set".to_string(),
             args: vec![format!("memstr:{}", i).into_bytes(), format!("val:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
         handler.process(Command {
             name: "hset".to_string(),
             args: vec![b"memhash".to_vec(), format!("f:{}", i).into_bytes(), format!("v:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
         handler.process(Command {
             name: "lpush".to_string(),
             args: vec![b"memlist".to_vec(), format!("item:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
         handler.process(Command {
             name: "sadd".to_string(),
             args: vec![b"memset".to_vec(), format!("member:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
         handler.process(Command {
             name: "zadd".to_string(),
             args: vec![b"memzset".to_vec(), format!("{}", i as f64).into_bytes(), format!("m:{}", i).into_bytes()],
-        }).await.unwrap();
+        }, 0).await.unwrap();
     }
 }
 
