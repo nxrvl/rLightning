@@ -885,7 +885,30 @@ impl Server {
                         }
                     }
                 } else {
-                    let response = RespValue::SimpleString("OK".to_string());
+                    // No security manager: provide Redis-compatible defaults for read-only
+                    // subcommands, error for write subcommands that would give a false sense of security
+                    let subcmd = cmd.args.first().map(|a| String::from_utf8_lossy(a).to_lowercase());
+                    let response = match subcmd.as_deref() {
+                        Some("whoami") => RespValue::BulkString(Some(b"default".to_vec())),
+                        Some("users") => RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(b"default".to_vec())),
+                        ])),
+                        Some("list") => RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(b"user default on ~* &* +@all".to_vec())),
+                        ])),
+                        Some("cat") => RespValue::Array(Some(vec![
+                            "keyspace", "read", "write", "set", "sortedset", "list", "hash",
+                            "string", "bitmap", "hyperloglog", "geo", "stream", "pubsub",
+                            "admin", "fast", "slow", "blocking", "dangerous", "connection",
+                            "transaction", "scripting", "server",
+                        ].into_iter().map(|s| RespValue::BulkString(Some(s.as_bytes().to_vec()))).collect())),
+                        Some("genpass") => {
+                            let pass: String = (0..64).map(|_| format!("{:x}", fastrand::u8(..))).collect();
+                            RespValue::BulkString(Some(pass.into_bytes()))
+                        }
+                        Some("log") => RespValue::Array(Some(vec![])),
+                        _ => RespValue::Error("ERR ACL is not enabled. Set 'requirepass' or configure ACL users to enable it.".to_string()),
+                    };
                     if let Ok(bytes) = response.serialize() {
                         response_buffer.extend_from_slice(&bytes);
                     }
@@ -967,20 +990,81 @@ impl Server {
         // Cluster mode: validate cross-slot access for multi-key commands
         if let Some(cluster_mgr) = cluster
             && cluster_mgr.is_enabled() {
-                // Get key indices for this command to check cross-slot
+                // Extract only actual key arguments per command's syntax
                 let key_refs: Vec<&[u8]> = match cmd_lower.as_str() {
-                    // Multi-key commands that must operate on the same slot
-                    "mget" | "mset" | "msetnx" | "del" | "unlink" | "exists" | "touch"
+                    // All args are keys
+                    "mget" | "del" | "unlink" | "exists" | "touch"
                     | "sinter" | "sinterstore" | "sunion" | "sunionstore" | "sdiff" | "sdiffstore"
-                    | "sintercard" | "smove"
-                    | "zunionstore" | "zinterstore" | "zdiffstore" | "zunion" | "zinter" | "zdiff"
-                    | "lmpop" | "blmpop" | "blpop" | "brpop"
                     | "pfcount" | "pfmerge"
-                    | "bitop" | "rename" | "renamenx" | "copy"
-                    | "rpoplpush" | "lmove" | "blmove"
-                    | "smismember"
-                    | "xread" | "xreadgroup" => {
+                    | "rename" | "renamenx" | "rpoplpush" => {
                         cmd.args.iter().map(|a| a.as_slice()).collect()
+                    }
+                    // Alternating key-value pairs: keys at even indices
+                    "mset" | "msetnx" => {
+                        cmd.args.iter().step_by(2).map(|a| a.as_slice()).collect()
+                    }
+                    // First 2 args are keys
+                    "smove" | "copy" | "lmove" | "blmove" => {
+                        cmd.args.iter().take(2).map(|a| a.as_slice()).collect()
+                    }
+                    // Skip first arg (operation/dest), rest are keys: BITOP op dest key [key ...]
+                    "bitop" => {
+                        cmd.args.iter().skip(1).map(|a| a.as_slice()).collect()
+                    }
+                    // All args except last (timeout): BLPOP key [key ...] timeout
+                    "blpop" | "brpop" => {
+                        if cmd.args.len() > 1 {
+                            cmd.args[..cmd.args.len() - 1].iter().map(|a| a.as_slice()).collect()
+                        } else {
+                            vec![]
+                        }
+                    }
+                    // dest numkeys key [key ...] [options]: ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE
+                    "zunionstore" | "zinterstore" | "zdiffstore" => {
+                        if cmd.args.len() >= 2 {
+                            let numkeys = std::str::from_utf8(&cmd.args[1]).ok()
+                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                            let mut keys = vec![cmd.args[0].as_slice()]; // dest key
+                            for arg in cmd.args.iter().skip(2).take(numkeys) {
+                                keys.push(arg.as_slice());
+                            }
+                            keys
+                        } else {
+                            vec![]
+                        }
+                    }
+                    // numkeys key [key ...] [options]: ZUNION/ZINTER/ZDIFF/LMPOP/SINTERCARD
+                    "zunion" | "zinter" | "zdiff" | "lmpop" | "sintercard" => {
+                        if !cmd.args.is_empty() {
+                            let numkeys = std::str::from_utf8(&cmd.args[0]).ok()
+                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                            cmd.args.iter().skip(1).take(numkeys).map(|a| a.as_slice()).collect()
+                        } else {
+                            vec![]
+                        }
+                    }
+                    // timeout numkeys key [key ...] direction: BLMPOP
+                    "blmpop" => {
+                        if cmd.args.len() >= 2 {
+                            let numkeys = std::str::from_utf8(&cmd.args[1]).ok()
+                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                            cmd.args.iter().skip(2).take(numkeys).map(|a| a.as_slice()).collect()
+                        } else {
+                            vec![]
+                        }
+                    }
+                    // XREAD/XREADGROUP: keys follow STREAMS keyword, count = remaining/2
+                    "xread" | "xreadgroup" => {
+                        let streams_pos = cmd.args.iter().position(|a| {
+                            a.eq_ignore_ascii_case(b"streams")
+                        });
+                        if let Some(pos) = streams_pos {
+                            let after_streams = &cmd.args[pos + 1..];
+                            let num_keys = after_streams.len() / 2;
+                            after_streams.iter().take(num_keys).map(|a| a.as_slice()).collect()
+                        } else {
+                            vec![]
+                        }
                     }
                     _ => vec![],
                 };

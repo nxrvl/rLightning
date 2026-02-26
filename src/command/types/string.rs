@@ -173,22 +173,21 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
-    
-    // Check if the key exists first
-    if !engine.exists(&key).await? {
+
+    // Check the type first - returns "none" for non-existent keys
+    let key_type = engine.get_type(&key).await?;
+
+    if key_type == "none" {
         return Ok(RespValue::BulkString(None));
     }
-    
-    // Check if the key is not a known collection type
-    let key_type = engine.get_type(&key).await?;
-    
+
     // If the key has a specific collection type, return WRONGTYPE error
     if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
         return Err(CommandError::WrongType);
     }
-    
+
     // Otherwise, treat it as a string and get the value
     match engine.get(&key).await? {
         Some(value) => Ok(RespValue::BulkString(Some(value))),
