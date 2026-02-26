@@ -283,7 +283,7 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
 /// Redis CONFIG SET command - Set configuration parameters
 pub async fn config_set(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // CONFIG SET param value [param value ...]
-    if args.is_empty() || args.len() % 2 != 0 {
+    if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     // Accept the parameters but don't actually modify runtime config in this implementation
@@ -513,7 +513,7 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let seconds: f64 = seconds_str.parse().map_err(|_| {
                 CommandError::InvalidArgument("Invalid sleep duration".to_string())
             })?;
-            if seconds < 0.0 || seconds > 30.0 {
+            if !(0.0..=30.0).contains(&seconds) {
                 return Err(CommandError::InvalidArgument(
                     "ERR sleep duration must be between 0 and 30 seconds".to_string(),
                 ));

@@ -170,8 +170,8 @@ pub async fn expireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             return Ok(RespValue::Integer(0));
         }
         // GT: Set expiry only when the new expiry is greater than current
-        if gt {
-            if let Some(current) = current_ttl {
+        if gt
+            && let Some(current) = current_ttl {
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -181,10 +181,9 @@ pub async fn expireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     return Ok(RespValue::Integer(0));
                 }
             }
-        }
         // LT: Set expiry only when the new expiry is less than current
-        if lt {
-            if let Some(current) = current_ttl {
+        if lt
+            && let Some(current) = current_ttl {
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -194,7 +193,6 @@ pub async fn expireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     return Ok(RespValue::Integer(0));
                 }
             }
-        }
     }
 
     match engine.expire_at(key, timestamp).await? {
@@ -245,8 +243,8 @@ pub async fn pexpireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt {
-            if let Some(current) = current_ttl {
+        if gt
+            && let Some(current) = current_ttl {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -256,9 +254,8 @@ pub async fn pexpireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                     return Ok(RespValue::Integer(0));
                 }
             }
-        }
-        if lt {
-            if let Some(current) = current_ttl {
+        if lt
+            && let Some(current) = current_ttl {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -268,7 +265,6 @@ pub async fn pexpireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                     return Ok(RespValue::Integer(0));
                 }
             }
-        }
     }
 
     match engine.pexpire_at(key, timestamp_ms).await? {
@@ -760,9 +756,7 @@ pub async fn select(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     })?;
 
     if db >= NUM_DATABASES {
-        return Err(CommandError::InvalidArgument(format!(
-            "DB index is out of range"
-        )));
+        return Err(CommandError::InvalidArgument("DB index is out of range".to_string()));
     }
 
     // The actual database switching is handled at the server level

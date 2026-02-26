@@ -249,11 +249,10 @@ impl StreamData {
         let mut result = Vec::new();
         for (_, entry) in self.entries.range(start.clone()..=end.clone()) {
             result.push(entry);
-            if let Some(max) = count {
-                if result.len() >= max {
+            if let Some(max) = count
+                && result.len() >= max {
                     break;
                 }
-            }
         }
         result
     }
@@ -263,11 +262,10 @@ impl StreamData {
         let mut result = Vec::new();
         for (_, entry) in self.entries.range(end.clone()..=start.clone()).rev() {
             result.push(entry);
-            if let Some(max) = count {
-                if result.len() >= max {
+            if let Some(max) = count
+                && result.len() >= max {
                     break;
                 }
-            }
         }
         result
     }
@@ -289,7 +287,7 @@ impl StreamData {
         let ids_to_remove: Vec<StreamEntryId> = self.entries.keys().take(actual_remove).cloned().collect();
         for id in ids_to_remove {
             self.entries.remove(&id);
-            if self.max_deleted_entry_id.as_ref().map_or(true, |max| id > *max) {
+            if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > *max) {
                 self.max_deleted_entry_id = Some(id);
             }
             removed += 1;
@@ -311,7 +309,7 @@ impl StreamData {
         let mut removed = 0u64;
         for id in ids_to_remove.into_iter().take(to_remove) {
             self.entries.remove(&id);
-            if self.max_deleted_entry_id.as_ref().map_or(true, |max| id > *max) {
+            if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > *max) {
                 self.max_deleted_entry_id = Some(id);
             }
             removed += 1;
@@ -324,7 +322,7 @@ impl StreamData {
         let mut deleted = 0u64;
         for id in ids {
             if self.entries.remove(id).is_some() {
-                if self.max_deleted_entry_id.as_ref().map_or(true, |max| id > max) {
+                if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > max) {
                     self.max_deleted_entry_id = Some(id.clone());
                 }
                 deleted += 1;
@@ -346,17 +344,21 @@ impl StreamData {
 
         for (_, entry) in self.entries.range(start..) {
             result.push(entry);
-            if let Some(max) = count {
-                if result.len() >= max {
+            if let Some(max) = count
+                && result.len() >= max {
                     break;
                 }
-            }
         }
         result
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

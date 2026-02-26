@@ -246,19 +246,19 @@ Wire existing cluster and sentinel modules into the server so they're functional
 
 ### Task 13: Verify Acceptance Criteria
 
-- [ ] Run full test suite: `cargo test`
-- [ ] Run clippy: `cargo clippy -- -D warnings` (zero warnings)
-- [ ] Build release: `cargo build --release` (zero warnings)
-- [ ] Verify Redis protocol compliance: test with redis-cli connecting and running basic commands across all data types
-- [ ] Verify SET NX/XX atomicity: concurrent SET NX test shows correct single-winner behavior
-- [ ] Verify INCR atomicity: concurrent INCR test shows no lost updates
-- [ ] Verify SELECT works: SELECT 1, SET key val, SELECT 0, GET key returns nil
-- [ ] Verify hash isolation: HSET myhash field val + SET myhash:field val2 are independent keys
-- [ ] Verify MULTI/EXEC atomicity: concurrent transactions on overlapping keys don't interleave
-- [ ] Verify RESP3: HELLO 3, HGETALL returns map format
-- [ ] Verify persistence: save RDB with all types, restart, verify data intact
-- [ ] Run benchmarks: `cargo bench` to verify no performance regressions
-- [ ] Verify test coverage meets 80%+
+- [x] Run full test suite: `cargo test`
+- [x] Run clippy: `cargo clippy -- -D warnings` (zero warnings)
+- [x] Build release: `cargo build --release` (zero warnings)
+- [x] Verify Redis protocol compliance: test with redis-cli connecting and running basic commands across all data types
+- [x] Verify SET NX/XX atomicity: concurrent SET NX test shows correct single-winner behavior
+- [x] Verify INCR atomicity: concurrent INCR test shows no lost updates
+- [x] Verify SELECT works: SELECT 1, SET key val, SELECT 0, GET key returns nil
+- [x] Verify hash isolation: HSET myhash field val + SET myhash:field val2 are independent keys
+- [x] Verify MULTI/EXEC atomicity: concurrent transactions on overlapping keys don't interleave
+- [x] Verify RESP3: HELLO 3, HGETALL returns map format
+- [x] Verify persistence: save RDB with all types, restart, verify data intact
+- [x] Run benchmarks: `cargo bench` to verify no performance regressions
+- [x] Verify test coverage meets 80%+
 
 ### Task 14: Update Documentation
 

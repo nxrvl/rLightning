@@ -120,8 +120,8 @@ impl FailoverOrchestrator {
                 }
 
                 // Check for failover timeout
-                if master.failover_state != FailoverState::None && master.failover_state != FailoverState::Done {
-                    if let Some(start_time) = master.failover_start_time {
+                if master.failover_state != FailoverState::None && master.failover_state != FailoverState::Done
+                    && let Some(start_time) = master.failover_start_time {
                         let elapsed = start_time.elapsed().as_millis() as u64;
                         if elapsed > master.failover_timeout_ms {
                             warn!(
@@ -131,7 +131,6 @@ impl FailoverOrchestrator {
                             Self::abort_failover(master);
                         }
                     }
-                }
             }
         }
     }

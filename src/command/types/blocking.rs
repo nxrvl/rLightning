@@ -13,6 +13,12 @@ pub struct BlockingManager {
     counter: AtomicU64,
 }
 
+impl Default for BlockingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockingManager {
     pub fn new() -> Self {
         BlockingManager {

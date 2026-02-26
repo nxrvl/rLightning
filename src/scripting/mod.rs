@@ -45,6 +45,12 @@ pub struct ScriptingEngine {
     scripts_running: AtomicUsize,
 }
 
+impl Default for ScriptingEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScriptingEngine {
     pub fn new() -> Self {
         Self {
@@ -261,14 +267,13 @@ impl ScriptingEngine {
 
             // Check for conflicts with other libraries
             for func in &functions {
-                if let Some(existing_lib) = index.get(&func.name) {
-                    if *existing_lib != lib_name {
+                if let Some(existing_lib) = index.get(&func.name)
+                    && *existing_lib != lib_name {
                         return Err(CommandError::InternalError(format!(
                             "ERR Function {} already exists in library {}",
                             func.name, existing_lib
                         )));
                     }
-                }
             }
 
             // Register functions
@@ -329,11 +334,10 @@ impl ScriptingEngine {
         let mut result = Vec::new();
 
         for (name, lib) in libs.iter() {
-            if let Some(pat) = library_pattern {
-                if !name.contains(pat) {
+            if let Some(pat) = library_pattern
+                && !name.contains(pat) {
                     continue;
                 }
-            }
             result.push((name.clone(), lib.engine.clone(), lib.functions.clone()));
         }
 
@@ -429,9 +433,7 @@ impl ScriptingEngine {
         let sha1 = String::from_utf8_lossy(&args[0]).to_lowercase();
 
         let script = self.get_script(&sha1).ok_or_else(|| {
-            CommandError::InternalError(format!(
-                "NOSCRIPT No matching script. Please use EVAL."
-            ))
+            CommandError::InternalError("NOSCRIPT No matching script. Please use EVAL.".to_string())
         })?;
 
         let numkeys: usize = String::from_utf8_lossy(&args[1])
@@ -583,33 +585,34 @@ impl ScriptingEngine {
                 let mut result = Vec::new();
 
                 for (name, engine, functions) in libraries {
-                    let mut lib_info = Vec::new();
-                    lib_info.push(RespValue::BulkString(Some(b"library_name".to_vec())));
-                    lib_info.push(RespValue::BulkString(Some(name.into_bytes())));
-                    lib_info.push(RespValue::BulkString(Some(b"engine".to_vec())));
-                    lib_info.push(RespValue::BulkString(Some(engine.into_bytes())));
-                    lib_info.push(RespValue::BulkString(Some(b"functions".to_vec())));
-
                     let mut func_list = Vec::new();
                     for func in functions {
-                        let mut func_info = Vec::new();
-                        func_info.push(RespValue::BulkString(Some(b"name".to_vec())));
-                        func_info.push(RespValue::BulkString(Some(func.name.into_bytes())));
-                        func_info.push(RespValue::BulkString(Some(b"description".to_vec())));
-                        func_info.push(RespValue::BulkString(Some(
-                            func.description.unwrap_or_default().into_bytes(),
-                        )));
-                        func_info.push(RespValue::BulkString(Some(b"flags".to_vec())));
                         let flags: Vec<RespValue> = func
                             .flags
                             .iter()
                             .map(|f| RespValue::BulkString(Some(f.clone().into_bytes())))
                             .collect();
-                        func_info.push(RespValue::Array(Some(flags)));
+                        let func_info = vec![
+                            RespValue::BulkString(Some(b"name".to_vec())),
+                            RespValue::BulkString(Some(func.name.into_bytes())),
+                            RespValue::BulkString(Some(b"description".to_vec())),
+                            RespValue::BulkString(Some(
+                                func.description.unwrap_or_default().into_bytes(),
+                            )),
+                            RespValue::BulkString(Some(b"flags".to_vec())),
+                            RespValue::Array(Some(flags)),
+                        ];
                         func_list.push(RespValue::Array(Some(func_info)));
                     }
 
-                    lib_info.push(RespValue::Array(Some(func_list)));
+                    let lib_info = vec![
+                        RespValue::BulkString(Some(b"library_name".to_vec())),
+                        RespValue::BulkString(Some(name.into_bytes())),
+                        RespValue::BulkString(Some(b"engine".to_vec())),
+                        RespValue::BulkString(Some(engine.into_bytes())),
+                        RespValue::BulkString(Some(b"functions".to_vec())),
+                        RespValue::Array(Some(func_list)),
+                    ];
                     result.push(RespValue::Array(Some(lib_info)));
                 }
 

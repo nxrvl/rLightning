@@ -440,7 +440,7 @@ impl SentinelManager {
     pub async fn remove_master(&self, name: &str) -> Result<(), String> {
         let mut state = self.state.write().await;
         if state.masters.remove(name).is_none() {
-            return Err(format!("ERR No such master with that name"));
+            return Err("ERR No such master with that name".to_string());
         }
         info!("Sentinel stopped monitoring master '{}'", name);
         Ok(())
@@ -625,7 +625,7 @@ impl SentinelManager {
         let state = self.state.read().await;
         match state.masters.get(name) {
             Some(master) => Ok(master_to_resp(master)),
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -641,7 +641,7 @@ impl SentinelManager {
                     .collect();
                 Ok(RespValue::Array(Some(replicas)))
             }
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -657,7 +657,7 @@ impl SentinelManager {
                     .collect();
                 Ok(RespValue::Array(Some(sentinels)))
             }
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -679,8 +679,8 @@ impl SentinelManager {
         let mut count = 0;
         let names: Vec<String> = state.masters.keys().cloned().collect();
         for name in &names {
-            if glob_match(pattern, name) {
-                if let Some(master) = state.masters.get_mut(name) {
+            if glob_match(pattern, name)
+                && let Some(master) = state.masters.get_mut(name) {
                     master.replicas.clear();
                     master.sentinels.clear();
                     master.subjective_down = false;
@@ -690,7 +690,6 @@ impl SentinelManager {
                     master.odown_vote_count = 0;
                     count += 1;
                 }
-            }
         }
         Ok(RespValue::Integer(count))
     }
@@ -702,7 +701,7 @@ impl SentinelManager {
         {
             let master = match state.masters.get(name) {
                 Some(m) => m,
-                None => return Err(format!("ERR No such master with that name")),
+                None => return Err("ERR No such master with that name".to_string()),
             };
             if master.failover_state != FailoverState::None {
                 return Err("ERR FAILOVER already in progress".to_string());
@@ -740,7 +739,7 @@ impl SentinelManager {
                     ))
                 }
             }
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -817,7 +816,7 @@ impl SentinelManager {
                 }
                 Ok(RespValue::SimpleString("OK".to_string()))
             }
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -886,7 +885,7 @@ impl SentinelManager {
                     ])),
                 ])))
             }
-            None => Err(format!("ERR No such master with that name")),
+            None => Err("ERR No such master with that name".to_string()),
         }
     }
 
@@ -896,11 +895,11 @@ impl SentinelManager {
         let mut info = String::new();
         info.push_str("# Sentinel\r\n");
         info.push_str(&format!("sentinel_masters:{}\r\n", state.masters.len()));
-        info.push_str(&format!("sentinel_tilt:0\r\n"));
-        info.push_str(&format!("sentinel_tilt_since_seconds:-1\r\n"));
-        info.push_str(&format!("sentinel_running_scripts:0\r\n"));
-        info.push_str(&format!("sentinel_scripts_queue_length:0\r\n"));
-        info.push_str(&format!("sentinel_simulate_failure_flags:0\r\n"));
+        info.push_str("sentinel_tilt:0\r\n");
+        info.push_str("sentinel_tilt_since_seconds:-1\r\n");
+        info.push_str("sentinel_running_scripts:0\r\n");
+        info.push_str("sentinel_scripts_queue_length:0\r\n");
+        info.push_str("sentinel_simulate_failure_flags:0\r\n");
 
         for (name, master) in &state.masters {
             info.push_str(&format!(

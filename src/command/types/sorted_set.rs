@@ -17,6 +17,12 @@ pub struct SortedSetData {
     pub scores: HashMap<Vec<u8>, f64>,
 }
 
+impl Default for SortedSetData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SortedSetData {
     pub fn new() -> Self {
         SortedSetData {
@@ -153,16 +159,12 @@ fn in_lex_range(member: &[u8], min: &(Vec<u8>, bool, bool, bool), max: &(Vec<u8>
     if !min.2 {
         if min.1 {
             if member <= min.0.as_slice() { return false; }
-        } else {
-            if member < min.0.as_slice() { return false; }
-        }
+        } else if member < min.0.as_slice() { return false; }
     }
     if !max.3 {
         if max.1 {
             if member >= max.0.as_slice() { return false; }
-        } else {
-            if member > max.0.as_slice() { return false; }
-        }
+        } else if member > max.0.as_slice() { return false; }
     }
     true
 }
@@ -260,7 +262,7 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if only_if_new && (only_if_greater || only_if_less) {
         return Err(CommandError::InvalidArgument("GT/LT options cannot be used with NX".to_string()));
     }
-    if (args.len() - i) < 2 || (args.len() - i) % 2 != 0 {
+    if (args.len() - i) < 2 || !(args.len() - i).is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let mut pairs: Vec<(f64, Vec<u8>)> = Vec::new();
@@ -1021,39 +1023,35 @@ async fn blocking_zpop(
     blocking_mgr: &BlockingManager,
 ) -> CommandResult {
     for key in keys {
-        if let Some(ss) = load_sorted_set_readonly(engine, key).await? {
-            if !ss.is_empty() {
+        if let Some(ss) = load_sorted_set_readonly(engine, key).await?
+            && !ss.is_empty() {
                 let pop_args = vec![key.clone()];
                 let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
-                if let RespValue::Array(Some(ref items)) = result {
-                    if items.len() >= 2 {
+                if let RespValue::Array(Some(ref items)) = result
+                    && items.len() >= 2 {
                         return Ok(RespValue::Array(Some(vec![
                             RespValue::BulkString(Some(key.clone())),
                             items[0].clone(), items[1].clone(),
                         ])));
                     }
-                }
             }
-        }
     }
     let deadline = if timeout_secs > 0.0 { Some(Instant::now() + Duration::from_secs_f64(timeout_secs)) } else { None };
     loop {
         let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
         for key in keys {
-            if let Some(ss) = load_sorted_set_readonly(engine, key).await? {
-                if !ss.is_empty() {
+            if let Some(ss) = load_sorted_set_readonly(engine, key).await?
+                && !ss.is_empty() {
                     let pop_args = vec![key.clone()];
                     let result = if pop_min { zpopmin(engine, &pop_args).await? } else { zpopmax(engine, &pop_args).await? };
-                    if let RespValue::Array(Some(ref items)) = result {
-                        if items.len() >= 2 {
+                    if let RespValue::Array(Some(ref items)) = result
+                        && items.len() >= 2 {
                             return Ok(RespValue::Array(Some(vec![
                                 RespValue::BulkString(Some(key.clone())),
                                 items[0].clone(), items[1].clone(),
                             ])));
                         }
-                    }
                 }
-            }
         }
         let futs: Vec<_> = receivers.into_iter()
             .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))

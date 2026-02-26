@@ -12,11 +12,12 @@ fn bench_string_operations(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     
     group.bench_function("SET operation", |b| {
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            StorageEngine::new(config)
+        });
         b.iter(|| {
             rt.block_on(async {
-                let config = StorageConfig::default();
-                let storage = StorageEngine::new(config);
-                
                 storage.set(
                     black_box(b"test_key".to_vec()),
                     black_box(b"test_value".to_vec()),
@@ -27,13 +28,13 @@ fn bench_string_operations(c: &mut Criterion) {
     });
     
     group.bench_function("GET operation", |b| {
-        let config = StorageConfig::default();
-        let storage = StorageEngine::new(config);
-        
-        rt.block_on(async {
-            storage.set(b"bench_key".to_vec(), b"bench_value".to_vec(), None).await.unwrap();
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            let s = StorageEngine::new(config);
+            s.set(b"bench_key".to_vec(), b"bench_value".to_vec(), None).await.unwrap();
+            s
         });
-        
+
         b.iter(|| {
             rt.block_on(async {
                 let _ = storage.get(black_box(b"bench_key")).await.unwrap();
@@ -42,11 +43,12 @@ fn bench_string_operations(c: &mut Criterion) {
     });
     
     group.bench_function("SET with TTL", |b| {
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            StorageEngine::new(config)
+        });
         b.iter(|| {
             rt.block_on(async {
-                let config = StorageConfig::default();
-                let storage = StorageEngine::new(config);
-                
                 storage.set(
                     black_box(b"ttl_key".to_vec()),
                     black_box(b"ttl_value".to_vec()),
@@ -57,32 +59,29 @@ fn bench_string_operations(c: &mut Criterion) {
     });
     
     group.bench_function("DELETE operation", |b| {
-        b.iter_with_setup(
-            || {
-                rt.block_on(async {
-                    let config = StorageConfig::default();
-                    let storage = StorageEngine::new(config);
-                    let key = format!("del_key_{}", fastrand::u32(..1000000));
-                    storage.set(key.as_bytes().to_vec(), b"value".to_vec(), None).await.unwrap();
-                    (storage, key)
-                })
-            },
-            |(storage, key)| {
-                rt.block_on(async {
-                    storage.del(black_box(key.as_bytes())).await.unwrap();
-                })
-            }
-        );
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            StorageEngine::new(config)
+        });
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        b.iter(|| {
+            let i = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rt.block_on(async {
+                let key = format!("del_key_{}", i);
+                storage.set(key.as_bytes().to_vec(), b"value".to_vec(), None).await.unwrap();
+                storage.del(black_box(key.as_bytes())).await.unwrap();
+            })
+        });
     });
     
     group.bench_function("EXISTS operation", |b| {
-        let config = StorageConfig::default();
-        let storage = StorageEngine::new(config);
-        
-        rt.block_on(async {
-            storage.set(b"exists_key".to_vec(), b"value".to_vec(), None).await.unwrap();
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            let s = StorageEngine::new(config);
+            s.set(b"exists_key".to_vec(), b"value".to_vec(), None).await.unwrap();
+            s
         });
-        
+
         b.iter(|| {
             rt.block_on(async {
                 let _ = storage.exists(black_box(b"exists_key")).await.unwrap();
@@ -101,13 +100,14 @@ fn bench_concurrency_performance(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     
     group.bench_function("Concurrent SET operations", |b| {
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            StorageEngine::new(config)
+        });
         b.iter(|| {
             rt.block_on(async {
-                let config = StorageConfig::default();
-                let storage = StorageEngine::new(config);
-                
                 let mut handles = Vec::new();
-                
+
                 // Spawn 20 concurrent SET operations
                 for i in 0..20 {
                     let storage_ref = storage.clone();
@@ -118,7 +118,7 @@ fn bench_concurrency_performance(c: &mut Criterion) {
                     });
                     handles.push(handle);
                 }
-                
+
                 // Wait for all operations to complete
                 for handle in handles {
                     handle.await.unwrap();
@@ -128,16 +128,15 @@ fn bench_concurrency_performance(c: &mut Criterion) {
     });
     
     group.bench_function("Concurrent GET operations", |b| {
-        let config = StorageConfig::default();
-        let storage = StorageEngine::new(config);
-        
-        // Pre-populate data
-        rt.block_on(async {
+        let storage = rt.block_on(async {
+            let config = StorageConfig::default();
+            let s = StorageEngine::new(config);
             for i in 0..20 {
                 let key = format!("get_key_{}", i);
                 let value = format!("get_value_{}", i);
-                storage.set(key.into_bytes(), value.into_bytes(), None).await.unwrap();
+                s.set(key.into_bytes(), value.into_bytes(), None).await.unwrap();
             }
+            s
         });
         
         b.iter(|| {
@@ -173,23 +172,26 @@ fn bench_memory_management(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     
     group.bench_function("Memory usage tracking", |b| {
+        let storage = rt.block_on(async {
+            let config = StorageConfig {
+                max_memory: 10 * 1024 * 1024, // 10MB
+                ..Default::default()
+            };
+            StorageEngine::new(config)
+        });
+        let counter = std::sync::atomic::AtomicU64::new(0);
         b.iter(|| {
+            let batch = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             rt.block_on(async {
-                let config = StorageConfig {
-                    max_memory: 10 * 1024 * 1024, // 10MB
-                    ..Default::default()
-                };
-                let storage = StorageEngine::new(config);
-                
                 // Add several items and check memory usage
                 for i in 0..50 {
-                    let key = format!("mem_key_{}", i);
+                    let key = format!("mem_key_{}_{}", batch, i);
                     let value = vec![b'x'; 1000]; // 1KB values
                     storage.set(key.into_bytes(), value, None).await.unwrap();
                 }
-                
+
                 // Check that data was stored
-                black_box(storage.exists(b"mem_key_25").await.unwrap());
+                black_box(storage.exists(format!("mem_key_{}_25", batch).as_bytes()).await.unwrap());
             })
         });
     });

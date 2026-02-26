@@ -40,7 +40,7 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     
     // Prepend all elements at once using splice for O(N+M) instead of O(N*M).
     // Redis LPUSH pushes elements left-to-right, so the last arg ends up at the head.
-    let new_elements: Vec<Vec<u8>> = elements.iter().rev().map(|e| e.clone()).collect();
+    let new_elements: Vec<Vec<u8>> = elements.iter().rev().cloned().collect();
     list.splice(0..0, new_elements);
     
     let length = list.len();
@@ -133,11 +133,7 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     } else {
         // List doesn't exist, return nil (or empty array with count)
-        return if count.is_some() {
-            Ok(RespValue::BulkString(None))
-        } else {
-            Ok(RespValue::BulkString(None))
-        };
+        return Ok(RespValue::BulkString(None));
     }
 
     // Get the current list
@@ -146,11 +142,7 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
                 Ok(mut list) => {
                     if list.is_empty() {
-                        return if count.is_some() {
-                            Ok(RespValue::BulkString(None))
-                        } else {
-                            Ok(RespValue::BulkString(None))
-                        };
+                        return Ok(RespValue::BulkString(None));
                     }
 
                     if let Some(count) = count {
@@ -864,8 +856,8 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         // Forward scan
         let search_len = if maxlen > 0 { maxlen.min(list.len()) } else { list.len() };
         let mut found = 0i64;
-        for idx in 0..search_len {
-            if list[idx] == *element {
+        for (idx, item) in list[..search_len].iter().enumerate() {
+            if *item == *element {
                 found += 1;
                 if found >= rank {
                     matches.push(idx as i64);

@@ -57,8 +57,11 @@ impl Ord for ExpirationEntry {
 /// Eviction policy for the storage engine
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum EvictionPolicy {
     /// Remove the least recently used item
+    #[default]
     LRU,
     /// Remove the least frequently used item
     LFU,
@@ -68,11 +71,6 @@ pub enum EvictionPolicy {
     NoEviction,
 }
 
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        Self::LRU
-    }
-}
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for EvictionPolicy {
@@ -242,14 +240,13 @@ impl StorageEngine {
                     Some(item) => item.is_expired(),
                     None => false, // Key already deleted
                 };
-                if should_remove {
-                    if let Some((k, item)) = self.data.remove(&expired_entry.key) {
+                if should_remove
+                    && let Some((k, item)) = self.data.remove(&expired_entry.key) {
                         let size = Self::calculate_size(&k, &item.value) as u64;
                         self.current_memory.fetch_sub(size, Ordering::AcqRel);
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                         removed_count += 1;
                     }
-                }
                 
                 // Limit removals per cycle to avoid blocking
                 if removed_count >= MAX_REMOVALS_PER_CYCLE {
@@ -484,8 +481,7 @@ impl StorageEngine {
         };
 
         // Use entry API for atomic read-modify-write to avoid TOCTOU races
-        let is_new_key;
-        match self.active_db().entry(key.clone()) {
+        let is_new_key = match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
@@ -493,14 +489,14 @@ impl StorageEngine {
                 }
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
-                is_new_key = false;
+                false
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
-                is_new_key = true;
+                true
             }
-        }
+        };
 
         // Add to expiration queue if TTL is set
         if let Some(expires_at) = expires_at {
@@ -554,8 +550,7 @@ impl StorageEngine {
         };
 
         // Use entry API for atomic read-modify-write to avoid TOCTOU races
-        let is_new_key;
-        match self.active_db().entry(key.clone()) {
+        let is_new_key = match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
@@ -563,14 +558,14 @@ impl StorageEngine {
                 }
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
-                is_new_key = false;
+                false
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
-                is_new_key = true;
+                true
             }
-        }
+        };
 
         // Add to expiration queue if TTL is set
         if let Some(expires_at) = expires_at {
@@ -735,15 +730,12 @@ impl StorageEngine {
                 let mut keys = Vec::new();
                 for key in indexed_keys {
                     // Check if key still exists and is not expired
-                    if let Some(entry) = db.get(key) {
-                        if !entry.value().is_expired() {
-                            if let Ok(key_str) = std::str::from_utf8(key) {
-                                if self.matches_pattern(key_str, pattern) {
+                    if let Some(entry) = db.get(key)
+                        && !entry.value().is_expired()
+                            && let Ok(key_str) = std::str::from_utf8(key)
+                                && self.matches_pattern(key_str, pattern) {
                                     keys.push(key.clone());
                                 }
-                            }
-                        }
-                    }
                 }
                 return Ok(keys);
             }
@@ -758,11 +750,10 @@ impl StorageEngine {
             }
             
             // Convert key to string for pattern matching
-            if let Ok(key_str) = std::str::from_utf8(item.key()) {
-                if self.matches_pattern(key_str, pattern) {
+            if let Ok(key_str) = std::str::from_utf8(item.key())
+                && self.matches_pattern(key_str, pattern) {
                     keys.push(item.key().clone());
                 }
-            }
         }
         
         Ok(keys)
@@ -889,15 +880,13 @@ impl StorageEngine {
                         let flag: Vec<u8> = command.args[i].iter().map(|b| b.to_ascii_uppercase()).collect();
                         match flag.as_slice() {
                             b"EX" if i + 1 < command.args.len() => {
-                                if let Ok(s) = std::str::from_utf8(&command.args[i+1]) {
-                                    if let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_secs(v)); }
-                                }
+                                if let Ok(s) = std::str::from_utf8(&command.args[i+1])
+                                    && let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_secs(v)); }
                                 i += 2;
                             }
                             b"PX" if i + 1 < command.args.len() => {
-                                if let Ok(s) = std::str::from_utf8(&command.args[i+1]) {
-                                    if let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_millis(v)); }
-                                }
+                                if let Ok(s) = std::str::from_utf8(&command.args[i+1])
+                                    && let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_millis(v)); }
                                 i += 2;
                             }
                             _ => { i += 1; }
@@ -913,22 +902,18 @@ impl StorageEngine {
                 }
             },
             b"EXPIRE" => {
-                if command.args.len() >= 2 {
-                    if let Ok(secs) = std::str::from_utf8(&command.args[1]) {
-                        if let Ok(v) = secs.parse::<u64>() {
+                if command.args.len() >= 2
+                    && let Ok(secs) = std::str::from_utf8(&command.args[1])
+                        && let Ok(v) = secs.parse::<u64>() {
                             self.expire(&command.args[0], Some(Duration::from_secs(v))).await?;
                         }
-                    }
-                }
             },
             b"PEXPIRE" => {
-                if command.args.len() >= 2 {
-                    if let Ok(millis) = std::str::from_utf8(&command.args[1]) {
-                        if let Ok(v) = millis.parse::<u64>() {
+                if command.args.len() >= 2
+                    && let Ok(millis) = std::str::from_utf8(&command.args[1])
+                        && let Ok(v) = millis.parse::<u64>() {
                             self.expire(&command.args[0], Some(Duration::from_millis(v))).await?;
                         }
-                    }
-                }
             },
             b"RPUSH" => {
                 if command.args.len() >= 2 {
@@ -970,14 +955,13 @@ impl StorageEngine {
                         let mut zset: crate::command::types::sorted_set::SortedSetData = existing
                             .as_deref()
                             .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_else(|| crate::command::types::sorted_set::SortedSetData::new());
+                            .unwrap_or_else(crate::command::types::sorted_set::SortedSetData::new);
                         let mut i = 0;
                         while i + 1 < pairs.len() {
-                            if let Ok(score_str) = std::str::from_utf8(&pairs[i]) {
-                                if let Ok(score) = score_str.parse::<f64>() {
+                            if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                && let Ok(score) = score_str.parse::<f64>() {
                                     zset.insert(score, pairs[i+1].clone());
                                 }
-                            }
                             i += 2;
                         }
                         Ok((Some(bincode::serialize(&zset).unwrap()), ()))
@@ -1006,9 +990,9 @@ impl StorageEngine {
                         let mut stream: crate::storage::stream::StreamData = existing
                             .as_deref()
                             .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_else(|| crate::storage::stream::StreamData::new());
-                        if let Ok(id_str) = std::str::from_utf8(id_bytes) {
-                            if let Some(id) = crate::storage::stream::StreamEntryId::parse(id_str) {
+                            .unwrap_or_else(crate::storage::stream::StreamData::new);
+                        if let Ok(id_str) = std::str::from_utf8(id_bytes)
+                            && let Some(id) = crate::storage::stream::StreamEntryId::parse(id_str) {
                                 let mut fields = Vec::new();
                                 let mut j = 0;
                                 while j + 1 < field_args.len() {
@@ -1025,7 +1009,6 @@ impl StorageEngine {
                                     stream.first_entry_id = Some(id);
                                 }
                             }
-                        }
                         Ok((Some(bincode::serialize(&stream).unwrap()), ()))
                     })?;
                 }
@@ -1253,13 +1236,11 @@ impl StorageEngine {
         };
 
         // Check if destination exists (non-expired) and we're not replacing
-        if !replace {
-            if let Some(entry) = db.get(&dst) {
-                if !entry.value().is_expired() {
+        if !replace
+            && let Some(entry) = db.get(&dst)
+                && !entry.value().is_expired() {
                     return Ok(false);
                 }
-            }
-        }
 
         // Clone with fresh timestamps but same TTL
         let mut new_item = StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
@@ -1330,7 +1311,7 @@ impl StorageEngine {
 
         // Track the moved item's memory in the global counter
         // (self.del will decrement for the source, so we add for the destination first)
-        let moved_size = Self::calculate_size(&key.to_vec(), &src_item.value) as u64;
+        let moved_size = Self::calculate_size(key, &src_item.value) as u64;
         self.current_memory.fetch_add(moved_size, Ordering::AcqRel);
 
         // Insert into destination database
@@ -1572,6 +1553,7 @@ impl StorageEngine {
 
     /// Unified SET with all flag combinations (NX, XX, GET).
     /// Returns SetResult indicating what happened.
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_with_options(
         &self,
         key: Vec<u8>,
@@ -1641,7 +1623,7 @@ impl StorageEngine {
                     }
                     occ.insert(item);
                     let effective_expires = if keepttl && effectively_exists {
-                        preserved_expires.map(|ea| ea)
+                        preserved_expires
                     } else {
                         new_expires_at
                     };

@@ -31,7 +31,7 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // Two-key commands: args[0] and args[1]
         "rename" | "renamenx" | "lmove" | "rpoplpush" | "smove" | "copy" | "lcs" => {
             let mut keys = Vec::new();
-            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
             keys
         }
@@ -39,7 +39,7 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // BLMOVE: args[0] source, args[1] dest
         "blmove" => {
             let mut keys = Vec::new();
-            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
             keys
         }
@@ -89,7 +89,7 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // ZINTERSTORE/ZUNIONSTORE/ZDIFFSTORE: args[0] dest, args[1] numkeys, args[2..2+numkeys] source keys
         "zinterstore" | "zunionstore" | "zdiffstore" => {
             let mut keys = Vec::new();
-            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
                 for k in cmd.args.iter().skip(2).take(numkeys) {
                     keys.push(k.clone());
@@ -110,7 +110,7 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // ZRANGESTORE: args[0] dest, args[1] source
         "zrangestore" | "geosearchstore" => {
             let mut keys = Vec::new();
-            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
             keys
         }
@@ -151,7 +151,7 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // SORT/SORT_RO: args[0] is key, may have STORE dest
         "sort" | "sort_ro" => {
             let mut keys = Vec::new();
-            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             // Check for STORE option
             for i in 1..cmd.args.len() {
                 if cmd.args[i].eq_ignore_ascii_case(b"STORE") {
@@ -209,6 +209,12 @@ pub struct TransactionState {
     pub has_command_errors: bool,
     /// Errors from queued commands (stored for EXEC response)
     pub queued_errors: Vec<(usize, CommandError)>,
+}
+
+impl Default for TransactionState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TransactionState {

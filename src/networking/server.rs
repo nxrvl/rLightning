@@ -249,6 +249,7 @@ impl Server {
     }
 
     /// Handle a client connection
+    #[allow(clippy::too_many_arguments)]
     async fn handle_client(
         socket: TcpStream,
         command_handler: Arc<CommandHandler>,
@@ -311,12 +312,11 @@ impl Server {
                                 } else {
                                     response
                                 };
-                                if let Ok(bytes) = response.serialize() {
-                                    if let Err(e) = socket_writer.write_all(&bytes).await {
+                                if let Ok(bytes) = response.serialize()
+                                    && let Err(e) = socket_writer.write_all(&bytes).await {
                                         error!(client_addr = %client_addr_str, "Failed to write pub/sub message: {}", e);
                                         break;
                                     }
-                                }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 warn!(client_addr = %client_addr_str, missed = n, "Client lagged behind, missed messages");
@@ -651,9 +651,9 @@ impl Server {
 
         // Auth check - block unauthenticated access to all commands except AUTH, HELLO, QUIT
         let is_auth_command = cmd_lower == "auth";
-        if !is_auth_command {
-            if let Some(security_mgr) = security {
-                if security_mgr.require_auth()
+        if !is_auth_command
+            && let Some(security_mgr) = security
+                && security_mgr.require_auth()
                     && !security_mgr.is_authenticated(client_addr_str)
                 {
                     Self::send_error_to_writer(
@@ -663,12 +663,10 @@ impl Server {
                     ).await?;
                     return Ok(DispatchAction::Continue);
                 }
-            }
-        }
 
         // ACL permission checks for authenticated clients
-        if let Some(security_mgr) = security {
-            if !is_auth_command && security_mgr.is_authenticated(client_addr_str) {
+        if let Some(security_mgr) = security
+            && !is_auth_command && security_mgr.is_authenticated(client_addr_str) {
                 // Check command permission
                 if !security_mgr.check_command_permission(client_addr_str, &cmd_lower) {
                     let username = security_mgr.acl().get_username(client_addr_str).unwrap_or_else(|| "default".to_string());
@@ -694,7 +692,6 @@ impl Server {
                     }
                 }
             }
-        }
 
         // SELECT - database switching
         if cmd_lower == "select" {
@@ -794,13 +791,12 @@ impl Server {
                 return Ok(DispatchAction::Continue);
             }
             "publish" => {
-                if let Some(security_mgr) = security {
-                    if !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
+                if let Some(security_mgr) = security
+                    && !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
                         let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
                         Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
                         return Ok(DispatchAction::Continue);
                     }
-                }
                 let response = pubsub_commands::publish(pubsub, &cmd.args).await;
                 match response {
                     Ok(resp) => {
@@ -841,13 +837,12 @@ impl Server {
                 return Ok(DispatchAction::Continue);
             }
             "spublish" => {
-                if let Some(security_mgr) = security {
-                    if !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
+                if let Some(security_mgr) = security
+                    && !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
                         let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
                         Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
                         return Ok(DispatchAction::Continue);
                     }
-                }
                 let response = pubsub_commands::spublish(pubsub, &cmd.args).await;
                 match response {
                     Ok(resp) => {
@@ -959,8 +954,8 @@ impl Server {
         }
 
         // Read-only mode check
-        if let Some(repl) = replication {
-            if repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
+        if let Some(repl) = replication
+            && repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
                 Self::send_error_to_writer(
                     socket_writer,
                     "READONLY You can't write against a read only replica.".to_string(),
@@ -968,11 +963,10 @@ impl Server {
                 ).await?;
                 return Ok(DispatchAction::Continue);
             }
-        }
 
         // Cluster mode: validate cross-slot access for multi-key commands
-        if let Some(cluster_mgr) = cluster {
-            if cluster_mgr.is_enabled() {
+        if let Some(cluster_mgr) = cluster
+            && cluster_mgr.is_enabled() {
                 // Get key indices for this command to check cross-slot
                 let key_refs: Vec<&[u8]> = match cmd_lower.as_str() {
                     // Multi-key commands that must operate on the same slot
@@ -999,7 +993,6 @@ impl Server {
                     return Ok(DispatchAction::Continue);
                 }
             }
-        }
 
         // Capture queued commands before EXEC drains them (for replication)
         let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
@@ -1230,6 +1223,7 @@ impl Server {
 
     /// Process a command with transaction state handling.
     /// Handles MULTI/EXEC/DISCARD/WATCH/UNWATCH and queuing during transactions.
+    #[allow(clippy::too_many_arguments)]
     async fn process_with_transaction(
         cmd: &Command,
         cmd_lower: &str,
@@ -1255,8 +1249,8 @@ impl Server {
                     transaction::handle_exec(tx_state, command_handler, engine, db_index).await
                 }).await?;
                 // Log transaction commands to AOF wrapped in MULTI/EXEC
-                if let Some(persistence_mgr) = persistence {
-                    if let RespValue::Array(Some(_)) = &result {
+                if let Some(persistence_mgr) = persistence
+                    && let RespValue::Array(Some(_)) = &result {
                         // Transaction succeeded (not aborted by WATCH)
                         // Log MULTI first
                         let multi_cmd = RespCommand {
@@ -1282,7 +1276,6 @@ impl Server {
                         };
                         let _ = persistence_mgr.log_command(exec_cmd, aof_sync_policy).await;
                     }
-                }
                 return Ok(result);
             },
             "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args),
@@ -1300,8 +1293,8 @@ impl Server {
 
         // Log to AOF if persistence is enabled, command succeeded, and it's a write command
         // Skip AUTH commands to avoid persisting passwords in the AOF file
-        if let Some(persistence_mgr) = persistence {
-            if !is_auth_command && ReplicationManager::is_write_command(&cmd_lower) {
+        if let Some(persistence_mgr) = persistence
+            && !is_auth_command && ReplicationManager::is_write_command(cmd_lower) {
                 let resp_cmd = RespCommand {
                     name: cmd.name.as_bytes().to_vec(),
                     args: cmd.args.clone(),
@@ -1311,13 +1304,12 @@ impl Server {
                     // Command already executed; log the error but don't fail the response
                 }
             }
-        }
 
         // For AUTH command, update authentication status
-        if is_auth_command {
-            if let Some(security_mgr) = security {
-                if let RespValue::SimpleString(ref s) = result {
-                    if s == "OK" {
+        if is_auth_command
+            && let Some(security_mgr) = security
+                && let RespValue::SimpleString(ref s) = result
+                    && s == "OK" {
                         if cmd.args.len() == 1 {
                             // AUTH password (default user)
                             let password_str = String::from_utf8_lossy(&cmd.args[0]).to_string();
@@ -1339,15 +1331,13 @@ impl Server {
                             }
                         }
                     }
-                }
-            }
-        }
 
         Ok(result)
     }
 
     /// Process commands while in subscription mode
     /// Only (P|S)SUBSCRIBE, (P|S)UNSUBSCRIBE, PING, and QUIT are allowed
+    #[allow(clippy::too_many_arguments)]
     async fn process_subscription_commands(
         buffer: &mut BytesMut,
         partial_command_buffer: &mut Vec<u8>,
@@ -1378,8 +1368,8 @@ impl Server {
                             match cmd_lower.as_str() {
                                 "subscribe" => {
                                     // ACL channel check in subscription mode
-                                    if let Some(security_mgr) = security {
-                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                    if let Some(security_mgr) = security
+                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
                                             let ch_str = String::from_utf8_lossy(denied);
                                             let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
                                             if let Ok(bytes) = err.serialize() {
@@ -1387,7 +1377,6 @@ impl Server {
                                             }
                                             continue;
                                         }
-                                    }
                                     if let Ok(responses) = pubsub_commands::subscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
@@ -1415,8 +1404,8 @@ impl Server {
                                 }
                                 "psubscribe" => {
                                     // ACL channel check in subscription mode
-                                    if let Some(security_mgr) = security {
-                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                    if let Some(security_mgr) = security
+                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
                                             let ch_str = String::from_utf8_lossy(denied);
                                             let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
                                             if let Ok(bytes) = err.serialize() {
@@ -1424,7 +1413,6 @@ impl Server {
                                             }
                                             continue;
                                         }
-                                    }
                                     if let Ok(responses) = pubsub_commands::psubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
@@ -1452,8 +1440,8 @@ impl Server {
                                 }
                                 "ssubscribe" => {
                                     // ACL channel check in subscription mode
-                                    if let Some(security_mgr) = security {
-                                        if let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
+                                    if let Some(security_mgr) = security
+                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
                                             let ch_str = String::from_utf8_lossy(denied);
                                             let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
                                             if let Ok(bytes) = err.serialize() {
@@ -1461,7 +1449,6 @@ impl Server {
                                             }
                                             continue;
                                         }
-                                    }
                                     if let Ok(responses) = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await {
                                         for resp in responses {
                                             let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
@@ -1791,8 +1778,8 @@ impl Server {
                 }
             }
             "replconf" => {
-                if let Some(repl) = replication {
-                    if cmd.args.len() >= 2 {
+                if let Some(repl) = replication
+                    && cmd.args.len() >= 2 {
                         let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
                         if subcmd == "ACK" {
                             if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
@@ -1801,7 +1788,6 @@ impl Server {
                             return Ok(false);
                         }
                     }
-                }
                 let response = RespValue::SimpleString("OK".to_string());
                 if let Ok(bytes) = response.serialize() {
                     response_buffer.extend_from_slice(&bytes);
@@ -1930,11 +1916,10 @@ impl Server {
                     }
                     let username = String::from_utf8_lossy(&args[i + 1]).to_string();
                     let password = String::from_utf8_lossy(&args[i + 2]).to_string();
-                    if let Some(security_mgr) = security {
-                        if let Err(e) = security_mgr.authenticate_with_username(client_addr, &username, &password) {
+                    if let Some(security_mgr) = security
+                        && let Err(e) = security_mgr.authenticate_with_username(client_addr, &username, &password) {
                             return (RespValue::Error(e), current_version);
                         }
-                    }
                     // When no security manager is configured (no auth required),
                     // silently ignore the AUTH option (matching Redis behavior)
                     i += 3;

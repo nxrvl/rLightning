@@ -75,9 +75,7 @@ impl ClusterMessage {
         let id_bytes = self.sender_id.as_bytes();
         let id_len = id_bytes.len().min(40);
         data.extend_from_slice(&id_bytes[..id_len]);
-        for _ in id_len..40 {
-            data.push(0);
-        }
+        data.extend(std::iter::repeat_n(0u8, 40 - id_len));
 
         // Sender address (variable length, null-terminated)
         data.extend_from_slice(self.sender_addr.as_bytes());
@@ -109,9 +107,7 @@ impl ClusterMessage {
             let eid = entry.node_id.as_bytes();
             let eid_len = eid.len().min(40);
             data.extend_from_slice(&eid[..eid_len]);
-            for _ in eid_len..40 {
-                data.push(0);
-            }
+            data.extend(std::iter::repeat_n(0u8, 40 - eid_len));
             data.extend_from_slice(entry.addr.as_bytes());
             data.push(0);
             data.extend_from_slice(&entry.port.to_be_bytes());
@@ -308,22 +304,15 @@ async fn handle_cluster_bus_connection(
 
     let mut buf = vec![0u8; 65536];
 
-    loop {
-        // Read message length (4 bytes)
-        match stream.read_exact(&mut buf[..4]).await {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
+    while stream.read_exact(&mut buf[..4]).await.is_ok() {
         let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         if msg_len > buf.len() {
             warn!("Cluster bus message too large: {}", msg_len);
             break;
         }
 
-        match stream.read_exact(&mut buf[..msg_len]).await {
-            Ok(_) => {}
-            Err(_) => break,
+        if stream.read_exact(&mut buf[..msg_len]).await.is_err() {
+            break;
         }
 
         if let Some(msg) = ClusterMessage::deserialize(&buf[..msg_len]) {

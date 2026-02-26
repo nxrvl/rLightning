@@ -20,9 +20,7 @@ pub async fn module_command(_engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
         "LOAD" => module_load(&args[1..]).await,
         "LOADEX" => module_loadex(&args[1..]).await,
         "UNLOAD" => module_unload(&args[1..]).await,
-        _ => Err(CommandError::InvalidArgument(format!(
-            "Unknown subcommand or wrong number of arguments for 'module' command"
-        ))),
+        _ => Err(CommandError::InvalidArgument("Unknown subcommand or wrong number of arguments for 'module' command".to_string())),
     }
 }
 

@@ -185,24 +185,18 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt {
-            if let Some(current) = current_ttl {
-                if let Some(new_ttl) = &ttl {
-                    if *new_ttl <= current {
+        if gt
+            && let Some(current) = current_ttl
+                && let Some(new_ttl) = &ttl
+                    && *new_ttl <= current {
                         return Ok(RespValue::Integer(0));
                     }
-                }
-            }
-        }
-        if lt {
-            if let Some(current) = current_ttl {
-                if let Some(new_ttl) = &ttl {
-                    if *new_ttl >= current {
+        if lt
+            && let Some(current) = current_ttl
+                && let Some(new_ttl) = &ttl
+                    && *new_ttl >= current {
                         return Ok(RespValue::Integer(0));
                     }
-                }
-            }
-        }
     }
 
     match engine.expire(&key, ttl).await? {

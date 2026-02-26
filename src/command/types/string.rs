@@ -215,7 +215,7 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
 /// Redis MSET command - Set multiple key-value pairs
 pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 || args.len() % 2 != 0 {
+    if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     
@@ -430,7 +430,7 @@ pub async fn getset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 /// Redis MSETNX command - Set multiple key-value pairs, only if none of the keys exist
 /// Uses set_with_options NX for each key. If any key exists, none are set.
 pub async fn msetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
-    if args.len() < 2 || args.len() % 2 != 0 {
+    if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
@@ -590,24 +590,18 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt {
-            if let Some(current) = current_ttl {
-                if let Some(new_ttl) = &ttl {
-                    if *new_ttl <= current {
+        if gt
+            && let Some(current) = current_ttl
+                && let Some(new_ttl) = &ttl
+                    && *new_ttl <= current {
                         return Ok(RespValue::Integer(0));
                     }
-                }
-            }
-        }
-        if lt {
-            if let Some(current) = current_ttl {
-                if let Some(new_ttl) = &ttl {
-                    if *new_ttl >= current {
+        if lt
+            && let Some(current) = current_ttl
+                && let Some(new_ttl) = &ttl
+                    && *new_ttl >= current {
                         return Ok(RespValue::Integer(0));
                     }
-                }
-            }
-        }
     }
 
     match engine.expire(&key, ttl).await? {
@@ -885,8 +879,7 @@ pub async fn lcs(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let mut end_a = start_a;
             let mut end_b = start_b;
 
-            for k in 1..match_positions.len() {
-                let (pa, pb) = match_positions[k];
+            for &(pa, pb) in &match_positions[1..] {
                 if pa == end_a + 1 && pb == end_b + 1 {
                     end_a = pa;
                     end_b = pb;

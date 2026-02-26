@@ -40,6 +40,7 @@ pub enum CommandCategory {
 }
 
 impl CommandCategory {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "keyspace" => Some(Self::Keyspace),
@@ -379,12 +380,11 @@ impl AclUser {
             key_patterns: vec!["*".to_string()],
             channel_patterns: vec!["*".to_string()],
         };
-        if let Some(pass) = password {
-            if !pass.is_empty() {
+        if let Some(pass) = password
+            && !pass.is_empty() {
                 user.passwords.push(hash_password(pass));
                 user.nopass = false;
             }
-        }
         user
     }
 
@@ -588,9 +588,9 @@ impl AclUser {
                     self.command_rules
                         .push(AclCommandRule::DenyCommand(cmd.to_string()));
                     Ok(())
-                } else if rule.starts_with('#') {
+                } else if let Some(hash_str) = rule.strip_prefix('#') {
                     // Hashed password (already SHA256)
-                    let hash = rule[1..].to_string();
+                    let hash = hash_str.to_string();
                     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
                         return Err(format!("Invalid SHA256 hash format in ACL rule: '{}'", rule));
                     }
@@ -1186,7 +1186,7 @@ impl AclManager {
         };
 
         // Generate cryptographically secure random bytes and hex-encode
-        let num_bytes = (bits + 7) / 8;
+        let num_bytes = bits.div_ceil(8);
         let mut bytes = vec![0u8; num_bytes];
         getrandom::fill(&mut bytes).map_err(|_| {
             crate::command::CommandError::InternalError(
@@ -1197,7 +1197,7 @@ impl AclManager {
         let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
         // Truncate to the right number of hex chars
-        let hex_chars = (bits + 3) / 4;
+        let hex_chars = bits.div_ceil(4);
         let result = if hex_str.len() > hex_chars {
             hex_str[..hex_chars].to_string()
         } else {
@@ -1517,8 +1517,8 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // ZINTERSTORE/ZUNIONSTORE - dest numkeys key [key ...]
         "zinterstore" | "zunionstore" | "zdiffstore" => {
             let mut keys = vec![0]; // dest
-            if args.len() >= 2 {
-                if let Ok(numkeys) =
+            if args.len() >= 2
+                && let Ok(numkeys) =
                     String::from_utf8_lossy(&args[1]).parse::<usize>()
                 {
                     for i in 0..numkeys {
@@ -1527,7 +1527,6 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
                         }
                     }
                 }
-            }
             keys
         }
 
@@ -1555,26 +1554,22 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // EVAL/EVALSHA: args = [script, numkeys, key [key ...], arg [arg ...]]
         // Keys start at index 2, count given by args[1]
         "eval" | "evalsha" | "eval_ro" | "evalsha_ro" => {
-            if args.len() >= 2 {
-                if let Ok(s) = std::str::from_utf8(&args[1]) {
-                    if let Ok(numkeys) = s.parse::<usize>() {
+            if args.len() >= 2
+                && let Ok(s) = std::str::from_utf8(&args[1])
+                    && let Ok(numkeys) = s.parse::<usize>() {
                         return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
                     }
-                }
-            }
             vec![]
         }
 
         // FCALL/FCALL_RO: args = [function, numkeys, key [key ...], arg [arg ...]]
         // Keys start at index 2, count given by args[1]
         "fcall" | "fcall_ro" => {
-            if args.len() >= 2 {
-                if let Ok(s) = std::str::from_utf8(&args[1]) {
-                    if let Ok(numkeys) = s.parse::<usize>() {
+            if args.len() >= 2
+                && let Ok(s) = std::str::from_utf8(&args[1])
+                    && let Ok(numkeys) = s.parse::<usize>() {
                         return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
                     }
-                }
-            }
             vec![]
         }
 

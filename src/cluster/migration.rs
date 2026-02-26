@@ -9,6 +9,7 @@ use crate::storage::engine::StorageEngine;
 
 /// MIGRATE command implementation
 /// Transfers a key from this instance to another Redis/rLightning instance
+#[allow(clippy::too_many_arguments)]
 pub async fn migrate_key(
     engine: &StorageEngine,
     host: &str,
@@ -94,6 +95,7 @@ pub async fn migrate_key(
 }
 
 /// MIGRATE command for multiple keys
+#[allow(clippy::too_many_arguments)]
 pub async fn migrate_keys(
     engine: &StorageEngine,
     host: &str,

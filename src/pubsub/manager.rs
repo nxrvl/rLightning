@@ -367,14 +367,13 @@ impl PubSubManager {
 
             if let Some(subscriber_ids) = channels.get(&channel) {
                 for &client_id in subscriber_ids {
-                    if let Some(client_sub) = clients.get(&client_id) {
-                        if client_sub.tx.send(SubscriptionMessage::Message {
+                    if let Some(client_sub) = clients.get(&client_id)
+                        && client_sub.tx.send(SubscriptionMessage::Message {
                             channel: channel.clone(),
                             data: message.clone(),
                         }).is_ok() {
                             recipients += 1;
                         }
-                    }
                 }
             }
         }
@@ -387,15 +386,14 @@ impl PubSubManager {
             for (pattern, subscriber_ids) in patterns.iter() {
                 if Self::matches_pattern(pattern, &channel) {
                     for &client_id in subscriber_ids {
-                        if let Some(client_sub) = clients.get(&client_id) {
-                            if client_sub.tx.send(SubscriptionMessage::PMessage {
+                        if let Some(client_sub) = clients.get(&client_id)
+                            && client_sub.tx.send(SubscriptionMessage::PMessage {
                                 pattern: pattern.clone(),
                                 channel: channel.clone(),
                                 data: message.clone(),
                             }).is_ok() {
                                 recipients += 1;
                             }
-                        }
                     }
                 }
             }
@@ -505,8 +503,8 @@ impl PubSubManager {
 
         if let Some(subscriber_ids) = shard_channels.get(&channel) {
             for &client_id in subscriber_ids {
-                if let Some(client_sub) = clients.get(&client_id) {
-                    if client_sub
+                if let Some(client_sub) = clients.get(&client_id)
+                    && client_sub
                         .tx
                         .send(SubscriptionMessage::SMessage {
                             channel: channel.clone(),
@@ -516,7 +514,6 @@ impl PubSubManager {
                     {
                         recipients += 1;
                     }
-                }
             }
         }
 

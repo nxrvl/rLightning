@@ -285,21 +285,21 @@ async fn cluster_myid(mgr: &ClusterManager) -> CommandResult {
 async fn cluster_meet(mgr: &ClusterManager, host: &str, port: u16) -> CommandResult {
     mgr.meet(host, port)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 async fn cluster_forget(mgr: &ClusterManager, node_id: &str) -> CommandResult {
     mgr.forget(node_id)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 async fn cluster_replicate(mgr: &ClusterManager, master_id: &str) -> CommandResult {
     mgr.replicate(master_id)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -311,14 +311,14 @@ async fn cluster_reset(mgr: &ClusterManager, hard: bool) -> CommandResult {
 async fn cluster_addslots(mgr: &ClusterManager, slots: &[u16]) -> CommandResult {
     mgr.add_slots(slots)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 async fn cluster_delslots(mgr: &ClusterManager, slots: &[u16]) -> CommandResult {
     mgr.del_slots(slots)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -335,7 +335,7 @@ async fn cluster_setslot(
 ) -> CommandResult {
     mgr.set_slot(slot, subcmd, node_id)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -343,7 +343,7 @@ async fn cluster_countkeysinslot(mgr: &ClusterManager, slot: u16) -> CommandResu
     let count = mgr
         .count_keys_in_slot(slot)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::Integer(count))
 }
 
@@ -355,7 +355,7 @@ async fn cluster_getkeysinslot(
     let keys = mgr
         .get_keys_in_slot(slot, count)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     let resp_keys: Vec<RespValue> = keys
         .into_iter()
         .map(|k| RespValue::BulkString(Some(k)))
@@ -366,21 +366,21 @@ async fn cluster_getkeysinslot(
 async fn cluster_failover(mgr: &ClusterManager, force: bool) -> CommandResult {
     mgr.failover(force)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 async fn cluster_saveconfig(mgr: &ClusterManager) -> CommandResult {
     mgr.save_config()
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 async fn cluster_set_config_epoch(mgr: &ClusterManager, epoch: u64) -> CommandResult {
     mgr.set_config_epoch(epoch)
         .await
-        .map_err(|e| CommandError::InternalError(e))?;
+        .map_err(CommandError::InternalError)?;
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -525,8 +525,8 @@ pub async fn migrate(
             }
             "KEYS" => {
                 // Collect remaining args as keys
-                for j in (i + 1)..args.len() {
-                    extra_keys.push(args[j].clone());
+                for arg in args.iter().skip(i + 1) {
+                    extra_keys.push(arg.clone());
                 }
                 break;
             }

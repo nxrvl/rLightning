@@ -209,6 +209,7 @@ struct GeoResult {
 }
 
 /// Common search logic used by GEOSEARCH, GEOSEARCHSTORE, GEORADIUS, GEORADIUSBYMEMBER
+#[allow(clippy::too_many_arguments)]
 fn search_members(
     ss: &SortedSet,
     center_lon: f64,
@@ -246,13 +247,11 @@ fn search_members(
                 lat,
             });
             // If ANY is specified with COUNT, we can stop early (no sorting needed)
-            if any {
-                if let Some(c) = count {
-                    if results.len() >= c {
+            if any
+                && let Some(c) = count
+                    && results.len() >= c {
                         break;
                     }
-                }
-            }
         }
     }
 
@@ -272,11 +271,10 @@ fn search_members(
     }
 
     // Apply COUNT limit after sorting (unless ANY was used)
-    if !any {
-        if let Some(c) = count {
+    if !any
+        && let Some(c) = count {
             results.truncate(c);
         }
-    }
 
     results
 }
@@ -373,7 +371,7 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Remaining args must be triples: longitude latitude member
     let remaining = args.len() - idx;
-    if remaining == 0 || remaining % 3 != 0 {
+    if remaining == 0 || !remaining.is_multiple_of(3) {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
@@ -717,6 +715,7 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
 
 /// Parse GEOSEARCH style arguments (after key).
 /// Returns (center_lon, center_lat, shape, unit, sort, count, any, withcoord, withdist, withhash)
+#[allow(clippy::type_complexity)]
 fn parse_geosearch_args(
     args: &[Vec<u8>],
     ss: &SortedSet,
@@ -860,6 +859,7 @@ fn parse_geosearch_args(
 
 /// Parse GEORADIUS optional arguments.
 /// Returns (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key)
+#[allow(clippy::type_complexity)]
 fn parse_georadius_options(
     args: &[Vec<u8>],
 ) -> Result<(SortOrder, Option<usize>, bool, bool, bool, bool, Option<Vec<u8>>, Option<Vec<u8>>), CommandError> {

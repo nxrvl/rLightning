@@ -129,7 +129,7 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Parse field-value pairs
     let remaining = &args[idx..];
-    if remaining.is_empty() || remaining.len() % 2 != 0 {
+    if remaining.is_empty() || !remaining.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let mut fields = Vec::new();
@@ -367,7 +367,7 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
 
     // After STREAMS keyword, we have keys followed by IDs
     let remaining = &args[idx..];
-    if remaining.is_empty() || remaining.len() % 2 != 0 {
+    if remaining.is_empty() || !remaining.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let half = remaining.len() / 2;
@@ -411,8 +411,8 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
 
         // Try again
         let result = do_xread(engine, keys, &parsed_ids, count).await?;
-        if result.is_some() {
-            return Ok(result.unwrap());
+        if let Some(val) = result {
+            return Ok(val);
         }
 
         // Wait for notification or timeout
@@ -640,9 +640,9 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let first_entry = stream.entries.values().next().map(|e| entry_to_resp(e))
+        let first_entry = stream.entries.values().next().map(entry_to_resp)
             .unwrap_or(RespValue::BulkString(None));
-        let last_entry = stream.entries.values().next_back().map(|e| entry_to_resp(e))
+        let last_entry = stream.entries.values().next_back().map(entry_to_resp)
             .unwrap_or(RespValue::BulkString(None));
 
         let resp = RespValue::Array(Some(vec![
@@ -1200,7 +1200,7 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
 
     // Parse keys and IDs
     let remaining = &args[idx..];
-    if remaining.is_empty() || remaining.len() % 2 != 0 {
+    if remaining.is_empty() || !remaining.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let half = remaining.len() / 2;
@@ -1227,8 +1227,8 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
             .collect();
 
         let result = do_xreadgroup(engine, keys, ids, &group_name, &consumer_name, count, noack).await?;
-        if result.is_some() {
-            return Ok(result.unwrap());
+        if let Some(val) = result {
+            return Ok(val);
         }
 
         let futs: Vec<_> = receivers.into_iter()
@@ -1297,11 +1297,10 @@ async fn do_xreadgroup(
                     let mut collected = Vec::new();
                     for (_, entry) in iter {
                         collected.push(entry.clone());
-                        if let Some(max) = count {
-                            if collected.len() >= max {
+                        if let Some(max) = count
+                            && collected.len() >= max {
                                 break;
                             }
-                        }
                     }
                     collected
                 };
@@ -1338,7 +1337,7 @@ async fn do_xreadgroup(
                         *er += entries.len() as u64;
                     }
 
-                    let entry_list: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
+                    let entry_list: Vec<RespValue> = entries.iter().map(entry_to_resp).collect();
                     (true, RespValue::Array(Some(vec![
                         RespValue::BulkString(Some(key.clone())),
                         RespValue::Array(Some(entry_list)),
@@ -1374,16 +1373,15 @@ async fn do_xreadgroup(
                         if let Some(entry) = stream.entries.get(pending_id) {
                             pending_entries.push(entry.clone());
                         }
-                        if let Some(max) = count {
-                            if pending_entries.len() >= max {
+                        if let Some(max) = count
+                            && pending_entries.len() >= max {
                                 break;
                             }
-                        }
                     }
                 }
 
                 let has = !pending_entries.is_empty();
-                let entry_list: Vec<RespValue> = pending_entries.iter().map(|e| entry_to_resp(e)).collect();
+                let entry_list: Vec<RespValue> = pending_entries.iter().map(entry_to_resp).collect();
                 (has, RespValue::Array(Some(vec![
                     RespValue::BulkString(Some(key.clone())),
                     RespValue::Array(Some(entry_list)),
@@ -1562,11 +1560,10 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             let now = now_ms();
             let mut result = Vec::new();
             for (id, pe) in group.pel.range(start.clone()..=end.clone()) {
-                if let Some(cf) = consumer_filter {
-                    if pe.consumer != *cf {
+                if let Some(cf) = consumer_filter
+                    && pe.consumer != *cf {
                         continue;
                     }
-                }
                 if let Some(mi) = min_idle {
                     let idle = now.saturating_sub(pe.delivery_time);
                     if idle < mi {
@@ -1780,7 +1777,7 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }).collect();
             RespValue::Array(Some(result))
         } else {
-            let result: Vec<RespValue> = claimed.iter().map(|e| entry_to_resp(e)).collect();
+            let result: Vec<RespValue> = claimed.iter().map(entry_to_resp).collect();
             RespValue::Array(Some(result))
         };
 
@@ -1934,7 +1931,7 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
                 RespValue::BulkString(Some(e.id.to_string().into_bytes()))
             }).collect::<Vec<_>>()
         } else {
-            claimed.iter().map(|e| entry_to_resp(e)).collect::<Vec<_>>()
+            claimed.iter().map(entry_to_resp).collect::<Vec<_>>()
         };
 
         let deleted_resp: Vec<RespValue> = deleted_ids.iter().map(|id| {
