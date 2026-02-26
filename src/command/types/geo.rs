@@ -1,5 +1,6 @@
 use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::types::sorted_set::SortedSetData;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
@@ -137,14 +138,13 @@ async fn load_sorted_set(
 ) -> Result<Option<SortedSet>, CommandError> {
     match engine.get(key).await? {
         Some(data) => {
-            let mut ss = bincode::deserialize::<SortedSet>(&data)
+            let ss_data = bincode::deserialize::<SortedSetData>(&data)
                 .map_err(|_| CommandError::WrongType)?;
-            ss.sort_by(|a, b| {
-                a.0.partial_cmp(&b.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.1.cmp(&b.1))
-            });
-            Ok(Some(ss))
+            // Convert from SortedSetData to Vec<(f64, Vec<u8>)> - already sorted by BTreeSet
+            let vec: Vec<(f64, Vec<u8>)> = ss_data.entries.into_iter()
+                .map(|(score, member)| (score.into_inner(), member))
+                .collect();
+            Ok(Some(vec))
         }
         None => Ok(None),
     }
@@ -158,7 +158,11 @@ async fn save_sorted_set(
     if ss.is_empty() {
         engine.del(key).await?;
     } else {
-        let serialized = bincode::serialize(ss)
+        let mut ss_data = SortedSetData::new();
+        for (score, member) in ss {
+            ss_data.insert(*score, member.clone());
+        }
+        let serialized = bincode::serialize(&ss_data)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
             .set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::ZSet)

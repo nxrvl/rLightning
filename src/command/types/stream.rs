@@ -5,14 +5,15 @@ use crate::command::types::blocking::BlockingManager;
 use crate::command::utils::bytes_to_string;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
+use crate::storage::error::StorageError;
 use crate::storage::item::RedisDataType;
 use crate::storage::stream::{ConsumerGroup, PendingEntry, StreamData, StreamEntryId};
 
-/// Helper: get a stream from storage, returning None if key doesn't exist
-async fn get_stream(engine: &StorageEngine, key: &[u8]) -> Result<Option<StreamData>, CommandError> {
+/// Helper: get stream data for multi-key read operations (XREAD, XREADGROUP).
+/// Uses engine.get() since atomic_modify is per-key and we need cross-key reads.
+async fn get_stream_data(engine: &StorageEngine, key: &[u8]) -> Result<Option<StreamData>, CommandError> {
     match engine.get(key).await.map_err(|e| CommandError::StorageError(e.to_string()))? {
         Some(data) => {
-            // Check type
             let key_type = engine.get_type(key).await.map_err(|e| CommandError::StorageError(e.to_string()))?;
             if key_type != "stream" {
                 return Err(CommandError::WrongType);
@@ -23,15 +24,6 @@ async fn get_stream(engine: &StorageEngine, key: &[u8]) -> Result<Option<StreamD
         }
         None => Ok(None),
     }
-}
-
-/// Helper: save a stream to storage
-async fn save_stream(engine: &StorageEngine, key: Vec<u8>, stream: &StreamData) -> Result<(), CommandError> {
-    let serialized = bincode::serialize(stream)
-        .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-    engine.set_with_type_preserve_ttl(key, serialized, RedisDataType::Stream)
-        .await
-        .map_err(|e| CommandError::StorageError(e.to_string()))
 }
 
 /// Helper: format a stream entry as a RESP array [id, [field, value, ...]]
@@ -128,7 +120,7 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    // Parse the entry ID
+    // Parse the entry ID string (resolve against stream state inside closure)
     if idx >= args.len() {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -145,27 +137,16 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         fields.push((chunk[0].clone(), chunk[1].clone()));
     }
 
-    // Get or create the stream
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => {
-            if nomkstream {
-                return Ok(RespValue::BulkString(None));
-            }
-            StreamData::new()
-        }
-    };
-
-    // Generate/parse the entry ID
-    let entry_id = if id_str == "*" {
-        stream.generate_id(None, None)
+    // Pre-parse the ID string to extract ms/seq components (but resolve against stream inside closure)
+    let parsed_id = if id_str == "*" {
+        (None, None) // fully auto-generated
     } else {
         let parts: Vec<&str> = id_str.splitn(2, '-').collect();
         let ms = parts[0].parse::<u64>().map_err(|_| {
             CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string())
         })?;
         if parts.len() > 1 && parts[1] == "*" {
-            stream.generate_id(Some(ms), None)
+            (Some(ms), None) // explicit ms, auto seq
         } else {
             let seq = if parts.len() > 1 {
                 parts[1].parse::<u64>().map_err(|_| {
@@ -174,26 +155,43 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             } else {
                 0
             };
-            // For explicit IDs without seq part, if no dash present, seq defaults to 0
-            stream.generate_id(Some(ms), Some(seq))
+            (Some(ms), Some(seq))
         }
-    }.map_err(|e| CommandError::InvalidArgument(e.to_string()))?;
+    };
 
-    // Add the entry
-    let added_id = stream.add_entry(entry_id, fields);
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => {
+                if nomkstream {
+                    return Ok((None, RespValue::BulkString(None)));
+                }
+                StreamData::new()
+            }
+        };
 
-    // Apply trimming
-    if let Some((threshold, approximate)) = maxlen {
-        stream.trim_maxlen(threshold, approximate);
-    }
-    if let Some((min_entry_id, approximate)) = minid {
-        stream.trim_minid(&min_entry_id, approximate);
-    }
+        // Generate/resolve the entry ID using stream state
+        let entry_id = stream.generate_id(parsed_id.0, parsed_id.1)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
 
-    // Save
-    save_stream(engine, key.clone(), &stream).await?;
+        // Add the entry
+        let added_id = stream.add_entry(entry_id, fields.clone());
 
-    Ok(RespValue::BulkString(Some(added_id.to_string().into_bytes())))
+        // Apply trimming
+        if let Some((threshold, approximate)) = maxlen {
+            stream.trim_maxlen(threshold, approximate);
+        }
+        if let Some((ref min_entry_id, approximate)) = minid {
+            stream.trim_minid(min_entry_id, approximate);
+        }
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::BulkString(Some(added_id.to_string().into_bytes()))))
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -207,10 +205,19 @@ pub async fn xlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let key = &args[0];
-    match get_stream(engine, key).await? {
-        Some(stream) => Ok(RespValue::Integer(stream.len() as i64)),
-        None => Ok(RespValue::Integer(0)),
-    }
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Integer(0))),
+        };
+        let len = stream.len() as i64;
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Integer(len)))
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -243,14 +250,21 @@ pub async fn xrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    let stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Array(Some(vec![])))),
+        };
 
-    let entries = stream.range(&start, &end, count);
-    let result: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
-    Ok(RespValue::Array(Some(result)))
+        let entries = stream.range(&start, &end, count);
+        let resp: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Array(Some(resp))))
+    })?;
+
+    Ok(result)
 }
 
 /// Redis XREVRANGE command - Return entries in reverse order
@@ -279,14 +293,21 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         }
     }
 
-    let stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Array(Some(vec![]))),
-    };
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Array(Some(vec![])))),
+        };
 
-    let entries = stream.rev_range(&end, &start, count);
-    let result: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
-    Ok(RespValue::Array(Some(result)))
+        let entries = stream.rev_range(&end, &start, count);
+        let resp: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Array(Some(resp))))
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -359,7 +380,7 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
         let id_str = bytes_to_string(id_bytes)?;
         if id_str == "$" {
             // $ means "only new entries from now"
-            let stream = get_stream(engine, &keys[i]).await?;
+            let stream = get_stream_data(engine, &keys[i]).await?;
             let last_id = stream.map(|s| s.last_id.clone()).unwrap_or_else(|| StreamEntryId::new(0, 0));
             parsed_ids.push(last_id);
         } else {
@@ -413,7 +434,7 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
     }
 }
 
-/// Internal helper to do a non-blocking XREAD
+/// Internal helper to do a non-blocking XREAD (multi-key, uses get_stream_data)
 async fn do_xread(
     engine: &StorageEngine,
     keys: &[Vec<u8>],
@@ -424,7 +445,7 @@ async fn do_xread(
     let mut has_data = false;
 
     for (i, key) in keys.iter().enumerate() {
-        let stream = get_stream(engine, key).await?;
+        let stream = get_stream_data(engine, key).await?;
         let entries = match &stream {
             Some(s) => s.read_after(&after_ids[i], count),
             None => vec![],
@@ -479,22 +500,23 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
     let threshold_str = bytes_to_string(&args[idx])?;
 
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Integer(0)),
-    };
+    // Pre-parse strategy-specific arguments outside the closure
+    enum TrimStrategy {
+        MaxLen(usize, bool),
+        MinId(StreamEntryId, bool),
+    }
 
-    let removed = match strategy.as_str() {
+    let trim_strategy = match strategy.as_str() {
         "MAXLEN" => {
             let maxlen = threshold_str.parse::<usize>().map_err(|_| {
                 CommandError::InvalidArgument("value is not an integer or out of range".to_string())
             })?;
-            stream.trim_maxlen(maxlen, approximate)
+            TrimStrategy::MaxLen(maxlen, approximate)
         }
         "MINID" => {
             let min_id = StreamEntryId::parse_range_start(&threshold_str)
                 .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
-            stream.trim_minid(&min_id, approximate)
+            TrimStrategy::MinId(min_id, approximate)
         }
         _ => {
             return Err(CommandError::InvalidArgument(
@@ -503,10 +525,30 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     };
 
-    if removed > 0 {
-        save_stream(engine, key.clone(), &stream).await?;
-    }
-    Ok(RespValue::Integer(removed as i64))
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Integer(0))),
+        };
+
+        let removed = match &trim_strategy {
+            TrimStrategy::MaxLen(maxlen, approx) => stream.trim_maxlen(*maxlen, *approx),
+            TrimStrategy::MinId(min_id, approx) => stream.trim_minid(min_id, *approx),
+        };
+
+        if removed > 0 {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(removed as i64)))
+        } else {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(0)))
+        }
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -521,11 +563,8 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let key = &args[0];
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Integer(0)),
-    };
 
+    // Parse IDs outside the closure
     let mut ids = Vec::new();
     for id_bytes in &args[1..] {
         let id_str = bytes_to_string(id_bytes)?;
@@ -534,11 +573,26 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         ids.push(id);
     }
 
-    let deleted = stream.delete_entries(&ids);
-    if deleted > 0 {
-        save_stream(engine, key.clone(), &stream).await?;
-    }
-    Ok(RespValue::Integer(deleted as i64))
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Integer(0))),
+        };
+
+        let deleted = stream.delete_entries(&ids);
+        if deleted > 0 {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(deleted as i64)))
+        } else {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(0)))
+        }
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -578,46 +632,64 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         return Err(CommandError::WrongNumberOfArguments);
     }
     let key = &args[0];
-    let stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
 
-    let first_entry = stream.entries.values().next().map(|e| entry_to_resp(e))
-        .unwrap_or(RespValue::BulkString(None));
-    let last_entry = stream.entries.values().next_back().map(|e| entry_to_resp(e))
-        .unwrap_or(RespValue::BulkString(None));
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    Ok(RespValue::Array(Some(vec![
-        RespValue::BulkString(Some(b"length".to_vec())),
-        RespValue::Integer(stream.len() as i64),
-        RespValue::BulkString(Some(b"radix-tree-keys".to_vec())),
-        RespValue::Integer(stream.len() as i64),
-        RespValue::BulkString(Some(b"radix-tree-nodes".to_vec())),
-        RespValue::Integer((stream.len() + 1) as i64),
-        RespValue::BulkString(Some(b"last-generated-id".to_vec())),
-        RespValue::BulkString(Some(stream.last_id.to_string().into_bytes())),
-        RespValue::BulkString(Some(b"max-deleted-entry-id".to_vec())),
-        RespValue::BulkString(Some(
-            stream.max_deleted_entry_id.as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "0-0".to_string())
-                .into_bytes()
-        )),
-        RespValue::BulkString(Some(b"entries-added".to_vec())),
-        RespValue::Integer(stream.entries_added as i64),
-        RespValue::BulkString(Some(b"recorded-first-entry-id".to_vec())),
-        RespValue::BulkString(Some(
-            stream.first_entry_id.as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "0-0".to_string())
-                .into_bytes()
-        )),
-        RespValue::BulkString(Some(b"groups".to_vec())),
-        RespValue::Integer(stream.groups.len() as i64),
-        RespValue::BulkString(Some(b"first-entry".to_vec())),
-        first_entry,
-        RespValue::BulkString(Some(b"last-entry".to_vec())),
-        last_entry,
-    ])))
+        let first_entry = stream.entries.values().next().map(|e| entry_to_resp(e))
+            .unwrap_or(RespValue::BulkString(None));
+        let last_entry = stream.entries.values().next_back().map(|e| entry_to_resp(e))
+            .unwrap_or(RespValue::BulkString(None));
+
+        let resp = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"length".to_vec())),
+            RespValue::Integer(stream.len() as i64),
+            RespValue::BulkString(Some(b"radix-tree-keys".to_vec())),
+            RespValue::Integer(stream.len() as i64),
+            RespValue::BulkString(Some(b"radix-tree-nodes".to_vec())),
+            RespValue::Integer((stream.len() + 1) as i64),
+            RespValue::BulkString(Some(b"last-generated-id".to_vec())),
+            RespValue::BulkString(Some(stream.last_id.to_string().into_bytes())),
+            RespValue::BulkString(Some(b"max-deleted-entry-id".to_vec())),
+            RespValue::BulkString(Some(
+                stream.max_deleted_entry_id.as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "0-0".to_string())
+                    .into_bytes()
+            )),
+            RespValue::BulkString(Some(b"entries-added".to_vec())),
+            RespValue::Integer(stream.entries_added as i64),
+            RespValue::BulkString(Some(b"recorded-first-entry-id".to_vec())),
+            RespValue::BulkString(Some(
+                stream.first_entry_id.as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "0-0".to_string())
+                    .into_bytes()
+            )),
+            RespValue::BulkString(Some(b"groups".to_vec())),
+            RespValue::Integer(stream.groups.len() as i64),
+            RespValue::BulkString(Some(b"first-entry".to_vec())),
+            first_entry,
+            RespValue::BulkString(Some(b"last-entry".to_vec())),
+            last_entry,
+        ]));
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), resp))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -625,33 +697,49 @@ async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         return Err(CommandError::WrongNumberOfArguments);
     }
     let key = &args[0];
-    let stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
 
-    let mut groups = Vec::new();
-    for group in stream.groups.values() {
-        groups.push(RespValue::Array(Some(vec![
-            RespValue::BulkString(Some(b"name".to_vec())),
-            RespValue::BulkString(Some(group.name.as_bytes().to_vec())),
-            RespValue::BulkString(Some(b"consumers".to_vec())),
-            RespValue::Integer(group.consumers.len() as i64),
-            RespValue::BulkString(Some(b"pending".to_vec())),
-            RespValue::Integer(group.pel.len() as i64),
-            RespValue::BulkString(Some(b"last-delivered-id".to_vec())),
-            RespValue::BulkString(Some(group.last_delivered_id.to_string().into_bytes())),
-            RespValue::BulkString(Some(b"entries-read".to_vec())),
-            group.entries_read.map(|n| RespValue::Integer(n as i64)).unwrap_or(RespValue::BulkString(None)),
-            RespValue::BulkString(Some(b"lag".to_vec())),
-            {
-                // lag = stream entries_added - entries_read (if known)
-                let lag = group.entries_read.map(|er| {
-                    (stream.entries_added as i64 - er as i64).max(0)
-                });
-                lag.map(RespValue::Integer).unwrap_or(RespValue::BulkString(None))
-            },
-        ])));
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
+
+        let mut groups = Vec::new();
+        for group in stream.groups.values() {
+            groups.push(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"name".to_vec())),
+                RespValue::BulkString(Some(group.name.as_bytes().to_vec())),
+                RespValue::BulkString(Some(b"consumers".to_vec())),
+                RespValue::Integer(group.consumers.len() as i64),
+                RespValue::BulkString(Some(b"pending".to_vec())),
+                RespValue::Integer(group.pel.len() as i64),
+                RespValue::BulkString(Some(b"last-delivered-id".to_vec())),
+                RespValue::BulkString(Some(group.last_delivered_id.to_string().into_bytes())),
+                RespValue::BulkString(Some(b"entries-read".to_vec())),
+                group.entries_read.map(|n| RespValue::Integer(n as i64)).unwrap_or(RespValue::BulkString(None)),
+                RespValue::BulkString(Some(b"lag".to_vec())),
+                {
+                    let lag = group.entries_read.map(|er| {
+                        (stream.entries_added as i64 - er as i64).max(0)
+                    });
+                    lag.map(RespValue::Integer).unwrap_or(RespValue::BulkString(None))
+                },
+            ])));
+        }
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Array(Some(groups))))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(e) => Err(e.into()),
     }
-    Ok(RespValue::Array(Some(groups)))
 }
 
 async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -660,30 +748,49 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    let group = stream.groups.get(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
+        let group = stream.groups.get(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
 
-    let mut consumers = Vec::new();
-    for consumer in group.consumers.values() {
-        let idle = now_ms().saturating_sub(consumer.seen_time);
-        consumers.push(RespValue::Array(Some(vec![
-            RespValue::BulkString(Some(b"name".to_vec())),
-            RespValue::BulkString(Some(consumer.name.as_bytes().to_vec())),
-            RespValue::BulkString(Some(b"pending".to_vec())),
-            RespValue::Integer(consumer.pending.len() as i64),
-            RespValue::BulkString(Some(b"idle".to_vec())),
-            RespValue::Integer(idle as i64),
-        ])));
+        let mut consumers = Vec::new();
+        for consumer in group.consumers.values() {
+            let idle = now_ms().saturating_sub(consumer.seen_time);
+            consumers.push(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"name".to_vec())),
+                RespValue::BulkString(Some(consumer.name.as_bytes().to_vec())),
+                RespValue::BulkString(Some(b"pending".to_vec())),
+                RespValue::Integer(consumer.pending.len() as i64),
+                RespValue::BulkString(Some(b"idle".to_vec())),
+                RespValue::Integer(idle as i64),
+            ])));
+        }
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Array(Some(consumers))))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
     }
-    Ok(RespValue::Array(Some(consumers)))
 }
 
 // ============================================================
@@ -761,40 +868,61 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         }
     }
 
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => {
-            if mkstream {
-                StreamData::new()
-            } else {
-                return Err(CommandError::InvalidArgument(
-                    "The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string()
-                ));
-            }
-        }
-    };
-
-    if stream.groups.contains_key(&group_name) {
-        return Err(CommandError::InvalidArgument(format!(
-            "BUSYGROUP Consumer Group name already exists"
-        )));
-    }
-
-    let last_id = if id_str == "$" {
-        stream.last_id.clone()
+    // Pre-parse the ID (resolve $ inside closure where we have stream state)
+    let parsed_id = if id_str == "$" {
+        None // resolve inside closure
     } else if id_str == "0" || id_str == "0-0" {
-        StreamEntryId::new(0, 0)
+        Some(StreamEntryId::new(0, 0))
     } else {
-        StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?
+        Some(StreamEntryId::parse_range_start(&id_str)
+            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?)
     };
 
-    let mut group = ConsumerGroup::new(group_name.clone(), last_id);
-    group.entries_read = entries_read;
-    stream.groups.insert(group_name, group);
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => {
+                if mkstream {
+                    StreamData::new()
+                } else {
+                    return Err(StorageError::InternalError(
+                        "The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string()
+                    ));
+                }
+            }
+        };
 
-    save_stream(engine, key.clone(), &stream).await?;
-    Ok(RespValue::SimpleString("OK".to_string()))
+        if stream.groups.contains_key(&group_name) {
+            return Err(StorageError::InternalError(
+                "BUSYGROUP Consumer Group name already exists".to_string()
+            ));
+        }
+
+        let last_id = match &parsed_id {
+            Some(id) => id.clone(),
+            None => stream.last_id.clone(), // $ resolves to current last_id
+        };
+
+        let mut group = ConsumerGroup::new(group_name.clone(), last_id);
+        group.entries_read = entries_read;
+        stream.groups.insert(group_name.clone(), group);
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::SimpleString("OK".to_string())))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("The XGROUP subcommand") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("BUSYGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -805,6 +933,7 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
     let id_str = bytes_to_string(&args[2])?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
     let mut entries_read: Option<u64> = None;
     let mut idx = 3;
@@ -822,28 +951,50 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         idx += 1;
     }
 
-    let mut stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
-
-    let group = stream.groups.get_mut(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
-
-    group.last_delivered_id = if id_str == "$" {
-        stream.last_id.clone()
+    // Pre-parse the ID (resolve $ inside closure)
+    let parsed_id = if id_str == "$" {
+        None
     } else {
-        StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?
+        Some(StreamEntryId::parse_range_start(&id_str)
+            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?)
     };
-    if let Some(er) = entries_read {
-        group.entries_read = Some(er);
-    }
 
-    save_stream(engine, key.clone(), &stream).await?;
-    Ok(RespValue::SimpleString("OK".to_string()))
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
+
+        let group = stream.groups.get_mut(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
+
+        group.last_delivered_id = match &parsed_id {
+            Some(id) => id.clone(),
+            None => stream.last_id.clone(), // $ resolves to current last_id
+        };
+        if let Some(er) = entries_read {
+            group.entries_read = Some(er);
+        }
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::SimpleString("OK".to_string())))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn xgroup_destroy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -854,16 +1005,26 @@ async fn xgroup_destroy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
 
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Integer(0)),
-    };
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Integer(0))),
+        };
 
-    let removed = stream.groups.remove(&group_name).is_some();
-    if removed {
-        save_stream(engine, key.clone(), &stream).await?;
-    }
-    Ok(RespValue::Integer(if removed { 1 } else { 0 }))
+        let removed = stream.groups.remove(&group_name).is_some();
+        if removed {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(1)))
+        } else {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(0)))
+        }
+    })?;
+
+    Ok(result)
 }
 
 async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -874,31 +1035,47 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
     let consumer_name = bytes_to_string(&args[2])?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let mut stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    let group = stream.groups.get_mut(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
+        let group = stream.groups.get_mut(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
 
-    let pending_count = match group.consumers.remove(&consumer_name) {
-        Some(consumer) => {
-            // Remove this consumer's entries from PEL
-            let count = consumer.pending.len();
-            for id in &consumer.pending {
-                group.pel.remove(id);
+        let pending_count = match group.consumers.remove(&consumer_name) {
+            Some(consumer) => {
+                let count = consumer.pending.len();
+                for id in &consumer.pending {
+                    group.pel.remove(id);
+                }
+                count as i64
             }
-            count as i64
-        }
-        None => 0,
-    };
+            None => 0,
+        };
 
-    save_stream(engine, key.clone(), &stream).await?;
-    Ok(RespValue::Integer(pending_count))
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Integer(pending_count)))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
@@ -909,26 +1086,43 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
     let consumer_name = bytes_to_string(&args[2])?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let mut stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    let group = stream.groups.get_mut(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
+        let group = stream.groups.get_mut(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
 
-    let created = if group.consumers.contains_key(&consumer_name) {
-        0
-    } else {
-        group.get_or_create_consumer(&consumer_name);
-        1
-    };
+        let created = if group.consumers.contains_key(&consumer_name) {
+            0
+        } else {
+            group.get_or_create_consumer(&consumer_name);
+            1
+        };
 
-    save_stream(engine, key.clone(), &stream).await?;
-    Ok(RespValue::Integer(created))
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), RespValue::Integer(created)))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ============================================================
@@ -1055,7 +1249,8 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
     }
 }
 
-/// Internal helper for XREADGROUP non-blocking read
+/// Internal helper for XREADGROUP non-blocking read.
+/// Uses atomic_modify per-key since XREADGROUP modifies stream state (PEL, consumer tracking).
 async fn do_xreadgroup(
     engine: &StorageEngine,
     keys: &[Vec<u8>],
@@ -1070,121 +1265,150 @@ async fn do_xreadgroup(
 
     for (i, key) in keys.iter().enumerate() {
         let id_str = bytes_to_string(&ids[i])?;
+        let key_str = String::from_utf8_lossy(key).to_string();
+        let group_name_owned = group_name.to_string();
+        let consumer_name_owned = consumer_name.to_string();
 
-        let mut stream = match get_stream(engine, key).await? {
-            Some(s) => s,
-            None => {
-                results.push(RespValue::Array(Some(vec![
-                    RespValue::BulkString(Some(key.clone())),
-                    RespValue::Array(Some(vec![])),
-                ])));
-                continue;
-            }
-        };
-
-        let group = stream.groups.get_mut(group_name)
-            .ok_or_else(|| CommandError::InvalidArgument(format!(
-                "NOGROUP No such consumer group '{}' for key name '{}'",
-                group_name,
-                String::from_utf8_lossy(key)
-            )))?;
-
-        if id_str == ">" {
-            // Read new entries not yet delivered to this group
-            let entries = stream.entries.range(
-                (std::ops::Bound::Excluded(group.last_delivered_id.clone()),
-                 std::ops::Bound::Unbounded)
-            );
-
-            let mut delivered = Vec::new();
-            for (_, entry) in entries {
-                delivered.push(entry.clone());
-                if let Some(max) = count {
-                    if delivered.len() >= max {
-                        break;
-                    }
+        let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+            let mut stream = match existing {
+                Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                    .map_err(|_| StorageError::WrongType)?,
+                None => {
+                    return Ok((None, (false, RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(key.clone())),
+                        RespValue::Array(Some(vec![])),
+                    ])))));
                 }
-            }
-
-            if !delivered.is_empty() {
-                has_data = true;
-                let now = now_ms();
-
-                // First, insert PEL entries and collect pending IDs
-                let mut pending_ids = Vec::new();
-                if !noack {
-                    for entry in &delivered {
-                        pending_ids.push(entry.id.clone());
-                        group.pel.insert(entry.id.clone(), PendingEntry {
-                            id: entry.id.clone(),
-                            consumer: consumer_name.to_string(),
-                            delivery_time: now,
-                            delivery_count: 1,
-                        });
-                    }
-                }
-
-                // Now update consumer (separate borrow)
-                let consumer = group.get_or_create_consumer(consumer_name);
-                consumer.seen_time = now;
-                for pid in pending_ids {
-                    consumer.pending.push(pid);
-                }
-
-                // Update last delivered ID
-                if let Some(last) = delivered.last() {
-                    group.last_delivered_id = last.id.clone();
-                }
-                if let Some(er) = group.entries_read.as_mut() {
-                    *er += delivered.len() as u64;
-                }
-            }
-
-            let entry_list: Vec<RespValue> = delivered.iter().map(|e| entry_to_resp(e)).collect();
-            results.push(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(key.clone())),
-                RespValue::Array(Some(entry_list)),
-            ])));
-
-            // Save stream with updated group state
-            save_stream(engine, key.clone(), &stream).await?;
-        } else {
-            // Read pending entries for this consumer
-            let start = if id_str == "0" || id_str == "0-0" {
-                StreamEntryId::min()
-            } else {
-                StreamEntryId::parse_range_start(&id_str)
-                    .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID".to_string()))?
             };
 
-            let consumer = group.get_or_create_consumer(consumer_name);
-            consumer.seen_time = now_ms();
+            let (stream_has_data, entry_resp) = if id_str == ">" {
+                // Read new entries not yet delivered to this group
+                let group = stream.groups.get_mut(&group_name_owned)
+                    .ok_or_else(|| StorageError::InternalError(format!(
+                        "NOGROUP No such consumer group '{}' for key name '{}'",
+                        group_name_owned, key_str
+                    )))?;
 
-            let mut pending_entries = Vec::new();
-            for pending_id in &consumer.pending {
-                if *pending_id >= start {
-                    if let Some(entry) = stream.entries.get(pending_id) {
-                        pending_entries.push(entry.clone());
+                let entries: Vec<_> = {
+                    let iter = stream.entries.range(
+                        (std::ops::Bound::Excluded(group.last_delivered_id.clone()),
+                         std::ops::Bound::Unbounded)
+                    );
+                    let mut collected = Vec::new();
+                    for (_, entry) in iter {
+                        collected.push(entry.clone());
+                        if let Some(max) = count {
+                            if collected.len() >= max {
+                                break;
+                            }
+                        }
                     }
-                    if let Some(max) = count {
-                        if pending_entries.len() >= max {
-                            break;
+                    collected
+                };
+
+                if !entries.is_empty() {
+                    let now = now_ms();
+
+                    // Insert PEL entries and collect pending IDs
+                    let mut pending_ids = Vec::new();
+                    if !noack {
+                        for entry in &entries {
+                            pending_ids.push(entry.id.clone());
+                            group.pel.insert(entry.id.clone(), PendingEntry {
+                                id: entry.id.clone(),
+                                consumer: consumer_name_owned.clone(),
+                                delivery_time: now,
+                                delivery_count: 1,
+                            });
+                        }
+                    }
+
+                    // Update consumer
+                    let consumer = group.get_or_create_consumer(&consumer_name_owned);
+                    consumer.seen_time = now;
+                    for pid in pending_ids {
+                        consumer.pending.push(pid);
+                    }
+
+                    // Update last delivered ID
+                    if let Some(last) = entries.last() {
+                        group.last_delivered_id = last.id.clone();
+                    }
+                    if let Some(er) = group.entries_read.as_mut() {
+                        *er += entries.len() as u64;
+                    }
+
+                    let entry_list: Vec<RespValue> = entries.iter().map(|e| entry_to_resp(e)).collect();
+                    (true, RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(key.clone())),
+                        RespValue::Array(Some(entry_list)),
+                    ])))
+                } else {
+                    let entry_list: Vec<RespValue> = Vec::new();
+                    (false, RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(key.clone())),
+                        RespValue::Array(Some(entry_list)),
+                    ])))
+                }
+            } else {
+                // Read pending entries for this consumer
+                let group = stream.groups.get_mut(&group_name_owned)
+                    .ok_or_else(|| StorageError::InternalError(format!(
+                        "NOGROUP No such consumer group '{}' for key name '{}'",
+                        group_name_owned, key_str
+                    )))?;
+
+                let start = if id_str == "0" || id_str == "0-0" {
+                    StreamEntryId::min()
+                } else {
+                    StreamEntryId::parse_range_start(&id_str)
+                        .ok_or_else(|| StorageError::InternalError("Invalid stream ID".to_string()))?
+                };
+
+                let consumer = group.get_or_create_consumer(&consumer_name_owned);
+                consumer.seen_time = now_ms();
+
+                let mut pending_entries = Vec::new();
+                for pending_id in &consumer.pending {
+                    if *pending_id >= start {
+                        if let Some(entry) = stream.entries.get(pending_id) {
+                            pending_entries.push(entry.clone());
+                        }
+                        if let Some(max) = count {
+                            if pending_entries.len() >= max {
+                                break;
+                            }
                         }
                     }
                 }
+
+                let has = !pending_entries.is_empty();
+                let entry_list: Vec<RespValue> = pending_entries.iter().map(|e| entry_to_resp(e)).collect();
+                (has, RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(key.clone())),
+                    RespValue::Array(Some(entry_list)),
+                ])))
+            };
+
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), (stream_has_data, entry_resp)))
+        });
+
+        match result {
+            Ok((stream_has_data, entry_resp)) => {
+                if stream_has_data {
+                    has_data = true;
+                }
+                results.push(entry_resp);
             }
-
-            if !pending_entries.is_empty() {
-                has_data = true;
+            Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+                return Err(CommandError::InvalidArgument(msg));
             }
-
-            let entry_list: Vec<RespValue> = pending_entries.iter().map(|e| entry_to_resp(e)).collect();
-            results.push(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(key.clone())),
-                RespValue::Array(Some(entry_list)),
-            ])));
-
-            save_stream(engine, key.clone(), &stream).await?;
+            Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "Invalid stream ID" => {
+                return Err(CommandError::InvalidArgument(msg));
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 
@@ -1209,35 +1433,53 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
 
-    let mut stream = match get_stream(engine, key).await? {
-        Some(s) => s,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let group = match stream.groups.get_mut(&group_name) {
-        Some(g) => g,
-        None => return Ok(RespValue::Integer(0)),
-    };
-
-    let mut acked = 0i64;
+    // Parse IDs outside the closure
+    let mut ids = Vec::new();
     for id_bytes in &args[2..] {
         let id_str = bytes_to_string(id_bytes)?;
         let id = StreamEntryId::parse_range_start(&id_str)
             .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+        ids.push(id);
+    }
 
-        if group.pel.remove(&id).is_some() {
-            acked += 1;
-            // Remove from consumer's pending list
-            for consumer in group.consumers.values_mut() {
-                consumer.pending.retain(|pid| pid != &id);
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Ok((None, RespValue::Integer(0))),
+        };
+
+        let group = match stream.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => {
+                let serialized = bincode::serialize(&stream)
+                    .map_err(|e| StorageError::InternalError(e.to_string()))?;
+                return Ok((Some(serialized), RespValue::Integer(0)));
+            }
+        };
+
+        let mut acked = 0i64;
+        for id in &ids {
+            if group.pel.remove(id).is_some() {
+                acked += 1;
+                for consumer in group.consumers.values_mut() {
+                    consumer.pending.retain(|pid| pid != id);
+                }
             }
         }
-    }
 
-    if acked > 0 {
-        save_stream(engine, key.clone(), &stream).await?;
-    }
-    Ok(RespValue::Integer(acked))
+        if acked > 0 {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(acked)))
+        } else {
+            let serialized = bincode::serialize(&stream)
+                .map_err(|e| StorageError::InternalError(e.to_string()))?;
+            Ok((Some(serialized), RespValue::Integer(0)))
+        }
+    })?;
+
+    Ok(result)
 }
 
 // ============================================================
@@ -1253,120 +1495,144 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let key = &args[0];
     let group_name = bytes_to_string(&args[1])?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    // Parse extended form arguments outside the closure
+    let extended_args = if args.len() > 2 {
+        let mut idx = 2;
+        let mut min_idle: Option<u64> = None;
 
-    let group = stream.groups.get(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
-
-    // Summary form: XPENDING key group
-    if args.len() == 2 {
-        let pel_count = group.pel.len() as i64;
-        if pel_count == 0 {
-            return Ok(RespValue::Array(Some(vec![
-                RespValue::Integer(0),
-                RespValue::BulkString(None),
-                RespValue::BulkString(None),
-                RespValue::BulkString(None),
-            ])));
-        }
-
-        let min_id = group.pel.keys().next().unwrap();
-        let max_id = group.pel.keys().next_back().unwrap();
-
-        // Count per consumer
-        let mut consumer_counts: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
-        for pe in group.pel.values() {
-            *consumer_counts.entry(&pe.consumer).or_insert(0) += 1;
-        }
-        let consumer_list: Vec<RespValue> = consumer_counts.iter().map(|(name, count)| {
-            RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(name.as_bytes().to_vec())),
-                RespValue::BulkString(Some(count.to_string().into_bytes())),
-            ]))
-        }).collect();
-
-        return Ok(RespValue::Array(Some(vec![
-            RespValue::Integer(pel_count),
-            RespValue::BulkString(Some(min_id.to_string().into_bytes())),
-            RespValue::BulkString(Some(max_id.to_string().into_bytes())),
-            RespValue::Array(Some(consumer_list)),
-        ])));
-    }
-
-    // Extended form: XPENDING key group [IDLE min-idle-time] start end count [consumer]
-    let mut idx = 2;
-    let mut min_idle: Option<u64> = None;
-
-    // Check for IDLE option
-    if idx < args.len() {
-        let maybe_idle = bytes_to_string(&args[idx])?.to_uppercase();
-        if maybe_idle == "IDLE" {
-            idx += 1;
-            if idx >= args.len() {
-                return Err(CommandError::WrongNumberOfArguments);
+        if idx < args.len() {
+            let maybe_idle = bytes_to_string(&args[idx])?.to_uppercase();
+            if maybe_idle == "IDLE" {
+                idx += 1;
+                if idx >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
+                min_idle = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
+                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                })?);
+                idx += 1;
             }
-            min_idle = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-            })?);
-            idx += 1;
         }
-    }
 
-    if idx + 2 >= args.len() {
-        return Err(CommandError::WrongNumberOfArguments);
-    }
+        if idx + 2 >= args.len() {
+            return Err(CommandError::WrongNumberOfArguments);
+        }
 
-    let start_str = bytes_to_string(&args[idx])?;
-    let end_str = bytes_to_string(&args[idx + 1])?;
-    let count_str = bytes_to_string(&args[idx + 2])?;
-    idx += 3;
+        let start_str = bytes_to_string(&args[idx])?;
+        let end_str = bytes_to_string(&args[idx + 1])?;
+        let count_str = bytes_to_string(&args[idx + 2])?;
+        idx += 3;
 
-    let start = StreamEntryId::parse_range_start(&start_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID".to_string()))?;
-    let end = StreamEntryId::parse_range_end(&end_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID".to_string()))?;
-    let count = count_str.parse::<usize>().map_err(|_| {
-        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-    })?;
+        let start = StreamEntryId::parse_range_start(&start_str)
+            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID".to_string()))?;
+        let end = StreamEntryId::parse_range_end(&end_str)
+            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID".to_string()))?;
+        let count = count_str.parse::<usize>().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
 
-    let consumer_filter = if idx < args.len() {
-        Some(bytes_to_string(&args[idx])?)
+        let consumer_filter = if idx < args.len() {
+            Some(bytes_to_string(&args[idx])?)
+        } else {
+            None
+        };
+
+        Some((min_idle, start, end, count, consumer_filter))
     } else {
         None
     };
 
-    let now = now_ms();
-    let mut result = Vec::new();
-    for (id, pe) in group.pel.range(start..=end) {
-        if let Some(ref cf) = consumer_filter {
-            if pe.consumer != *cf {
-                continue;
-            }
-        }
-        if let Some(mi) = min_idle {
-            let idle = now.saturating_sub(pe.delivery_time);
-            if idle < mi {
-                continue;
-            }
-        }
-        result.push(RespValue::Array(Some(vec![
-            RespValue::BulkString(Some(id.to_string().into_bytes())),
-            RespValue::BulkString(Some(pe.consumer.as_bytes().to_vec())),
-            RespValue::Integer(now.saturating_sub(pe.delivery_time) as i64),
-            RespValue::Integer(pe.delivery_count as i64),
-        ])));
-        if result.len() >= count {
-            break;
-        }
-    }
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    Ok(RespValue::Array(Some(result)))
+        let group = stream.groups.get(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
+
+        let resp = if let Some((min_idle, ref start, ref end, count, ref consumer_filter)) = extended_args {
+            // Extended form
+            let now = now_ms();
+            let mut result = Vec::new();
+            for (id, pe) in group.pel.range(start.clone()..=end.clone()) {
+                if let Some(cf) = consumer_filter {
+                    if pe.consumer != *cf {
+                        continue;
+                    }
+                }
+                if let Some(mi) = min_idle {
+                    let idle = now.saturating_sub(pe.delivery_time);
+                    if idle < mi {
+                        continue;
+                    }
+                }
+                result.push(RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(id.to_string().into_bytes())),
+                    RespValue::BulkString(Some(pe.consumer.as_bytes().to_vec())),
+                    RespValue::Integer(now.saturating_sub(pe.delivery_time) as i64),
+                    RespValue::Integer(pe.delivery_count as i64),
+                ])));
+                if result.len() >= count {
+                    break;
+                }
+            }
+            RespValue::Array(Some(result))
+        } else {
+            // Summary form
+            let pel_count = group.pel.len() as i64;
+            if pel_count == 0 {
+                RespValue::Array(Some(vec![
+                    RespValue::Integer(0),
+                    RespValue::BulkString(None),
+                    RespValue::BulkString(None),
+                    RespValue::BulkString(None),
+                ]))
+            } else {
+                let min_id = group.pel.keys().next().unwrap();
+                let max_id = group.pel.keys().next_back().unwrap();
+
+                let mut consumer_counts: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+                for pe in group.pel.values() {
+                    *consumer_counts.entry(&pe.consumer).or_insert(0) += 1;
+                }
+                let consumer_list: Vec<RespValue> = consumer_counts.iter().map(|(name, count)| {
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(name.as_bytes().to_vec())),
+                        RespValue::BulkString(Some(count.to_string().into_bytes())),
+                    ]))
+                }).collect();
+
+                RespValue::Array(Some(vec![
+                    RespValue::Integer(pel_count),
+                    RespValue::BulkString(Some(min_id.to_string().into_bytes())),
+                    RespValue::BulkString(Some(max_id.to_string().into_bytes())),
+                    RespValue::Array(Some(consumer_list)),
+                ]))
+            }
+        };
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), resp))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ============================================================
@@ -1438,81 +1704,100 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let mut stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let group = stream.groups.get_mut(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
-
-    let now = now_ms();
-    let mut claimed = Vec::new();
-
-    for id in &entry_ids {
-        let should_claim = if let Some(pe) = group.pel.get(id) {
-            let idle = now.saturating_sub(pe.delivery_time);
-            idle >= min_idle_time
-        } else {
-            force
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        if should_claim {
-            // Remove from old consumer's pending list
-            if let Some(pe) = group.pel.get(id) {
-                let old_consumer = pe.consumer.clone();
-                if let Some(consumer) = group.consumers.get_mut(&old_consumer) {
-                    consumer.pending.retain(|pid| pid != id);
+        let group = stream.groups.get_mut(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
+
+        let now = now_ms();
+        let mut claimed = Vec::new();
+
+        for id in &entry_ids {
+            let should_claim = if let Some(pe) = group.pel.get(id) {
+                let idle = now.saturating_sub(pe.delivery_time);
+                idle >= min_idle_time
+            } else {
+                force
+            };
+
+            if should_claim {
+                // Remove from old consumer's pending list
+                if let Some(pe) = group.pel.get(id) {
+                    let old_consumer = pe.consumer.clone();
+                    if let Some(consumer) = group.consumers.get_mut(&old_consumer) {
+                        consumer.pending.retain(|pid| pid != id);
+                    }
+                }
+
+                let delivery_time = if let Some(t) = time_ms {
+                    t
+                } else if let Some(idle) = idle_ms {
+                    now.saturating_sub(idle)
+                } else {
+                    now
+                };
+
+                let new_count = if let Some(rc) = retry_count {
+                    rc
+                } else {
+                    group.pel.get(id).map(|pe| pe.delivery_count + 1).unwrap_or(1)
+                };
+
+                // Update or insert PEL entry
+                group.pel.insert(id.clone(), PendingEntry {
+                    id: id.clone(),
+                    consumer: new_consumer.clone(),
+                    delivery_time,
+                    delivery_count: new_count,
+                });
+
+                // Add to new consumer's pending list
+                let consumer = group.get_or_create_consumer(&new_consumer);
+                consumer.seen_time = now;
+                if !consumer.pending.contains(id) {
+                    consumer.pending.push(id.clone());
+                }
+
+                if let Some(entry) = stream.entries.get(id) {
+                    claimed.push(entry.clone());
                 }
             }
-
-            let delivery_time = if let Some(t) = time_ms {
-                t
-            } else if let Some(idle) = idle_ms {
-                now.saturating_sub(idle)
-            } else {
-                now
-            };
-
-            let new_count = if let Some(rc) = retry_count {
-                rc
-            } else {
-                group.pel.get(id).map(|pe| pe.delivery_count + 1).unwrap_or(1)
-            };
-
-            // Update or insert PEL entry
-            group.pel.insert(id.clone(), PendingEntry {
-                id: id.clone(),
-                consumer: new_consumer.clone(),
-                delivery_time,
-                delivery_count: new_count,
-            });
-
-            // Add to new consumer's pending list
-            let consumer = group.get_or_create_consumer(&new_consumer);
-            consumer.seen_time = now;
-            if !consumer.pending.contains(id) {
-                consumer.pending.push(id.clone());
-            }
-
-            if let Some(entry) = stream.entries.get(id) {
-                claimed.push(entry.clone());
-            }
         }
-    }
 
-    save_stream(engine, key.clone(), &stream).await?;
+        let resp = if justid {
+            let result: Vec<RespValue> = claimed.iter().map(|e| {
+                RespValue::BulkString(Some(e.id.to_string().into_bytes()))
+            }).collect();
+            RespValue::Array(Some(result))
+        } else {
+            let result: Vec<RespValue> = claimed.iter().map(|e| entry_to_resp(e)).collect();
+            RespValue::Array(Some(result))
+        };
 
-    if justid {
-        let result: Vec<RespValue> = claimed.iter().map(|e| {
-            RespValue::BulkString(Some(e.id.to_string().into_bytes()))
-        }).collect();
-        Ok(RespValue::Array(Some(result)))
-    } else {
-        let result: Vec<RespValue> = claimed.iter().map(|e| entry_to_resp(e)).collect();
-        Ok(RespValue::Array(Some(result)))
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), resp))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -1564,100 +1849,119 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         idx += 1;
     }
 
-    let mut stream = get_stream(engine, key).await?
-        .ok_or(CommandError::InvalidArgument("no such key".to_string()))?;
+    let key_str = String::from_utf8_lossy(key).to_string();
 
-    let group = stream.groups.get_mut(&group_name)
-        .ok_or_else(|| CommandError::InvalidArgument(format!(
-            "NOGROUP No such consumer group '{}' for key name '{}'",
-            group_name,
-            String::from_utf8_lossy(key)
-        )))?;
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
+        let mut stream = match existing {
+            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
+                .map_err(|_| StorageError::WrongType)?,
+            None => return Err(StorageError::InternalError("no such key".to_string())),
+        };
 
-    let now = now_ms();
-    let mut claimed = Vec::new();
-    let mut deleted_ids = Vec::new();
-    let mut next_start = StreamEntryId::new(0, 0);
-    let mut found = 0;
+        let group = stream.groups.get_mut(&group_name)
+            .ok_or_else(|| StorageError::InternalError(format!(
+                "NOGROUP No such consumer group '{}' for key name '{}'",
+                group_name, key_str
+            )))?;
 
-    let pel_entries: Vec<(StreamEntryId, PendingEntry)> = group.pel.range(start_id..)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+        let now = now_ms();
+        let mut claimed = Vec::new();
+        let mut deleted_ids = Vec::new();
+        let mut next_start = StreamEntryId::new(0, 0);
+        let mut found = 0;
 
-    for (id, pe) in &pel_entries {
-        if found >= count {
-            next_start = id.clone();
-            break;
-        }
+        let pel_entries: Vec<(StreamEntryId, PendingEntry)> = group.pel.range(start_id..)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        let idle = now.saturating_sub(pe.delivery_time);
-        if idle >= min_idle_time {
-            found += 1;
+        for (id, pe) in &pel_entries {
+            if found >= count {
+                next_start = id.clone();
+                break;
+            }
 
-            // Check if entry still exists
-            if stream.entries.contains_key(id) {
-                // Remove from old consumer
-                if let Some(consumer) = group.consumers.get_mut(&pe.consumer) {
-                    consumer.pending.retain(|pid| pid != id);
+            let idle = now.saturating_sub(pe.delivery_time);
+            if idle >= min_idle_time {
+                found += 1;
+
+                // Check if entry still exists
+                if stream.entries.contains_key(id) {
+                    // Remove from old consumer
+                    if let Some(consumer) = group.consumers.get_mut(&pe.consumer) {
+                        consumer.pending.retain(|pid| pid != id);
+                    }
+
+                    // Claim for new consumer
+                    group.pel.insert(id.clone(), PendingEntry {
+                        id: id.clone(),
+                        consumer: new_consumer.clone(),
+                        delivery_time: now,
+                        delivery_count: pe.delivery_count + 1,
+                    });
+
+                    let consumer = group.get_or_create_consumer(&new_consumer);
+                    consumer.seen_time = now;
+                    if !consumer.pending.contains(id) {
+                        consumer.pending.push(id.clone());
+                    }
+
+                    if let Some(entry) = stream.entries.get(id) {
+                        claimed.push(entry.clone());
+                    }
+                } else {
+                    // Entry was deleted - remove from PEL
+                    deleted_ids.push(id.clone());
                 }
-
-                // Claim for new consumer
-                group.pel.insert(id.clone(), PendingEntry {
-                    id: id.clone(),
-                    consumer: new_consumer.clone(),
-                    delivery_time: now,
-                    delivery_count: pe.delivery_count + 1,
-                });
-
-                let consumer = group.get_or_create_consumer(&new_consumer);
-                consumer.seen_time = now;
-                if !consumer.pending.contains(id) {
-                    consumer.pending.push(id.clone());
-                }
-
-                if let Some(entry) = stream.entries.get(id) {
-                    claimed.push(entry.clone());
-                }
-            } else {
-                // Entry was deleted - remove from PEL
-                deleted_ids.push(id.clone());
             }
         }
-    }
 
-    // Clean up deleted entries from PEL
-    for id in &deleted_ids {
-        group.pel.remove(id);
-        for consumer in group.consumers.values_mut() {
-            consumer.pending.retain(|pid| pid != id);
+        // Clean up deleted entries from PEL
+        for id in &deleted_ids {
+            group.pel.remove(id);
+            for consumer in group.consumers.values_mut() {
+                consumer.pending.retain(|pid| pid != id);
+            }
         }
+
+        let next_start_str = if found < count {
+            "0-0".to_string()
+        } else {
+            next_start.to_string()
+        };
+
+        let claimed_resp = if justid {
+            claimed.iter().map(|e| {
+                RespValue::BulkString(Some(e.id.to_string().into_bytes()))
+            }).collect::<Vec<_>>()
+        } else {
+            claimed.iter().map(|e| entry_to_resp(e)).collect::<Vec<_>>()
+        };
+
+        let deleted_resp: Vec<RespValue> = deleted_ids.iter().map(|id| {
+            RespValue::BulkString(Some(id.to_string().into_bytes()))
+        }).collect();
+
+        let resp = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(next_start_str.into_bytes())),
+            RespValue::Array(Some(claimed_resp)),
+            RespValue::Array(Some(deleted_resp)),
+        ]));
+
+        let serialized = bincode::serialize(&stream)
+            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((Some(serialized), resp))
+    });
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
+            Err(CommandError::InvalidArgument("no such key".to_string()))
+        }
+        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(CommandError::InvalidArgument(msg))
+        }
+        Err(e) => Err(e.into()),
     }
-
-    save_stream(engine, key.clone(), &stream).await?;
-
-    let next_start_str = if found < count {
-        "0-0".to_string()
-    } else {
-        next_start.to_string()
-    };
-
-    let claimed_resp = if justid {
-        claimed.iter().map(|e| {
-            RespValue::BulkString(Some(e.id.to_string().into_bytes()))
-        }).collect::<Vec<_>>()
-    } else {
-        claimed.iter().map(|e| entry_to_resp(e)).collect::<Vec<_>>()
-    };
-
-    let deleted_resp: Vec<RespValue> = deleted_ids.iter().map(|id| {
-        RespValue::BulkString(Some(id.to_string().into_bytes()))
-    }).collect();
-
-    Ok(RespValue::Array(Some(vec![
-        RespValue::BulkString(Some(next_start_str.into_bytes())),
-        RespValue::Array(Some(claimed_resp)),
-        RespValue::Array(Some(deleted_resp)),
-    ])))
 }
 
 #[cfg(test)]

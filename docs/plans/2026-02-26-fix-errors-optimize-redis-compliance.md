@@ -86,14 +86,14 @@ Use the atomic storage primitives from Task 1 to fix all string command race con
 
 Use `atomic_modify` for all collection operations and upgrade sorted set data structure.
 
-- [ ] Rewrite all list commands (LPUSH, RPUSH, LPOP, RPOP, LSET, LREM, LINSERT, LTRIM, LRANGE, LINDEX, LLEN, LPOS, LMPOP) to use `atomic_modify` for thread-safe read-modify-write
-- [ ] Rewrite all set commands (SADD, SREM, SPOP, SRANDMEMBER, SMEMBERS, SCARD, SISMEMBER, SMISMEMBER, SINTER, SUNION, SDIFF and their STORE variants, SSCAN) to use `atomic_modify`
-- [ ] Upgrade sorted set internal data structure from `Vec<(f64, Vec<u8>)>` to `BTreeMap<OrderedFloat<f64>, Vec<u8>>` + `HashMap<Vec<u8>, f64>` for O(log N) operations
-- [ ] Rewrite all sorted set commands (ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZRANGEBYSCORE, ZRANGEBYLEX, ZCARD, ZCOUNT, ZINCRBY, ZPOPMIN, ZPOPMAX, ZRANDMEMBER, ZLEXCOUNT, ZMSCORE, ZSCAN, ZUNION, ZINTER, ZDIFF and STORE variants) to use `atomic_modify` with new data structure
-- [ ] Rewrite all stream commands (XADD, XLEN, XRANGE, XREVRANGE, XREAD, XTRIM, XACK, XDEL, XINFO, XCLAIM, XAUTOCLAIM, XPENDING, XGROUP) to use `atomic_modify`
-- [ ] Write concurrency tests: two clients racing LPUSH on same list, SADD on same set, ZADD on same sorted set
-- [ ] Write performance test: ZADD/ZRANGE on sorted set with 10K+ members to verify O(log N) improvement
-- [ ] Run project test suite - must pass before task 5
+- [x] Rewrite all list commands (LPUSH, RPUSH, LPOP, RPOP, LSET, LREM, LINSERT, LTRIM, LRANGE, LINDEX, LLEN, LPOS, LMPOP) to use `atomic_modify` for thread-safe read-modify-write
+- [x] Rewrite all set commands (SADD, SREM, SPOP, SRANDMEMBER, SMEMBERS, SCARD, SISMEMBER, SMISMEMBER, SINTER, SUNION, SDIFF and their STORE variants, SSCAN) to use `atomic_modify`
+- [x] Upgrade sorted set internal data structure from `Vec<(f64, Vec<u8>)>` to `BTreeMap<OrderedFloat<f64>, Vec<u8>>` + `HashMap<Vec<u8>, f64>` for O(log N) operations
+- [x] Rewrite all sorted set commands (ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZRANGEBYSCORE, ZRANGEBYLEX, ZCARD, ZCOUNT, ZINCRBY, ZPOPMIN, ZPOPMAX, ZRANDMEMBER, ZLEXCOUNT, ZMSCORE, ZSCAN, ZUNION, ZINTER, ZDIFF and STORE variants) to use `atomic_modify` with new data structure
+- [x] Rewrite all stream commands (XADD, XLEN, XRANGE, XREVRANGE, XREAD, XTRIM, XACK, XDEL, XINFO, XCLAIM, XAUTOCLAIM, XPENDING, XGROUP) to use `atomic_modify`
+- [x] Write concurrency tests: two clients racing LPUSH on same list, SADD on same set, ZADD on same sorted set
+- [x] Write performance test: ZADD/ZRANGE on sorted set with 10K+ members to verify O(log N) improvement
+- [x] Run project test suite - must pass before task 5
 
 ### Task 5: MULTI/EXEC Transaction Atomicity
 

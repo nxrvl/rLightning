@@ -1175,4 +1175,33 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn test_concurrent_sadd_same_set() {
+        // Two clients racing SADD on the same set - no members should be lost
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                for j in 0..10 {
+                    let args = vec![
+                        b"race_set".to_vec(),
+                        format!("member_{}_{}", i, j).into_bytes(),
+                    ];
+                    sadd(&eng, &args).await.unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 100 unique members should be present
+        let result = scard(&engine, &[b"race_set".to_vec()]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(100));
+    }
 }
