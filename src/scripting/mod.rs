@@ -2,7 +2,7 @@ pub mod redis_api;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::command::handler::CommandHandler;
 use crate::command::{CommandError, CommandResult};
@@ -25,6 +25,10 @@ pub struct FunctionLibrary {
     pub functions: Vec<FunctionInfo>,
 }
 
+/// Maximum number of cached scripts to prevent unbounded memory growth.
+/// Matches a reasonable default; SCRIPT FLUSH can be used to clear manually.
+const MAX_SCRIPT_CACHE_SIZE: usize = 10_000;
+
 /// Lua scripting engine providing EVAL, EVALSHA, SCRIPT, FUNCTION, and FCALL support.
 /// Manages script cache and function registry.
 pub struct ScriptingEngine {
@@ -34,8 +38,8 @@ pub struct ScriptingEngine {
     function_libraries: RwLock<HashMap<String, FunctionLibrary>>,
     /// Function name -> library name (quick lookup index)
     function_index: RwLock<HashMap<String, String>>,
-    /// Flag to request script termination
-    kill_requested: AtomicBool,
+    /// Flag to request script termination (Arc for sharing with spawn_blocking Lua hooks)
+    kill_requested: Arc<AtomicBool>,
     /// Counter of currently running scripts (supports concurrent execution)
     scripts_running: AtomicUsize,
 }
@@ -46,7 +50,7 @@ impl ScriptingEngine {
             script_cache: RwLock::new(HashMap::new()),
             function_libraries: RwLock::new(HashMap::new()),
             function_index: RwLock::new(HashMap::new()),
-            kill_requested: AtomicBool::new(false),
+            kill_requested: Arc::new(AtomicBool::new(false)),
             scripts_running: AtomicUsize::new(0),
         }
     }
@@ -56,10 +60,18 @@ impl ScriptingEngine {
         sha1_smol::Sha1::from(script).digest().to_string()
     }
 
-    /// Load a script into the cache, returning its SHA1 hash
+    /// Load a script into the cache, returning its SHA1 hash.
+    /// Evicts oldest entries when cache exceeds MAX_SCRIPT_CACHE_SIZE.
     pub fn load_script(&self, script: &str) -> String {
         let sha1 = Self::compute_sha1(script);
         let mut cache = self.script_cache.write().unwrap_or_else(|e| e.into_inner());
+        // Evict entries if cache is at capacity (simple eviction: clear half)
+        if cache.len() >= MAX_SCRIPT_CACHE_SIZE && !cache.contains_key(&sha1) {
+            let keys_to_remove: Vec<String> = cache.keys().take(cache.len() / 2).cloned().collect();
+            for key in keys_to_remove {
+                cache.remove(&key);
+            }
+        }
         cache.insert(sha1.clone(), script.to_string());
         sha1
     }
@@ -106,9 +118,10 @@ impl ScriptingEngine {
         let handler = handler.clone();
         let script = script.to_string();
         let handle = tokio::runtime::Handle::current();
+        let kill_flag = Arc::clone(&self.kill_requested);
 
         let result = tokio::task::spawn_blocking(move || {
-            redis_api::execute_in_lua(&script, keys, args, &handler, &handle, read_only)
+            redis_api::execute_in_lua(&script, keys, args, &handler, &handle, read_only, Some(kill_flag))
         })
         .await;
 
@@ -154,6 +167,7 @@ impl ScriptingEngine {
         let handler = handler.clone();
         let func_name = func_name.to_string();
         let handle = tokio::runtime::Handle::current();
+        let kill_flag = Arc::clone(&self.kill_requested);
 
         let result = tokio::task::spawn_blocking(move || {
             redis_api::execute_function_in_lua(
@@ -164,6 +178,7 @@ impl ScriptingEngine {
                 &handler,
                 &handle,
                 read_only,
+                Some(kill_flag),
             )
         })
         .await;

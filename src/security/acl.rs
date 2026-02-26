@@ -1031,28 +1031,36 @@ impl AclManager {
             return Err(crate::command::CommandError::WrongNumberOfArguments);
         }
 
-        let mut users = self
-            .users
-            .write()
-            .map_err(|_| crate::command::CommandError::InternalError("Lock error".to_string()))?;
+        // Collect remaining usernames while holding the users lock, then drop it
+        // before acquiring sessions lock to avoid ABBA deadlock with
+        // check_command_permission (which acquires sessions -> users).
+        let (count, remaining_usernames) = {
+            let mut users = self
+                .users
+                .write()
+                .map_err(|_| crate::command::CommandError::InternalError("Lock error".to_string()))?;
 
-        let mut count = 0i64;
-        for arg in args {
-            let username = String::from_utf8_lossy(arg).to_string();
-            if username == "default" {
-                return Err(crate::command::CommandError::InvalidArgument(
-                    "The 'default' user cannot be removed".to_string(),
-                ));
+            let mut count = 0i64;
+            for arg in args {
+                let username = String::from_utf8_lossy(arg).to_string();
+                if username == "default" {
+                    return Err(crate::command::CommandError::InvalidArgument(
+                        "The 'default' user cannot be removed".to_string(),
+                    ));
+                }
+                if users.remove(&username).is_some() {
+                    count += 1;
+                    info!(username = %username, "ACL user deleted");
+                }
             }
-            if users.remove(&username).is_some() {
-                count += 1;
-                info!(username = %username, "ACL user deleted");
-            }
-        }
 
-        // Also remove any sessions for deleted users
+            let remaining: std::collections::HashSet<String> = users.keys().cloned().collect();
+            (count, remaining)
+        }; // users lock dropped here
+
+        // Now safely acquire sessions lock without holding users lock
         let mut sessions = self.sessions.write().expect("ACL sessions lock poisoned");
-        sessions.retain(|_, v| users.contains_key(v));
+        sessions.retain(|_, v| remaining_usernames.contains(v));
 
         Ok(RespValue::Integer(count))
     }
