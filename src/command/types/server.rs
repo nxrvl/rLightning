@@ -311,14 +311,14 @@ pub async fn scan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::Array(Some(response)))
 }
 
-/// Redis DBSIZE command - Return the number of keys in the database
+/// Redis DBSIZE command - Return the number of keys in the current database
 pub async fn dbsize(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if !args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
-    // Use O(1) atomic counter instead of O(n) scan
-    let key_count = engine.get_key_count();
+
+    // Use per-database key count via active_db() which respects the task-local db index
+    let key_count = engine.active_db().len();
     Ok(RespValue::Integer(key_count as i64))
 }
 

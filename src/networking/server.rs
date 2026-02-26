@@ -22,7 +22,7 @@ use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
 use crate::sentinel::SentinelManager;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
 use crate::utils::logging;
 
 /// The Redis-compatible server
@@ -200,6 +200,9 @@ impl Server {
 
         // Per-connection transaction state for MULTI/EXEC/WATCH
         let mut tx_state = TransactionState::new();
+
+        // Per-connection database index (SELECT command changes this)
+        let mut db_index: usize = 0;
 
         loop {
             // In subscription mode, we need to handle both:
@@ -404,6 +407,34 @@ impl Server {
                                     security_mgr.remove_client(&client_addr_str);
                                 }
                                 return Ok(());
+                            }
+
+                            // Handle SELECT command - updates per-connection database
+                            if cmd_lower == "select" {
+                                if cmd.args.len() != 1 {
+                                    let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
+                                    if let Ok(bytes) = response.serialize() {
+                                        response_buffer.extend_from_slice(&bytes);
+                                    }
+                                } else {
+                                    match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
+                                        Some(idx) if idx < 16 => {
+                                            db_index = idx;
+                                            let response = RespValue::SimpleString("OK".to_string());
+                                            if let Ok(bytes) = response.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                        }
+                                        _ => {
+                                            let response = RespValue::Error("ERR DB index is out of range".to_string());
+                                            if let Ok(bytes) = response.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                        }
+                                    }
+                                }
+                                commands_processed += 1;
+                                continue;
                             }
 
                             // Check for pub/sub commands
@@ -807,6 +838,7 @@ impl Server {
                                 is_auth_command,
                                 &security,
                                 &client_addr_str,
+                                db_index,
                             ).await;
 
                             match tx_result {
@@ -948,6 +980,34 @@ impl Server {
                                                         continue;
                                                     }
                                                 }
+                                            }
+
+                                            // Handle SELECT command - updates per-connection database (slow path)
+                                            if cmd_lower == "select" {
+                                                if cmd.args.len() != 1 {
+                                                    let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
+                                                    if let Ok(bytes) = response.serialize() {
+                                                        response_buffer.extend_from_slice(&bytes);
+                                                    }
+                                                } else {
+                                                    match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
+                                                        Some(idx) if idx < 16 => {
+                                                            db_index = idx;
+                                                            let response = RespValue::SimpleString("OK".to_string());
+                                                            if let Ok(bytes) = response.serialize() {
+                                                                response_buffer.extend_from_slice(&bytes);
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            let response = RespValue::Error("ERR DB index is out of range".to_string());
+                                                            if let Ok(bytes) = response.serialize() {
+                                                                response_buffer.extend_from_slice(&bytes);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                commands_processed += 1;
+                                                continue;
                                             }
 
                                             // Check for pub/sub commands
@@ -1211,6 +1271,7 @@ impl Server {
                                                 is_auth_command,
                                                 &security,
                                                 &client_addr_str,
+                                                db_index,
                                             ).await;
 
                                             match tx_result {
@@ -1418,6 +1479,7 @@ impl Server {
         is_auth_command: bool,
         security: &Option<Arc<SecurityManager>>,
         client_addr_str: &str,
+        db_index: usize,
     ) -> Result<RespValue, crate::command::CommandError> {
         let engine = command_handler.storage();
 
@@ -1428,7 +1490,9 @@ impl Server {
             "exec" => {
                 // Capture queued commands before EXEC drains them (for AOF logging)
                 let queued_commands: Vec<Command> = tx_state.queue.clone();
-                let result = transaction::handle_exec(tx_state, command_handler, engine).await?;
+                let result = CURRENT_DB_INDEX.scope(db_index, async {
+                    transaction::handle_exec(tx_state, command_handler, engine, db_index).await
+                }).await?;
                 // Log transaction commands to AOF wrapped in MULTI/EXEC
                 if let Some(persistence_mgr) = persistence {
                     if let RespValue::Array(Some(_)) = &result {
@@ -1471,7 +1535,7 @@ impl Server {
         }
 
         // Execute the command first, then log to AOF only on success
-        let result = command_handler.process(cmd.clone()).await?;
+        let result = command_handler.process(cmd.clone(), db_index).await?;
 
         // Log to AOF if persistence is enabled, command succeeded, and it's a write command
         // Skip AUTH commands to avoid persisting passwords in the AOF file

@@ -383,7 +383,9 @@ fn redis_call_impl(
     };
 
     // Execute the command using the handler (blocking bridge to async)
-    let result = handle.block_on(handler.process(command));
+    // Use the current db_index from the task-local, defaulting to 0
+    let db_index = crate::storage::engine::CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+    let result = handle.block_on(handler.process(command, db_index));
 
     match result {
         Ok(resp) => resp_to_lua(lua, &resp),

@@ -24,13 +24,13 @@ async fn test_new_string_commands_compliance() {
         name: "set".to_string(),
         args: vec![b"testkey".to_vec(), b"testvalue".to_vec()],
     };
-    handler.process(set_cmd).await.unwrap();
+    handler.process(set_cmd, 0).await.unwrap();
     
     let strlen_cmd = Command {
         name: "strlen".to_string(),
         args: vec![b"testkey".to_vec()],
     };
-    let result = handler.process(strlen_cmd).await.unwrap();
+    let result = handler.process(strlen_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(9));
     println!("  ✅ STRLEN");
     
@@ -39,7 +39,7 @@ async fn test_new_string_commands_compliance() {
         name: "getrange".to_string(),
         args: vec![b"testkey".to_vec(), b"0".to_vec(), b"3".to_vec()],
     };
-    let result = handler.process(getrange_cmd).await.unwrap();
+    let result = handler.process(getrange_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::BulkString(Some(b"test".to_vec())));
     println!("  ✅ GETRANGE");
     
@@ -48,7 +48,7 @@ async fn test_new_string_commands_compliance() {
         name: "setrange".to_string(),
         args: vec![b"testkey".to_vec(), b"0".to_vec(), b"best".to_vec()],
     };
-    let result = handler.process(setrange_cmd).await.unwrap();
+    let result = handler.process(setrange_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(9));
     println!("  ✅ SETRANGE");
     
@@ -57,7 +57,7 @@ async fn test_new_string_commands_compliance() {
         name: "getset".to_string(),
         args: vec![b"testkey".to_vec(), b"newvalue".to_vec()],
     };
-    let result = handler.process(getset_cmd).await.unwrap();
+    let result = handler.process(getset_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::BulkString(Some(b"bestvalue".to_vec())));
     println!("  ✅ GETSET");
     
@@ -66,7 +66,7 @@ async fn test_new_string_commands_compliance() {
         name: "msetnx".to_string(),
         args: vec![b"key1".to_vec(), b"value1".to_vec(), b"key2".to_vec(), b"value2".to_vec()],
     };
-    let result = handler.process(msetnx_cmd).await.unwrap();
+    let result = handler.process(msetnx_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(1));
     println!("  ✅ MSETNX");
     
@@ -75,13 +75,13 @@ async fn test_new_string_commands_compliance() {
         name: "set".to_string(),
         args: vec![b"floatkey".to_vec(), b"3.5".to_vec()],
     };
-    handler.process(set_float_cmd).await.unwrap();
+    handler.process(set_float_cmd, 0).await.unwrap();
     
     let incrbyfloat_cmd = Command {
         name: "incrbyfloat".to_string(),
         args: vec![b"floatkey".to_vec(), b"1.5".to_vec()],
     };
-    let result = handler.process(incrbyfloat_cmd).await.unwrap();
+    let result = handler.process(incrbyfloat_cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(value)) = result {
         let float_str = String::from_utf8_lossy(&value);
         assert!(float_str.contains("5"));
@@ -104,14 +104,14 @@ async fn test_new_hash_commands_compliance() {
         name: "hset".to_string(),
         args: vec![b"hashkey".to_vec(), b"field1".to_vec(), b"value1".to_vec()],
     };
-    handler.process(hset_cmd).await.unwrap();
+    handler.process(hset_cmd, 0).await.unwrap();
     
     // Test HKEYS
     let hkeys_cmd = Command {
         name: "hkeys".to_string(),
         args: vec![b"hashkey".to_vec()],
     };
-    let result = handler.process(hkeys_cmd).await.unwrap();
+    let result = handler.process(hkeys_cmd, 0).await.unwrap();
     if let RespValue::Array(Some(keys)) = result {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0], RespValue::BulkString(Some(b"field1".to_vec())));
@@ -125,7 +125,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hvals".to_string(),
         args: vec![b"hashkey".to_vec()],
     };
-    let result = handler.process(hvals_cmd).await.unwrap();
+    let result = handler.process(hvals_cmd, 0).await.unwrap();
     if let RespValue::Array(Some(values)) = result {
         assert_eq!(values.len(), 1);
         assert_eq!(values[0], RespValue::BulkString(Some(b"value1".to_vec())));
@@ -139,7 +139,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hlen".to_string(),
         args: vec![b"hashkey".to_vec()],
     };
-    let result = handler.process(hlen_cmd).await.unwrap();
+    let result = handler.process(hlen_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(1));
     println!("  ✅ HLEN");
     
@@ -148,7 +148,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hmget".to_string(),
         args: vec![b"hashkey".to_vec(), b"field1".to_vec()],
     };
-    let result = handler.process(hmget_cmd).await.unwrap();
+    let result = handler.process(hmget_cmd, 0).await.unwrap();
     if let RespValue::Array(Some(values)) = result {
         assert_eq!(values.len(), 1);
         assert_eq!(values[0], RespValue::BulkString(Some(b"value1".to_vec())));
@@ -162,13 +162,13 @@ async fn test_new_hash_commands_compliance() {
         name: "hset".to_string(),
         args: vec![b"hashkey".to_vec(), b"counter".to_vec(), b"5".to_vec()],
     };
-    handler.process(hset_counter_cmd).await.unwrap();
+    handler.process(hset_counter_cmd, 0).await.unwrap();
     
     let hincrby_cmd = Command {
         name: "hincrby".to_string(),
         args: vec![b"hashkey".to_vec(), b"counter".to_vec(), b"3".to_vec()],
     };
-    let result = handler.process(hincrby_cmd).await.unwrap();
+    let result = handler.process(hincrby_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(8));
     println!("  ✅ HINCRBY");
     
@@ -177,7 +177,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hincrbyfloat".to_string(),
         args: vec![b"hashkey".to_vec(), b"counter".to_vec(), b"1.5".to_vec()],
     };
-    let result = handler.process(hincrbyfloat_cmd).await.unwrap();
+    let result = handler.process(hincrbyfloat_cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(value)) = result {
         let float_str = String::from_utf8_lossy(&value);
         assert!(float_str.contains("9.5"));
@@ -191,7 +191,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hsetnx".to_string(),
         args: vec![b"hashkey".to_vec(), b"newfield".to_vec(), b"newvalue".to_vec()],
     };
-    let result = handler.process(hsetnx_cmd).await.unwrap();
+    let result = handler.process(hsetnx_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(1));
     println!("  ✅ HSETNX");
     
@@ -200,7 +200,7 @@ async fn test_new_hash_commands_compliance() {
         name: "hstrlen".to_string(),
         args: vec![b"hashkey".to_vec(), b"field1".to_vec()],
     };
-    let result = handler.process(hstrlen_cmd).await.unwrap();
+    let result = handler.process(hstrlen_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(6));
     println!("  ✅ HSTRLEN");
     
@@ -218,7 +218,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.set".to_string(),
         args: vec![b"jsonkey".to_vec(), b"$".to_vec(), b"{\"name\":\"John\",\"age\":30}".to_vec()],
     };
-    let result = handler.process(json_set_cmd).await.unwrap();
+    let result = handler.process(json_set_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::SimpleString("OK".to_string()));
     println!("  ✅ JSON.SET");
     
@@ -227,7 +227,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.get".to_string(),
         args: vec![b"jsonkey".to_vec()],
     };
-    let result = handler.process(json_get_cmd).await.unwrap();
+    let result = handler.process(json_get_cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(value)) = result {
         let json_str = String::from_utf8_lossy(&value);
         assert!(json_str.contains("John"));
@@ -241,7 +241,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.type".to_string(),
         args: vec![b"jsonkey".to_vec()],
     };
-    let result = handler.process(json_type_cmd).await.unwrap();
+    let result = handler.process(json_type_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::SimpleString("object".to_string()));
     println!("  ✅ JSON.TYPE");
     
@@ -250,7 +250,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.objkeys".to_string(),
         args: vec![b"jsonkey".to_vec()],
     };
-    let result = handler.process(json_objkeys_cmd).await.unwrap();
+    let result = handler.process(json_objkeys_cmd, 0).await.unwrap();
     if let RespValue::Array(Some(keys)) = result {
         assert_eq!(keys.len(), 2); // "name" and "age"
     } else {
@@ -263,7 +263,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.objlen".to_string(),
         args: vec![b"jsonkey".to_vec()],
     };
-    let result = handler.process(json_objlen_cmd).await.unwrap();
+    let result = handler.process(json_objlen_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(2));
     println!("  ✅ JSON.OBJLEN");
     
@@ -272,14 +272,14 @@ async fn test_new_json_commands_compliance() {
         name: "json.set".to_string(),
         args: vec![b"arraykey".to_vec(), b"$".to_vec(), b"[1,2,3,4,5]".to_vec()],
     };
-    handler.process(json_set_array_cmd).await.unwrap();
+    handler.process(json_set_array_cmd, 0).await.unwrap();
     
     // Test JSON.ARRLEN
     let json_arrlen_cmd = Command {
         name: "json.arrlen".to_string(),
         args: vec![b"arraykey".to_vec()],
     };
-    let result = handler.process(json_arrlen_cmd).await.unwrap();
+    let result = handler.process(json_arrlen_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(5));
     println!("  ✅ JSON.ARRLEN");
     
@@ -288,7 +288,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.arrappend".to_string(),
         args: vec![b"arraykey".to_vec(), b"$".to_vec(), b"6".to_vec()],
     };
-    let result = handler.process(json_arrappend_cmd).await.unwrap();
+    let result = handler.process(json_arrappend_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(6));
     println!("  ✅ JSON.ARRAPPEND");
     
@@ -297,7 +297,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.arrtrim".to_string(),
         args: vec![b"arraykey".to_vec(), b"$".to_vec(), b"0".to_vec(), b"2".to_vec()],
     };
-    let result = handler.process(json_arrtrim_cmd).await.unwrap();
+    let result = handler.process(json_arrtrim_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(3));
     println!("  ✅ JSON.ARRTRIM");
     
@@ -306,14 +306,14 @@ async fn test_new_json_commands_compliance() {
         name: "json.set".to_string(),
         args: vec![b"numberkey".to_vec(), b"$".to_vec(), b"42".to_vec()],
     };
-    handler.process(json_set_number_cmd).await.unwrap();
+    handler.process(json_set_number_cmd, 0).await.unwrap();
     
     // Test JSON.NUMINCRBY
     let json_numincrby_cmd = Command {
         name: "json.numincrby".to_string(),
         args: vec![b"numberkey".to_vec(), b"$".to_vec(), b"8".to_vec()],
     };
-    let result = handler.process(json_numincrby_cmd).await.unwrap();
+    let result = handler.process(json_numincrby_cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(value)) = result {
         let num_str = String::from_utf8_lossy(&value);
         assert!(num_str.contains("50"));
@@ -327,7 +327,7 @@ async fn test_new_json_commands_compliance() {
         name: "json.del".to_string(),
         args: vec![b"jsonkey".to_vec()],
     };
-    let result = handler.process(json_del_cmd).await.unwrap();
+    let result = handler.process(json_del_cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(1));
     println!("  ✅ JSON.DEL");
     
@@ -408,14 +408,14 @@ async fn test_redis_compliance_summary() {
     ];
     
     for cmd in setup_commands {
-        let _ = handler.process(cmd).await;
+        let _ = handler.process(cmd, 0).await;
     }
     
     println!("📊 Testing {} Redis commands...", test_commands.len());
     
     for (cmd_name, cmd) in test_commands {
         total_commands += 1;
-        match handler.process(cmd).await {
+        match handler.process(cmd, 0).await {
             Ok(_) => {
                 working_commands += 1;
                 println!("  ✅ {}", cmd_name);

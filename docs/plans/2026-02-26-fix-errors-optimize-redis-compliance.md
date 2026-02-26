@@ -124,16 +124,16 @@ Implement proper transaction isolation so queued commands execute atomically.
 
 Implement real database switching so SELECT actually changes the active database.
 
-- [ ] Add `db_index: usize` field to per-connection state in server.rs (initialized to 0)
-- [ ] Modify SELECT handler to update the per-connection db_index and return it to the server loop
-- [ ] Add `get_db(&self, db_index: usize) -> &DashMap<...>` method to StorageEngine that returns the correct database (self.data for 0, self.extra_dbs[n-1] for 1-15)
-- [ ] Modify CommandHandler::process() to accept db_index and pass it through to storage operations
-- [ ] Update all storage engine methods that access self.data to use get_db(db_index) instead
-- [ ] Ensure MOVE command correctly moves between databases using db_index
-- [ ] Ensure SWAPDB works correctly
-- [ ] Ensure DBSIZE, FLUSHDB, RANDOMKEY respect db_index
-- [ ] Write tests: SELECT 1 then SET/GET should isolate from database 0, MOVE between databases, FLUSHDB only flushes selected db
-- [ ] Run project test suite - must pass before task 7
+- [x] Add `db_index: usize` field to per-connection state in server.rs (initialized to 0)
+- [x] Modify SELECT handler to update the per-connection db_index and return it to the server loop
+- [x] Add `get_db(&self, db_index: usize) -> &DashMap<...>` method to StorageEngine that returns the correct database (self.data for 0, self.extra_dbs[n-1] for 1-15)
+- [x] Modify CommandHandler::process() to accept db_index and pass it through to storage operations
+- [x] Update all storage engine methods that access self.data to use get_db(db_index) instead
+- [x] Ensure MOVE command correctly moves between databases using db_index
+- [x] Ensure SWAPDB works correctly
+- [x] Ensure DBSIZE, FLUSHDB, RANDOMKEY respect db_index
+- [x] Write tests: SELECT 1 then SET/GET should isolate from database 0, MOVE between databases, FLUSHDB only flushes selected db
+- [x] Run project test suite - must pass before task 7
 
 ### Task 7: RESP3 Response Serialization
 

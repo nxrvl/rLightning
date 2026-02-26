@@ -1516,7 +1516,7 @@ mod tests {
             args: vec![b"return 42".to_vec(), b"0".to_vec()],
         };
 
-        let result = handler.process(cmd).await.unwrap();
+        let result = handler.process(cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(42));
     }
 
@@ -1534,7 +1534,7 @@ mod tests {
             args: vec![sha1.into_bytes(), b"0".to_vec()],
         };
 
-        let result = handler.process(cmd).await.unwrap();
+        let result = handler.process(cmd, 0).await.unwrap();
         assert_eq!(
             result,
             RespValue::BulkString(Some(b"from evalsha".to_vec()))
@@ -1551,7 +1551,7 @@ mod tests {
             args: vec![b"LOAD".to_vec(), b"return 1".to_vec()],
         };
 
-        let result = handler.process(cmd).await.unwrap();
+        let result = handler.process(cmd, 0).await.unwrap();
         match result {
             RespValue::BulkString(Some(sha1)) => {
                 assert_eq!(String::from_utf8(sha1).unwrap().len(), 40);

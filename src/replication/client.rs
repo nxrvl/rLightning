@@ -237,7 +237,7 @@ impl ReplicationClient {
                                 
                                 // Execute the command
                                 let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
-                                if let Err(e) = cmd_handler.process(cmd).await {
+                                if let Err(e) = cmd_handler.process(cmd, 0).await {
                                     error!("Error processing command from master: {}", e);
                                 }
                                 

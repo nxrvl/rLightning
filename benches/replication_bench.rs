@@ -78,7 +78,7 @@ fn bench_replication_command_propagation(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(set_cmd).await.unwrap());
+                                black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);
@@ -240,7 +240,7 @@ fn bench_replication_lag_simulation(c: &mut Criterion) {
                                     args: vec![key, value],
                                 };
                                 
-                                black_box(handler_ref.process(set_cmd).await.unwrap());
+                                black_box(handler_ref.process(set_cmd, 0).await.unwrap());
                             });
                             
                             handles.push(handle);

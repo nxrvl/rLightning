@@ -45,7 +45,7 @@ fn bench_string_set_value_sizes(c: &mut Criterion) {
                                     make_value(size),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -76,7 +76,7 @@ fn bench_string_get_value_sizes(c: &mut Criterion) {
                                 make_value(size),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -86,7 +86,7 @@ fn bench_string_get_value_sizes(c: &mut Criterion) {
                                 name: "get".to_string(),
                                 args: vec![format!("strkey:{}", i).into_bytes()],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -119,7 +119,7 @@ fn bench_string_mset_mget(c: &mut Criterion) {
                             name: "mset".to_string(),
                             args,
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -140,7 +140,7 @@ fn bench_string_mset_mget(c: &mut Criterion) {
                         name: "mset".to_string(),
                         args,
                     };
-                    handler.process(cmd).await.unwrap();
+                    handler.process(cmd, 0).await.unwrap();
                 });
                 b.iter(|| {
                     rt.block_on(async {
@@ -151,7 +151,7 @@ fn bench_string_mset_mget(c: &mut Criterion) {
                             name: "mget".to_string(),
                             args,
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -175,7 +175,7 @@ fn bench_string_incr_append(c: &mut Criterion) {
                         name: "incr".to_string(),
                         args: vec![b"counter".to_vec()],
                     };
-                    black_box(handler.process(cmd).await.unwrap());
+                    black_box(handler.process(cmd, 0).await.unwrap());
                 }
             })
         });
@@ -193,7 +193,7 @@ fn bench_string_incr_append(c: &mut Criterion) {
                             b"data".to_vec(),
                         ],
                     };
-                    black_box(handler.process(cmd).await.unwrap());
+                    black_box(handler.process(cmd, 0).await.unwrap());
                 }
             })
         });
@@ -226,7 +226,7 @@ fn bench_list_push_pop(c: &mut Criterion) {
                                     format!("item:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -248,7 +248,7 @@ fn bench_list_push_pop(c: &mut Criterion) {
                                     format!("item:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -266,14 +266,14 @@ fn bench_list_push_pop(c: &mut Criterion) {
                         name: "lpush".to_string(),
                         args: vec![b"poplist".to_vec(), format!("item:{}", i).into_bytes()],
                     };
-                    handler.process(cmd).await.unwrap();
+                    handler.process(cmd, 0).await.unwrap();
                 }
                 for _ in 0..500 {
                     let cmd = Command {
                         name: "lpop".to_string(),
                         args: vec![b"poplist".to_vec()],
                     };
-                    black_box(handler.process(cmd).await.unwrap());
+                    black_box(handler.process(cmd, 0).await.unwrap());
                 }
             })
         });
@@ -288,14 +288,14 @@ fn bench_list_push_pop(c: &mut Criterion) {
                         name: "rpush".to_string(),
                         args: vec![b"rpoplist".to_vec(), format!("item:{}", i).into_bytes()],
                     };
-                    handler.process(cmd).await.unwrap();
+                    handler.process(cmd, 0).await.unwrap();
                 }
                 for _ in 0..500 {
                     let cmd = Command {
                         name: "rpop".to_string(),
                         args: vec![b"rpoplist".to_vec()],
                     };
-                    black_box(handler.process(cmd).await.unwrap());
+                    black_box(handler.process(cmd, 0).await.unwrap());
                 }
             })
         });
@@ -325,7 +325,7 @@ fn bench_list_lrange(c: &mut Criterion) {
                                 format!("item:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -338,7 +338,7 @@ fn bench_list_lrange(c: &mut Criterion) {
                                 b"-1".to_vec(),
                             ],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -372,7 +372,7 @@ fn bench_hash_operations(c: &mut Criterion) {
                                     format!("value:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -394,7 +394,7 @@ fn bench_hash_operations(c: &mut Criterion) {
                                 format!("value:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -407,7 +407,7 @@ fn bench_hash_operations(c: &mut Criterion) {
                                     format!("field:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -429,7 +429,7 @@ fn bench_hash_operations(c: &mut Criterion) {
                                 format!("value:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -438,7 +438,7 @@ fn bench_hash_operations(c: &mut Criterion) {
                             name: "hgetall".to_string(),
                             args: vec![b"allhash".to_vec()],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -471,7 +471,7 @@ fn bench_set_operations(c: &mut Criterion) {
                                     format!("member:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -495,7 +495,7 @@ fn bench_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                         // Overlapping set
                         let cmd = Command {
                             name: "sadd".to_string(),
@@ -504,7 +504,7 @@ fn bench_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i + set_size / 2).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -513,7 +513,7 @@ fn bench_set_operations(c: &mut Criterion) {
                             name: "sinter".to_string(),
                             args: vec![b"interset1".to_vec(), b"interset2".to_vec()],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -536,7 +536,7 @@ fn bench_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                         let cmd = Command {
                             name: "sadd".to_string(),
                             args: vec![
@@ -544,7 +544,7 @@ fn bench_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i + set_size).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -553,7 +553,7 @@ fn bench_set_operations(c: &mut Criterion) {
                             name: "sunion".to_string(),
                             args: vec![b"unionset1".to_vec(), b"unionset2".to_vec()],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -588,7 +588,7 @@ fn bench_sorted_set_operations(c: &mut Criterion) {
                                     format!("member:{}", i).into_bytes(),
                                 ],
                             };
-                            black_box(handler.process(cmd).await.unwrap());
+                            black_box(handler.process(cmd, 0).await.unwrap());
                         }
                     })
                 });
@@ -610,7 +610,7 @@ fn bench_sorted_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 b.iter(|| {
@@ -619,7 +619,7 @@ fn bench_sorted_set_operations(c: &mut Criterion) {
                             name: "zrange".to_string(),
                             args: vec![b"zrangeset".to_vec(), b"0".to_vec(), b"-1".to_vec()],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },
@@ -640,7 +640,7 @@ fn bench_sorted_set_operations(c: &mut Criterion) {
                                 format!("member:{}", i).into_bytes(),
                             ],
                         };
-                        handler.process(cmd).await.unwrap();
+                        handler.process(cmd, 0).await.unwrap();
                     }
                 });
                 let mid = zset_size / 4;
@@ -655,7 +655,7 @@ fn bench_sorted_set_operations(c: &mut Criterion) {
                                 format!("{}", upper).into_bytes(),
                             ],
                         };
-                        black_box(handler.process(cmd).await.unwrap());
+                        black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
             },

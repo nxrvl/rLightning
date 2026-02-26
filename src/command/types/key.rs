@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
 use crate::networking::resp::RespValue;
-use crate::storage::engine::{StorageEngine, NUM_DATABASES};
+use crate::storage::engine::{StorageEngine, NUM_DATABASES, CURRENT_DB_INDEX};
 use crate::storage::item::RedisDataType;
 
 /// Redis COPY command - Copy the value stored at the source key to the destination key
@@ -81,7 +81,8 @@ pub async fn move_cmd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         ));
     }
 
-    if db == 0 {
+    let current_db = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+    if db == current_db {
         // Cannot move to the same database
         return Ok(RespValue::Integer(0));
     }

@@ -501,7 +501,7 @@ async fn test_cluster_command_info() {
         name: "cluster".to_string(),
         args: vec![b"INFO".to_vec()],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let info = String::from_utf8(data).unwrap();
         assert!(info.contains("cluster_enabled:0"));
@@ -519,7 +519,7 @@ async fn test_cluster_command_keyslot() {
         name: "cluster".to_string(),
         args: vec![b"KEYSLOT".to_vec(), b"foo".to_vec()],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::Integer(12182));
 }
 
@@ -532,7 +532,7 @@ async fn test_cluster_command_help() {
         name: "cluster".to_string(),
         args: vec![b"HELP".to_vec()],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     if let RespValue::Array(Some(lines)) = result {
         assert!(lines.len() > 5);
     } else {
@@ -549,7 +549,7 @@ async fn test_asking_command() {
         name: "asking".to_string(),
         args: vec![],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 }
 
@@ -562,14 +562,14 @@ async fn test_readonly_readwrite_commands() {
         name: "readonly".to_string(),
         args: vec![],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
     let cmd = Command {
         name: "readwrite".to_string(),
         args: vec![],
     };
-    let result = handler.process(cmd).await.unwrap();
+    let result = handler.process(cmd, 0).await.unwrap();
     assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 }
 
