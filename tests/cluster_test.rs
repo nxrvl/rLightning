@@ -2,15 +2,21 @@
 /// Tests cluster slot calculation, topology management, CLUSTER subcommands,
 /// redirections, slot migration, and failover scenarios.
 
+mod test_utils;
+
 use std::sync::Arc;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, key_hash_slot, SlotRange};
 use rlightning::command::handler::CommandHandler;
 use rlightning::command::Command;
 use rlightning::networking::resp::RespValue;
+use rlightning::networking::server::Server;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
+
+use test_utils::{DEFAULT_TEST_PORT, create_client};
 
 // Helper to create a cluster manager with a storage engine
 fn create_cluster_env() -> (Arc<StorageEngine>, Arc<ClusterManager>) {
@@ -491,17 +497,16 @@ async fn test_cluster_manual_failover() {
 }
 
 // --- CLUSTER Command Interface Tests ---
+// These tests call cluster_command directly since cluster commands are now
+// handled at the server level (similar to sentinel/ACL)
 
 #[tokio::test]
-async fn test_cluster_command_info() {
+async fn test_cluster_command_info_disabled() {
+    use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
-    let handler = CommandHandler::new(Arc::clone(&storage));
 
-    let cmd = Command {
-        name: "cluster".to_string(),
-        args: vec![b"INFO".to_vec()],
-    };
-    let result = handler.process(cmd, 0).await.unwrap();
+    // Without a cluster manager, CLUSTER INFO shows disabled
+    let result = cluster_command(&storage, &[b"INFO".to_vec()], None).await.unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let info = String::from_utf8(data).unwrap();
         assert!(info.contains("cluster_enabled:0"));
@@ -511,32 +516,80 @@ async fn test_cluster_command_info() {
 }
 
 #[tokio::test]
-async fn test_cluster_command_keyslot() {
-    let (storage, _) = create_cluster_env();
-    let handler = CommandHandler::new(Arc::clone(&storage));
+async fn test_cluster_command_info_enabled() {
+    use rlightning::command::types::cluster::cluster_command;
+    let (storage, mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    mgr.init(addr).await;
 
-    let cmd = Command {
-        name: "cluster".to_string(),
-        args: vec![b"KEYSLOT".to_vec(), b"foo".to_vec()],
-    };
-    let result = handler.process(cmd, 0).await.unwrap();
+    // Assign all slots so cluster is OK
+    let all_slots: Vec<u16> = (0..16384).collect();
+    mgr.add_slots(&all_slots).await.unwrap();
+
+    // With a cluster manager, CLUSTER INFO shows enabled
+    let result = cluster_command(&storage, &[b"INFO".to_vec()], Some(&mgr)).await.unwrap();
+    if let RespValue::BulkString(Some(data)) = result {
+        let info = String::from_utf8(data).unwrap();
+        assert!(info.contains("cluster_enabled:1"));
+        assert!(info.contains("cluster_state:ok"));
+        assert!(info.contains("cluster_slots_assigned:16384"));
+    } else {
+        panic!("Expected BulkString for CLUSTER INFO");
+    }
+}
+
+#[tokio::test]
+async fn test_cluster_command_keyslot() {
+    use rlightning::command::types::cluster::cluster_command;
+    let (storage, _) = create_cluster_env();
+
+    let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"foo".to_vec()], None).await.unwrap();
     assert_eq!(result, RespValue::Integer(12182));
 }
 
 #[tokio::test]
 async fn test_cluster_command_help() {
+    use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
-    let handler = CommandHandler::new(Arc::clone(&storage));
 
-    let cmd = Command {
-        name: "cluster".to_string(),
-        args: vec![b"HELP".to_vec()],
-    };
-    let result = handler.process(cmd, 0).await.unwrap();
+    let result = cluster_command(&storage, &[b"HELP".to_vec()], None).await.unwrap();
     if let RespValue::Array(Some(lines)) = result {
         assert!(lines.len() > 5);
     } else {
         panic!("Expected Array for CLUSTER HELP");
+    }
+}
+
+#[tokio::test]
+async fn test_cluster_command_nodes_enabled() {
+    use rlightning::command::types::cluster::cluster_command;
+    let (storage, mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    mgr.init(addr).await;
+
+    let result = cluster_command(&storage, &[b"NODES".to_vec()], Some(&mgr)).await.unwrap();
+    if let RespValue::BulkString(Some(data)) = result {
+        let nodes = String::from_utf8(data).unwrap();
+        assert!(nodes.contains("myself,master"));
+    } else {
+        panic!("Expected BulkString for CLUSTER NODES");
+    }
+}
+
+#[tokio::test]
+async fn test_cluster_command_myid_enabled() {
+    use rlightning::command::types::cluster::cluster_command;
+    let (storage, mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    mgr.init(addr).await;
+
+    let result = cluster_command(&storage, &[b"MYID".to_vec()], Some(&mgr)).await.unwrap();
+    if let RespValue::BulkString(Some(data)) = result {
+        let id = String::from_utf8(data).unwrap();
+        assert_eq!(id.len(), 40);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    } else {
+        panic!("Expected BulkString for CLUSTER MYID");
     }
 }
 
@@ -734,4 +787,103 @@ async fn test_cluster_links() {
     mgr.meet("127.0.0.1", 6380).await.unwrap();
     let links = mgr.get_cluster_links().await;
     assert!(!links.is_empty());
+}
+
+// --- Server-Level Cluster Command Tests ---
+// These tests verify cluster commands work through a real server connection
+
+/// Helper to set up a test server with cluster mode enabled
+async fn setup_cluster_server(
+    port_offset: u16,
+) -> Result<(SocketAddr, Arc<ClusterManager>), Box<dyn std::error::Error + Send + Sync>> {
+    let port = DEFAULT_TEST_PORT + port_offset;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let storage = StorageEngine::new(StorageConfig::default());
+
+    let cluster_config = ClusterConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    cluster.init(addr).await;
+
+    let server = Server::new(addr, Arc::clone(&storage))
+        .with_connection_limit(100)
+        .with_buffer_size(1024 * 1024)
+        .with_cluster(Arc::clone(&cluster));
+
+    tokio::spawn(async move {
+        if let Err(e) = server.start().await {
+            eprintln!("Server error: {:?}", e);
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    Ok((addr, cluster))
+}
+
+/// Helper to extract string from RespValue
+fn resp_string(val: &RespValue) -> String {
+    match val {
+        RespValue::SimpleString(s) => s.clone(),
+        RespValue::BulkString(Some(b)) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("Expected string, got: {:?}", val),
+    }
+}
+
+#[tokio::test]
+async fn test_cluster_info_via_server_enabled() {
+    let (addr, _cluster) = setup_cluster_server(900).await.unwrap();
+    let mut client = create_client(addr).await.unwrap();
+
+    let response = client
+        .send_command_str("CLUSTER", &["INFO"])
+        .await
+        .unwrap();
+    let info = resp_string(&response);
+    assert!(info.contains("cluster_enabled:1"), "CLUSTER INFO should show enabled");
+    assert!(info.contains("cluster_known_nodes:1"), "Should know 1 node");
+}
+
+#[tokio::test]
+async fn test_cluster_myid_via_server() {
+    let (addr, _cluster) = setup_cluster_server(901).await.unwrap();
+    let mut client = create_client(addr).await.unwrap();
+
+    let response = client
+        .send_command_str("CLUSTER", &["MYID"])
+        .await
+        .unwrap();
+    let id = resp_string(&response);
+    assert_eq!(id.len(), 40, "Node ID should be 40 hex chars");
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn test_cluster_nodes_via_server() {
+    let (addr, _cluster) = setup_cluster_server(902).await.unwrap();
+    let mut client = create_client(addr).await.unwrap();
+
+    let response = client
+        .send_command_str("CLUSTER", &["NODES"])
+        .await
+        .unwrap();
+    let nodes = resp_string(&response);
+    assert!(nodes.contains("myself,master"), "Should show self as master");
+}
+
+#[tokio::test]
+async fn test_cluster_keyslot_via_server() {
+    let (addr, _cluster) = setup_cluster_server(903).await.unwrap();
+    let mut client = create_client(addr).await.unwrap();
+
+    let response = client
+        .send_command_str("CLUSTER", &["KEYSLOT", "foo"])
+        .await
+        .unwrap();
+    match response {
+        RespValue::Integer(slot) => assert_eq!(slot, 12182),
+        _ => panic!("Expected Integer for CLUSTER KEYSLOT, got: {:?}", response),
+    }
 }

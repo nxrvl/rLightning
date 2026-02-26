@@ -395,6 +395,24 @@ impl SentinelManager {
             return;
         }
         info!("Sentinel mode enabled, sentinel ID: {}", self.state.read().await.my_id);
+
+        // Start the background monitoring loop that periodically checks
+        // SDOWN/ODOWN for all monitored masters and their replicas
+        let monitor = monitor::MonitorLoop::new(
+            Arc::clone(&self.state),
+            self.config.ping_period_ms,
+        );
+        let ping_period = self.config.ping_period_ms;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                std::time::Duration::from_millis(ping_period),
+            );
+            loop {
+                interval.tick().await;
+                monitor.check_masters().await;
+            }
+        });
+        info!("Sentinel monitoring loop started (ping period: {}ms)", self.config.ping_period_ms);
     }
 
     /// Monitor a new master

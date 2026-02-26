@@ -235,14 +235,14 @@ Fix all 61 compiler warnings and implement real CLIENT LIST.
 
 Wire existing cluster and sentinel modules into the server so they're functional when enabled.
 
-- [ ] Initialize ClusterManager in main.rs when cluster mode is enabled in config
-- [ ] Wire cluster command dispatch in server.rs (CLUSTER INFO, CLUSTER NODES, CLUSTER MEET, etc.)
-- [ ] Add slot validation for multi-key commands when in cluster mode (CROSSSLOT error)
-- [ ] Start sentinel monitoring background tasks in init() when sentinel is enabled
-- [ ] Start PING/health check loops for monitored masters
-- [ ] Wire SDOWN/ODOWN detection based on ping failures
-- [ ] Write tests: CLUSTER INFO returns valid response when enabled, sentinel detects master down (mock)
-- [ ] Run project test suite - must pass before task 13
+- [x] Initialize ClusterManager in main.rs when cluster mode is enabled in config
+- [x] Wire cluster command dispatch in server.rs (CLUSTER INFO, CLUSTER NODES, CLUSTER MEET, etc.)
+- [x] Add slot validation for multi-key commands when in cluster mode (CROSSSLOT error)
+- [x] Start sentinel monitoring background tasks in init() when sentinel is enabled
+- [x] Start PING/health check loops for monitored masters
+- [x] Wire SDOWN/ODOWN detection based on ping failures
+- [x] Write tests: CLUSTER INFO returns valid response when enabled, sentinel detects master down (mock)
+- [x] Run project test suite - must pass before task 13
 
 ### Task 13: Verify Acceptance Criteria
 

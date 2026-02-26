@@ -13,8 +13,6 @@ use std::net::SocketAddr;
 
 use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole, RedirectType};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, key_hash_slot};
-use rlightning::command::handler::CommandHandler;
-use rlightning::command::Command;
 use rlightning::networking::resp::RespValue;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
@@ -227,19 +225,16 @@ async fn test_cluster_shards_output_format() {
 }
 
 // ---------------------------------------------------------------------------
-// CLUSTER Command Interface Tests (via CommandHandler)
+// CLUSTER Command Interface Tests (via cluster_command directly)
+// Cluster commands are handled at the server level, not through CommandHandler
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_cluster_info_via_handler() {
+    use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
-    let handler = CommandHandler::new(Arc::clone(&storage));
 
-    let result = handler
-        .process(Command {
-            name: "CLUSTER".to_string(),
-            args: vec![b"INFO".to_vec()],
-        }, 0)
+    let result = cluster_command(&storage, &[b"INFO".to_vec()], None)
         .await
         .unwrap();
 
@@ -254,23 +249,15 @@ async fn test_cluster_info_via_handler() {
 
 #[tokio::test]
 async fn test_cluster_keyslot_via_handler() {
+    use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
-    let handler = CommandHandler::new(Arc::clone(&storage));
 
-    let result = handler
-        .process(Command {
-            name: "CLUSTER".to_string(),
-            args: vec![b"KEYSLOT".to_vec(), b"foo".to_vec()],
-        }, 0)
+    let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"foo".to_vec()], None)
         .await
         .unwrap();
     assert_eq!(result, RespValue::Integer(12182));
 
-    let result = handler
-        .process(Command {
-            name: "CLUSTER".to_string(),
-            args: vec![b"KEYSLOT".to_vec(), b"{tag}key".to_vec()],
-        }, 0)
+    let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"{tag}key".to_vec()], None)
         .await
         .unwrap();
     let slot = match result {

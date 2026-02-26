@@ -49,7 +49,7 @@ pub use crate::command::types::connection::{
 };
 
 // Cluster commands
-pub use crate::command::types::cluster::{cluster_command, asking, readonly, readwrite, migrate};
+pub use crate::command::types::cluster::{asking, readonly, readwrite, migrate};
 
 // Sentinel commands
 

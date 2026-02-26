@@ -24,6 +24,7 @@ use crate::persistence::config::AofSyncPolicy;
 use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
+use crate::cluster::ClusterManager;
 use crate::sentinel::SentinelManager;
 use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
 use crate::utils::logging;
@@ -90,6 +91,7 @@ pub struct Server {
     security: Option<Arc<SecurityManager>>,
     replication: Option<Arc<ReplicationManager>>,
     sentinel: Option<Arc<SentinelManager>>,
+    cluster: Option<Arc<ClusterManager>>,
     aof_sync_policy: AofSyncPolicy,
     connection_limit: Arc<Semaphore>,
     buffer_size: usize,
@@ -119,6 +121,7 @@ impl Server {
             security: None,
             replication: None,
             sentinel: None,
+            cluster: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
             buffer_size: 64 * 1024,                              // 64KB initial buffer (grows on demand)
@@ -155,6 +158,12 @@ impl Server {
         self
     }
 
+    /// Set the cluster manager for this server
+    pub fn with_cluster(mut self, cluster: Arc<ClusterManager>) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+
     /// Set the maximum number of concurrent connections
     #[allow(dead_code)]
     pub fn with_connection_limit(mut self, max_connections: usize) -> Self {
@@ -188,6 +197,7 @@ impl Server {
                             let security = self.security.clone();
                             let replication = self.replication.clone();
                             let sentinel = self.sentinel.clone();
+                            let cluster = self.cluster.clone();
                             let aof_sync_policy = self.aof_sync_policy;
                             let buffer_size = self.buffer_size;
                             let connections = Arc::clone(&self.connections);
@@ -208,6 +218,7 @@ impl Server {
                                     security,
                                     replication,
                                     sentinel,
+                                    cluster,
                                     aof_sync_policy,
                                     buffer_size,
                                     connections.clone(),
@@ -246,6 +257,7 @@ impl Server {
         security: Option<Arc<SecurityManager>>,
         replication: Option<Arc<ReplicationManager>>,
         sentinel: Option<Arc<SentinelManager>>,
+        cluster: Option<Arc<ClusterManager>>,
         aof_sync_policy: AofSyncPolicy,
         buffer_size: usize,
         connections: Arc<DashMap<u64, ClientInfo>>,
@@ -403,7 +415,7 @@ impl Server {
                                 &cmd, &mut socket_writer, &mut response_buffer,
                                 &mut db_index, &mut protocol_version, &mut in_subscription_mode,
                                 &mut tx_state, &pubsub, client_id, &security, &sentinel,
-                                &replication, &command_handler, &persistence, aof_sync_policy,
+                                &cluster, &replication, &command_handler, &persistence, aof_sync_policy,
                                 &client_addr_str, &connections, conn_id,
                             ).await? {
                                 DispatchAction::CloseConnection => {
@@ -433,7 +445,7 @@ impl Server {
                                                 &cmd, &mut socket_writer, &mut response_buffer,
                                                 &mut db_index, &mut protocol_version, &mut in_subscription_mode,
                                                 &mut tx_state, &pubsub, client_id, &security, &sentinel,
-                                                &replication, &command_handler, &persistence, aof_sync_policy,
+                                                &cluster, &replication, &command_handler, &persistence, aof_sync_policy,
                                                 &client_addr_str, &connections, conn_id,
                                             ).await? {
                                                 DispatchAction::CloseConnection => {
@@ -606,6 +618,7 @@ impl Server {
         client_id: u64,
         security: &Option<Arc<SecurityManager>>,
         sentinel: &Option<Arc<SentinelManager>>,
+        cluster: &Option<Arc<ClusterManager>>,
         replication: &Option<Arc<ReplicationManager>>,
         command_handler: &Arc<CommandHandler>,
         persistence: &Option<Arc<PersistenceManager>>,
@@ -905,6 +918,19 @@ impl Server {
                 }
                 return Ok(DispatchAction::Continue);
             }
+            // Cluster commands - route to cluster manager when available
+            "cluster" => {
+                use crate::command::types::cluster::cluster_command;
+                let storage = command_handler.storage();
+                let response = match cluster_command(storage, &cmd.args, cluster.as_ref()).await {
+                    Ok(resp) => resp,
+                    Err(e) => RespValue::Error(e.to_string()),
+                };
+                if let Ok(bytes) = response.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                }
+                return Ok(DispatchAction::Continue);
+            }
             // Replication commands
             "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" | "wait" => {
                 let resp_cmd = RespCommand {
@@ -941,6 +967,37 @@ impl Server {
                     client_addr_str,
                 ).await?;
                 return Ok(DispatchAction::Continue);
+            }
+        }
+
+        // Cluster mode: validate cross-slot access for multi-key commands
+        if let Some(cluster_mgr) = cluster {
+            if cluster_mgr.is_enabled() {
+                // Get key indices for this command to check cross-slot
+                let key_refs: Vec<&[u8]> = match cmd_lower.as_str() {
+                    // Multi-key commands that must operate on the same slot
+                    "mget" | "mset" | "msetnx" | "del" | "unlink" | "exists" | "touch"
+                    | "sinter" | "sinterstore" | "sunion" | "sunionstore" | "sdiff" | "sdiffstore"
+                    | "sintercard" | "smove"
+                    | "zunionstore" | "zinterstore" | "zdiffstore" | "zunion" | "zinter" | "zdiff"
+                    | "lmpop" | "blmpop" | "blpop" | "brpop"
+                    | "pfcount" | "pfmerge"
+                    | "bitop" | "rename" | "renamenx" | "copy"
+                    | "rpoplpush" | "lmove" | "blmove"
+                    | "smismember"
+                    | "xread" | "xreadgroup" => {
+                        cmd.args.iter().map(|a| a.as_slice()).collect()
+                    }
+                    _ => vec![],
+                };
+                if cluster_mgr.check_cross_slot(&key_refs) {
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        "CROSSSLOT Keys in request don't hash to the same slot".to_string(),
+                        client_addr_str,
+                    ).await?;
+                    return Ok(DispatchAction::Continue);
+                }
             }
         }
 

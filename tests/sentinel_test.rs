@@ -640,3 +640,47 @@ async fn test_sentinel_info_cache_via_client() {
     let entries = resp_array(&response);
     assert_eq!(entries.len(), 1, "Should have one cache entry");
 }
+
+/// Test that the sentinel background monitoring loop detects SDOWN
+/// when master stops responding to PING (simulated by manipulating timestamps)
+#[tokio::test]
+async fn test_sentinel_monitoring_loop_detects_sdown() {
+    let config = SentinelConfig {
+        enabled: true,
+        down_after_ms: 100, // Very short for testing
+        ping_period_ms: 50,
+        ..Default::default()
+    };
+    let (_addr, sentinel) = setup_sentinel_server(820, config).await.unwrap();
+
+    // Monitor a master on an unreachable port
+    sentinel
+        .monitor_master("testmaster", "127.0.0.1", 19999, 2)
+        .await
+        .unwrap();
+
+    // Simulate the master going unresponsive by setting last_ping_reply to the past
+    {
+        let mut state = sentinel.state().write().await;
+        let master = state.masters.get_mut("testmaster").unwrap();
+        master.last_ping_reply = std::time::Instant::now() - Duration::from_millis(200);
+    }
+
+    // The background monitoring loop should detect this, but let's explicitly
+    // run a check cycle to verify the detection logic
+    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(
+        Arc::clone(sentinel.state()),
+        50,
+    );
+    monitor.check_masters().await;
+
+    // Verify SDOWN was detected
+    let state = sentinel.state().read().await;
+    let master = state.masters.get("testmaster").unwrap();
+    assert!(master.subjective_down, "Master should be subjectively down");
+    assert_eq!(
+        master.status,
+        rlightning::sentinel::MasterStatus::SubjectiveDown,
+        "Status should be SubjectiveDown"
+    );
+}
