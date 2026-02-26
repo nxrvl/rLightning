@@ -1521,63 +1521,6 @@ impl Server {
         Ok(())
     }
 
-    /// Helper function to serialize and send a response
-    #[allow(dead_code)]
-    async fn send_response(
-        socket: &mut TcpStream,
-        response: RespValue,
-        client_addr: &str,
-    ) -> Result<(), NetworkError> {
-        match response.serialize() {
-            Ok(response_bytes) => {
-                // Log the response data when debug is enabled
-                logging::log_protocol_data(client_addr, "response", &response_bytes, false);
-
-                if let Err(e) = socket.write_all(&response_bytes).await {
-                    error!(client_addr = %client_addr, "Failed to write response: {}", e);
-                    Err(NetworkError::Io(e))
-                } else {
-                    debug!(client_addr = %client_addr, response = ?response, "Sent response");
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                error!(client_addr = %client_addr, response = ?response, "Failed to serialize response: {:?}", e);
-                let error_msg = format!("ERR Internal error during response serialization: {}", e);
-                Self::send_error(socket, error_msg, client_addr)
-                    .await
-                    .map_err(|_| NetworkError::Serialization(e.to_string()))
-            }
-        }
-    }
-
-    /// Helper function to serialize and send an error response string
-    #[allow(dead_code)]
-    async fn send_error(
-        socket: &mut TcpStream,
-        error_message: String,
-        client_addr: &str,
-    ) -> Result<(), NetworkError> {
-        let error_resp = RespValue::Error(error_message);
-        match error_resp.serialize() {
-            Ok(bytes) => {
-                // Log the error response data when debug is enabled
-                logging::log_protocol_data(client_addr, "error_response", &bytes, false);
-
-                if let Err(e) = socket.write_all(&bytes).await {
-                    error!(client_addr = %client_addr, "Failed to write error response: {}", e);
-                    Err(NetworkError::Io(e))
-                } else {
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                error!(client_addr = %client_addr, error_resp = ?error_resp, "Failed to serialize error response itself: {:?}", e);
-                Err(NetworkError::Serialization(e.to_string()))
-            }
-        }
-    }
-
     /// Helper function to serialize and send a response to a split socket writer
     async fn send_response_to_writer(
         writer: &mut tokio::net::tcp::OwnedWriteHalf,

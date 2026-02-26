@@ -381,7 +381,7 @@ impl RespValue {
     /// Check if a command returns a set of members that should be a RESP3 Set
     fn is_set_command(cmd: &str) -> bool {
         matches!(cmd,
-            "smembers" | "sinter" | "sunion" | "sdiff" | "sscan"
+            "smembers" | "sinter" | "sunion" | "sdiff"
         )
     }
 

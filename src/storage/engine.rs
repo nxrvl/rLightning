@@ -88,21 +88,6 @@ impl clap::ValueEnum for EvictionPolicy {
     }
 }
 
-// Also implement FromStr for easier conversions
-impl std::str::FromStr for EvictionPolicy {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "lru" => Ok(Self::LRU),
-            "lfu" => Ok(Self::LFU),
-            "random" => Ok(Self::Random),
-            "noeviction" => Ok(Self::NoEviction),
-            _ => Err(format!("Unknown eviction policy: {}", s)),
-        }
-    }
-}
-
 /// Configuration for the storage engine
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -423,11 +408,16 @@ impl StorageEngine {
                             self.data.iter().nth(skip).map(|item| item.key().clone())
                         }
                     },
-                    _ => {
-                        // Default to LRU for now
+                    EvictionPolicy::LFU => {
+                        // LFU not yet implemented, fall back to LRU
+                        tracing::warn!("LFU eviction policy not yet implemented, falling back to LRU");
                         self.data.iter()
                             .min_by_key(|item| item.value().last_accessed)
                             .map(|item| item.key().clone())
+                    },
+                    _ => {
+                        // NoEviction is handled above, this is unreachable
+                        None
                     }
                 };
                 
@@ -449,72 +439,9 @@ impl StorageEngine {
         Ok(())
     }
     
-    /// Set a key-value pair in the storage engine
+    /// Set a key-value pair in the storage engine (defaults to String type)
     pub async fn set(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<()> {
-        // Check size limits
-        if key.len() > self.config.max_key_size {
-            return Err(StorageError::ValueTooLarge);
-        }
-        
-        if value.len() > self.config.max_value_size {
-            return Err(StorageError::ValueTooLarge);
-        }
-        
-        // CRITICAL FIX: Data validation to prevent RESP protocol confusion
-        if value.len() > 10240 { // 10KB
-            tracing::debug!("Large value SET operation: key={:?}, value_len={}", 
-                String::from_utf8_lossy(&key), value.len());
-        }
-        
-        let required_size = Self::calculate_size(&key, &value);
-
-        // Ensure we have enough memory
-        self.maybe_evict(required_size).await?;
-
-        // Create a new item
-        let mut item = StorageItem::new(value);
-        let expires_at = if let Some(ttl) = ttl {
-            item.expire(ttl);
-            Some(Instant::now() + ttl)
-        } else {
-            None
-        };
-
-        // Use entry API for atomic read-modify-write to avoid TOCTOU races
-        let is_new_key = match self.active_db().entry(key.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let old_size = Self::calculate_size(entry.key(), &entry.get().value);
-                if old_size > 0 {
-                    self.current_memory.fetch_sub(old_size as u64, Ordering::AcqRel);
-                }
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                entry.insert(item);
-                false
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                entry.insert(item);
-                true
-            }
-        };
-
-        // Add to expiration queue if TTL is set
-        if let Some(expires_at) = expires_at {
-            self.add_to_expiration_queue(key.clone(), expires_at).await;
-        }
-
-        // Update prefix index and key count for new keys
-        if is_new_key {
-            self.update_prefix_indices(&key, true).await;
-            self.key_count.fetch_add(1, Ordering::AcqRel);
-        }
-
-        // Bump key version for WATCH support
-        self.bump_key_version(&key);
-        // Increment write counters
-        self.increment_write_counters().await;
-
-        Ok(())
+        self.set_with_type(key, value, RedisDataType::String, ttl).await
     }
 
     /// Set a key-value pair with explicit data type
@@ -708,17 +635,6 @@ impl StorageEngine {
         }
     }
     
-    /// Get all keys in the storage engine
-    #[allow(dead_code)]
-    pub async fn all_keys(&self) -> StorageResult<Vec<Vec<u8>>> {
-        let keys: Vec<Vec<u8>> = self.active_db().iter()
-            .filter(|item| !item.value().is_expired())
-            .map(|item| item.key().clone())
-            .collect();
-        
-        Ok(keys)
-    }
-    
     /// Get all keys matching a pattern
     pub async fn keys(&self, pattern: &str) -> StorageResult<Vec<Vec<u8>>> {
         let db = self.active_db();
@@ -733,7 +649,7 @@ impl StorageEngine {
                     if let Some(entry) = db.get(key)
                         && !entry.value().is_expired()
                             && let Ok(key_str) = std::str::from_utf8(key)
-                                && self.matches_pattern(key_str, pattern) {
+                                && crate::utils::glob::glob_match(pattern, key_str) {
                                     keys.push(key.clone());
                                 }
                 }
@@ -751,16 +667,12 @@ impl StorageEngine {
             
             // Convert key to string for pattern matching
             if let Ok(key_str) = std::str::from_utf8(item.key())
-                && self.matches_pattern(key_str, pattern) {
+                && crate::utils::glob::glob_match(pattern, key_str) {
                     keys.push(item.key().clone());
                 }
         }
         
         Ok(keys)
-    }
-    
-    fn matches_pattern(&self, s: &str, pattern: &str) -> bool {
-        crate::utils::glob::glob_match(pattern, s)
     }
     
     /// Flush all data (remove all keys from all databases)

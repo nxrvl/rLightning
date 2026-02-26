@@ -27,17 +27,6 @@ impl CommandHandler {
         }
     }
 
-    /// Create a new CommandHandler with a shared blocking manager
-    #[allow(dead_code)]
-    pub fn new_with_blocking(storage: Arc<StorageEngine>, blocking_mgr: Arc<BlockingManager>) -> Self {
-        Self::start_blocking_cleanup_task(Arc::clone(&blocking_mgr));
-        CommandHandler {
-            storage,
-            blocking_mgr,
-            scripting: Arc::new(ScriptingEngine::new()),
-        }
-    }
-
     /// Start periodic cleanup of stale blocking manager entries
     fn start_blocking_cleanup_task(blocking_mgr: Arc<BlockingManager>) {
         tokio::spawn(async move {
@@ -47,12 +36,6 @@ impl CommandHandler {
                 blocking_mgr.cleanup_stale_entries();
             }
         });
-    }
-
-    /// Get a reference to the blocking manager
-    #[allow(dead_code)]
-    pub fn blocking_mgr(&self) -> &Arc<BlockingManager> {
-        &self.blocking_mgr
     }
 
     /// Get a reference to the storage engine
