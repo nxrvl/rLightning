@@ -5,6 +5,195 @@ use crate::command::handler::CommandHandler;
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
+/// Extract all keys that a command will access from its arguments.
+/// Used by EXEC to collect keys for transaction-level locking.
+fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
+    let cmd_lower = cmd.name.to_lowercase();
+    match cmd_lower.as_str() {
+        // Commands with no data keys (server, connection, admin)
+        "ping" | "echo" | "info" | "auth" | "config" | "keys" | "scan" | "dbsize"
+        | "randomkey" | "flushall" | "flushdb" | "monitor" | "select" | "quit" | "reset"
+        | "client" | "command" | "save" | "bgsave" | "bgrewriteaof" | "lastsave"
+        | "shutdown" | "slowlog" | "latency" | "memory" | "debug" | "swapdb" | "time"
+        | "lolwut" | "cluster" | "asking" | "readonly" | "readwrite" | "module" | "acl"
+        | "wait" | "waitaof" | "role" | "replicaof" | "slaveof" | "replconf" | "psync"
+        | "failover" | "sentinel" | "script" | "function" => vec![],
+
+        // All args are keys
+        "del" | "unlink" | "exists" | "touch" => cmd.args.clone(),
+
+        // MGET: all args are keys
+        "mget" => cmd.args.clone(),
+
+        // MSET/MSETNX: keys at even positions (key, value, key, value, ...)
+        "mset" | "msetnx" => cmd.args.iter().step_by(2).cloned().collect(),
+
+        // Two-key commands: args[0] and args[1]
+        "rename" | "renamenx" | "lmove" | "rpoplpush" | "smove" | "copy" | "lcs" => {
+            let mut keys = Vec::new();
+            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            keys
+        }
+
+        // BLMOVE: args[0] source, args[1] dest
+        "blmove" => {
+            let mut keys = Vec::new();
+            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            keys
+        }
+
+        // BLPOP/BRPOP: args[0..n-1] are keys, last is timeout
+        "blpop" | "brpop" | "bzpopmin" | "bzpopmax" => {
+            if cmd.args.len() > 1 {
+                cmd.args[..cmd.args.len() - 1].to_vec()
+            } else {
+                vec![]
+            }
+        }
+
+        // LMPOP/ZMPOP: args[0] is numkeys, args[1..1+numkeys] are keys
+        "lmpop" | "zmpop" => {
+            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                cmd.args.iter().skip(1).take(numkeys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // BLMPOP/BZMPOP: args[0] is timeout, args[1] is numkeys, args[2..2+numkeys] are keys
+        "blmpop" | "bzmpop" => {
+            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                cmd.args.iter().skip(2).take(numkeys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // SINTER/SUNION/SDIFF: all args are keys
+        "sinter" | "sunion" | "sdiff" | "pfcount" => cmd.args.clone(),
+
+        // SINTERCARD: args[0] is numkeys, args[1..1+numkeys] are keys
+        "sintercard" => {
+            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                cmd.args.iter().skip(1).take(numkeys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // SINTERSTORE/SUNIONSTORE/SDIFFSTORE: args[0] is dest, args[1..] are source keys
+        "sinterstore" | "sunionstore" | "sdiffstore" | "pfmerge" => cmd.args.clone(),
+
+        // ZINTERSTORE/ZUNIONSTORE/ZDIFFSTORE: args[0] dest, args[1] numkeys, args[2..2+numkeys] source keys
+        "zinterstore" | "zunionstore" | "zdiffstore" => {
+            let mut keys = Vec::new();
+            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                for k in cmd.args.iter().skip(2).take(numkeys) {
+                    keys.push(k.clone());
+                }
+            }
+            keys
+        }
+
+        // ZINTER/ZUNION/ZDIFF: args[0] numkeys, args[1..1+numkeys] source keys
+        "zinter" | "zunion" | "zdiff" => {
+            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                cmd.args.iter().skip(1).take(numkeys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // ZRANGESTORE: args[0] dest, args[1] source
+        "zrangestore" | "geosearchstore" => {
+            let mut keys = Vec::new();
+            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            keys
+        }
+
+        // BITOP: args[0] is operation, args[1] is dest, args[2..] are source keys
+        "bitop" => {
+            if cmd.args.len() > 1 {
+                cmd.args[1..].to_vec()
+            } else {
+                vec![]
+            }
+        }
+
+        // XREAD/XREADGROUP: keys appear after "STREAMS" keyword
+        "xread" | "xreadgroup" => {
+            let streams_pos = cmd.args.iter().position(|a| {
+                a.eq_ignore_ascii_case(b"STREAMS")
+            });
+            if let Some(pos) = streams_pos {
+                let remaining = &cmd.args[pos + 1..];
+                // Keys are the first half, IDs are the second half
+                let num_keys = remaining.len() / 2;
+                remaining.iter().take(num_keys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // EVAL/EVALSHA/FCALL: args[0] is script/sha/function, args[1] is numkeys, args[2..2+numkeys] are keys
+        "eval" | "evalsha" | "eval_ro" | "evalsha_ro" | "fcall" | "fcall_ro" => {
+            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+                cmd.args.iter().skip(2).take(numkeys).cloned().collect()
+            } else {
+                vec![]
+            }
+        }
+
+        // SORT/SORT_RO: args[0] is key, may have STORE dest
+        "sort" | "sort_ro" => {
+            let mut keys = Vec::new();
+            if cmd.args.len() > 0 { keys.push(cmd.args[0].clone()); }
+            // Check for STORE option
+            for i in 1..cmd.args.len() {
+                if cmd.args[i].eq_ignore_ascii_case(b"STORE") {
+                    if let Some(dest) = cmd.args.get(i + 1) {
+                        keys.push(dest.clone());
+                    }
+                    break;
+                }
+            }
+            keys
+        }
+
+        // MIGRATE: args[0..2] are host/port/key-or-empty, special multi-key via KEYS option
+        "migrate" => {
+            let mut keys = Vec::new();
+            // args[2] is the key (or empty string for multi-key)
+            if cmd.args.len() > 2 && !cmd.args[2].is_empty() {
+                keys.push(cmd.args[2].clone());
+            }
+            // Check for KEYS option
+            for i in 0..cmd.args.len() {
+                if cmd.args[i].eq_ignore_ascii_case(b"KEYS") {
+                    for k in &cmd.args[i + 1..] {
+                        keys.push(k.clone());
+                    }
+                    break;
+                }
+            }
+            keys
+        }
+
+        // Default: first argument is the key (covers the vast majority of single-key commands)
+        _ => {
+            if cmd.args.is_empty() {
+                vec![]
+            } else {
+                vec![cmd.args[0].clone()]
+            }
+        }
+    }
+}
+
 /// Per-connection transaction state for MULTI/EXEC/WATCH support
 #[derive(Debug)]
 pub struct TransactionState {
@@ -172,10 +361,18 @@ pub async fn handle_exec(
         return Ok(RespValue::BulkString(None)); // nil = transaction aborted due to WATCH
     }
 
-    // Execute all queued commands and collect results
+    // Collect all keys from queued commands for locking
     let commands: Vec<Command> = state.queue.drain(..).collect();
-    let mut results = Vec::with_capacity(commands.len());
+    let all_keys: Vec<Vec<u8>> = commands
+        .iter()
+        .flat_map(extract_keys_from_command)
+        .collect();
 
+    // Lock all keys in sorted order to prevent deadlocks and ensure isolation
+    let _lock_guard = engine.lock_keys(&all_keys).await;
+
+    // Execute all queued commands while holding locks
+    let mut results = Vec::with_capacity(commands.len());
     for cmd in commands {
         match handler.process(cmd).await {
             Ok(response) => results.push(response),
@@ -183,7 +380,7 @@ pub async fn handle_exec(
         }
     }
 
-    // Clear transaction state
+    // Clear transaction state (locks released when _lock_guard is dropped)
     state.reset();
 
     Ok(RespValue::Array(Some(results)))
@@ -725,5 +922,354 @@ mod tests {
 
         let result = handle_exec(&mut state, &handler, &engine).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_transactions_overlapping_keys() {
+        // Two transactions racing on the same counter key should produce correct final value
+        let engine = create_engine();
+
+        // Initialize counter
+        engine
+            .set(b"counter".to_vec(), b"0".to_vec(), None)
+            .await
+            .unwrap();
+
+        let engine1 = Arc::clone(&engine);
+        let engine2 = Arc::clone(&engine);
+
+        // Run two transactions concurrently, each incrementing the counter 50 times
+        let t1 = tokio::spawn(async move {
+            let handler = CommandHandler::new(Arc::clone(&engine1));
+            for _ in 0..50 {
+                let mut state = TransactionState::new();
+                handle_multi(&mut state).unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"counter".to_vec()],
+                    },
+                )
+                .unwrap();
+                let _ = handle_exec(&mut state, &handler, &engine1).await;
+            }
+        });
+
+        let t2 = tokio::spawn(async move {
+            let handler = CommandHandler::new(Arc::clone(&engine2));
+            for _ in 0..50 {
+                let mut state = TransactionState::new();
+                handle_multi(&mut state).unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"counter".to_vec()],
+                    },
+                )
+                .unwrap();
+                let _ = handle_exec(&mut state, &handler, &engine2).await;
+            }
+        });
+
+        t1.await.unwrap();
+        t2.await.unwrap();
+
+        // Final counter should be exactly 100 (no lost updates)
+        let val = engine.get(b"counter").await.unwrap().unwrap();
+        let counter: i64 = String::from_utf8_lossy(&val).parse().unwrap();
+        assert_eq!(counter, 100);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_multi_key_transactions() {
+        // Two transactions operating on overlapping keys should not interleave
+        let engine = create_engine();
+
+        engine
+            .set(b"a".to_vec(), b"0".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"b".to_vec(), b"0".to_vec(), None)
+            .await
+            .unwrap();
+
+        let engine1 = Arc::clone(&engine);
+        let engine2 = Arc::clone(&engine);
+
+        // Transaction 1: INCR a, INCR b (20 times)
+        let t1 = tokio::spawn(async move {
+            let handler = CommandHandler::new(Arc::clone(&engine1));
+            for _ in 0..20 {
+                let mut state = TransactionState::new();
+                handle_multi(&mut state).unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"a".to_vec()],
+                    },
+                )
+                .unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"b".to_vec()],
+                    },
+                )
+                .unwrap();
+                let _ = handle_exec(&mut state, &handler, &engine1).await;
+            }
+        });
+
+        // Transaction 2: INCR a, INCR b (20 times)
+        let t2 = tokio::spawn(async move {
+            let handler = CommandHandler::new(Arc::clone(&engine2));
+            for _ in 0..20 {
+                let mut state = TransactionState::new();
+                handle_multi(&mut state).unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"a".to_vec()],
+                    },
+                )
+                .unwrap();
+                queue_command(
+                    &mut state,
+                    Command {
+                        name: "INCR".to_string(),
+                        args: vec![b"b".to_vec()],
+                    },
+                )
+                .unwrap();
+                let _ = handle_exec(&mut state, &handler, &engine2).await;
+            }
+        });
+
+        t1.await.unwrap();
+        t2.await.unwrap();
+
+        // Both counters should be exactly 40
+        let a_val = engine.get(b"a").await.unwrap().unwrap();
+        let a: i64 = String::from_utf8_lossy(&a_val).parse().unwrap();
+        let b_val = engine.get(b"b").await.unwrap().unwrap();
+        let b: i64 = String::from_utf8_lossy(&b_val).parse().unwrap();
+        assert_eq!(a, 40);
+        assert_eq!(b, 40);
+    }
+
+    #[tokio::test]
+    async fn test_watch_concurrent_modification_detected() {
+        // WATCH should detect when another "client" modifies a watched key
+        // between WATCH and EXEC
+        let engine = create_engine();
+        let handler = CommandHandler::new(Arc::clone(&engine));
+
+        engine
+            .set(b"balance".to_vec(), b"100".to_vec(), None)
+            .await
+            .unwrap();
+
+        // Client 1: WATCH balance
+        let mut state = TransactionState::new();
+        handle_watch(&mut state, &engine, &[b"balance".to_vec()]).unwrap();
+
+        // Client 2: modifies balance between WATCH and EXEC
+        let engine2 = Arc::clone(&engine);
+        let handler2 = CommandHandler::new(Arc::clone(&engine2));
+        let mut state2 = TransactionState::new();
+        handle_multi(&mut state2).unwrap();
+        queue_command(
+            &mut state2,
+            Command {
+                name: "SET".to_string(),
+                args: vec![b"balance".to_vec(), b"50".to_vec()],
+            },
+        )
+        .unwrap();
+        let result2 = handle_exec(&mut state2, &handler2, &engine).await.unwrap();
+        // Client 2's transaction should succeed
+        match result2 {
+            RespValue::Array(Some(ref results)) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0], RespValue::SimpleString("OK".to_string()));
+            }
+            _ => panic!("Expected Array response"),
+        }
+
+        // Client 1: MULTI + SET balance 200 + EXEC (should fail because balance was modified)
+        handle_multi(&mut state).unwrap();
+        queue_command(
+            &mut state,
+            Command {
+                name: "SET".to_string(),
+                args: vec![b"balance".to_vec(), b"200".to_vec()],
+            },
+        )
+        .unwrap();
+        let result1 = handle_exec(&mut state, &handler, &engine).await.unwrap();
+        // Should return nil (transaction aborted)
+        assert_eq!(result1, RespValue::BulkString(None));
+
+        // Balance should remain at 50 (client 2's value)
+        let val = engine.get(b"balance").await.unwrap().unwrap();
+        assert_eq!(val, b"50");
+    }
+
+    #[tokio::test]
+    async fn test_discard_clears_all_state() {
+        let engine = create_engine();
+        let mut state = TransactionState::new();
+
+        // WATCH some keys
+        engine
+            .set(b"k1".to_vec(), b"v1".to_vec(), None)
+            .await
+            .unwrap();
+        handle_watch(&mut state, &engine, &[b"k1".to_vec(), b"k2".to_vec()]).unwrap();
+        assert_eq!(state.watched_keys.len(), 2);
+
+        // Start MULTI and queue commands
+        handle_multi(&mut state).unwrap();
+        assert!(state.in_multi);
+        queue_command(
+            &mut state,
+            Command {
+                name: "SET".to_string(),
+                args: vec![b"k1".to_vec(), b"new".to_vec()],
+            },
+        )
+        .unwrap();
+        queue_command(
+            &mut state,
+            Command {
+                name: "SET".to_string(),
+                args: vec![b"k2".to_vec(), b"new2".to_vec()],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.queue.len(), 2);
+
+        // DISCARD should clear everything
+        handle_discard(&mut state).unwrap();
+        assert!(!state.in_multi);
+        assert!(state.queue.is_empty());
+        assert!(state.watched_keys.is_empty());
+        assert!(!state.dirty);
+        assert!(!state.has_command_errors);
+        assert!(state.queued_errors.is_empty());
+    }
+
+    #[test]
+    fn test_extract_keys_single_key_commands() {
+        let cmd = Command {
+            name: "SET".to_string(),
+            args: vec![b"mykey".to_vec(), b"myval".to_vec()],
+        };
+        assert_eq!(extract_keys_from_command(&cmd), vec![b"mykey".to_vec()]);
+
+        let cmd = Command {
+            name: "GET".to_string(),
+            args: vec![b"mykey".to_vec()],
+        };
+        assert_eq!(extract_keys_from_command(&cmd), vec![b"mykey".to_vec()]);
+
+        let cmd = Command {
+            name: "INCR".to_string(),
+            args: vec![b"counter".to_vec()],
+        };
+        assert_eq!(extract_keys_from_command(&cmd), vec![b"counter".to_vec()]);
+    }
+
+    #[test]
+    fn test_extract_keys_multi_key_commands() {
+        let cmd = Command {
+            name: "MSET".to_string(),
+            args: vec![
+                b"k1".to_vec(),
+                b"v1".to_vec(),
+                b"k2".to_vec(),
+                b"v2".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"k1".to_vec(), b"k2".to_vec()]
+        );
+
+        let cmd = Command {
+            name: "DEL".to_string(),
+            args: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_no_key_commands() {
+        let cmd = Command {
+            name: "PING".to_string(),
+            args: vec![],
+        };
+        assert!(extract_keys_from_command(&cmd).is_empty());
+
+        let cmd = Command {
+            name: "INFO".to_string(),
+            args: vec![b"server".to_vec()],
+        };
+        assert!(extract_keys_from_command(&cmd).is_empty());
+    }
+
+    #[test]
+    fn test_extract_keys_two_key_commands() {
+        let cmd = Command {
+            name: "RENAME".to_string(),
+            args: vec![b"old".to_vec(), b"new".to_vec()],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"old".to_vec(), b"new".to_vec()]
+        );
+
+        let cmd = Command {
+            name: "LMOVE".to_string(),
+            args: vec![
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"src".to_vec(), b"dst".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_numkeys_commands() {
+        let cmd = Command {
+            name: "ZINTERSTORE".to_string(),
+            args: vec![
+                b"dest".to_vec(),
+                b"2".to_vec(),
+                b"zset1".to_vec(),
+                b"zset2".to_vec(),
+                b"WEIGHTS".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"dest".to_vec(), b"zset1".to_vec(), b"zset2".to_vec()]
+        );
     }
 }

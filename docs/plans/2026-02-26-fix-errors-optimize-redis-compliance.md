@@ -104,15 +104,15 @@ Use `atomic_modify` for all collection operations and upgrade sorted set data st
 
 Implement proper transaction isolation so queued commands execute atomically.
 
-- [ ] Add `lock_keys(keys: &[Vec<u8>]) -> KeyLockGuard` to StorageEngine that locks multiple keys in sorted order (prevents deadlocks)
-- [ ] Before EXEC execution, collect all keys from queued commands
-- [ ] Lock all keys atomically using sorted-order locking
-- [ ] Execute all queued commands while holding locks
-- [ ] Release locks after EXEC completes (via Drop on guard)
-- [ ] Verify WATCH correctly detects modifications between WATCH and EXEC (key version checking)
-- [ ] Verify DISCARD properly clears queued commands and releases WATCH
-- [ ] Write tests: two transactions racing on overlapping keys, WATCH detecting concurrent modification, DISCARD cleanup
-- [ ] Run project test suite - must pass before task 6
+- [x] Add `lock_keys(keys: &[Vec<u8>]) -> KeyLockGuard` to StorageEngine that locks multiple keys in sorted order (prevents deadlocks)
+- [x] Before EXEC execution, collect all keys from queued commands
+- [x] Lock all keys atomically using sorted-order locking
+- [x] Execute all queued commands while holding locks
+- [x] Release locks after EXEC completes (via Drop on guard)
+- [x] Verify WATCH correctly detects modifications between WATCH and EXEC (key version checking)
+- [x] Verify DISCARD properly clears queued commands and releases WATCH
+- [x] Write tests: two transactions racing on overlapping keys, WATCH detecting concurrent modification, DISCARD cleanup
+- [x] Run project test suite - must pass before task 6
 
 ### Task 6: SELECT Multi-Database Support
 
