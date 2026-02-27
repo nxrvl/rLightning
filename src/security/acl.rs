@@ -897,11 +897,10 @@ impl AclManager {
             "ACL denied command"
         );
 
-        if let Ok(mut log) = self.log.write() {
-            log.push_front(entry);
-            while log.len() > ACL_LOG_MAX_ENTRIES {
-                log.pop_back();
-            }
+        let mut log = self.log.write().unwrap_or_else(|e| e.into_inner());
+        log.push_front(entry);
+        while log.len() > ACL_LOG_MAX_ENTRIES {
+            log.pop_back();
         }
     }
 

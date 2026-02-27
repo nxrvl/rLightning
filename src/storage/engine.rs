@@ -949,6 +949,16 @@ impl StorageEngine {
         }
     }
 
+    /// Synchronous variant of increment_write_counters for use in non-async contexts
+    /// (e.g. atomic_modify). Uses try_read() which succeeds in virtually all cases.
+    fn increment_write_counters_sync(&self) {
+        if let Ok(counters) = self.write_counters.try_read() {
+            for counter in counters.iter() {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     /// Bump the version counter for a specific key (DB-scoped for WATCH isolation)
     pub fn bump_key_version(&self, key: &[u8]) {
         let db_idx = Self::current_db_idx();
@@ -2197,6 +2207,7 @@ impl StorageEngine {
                     }
                 }
                 self.bump_key_version(key);
+                self.increment_write_counters_sync();
                 Ok(result)
             }
             Entry::Vacant(vac) => {
@@ -2207,6 +2218,7 @@ impl StorageEngine {
                     self.key_count.fetch_add(1, Ordering::AcqRel);
                     vac.insert(StorageItem::new_with_type(val, data_type));
                     self.bump_key_version(key);
+                    self.increment_write_counters_sync();
                 }
                 Ok(result)
             }

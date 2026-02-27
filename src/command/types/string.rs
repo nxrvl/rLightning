@@ -184,7 +184,7 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
+    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
         return Err(CommandError::WrongType);
     }
 
@@ -309,7 +309,7 @@ pub async fn strlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key_type = engine.get_type(&key).await?;
     
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
+    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
         return Err(CommandError::WrongType);
     }
     
@@ -341,7 +341,7 @@ pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let key_type = engine.get_type(&key).await?;
     
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
+    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
         return Err(CommandError::WrongType);
     }
     
@@ -388,7 +388,7 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let key_type = engine.get_type(&key).await?;
     
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
+    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
         return Err(CommandError::WrongType);
     }
     
@@ -668,7 +668,7 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Check type
     if engine.exists(key).await? {
         let key_type = engine.get_type(key).await?;
-        if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
+        if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
             return Err(CommandError::WrongType);
         }
     }

@@ -247,8 +247,11 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
                         vec![]
                     }
                 }
-                "mget" | "mset" => {
+                "mget" => {
                     args[2..].iter().map(|a| RespValue::BulkString(Some(a.clone()))).collect()
+                }
+                "mset" | "msetnx" => {
+                    args[2..].iter().step_by(2).map(|a| RespValue::BulkString(Some(a.clone()))).collect()
                 }
                 _ => {
                     if args.len() >= 3 {
@@ -575,6 +578,8 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 // ---- SWAPDB ----
 
 /// Redis SWAPDB command - Swap two databases
+/// Delegates to StorageEngine::swap_db which acquires the cross-DB lock
+/// and bumps key versions for WATCH invalidation.
 pub async fn swapdb(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -589,44 +594,8 @@ pub async fn swapdb(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InvalidArgument("invalid DB index".to_string())
     })?;
 
-    if db1 >= 16 || db2 >= 16 {
-        return Err(CommandError::InvalidArgument(
-            "ERR invalid DB index".to_string(),
-        ));
-    }
-
-    if db1 == db2 {
-        return Ok(RespValue::SimpleString("OK".to_string()));
-    }
-
-    // Get both databases
-    let src = engine.get_db(db1);
-    let dst = engine.get_db(db2);
-
-    match (src, dst) {
-        (Some(db_a), Some(db_b)) => {
-            // Collect all entries from both databases
-            let entries_a: Vec<_> = db_a.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
-            let entries_b: Vec<_> = db_b.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
-
-            // Clear both
-            db_a.clear();
-            db_b.clear();
-
-            // Swap
-            for (k, v) in entries_a {
-                db_b.insert(k, v);
-            }
-            for (k, v) in entries_b {
-                db_a.insert(k, v);
-            }
-
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
-        _ => Err(CommandError::InvalidArgument(
-            "ERR invalid DB index".to_string(),
-        )),
-    }
+    engine.swap_db(db1, db2).await?;
+    Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 // ---- TIME ----
