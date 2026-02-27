@@ -345,7 +345,7 @@ impl AofPersistence {
                     
                     // Check if the file has grown enough to warrant a rewrite
                     let last_rewrite = *aof.last_rewrite.read().await;
-                    let rewrite_threshold = min_size as u64 * (1 + percentage as u64 / 100);
+                    let rewrite_threshold = min_size as u64 + (min_size as u64 * percentage as u64) / 100;
                     
                     if current_size > rewrite_threshold && last_rewrite.elapsed() > Duration::from_secs(3600) {
                         info!("AOF file size ({} bytes) exceeds threshold ({} bytes), triggering rewrite",

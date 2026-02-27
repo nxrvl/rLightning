@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::command::{Command, CommandError, CommandResult};
 use crate::command::handler::CommandHandler;
 use crate::networking::resp::RespValue;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, IN_TRANSACTION};
 
 /// Extract all keys that a command will access from its arguments.
 /// Used by EXEC to collect keys for transaction-level locking.
@@ -201,14 +201,18 @@ pub struct TransactionState {
     pub in_multi: bool,
     /// Queued commands waiting for EXEC
     pub queue: Vec<Command>,
-    /// Watched keys and their versions at WATCH time
-    pub watched_keys: HashMap<Vec<u8>, u64>,
+    /// Watched keys: maps (db_index, key) -> version_at_watch.
+    /// DB-scoped so that watching the same key name in different databases works correctly.
+    pub watched_keys: HashMap<(usize, Vec<u8>), u64>,
     /// Whether any watched key was modified (dirty flag)
     pub dirty: bool,
     /// Whether there was a command error during queuing (EXECABORT)
     pub has_command_errors: bool,
     /// Errors from queued commands (stored for EXEC response)
     pub queued_errors: Vec<(usize, CommandError)>,
+    /// Per-database flush epochs recorded at WATCH time.
+    /// Only databases that have watched keys are tracked.
+    pub flush_epochs_at_watch: HashMap<usize, u64>,
 }
 
 impl Default for TransactionState {
@@ -226,6 +230,7 @@ impl TransactionState {
             dirty: false,
             has_command_errors: false,
             queued_errors: Vec::new(),
+            flush_epochs_at_watch: HashMap::new(),
         }
     }
 
@@ -237,12 +242,21 @@ impl TransactionState {
         self.dirty = false;
         self.has_command_errors = false;
         self.queued_errors.clear();
+        self.flush_epochs_at_watch.clear();
     }
 
     /// Check if any watched keys have been modified since WATCH was called
     pub fn check_watched_keys(&self, engine: &StorageEngine) -> bool {
-        for (key, &watched_version) in &self.watched_keys {
-            let current_version = engine.get_key_version(key);
+        // Check if a FLUSH operation occurred in any watched database since WATCH
+        for (&db_index, &epoch) in &self.flush_epochs_at_watch {
+            if engine.get_flush_epoch_for_db(db_index) != epoch {
+                return true; // A flush happened in a watched DB, invalidate
+            }
+        }
+
+        // Check each watched key using its DB-scoped version
+        for ((db_index, key), &watched_version) in &self.watched_keys {
+            let current_version = engine.get_key_version_for_db(key, *db_index);
             if current_version != watched_version {
                 return true; // Key was modified
             }
@@ -283,6 +297,7 @@ pub fn handle_watch(
     state: &mut TransactionState,
     engine: &StorageEngine,
     args: &[Vec<u8>],
+    db_index: usize,
 ) -> CommandResult {
     if args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);
@@ -294,18 +309,24 @@ pub fn handle_watch(
         ));
     }
 
-    // Record the current version of each watched key
+    // Record flush epoch for this database (only if not already tracked)
+    state.flush_epochs_at_watch
+        .entry(db_index)
+        .or_insert_with(|| engine.get_flush_epoch_for_db(db_index));
+
+    // Record the current version of each watched key, keyed by (db_index, key)
     for key in args {
-        let version = engine.get_key_version(key);
-        state.watched_keys.insert(key.clone(), version);
+        let version = engine.get_key_version_for_db(key, db_index);
+        state.watched_keys.insert((db_index, key.clone()), version);
     }
 
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
-/// Handle the UNWATCH command - clear all watched keys
+/// Handle the UNWATCH command - clear all watched keys and flush epoch tracking
 pub fn handle_unwatch(state: &mut TransactionState) -> CommandResult {
     state.watched_keys.clear();
+    state.flush_epochs_at_watch.clear();
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -332,6 +353,21 @@ pub fn queue_command(state: &mut TransactionState, command: Command) -> CommandR
         "auth" => {
             return Err(CommandError::InternalError(
                 "AUTH inside MULTI is not allowed".to_string(),
+            ));
+        }
+        // Pub/sub commands change connection state and are not allowed inside MULTI
+        "subscribe" | "unsubscribe" | "psubscribe" | "punsubscribe"
+        | "ssubscribe" | "sunsubscribe" => {
+            return Err(CommandError::InternalError(
+                format!("Command not allowed inside MULTI: {}", cmd_lower),
+            ));
+        }
+        // Blocking commands would block the entire EXEC and are not allowed
+        "blpop" | "brpop" | "blmove" | "blmpop"
+        | "bzpopmin" | "bzpopmax" | "bzmpop"
+        | "wait" | "waitaof" => {
+            return Err(CommandError::InternalError(
+                format!("Command not allowed inside MULTI: {}", cmd_lower),
             ));
         }
         _ => {}
@@ -378,14 +414,19 @@ pub async fn handle_exec(
     // Lock all keys in sorted order to prevent deadlocks and ensure isolation
     let _lock_guard = engine.lock_keys(&all_keys).await;
 
-    // Execute all queued commands while holding locks
-    let mut results = Vec::with_capacity(commands.len());
-    for cmd in commands {
-        match handler.process(cmd, db_index).await {
-            Ok(response) => results.push(response),
-            Err(e) => results.push(RespValue::Error(e.to_string())),
+    // Execute all queued commands while holding locks.
+    // Set IN_TRANSACTION so nested lock_keys calls (e.g. from MSETNX) are no-ops,
+    // avoiding deadlocks since EXEC already holds all necessary locks.
+    let results = IN_TRANSACTION.scope(true, async {
+        let mut results = Vec::with_capacity(commands.len());
+        for cmd in commands {
+            match handler.process(cmd, db_index).await {
+                Ok(response) => results.push(response),
+                Err(e) => results.push(RespValue::Error(e.to_string())),
+            }
         }
-    }
+        results
+    }).await;
 
     // Clear transaction state (locks released when _lock_guard is dropped)
     state.reset();
@@ -493,11 +534,11 @@ mod tests {
         let mut state = TransactionState::new();
 
         let result =
-            handle_watch(&mut state, &engine, &[b"key1".to_vec(), b"key2".to_vec()]).unwrap();
+            handle_watch(&mut state, &engine, &[b"key1".to_vec(), b"key2".to_vec()], 0).unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         assert_eq!(state.watched_keys.len(), 2);
-        assert!(state.watched_keys.contains_key(&b"key1".to_vec()));
-        assert!(state.watched_keys.contains_key(&b"key2".to_vec()));
+        assert!(state.watched_keys.contains_key(&(0, b"key1".to_vec())));
+        assert!(state.watched_keys.contains_key(&(0, b"key2".to_vec())));
     }
 
     #[tokio::test]
@@ -505,7 +546,7 @@ mod tests {
         let engine = create_engine();
         let mut state = TransactionState::new();
 
-        let result = handle_watch(&mut state, &engine, &[]);
+        let result = handle_watch(&mut state, &engine, &[], 0);
         assert!(result.is_err());
     }
 
@@ -515,7 +556,7 @@ mod tests {
         let mut state = TransactionState::new();
         handle_multi(&mut state).unwrap();
 
-        let result = handle_watch(&mut state, &engine, &[b"key1".to_vec()]);
+        let result = handle_watch(&mut state, &engine, &[b"key1".to_vec()], 0);
         assert!(result.is_err());
     }
 
@@ -524,7 +565,7 @@ mod tests {
         let engine = create_engine();
         let mut state = TransactionState::new();
 
-        handle_watch(&mut state, &engine, &[b"key1".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"key1".to_vec()], 0).unwrap();
         assert_eq!(state.watched_keys.len(), 1);
 
         let result = handle_unwatch(&mut state).unwrap();
@@ -668,7 +709,7 @@ mod tests {
             .unwrap();
 
         // WATCH the key
-        handle_watch(&mut state, &engine, &[b"watched_key".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"watched_key".to_vec()], 0).unwrap();
 
         // Modify the key (simulating another client)
         engine
@@ -709,7 +750,7 @@ mod tests {
             .unwrap();
 
         // WATCH the key
-        handle_watch(&mut state, &engine, &[b"watched_key".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"watched_key".to_vec()], 0).unwrap();
 
         // Don't modify the key - start transaction directly
         handle_multi(&mut state).unwrap();
@@ -757,6 +798,7 @@ mod tests {
             &mut state,
             &engine,
             &[b"key1".to_vec(), b"key2".to_vec()],
+            0,
         )
         .unwrap();
 
@@ -810,7 +852,7 @@ mod tests {
         let engine = create_engine();
         let mut state = TransactionState::new();
 
-        handle_watch(&mut state, &engine, &[b"key1".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"key1".to_vec()], 0).unwrap();
         assert!(!state.watched_keys.is_empty());
 
         handle_multi(&mut state).unwrap();
@@ -876,7 +918,7 @@ mod tests {
         let mut state = TransactionState::new();
 
         // WATCH a key that doesn't exist
-        handle_watch(&mut state, &engine, &[b"nonexistent".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"nonexistent".to_vec()], 0).unwrap();
 
         // Create the key (modification)
         engine
@@ -911,7 +953,7 @@ mod tests {
             .unwrap();
 
         // WATCH the key
-        handle_watch(&mut state, &engine, &[b"mykey".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"mykey".to_vec()], 0).unwrap();
 
         // Delete the key
         engine.del(b"mykey").await.unwrap();
@@ -1084,7 +1126,7 @@ mod tests {
 
         // Client 1: WATCH balance
         let mut state = TransactionState::new();
-        handle_watch(&mut state, &engine, &[b"balance".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"balance".to_vec()], 0).unwrap();
 
         // Client 2: modifies balance between WATCH and EXEC
         let engine2 = Arc::clone(&engine);
@@ -1138,7 +1180,7 @@ mod tests {
             .set(b"k1".to_vec(), b"v1".to_vec(), None)
             .await
             .unwrap();
-        handle_watch(&mut state, &engine, &[b"k1".to_vec(), b"k2".to_vec()]).unwrap();
+        handle_watch(&mut state, &engine, &[b"k1".to_vec(), b"k2".to_vec()], 0).unwrap();
         assert_eq!(state.watched_keys.len(), 2);
 
         // Start MULTI and queue commands
