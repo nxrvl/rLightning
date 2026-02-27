@@ -15,7 +15,7 @@ pub fn parse_ttl(bytes: &[u8]) -> Result<Option<Duration>, CommandError> {
     let ttl_str = bytes_to_string(bytes)?;
     
     let ttl_seconds = ttl_str.parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument(format!("ERR value is not an integer or out of range: '{}'", ttl_str))
+        CommandError::InvalidArgument(format!("value is not an integer or out of range: '{}'", ttl_str))
     })?;
     
     if ttl_seconds <= 0 {

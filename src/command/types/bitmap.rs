@@ -25,7 +25,7 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let bit_str = bytes_to_string(&args[2])?;
 
     let offset: u64 = offset_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("ERR bit offset is not an integer or out of range".to_string())
+        CommandError::InvalidArgument("bit offset is not an integer or out of range".to_string())
     })?;
 
     // Redis limits offset to 2^32 - 1
@@ -36,7 +36,7 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let bit_value: u8 = bit_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("ERR bit is not an integer or out of range".to_string())
+        CommandError::InvalidArgument("bit is not an integer or out of range".to_string())
     })?;
 
     if bit_value > 1 {
@@ -84,7 +84,7 @@ pub async fn getbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let offset_str = bytes_to_string(&args[1])?;
 
     let offset: u64 = offset_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("ERR bit offset is not an integer or out of range".to_string())
+        CommandError::InvalidArgument("bit offset is not an integer or out of range".to_string())
     })?;
 
     check_string_type(engine, key).await?;
@@ -123,10 +123,10 @@ pub async fn bitcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         let end_str = bytes_to_string(&args[2])?;
 
         let start: i64 = start_str.parse().map_err(|_| {
-            CommandError::InvalidArgument("ERR value is not an integer or out of range".to_string())
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
         let end: i64 = end_str.parse().map_err(|_| {
-            CommandError::InvalidArgument("ERR value is not an integer or out of range".to_string())
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
 
         // Check for BIT or BYTE mode (Redis 7.0+)
@@ -196,7 +196,7 @@ pub async fn bitpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let bit_str = bytes_to_string(&args[1])?;
     let target_bit: u8 = bit_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("ERR bit is not an integer or out of range".to_string())
+        CommandError::InvalidArgument("bit is not an integer or out of range".to_string())
     })?;
 
     if target_bit > 1 {
@@ -323,7 +323,7 @@ pub async fn bitpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 fn parse_bitpos_range(args: &[Vec<u8>], bit_mode: bool) -> Result<(i64, i64, bool), CommandError> {
     let start = if args.len() >= 3 {
         bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
-            CommandError::InvalidArgument("ERR value is not an integer or out of range".to_string())
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?
     } else {
         0
@@ -352,7 +352,7 @@ fn parse_bitpos_range(args: &[Vec<u8>], bit_mode: bool) -> Result<(i64, i64, boo
     let (end, explicit_end) = if args.len() == 5 {
         let end_str = bytes_to_string(&args[3])?;
         let end_val = end_str.parse::<i64>().map_err(|_| {
-            CommandError::InvalidArgument("ERR value is not an integer or out of range".to_string())
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
         (end_val, true)
     } else {

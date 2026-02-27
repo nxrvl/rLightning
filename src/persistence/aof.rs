@@ -21,11 +21,13 @@ use crate::storage::item::{RedisDataType, StorageItem};
 const BUFFER_SIZE: usize = 4096; // 4KB buffer
 // These constants are defined in PersistenceConfig instead
 
-/// Represents a command to be written to the AOF
+/// Represents one or more commands to be written to the AOF atomically.
+/// Using a Vec allows SELECT + write-command pairs to be sent as a single
+/// unit through the channel, preventing interleaving with concurrent writers.
 #[derive(Debug, Clone)]
 pub struct AofEntry {
-    /// The RESP command
-    pub command: RespCommand,
+    /// The RESP commands (written together without yielding)
+    pub commands: Vec<RespCommand>,
     /// Whether to sync to disk after writing this entry
     pub sync: bool,
 }
@@ -114,30 +116,38 @@ impl AofPersistence {
                 tokio::select! {
                     // Handle new entries
                     Some(entry) = writer_rx.recv() => {
-                        // Serialize the command to RESP format
-                        let resp_cmd = RespValue::Array(Some(
-                            std::iter::once(RespValue::BulkString(Some(entry.command.name.clone())))
-                                .chain(entry.command.args.into_iter().map(|arg| RespValue::BulkString(Some(arg))))
-                                .collect()
-                        ));
+                        // Serialize and write all commands in this batch atomically
+                        let mut total_written = 0u64;
+                        let mut write_error = false;
+                        for command in entry.commands {
+                            let resp_cmd = RespValue::Array(Some(
+                                std::iter::once(RespValue::BulkString(Some(command.name.clone())))
+                                    .chain(command.args.into_iter().map(|arg| RespValue::BulkString(Some(arg))))
+                                    .collect()
+                            ));
 
-                        // Serialize and handle errors
-                        let serialized = match resp_cmd.serialize() {
-                            Ok(data) => data,
-                            Err(e) => {
-                                error!(command = ?resp_cmd, "Failed to serialize command for AOF: {:?}", e);
-                                continue;
+                            let serialized = match resp_cmd.serialize() {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    error!(command = ?resp_cmd, "Failed to serialize command for AOF: {:?}", e);
+                                    continue;
+                                }
+                            };
+
+                            if let Err(e) = writer.write_all(&serialized).await {
+                                error!(path = ?path, "Failed to write to AOF file: {:?}", e);
+                                write_error = true;
+                                break;
                             }
-                        };
+                            total_written += serialized.len() as u64;
+                        }
 
-                        // Write to the file
-                        if let Err(e) = writer.write_all(&serialized).await {
-                            error!(path = ?path, "Failed to write to AOF file: {:?}", e);
+                        if write_error {
                             continue;
                         }
 
                         // Update the file size
-                        *file_size.write().await += serialized.len() as u64;
+                        *file_size.write().await += total_written;
 
                         if entry.sync {
                             // Always policy: flush and fsync immediately
@@ -194,7 +204,9 @@ impl AofPersistence {
             let reader = BufReader::new(file);
             let mut line_count = 0;
             let mut command_count = 0;
-            
+            let mut current_db: usize = 0;
+            let mut skip_until_valid_select = false;
+
             // Process each line
             let mut parser = resp_parser::RespParser::new(reader);
             
@@ -227,9 +239,39 @@ impl AofPersistence {
                     _ => continue,
                 };
                 
-                // Execute the command
+                // Execute the command (handling SELECT for DB routing)
                 tokio::runtime::Handle::current().block_on(async {
-                    if let Err(e) = engine.process_command(&command).await {
+                    use crate::storage::engine::CURRENT_DB_INDEX;
+
+                    // Check if this is a SELECT command to switch DB context
+                    let upper_name: Vec<u8> = command.name.iter().map(|b| b.to_ascii_uppercase()).collect();
+                    if upper_name == b"SELECT" {
+                        if let Some(arg) = command.args.first()
+                            && let Ok(s) = std::str::from_utf8(arg)
+                                && let Ok(idx) = s.parse::<usize>() {
+                                    if idx >= crate::storage::engine::NUM_DATABASES {
+                                        warn!(db_index = idx, "AOF contains SELECT with invalid DB index >= {}, skipping subsequent commands until next valid SELECT", crate::storage::engine::NUM_DATABASES);
+                                        skip_until_valid_select = true;
+                                    } else {
+                                        current_db = idx;
+                                        skip_until_valid_select = false;
+                                        command_count += 1;
+                                    }
+                                }
+                        return;
+                    }
+
+                    // Skip commands if we encountered an invalid SELECT -
+                    // we don't know which DB they were intended for
+                    if skip_until_valid_select {
+                        warn!(command = ?command, "Skipping AOF command after invalid SELECT");
+                        return;
+                    }
+
+                    let result = CURRENT_DB_INDEX.scope(current_db, async {
+                        engine.process_command(&command).await
+                    }).await;
+                    if let Err(e) = result {
                         warn!(command = ?command, "Error processing AOF command: {:?}", e);
                     } else {
                         command_count += 1;
@@ -243,30 +285,42 @@ impl AofPersistence {
         }).await.map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?
     }
     
-    /// Append a command to the AOF
+    /// Append a single command to the AOF
+    #[allow(dead_code)]
     pub async fn append_command(&self, command: RespCommand, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
-        // Skip commands that don't modify data
-        if is_read_only_command(&command.name) {
+        self.append_commands_batch(vec![command], sync_policy).await
+    }
+
+    /// Append a batch of commands to the AOF atomically.
+    /// All commands in the batch are written together by the writer task without yielding,
+    /// ensuring that e.g. SELECT + write-command pairs cannot be interleaved with
+    /// concurrent calls from other connections.
+    pub async fn append_commands_batch(&self, commands: Vec<RespCommand>, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
+        // Filter out read-only commands
+        let commands: Vec<RespCommand> = commands.into_iter()
+            .filter(|cmd| !is_read_only_command(&cmd.name))
+            .collect();
+        if commands.is_empty() {
             return Ok(());
         }
-        
+
         // Determine if we need to sync based on the policy
         let sync = match sync_policy {
             AofSyncPolicy::Always => true,
             AofSyncPolicy::EverySecond => false,
             AofSyncPolicy::None => false,
         };
-        
-        // Create an AOF entry
+
+        // Create an AOF entry with all commands
         let entry = AofEntry {
-            command,
+            commands,
             sync,
         };
-        
+
         // Send to the writer task
         self.writer_tx.send(entry).await
             .map_err(|_| PersistenceError::Other("Failed to send command to AOF writer".to_string()))?;
-        
+
         Ok(())
     }
     
@@ -315,15 +369,15 @@ impl AofPersistence {
         
         debug!("Starting AOF rewrite to temporary file: {:?}", temp_path);
         
-        // Get a consistent snapshot of the data
-        let snapshot = match self.engine.snapshot().await {
+        // Get a consistent snapshot of all databases
+        let all_dbs = match self.engine.snapshot_all_dbs().await {
             Ok(data) => data,
             Err(e) => {
                 error!("Failed to create snapshot for AOF rewrite: {:?}", e);
                 return Err(PersistenceError::AofRewriteFailed(e.to_string()));
             }
         };
-        
+
         // Mark rewrite as in progress
         let mut in_progress = self.in_progress.lock().await;
         if *in_progress {
@@ -331,48 +385,66 @@ impl AofPersistence {
             return Ok(());
         }
         *in_progress = true;
-        
+
         // Spawn a blocking task for file operations
         let path = self.path.clone();
-        
+
         let result = tokio::task::spawn_blocking(move || -> Result<(), PersistenceError> {
             // Create parent directory if it doesn't exist
             ensure_dir_exists(&temp_path)?;
-            
+
             let file = File::create(&temp_path)
                 .map_err(PersistenceError::Io)?;
-            
+
             let mut writer = BufWriter::new(file);
-            
-            // Write each key using type-appropriate commands
-            for (key, item) in snapshot.iter() {
-                let commands = aof_rewrite_commands_for_item(key, item);
-                for args in commands {
-                    let resp_cmd = RespValue::Array(Some(
-                        args.into_iter().map(|arg: Vec<u8>| RespValue::BulkString(Some(arg))).collect()
-                    ));
 
-                    let serialized = resp_cmd.serialize()
-                        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+            // Write each database's data with SELECT commands
+            for (db_idx, snapshot) in all_dbs.iter().enumerate() {
+                if snapshot.is_empty() {
+                    continue; // Skip empty databases
+                }
 
-                    writer.write_all(&serialized)
-                        .map_err(PersistenceError::Io)?;
+                // Always write SELECT command to establish explicit DB context.
+                // This ensures replay correctness regardless of iteration order.
+                let select_cmd = RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"SELECT".to_vec())),
+                    RespValue::BulkString(Some(db_idx.to_string().into_bytes())),
+                ]));
+                let serialized = select_cmd.serialize()
+                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                writer.write_all(&serialized)
+                    .map_err(PersistenceError::Io)?;
+
+                // Write each key using type-appropriate commands
+                for (key, item) in snapshot.iter() {
+                    let commands = aof_rewrite_commands_for_item(key, item);
+                    for args in commands {
+                        let resp_cmd = RespValue::Array(Some(
+                            args.into_iter().map(|arg: Vec<u8>| RespValue::BulkString(Some(arg))).collect()
+                        ));
+
+                        let serialized = resp_cmd.serialize()
+                            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+
+                        writer.write_all(&serialized)
+                            .map_err(PersistenceError::Io)?;
+                    }
                 }
             }
-            
+
             // Ensure all data is flushed to disk
             writer.flush()
                 .map_err(PersistenceError::Io)?;
-            
+
             // Rename temp file to target file atomically
             let rename_result = fs::rename(&temp_path, &path);
-            
+
             if rename_result.is_err() {
                 error!("Failed to rename temp file during AOF rewrite: {:?}", rename_result);
             }
-            
+
             rename_result.map_err(|e| PersistenceError::AtomicRenameFailed(e.to_string()))?;
-            
+
             Ok(())
         }).await;
         
@@ -531,7 +603,7 @@ fn is_read_only_command(command: &[u8]) -> bool {
         b"XRANGE" | b"XREVRANGE" | b"XLEN" | b"XINFO" | b"XREAD" | b"XPENDING" |
         b"BITCOUNT" | b"BITPOS" | b"GETBIT" | b"SUBSTR" | b"GETRANGE" |
         b"LINDEX" | b"HEXISTS" | b"SMISMEMBER" |
-        b"PFCOUNT" | b"ECHO" | b"SELECT" | b"WAIT" | b"DEBUG" |
+        b"PFCOUNT" | b"ECHO" | b"WAIT" | b"DEBUG" |
         b"SLOWLOG" | b"MEMORY" | b"LATENCY" | b"MODULE" |
         b"CLUSTER" | b"SENTINEL" | b"SUBSCRIBE" | b"UNSUBSCRIBE" |
         b"PSUBSCRIBE" | b"PUNSUBSCRIBE" | b"PUBSUB" |
@@ -595,11 +667,17 @@ mod resp_parser {
                 Some('$') => {
                     let size = self.buffer[1..self.buffer.len() - 2].parse::<i64>()
                         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid bulk string size"))?;
-                    
+
                     if size < 0 {
-                        return Ok(Some(RespValue::SimpleString("nil".to_string())));
+                        return Ok(Some(RespValue::BulkString(None)));
                     }
-                    
+
+                    // Redis proto-max-bulk-len default is 512MB
+                    if size > 512 * 1024 * 1024 {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                            format!("Bulk string size {} exceeds maximum allowed (512MB)", size)));
+                    }
+
                     let mut bulk = vec![0; size as usize];
                     self.reader.read_exact(&mut bulk)?;
                     
@@ -614,9 +692,15 @@ mod resp_parser {
                         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid array size"))?;
                     
                     if count < 0 {
-                        return Ok(Some(RespValue::SimpleString("nil".to_string())));
+                        return Ok(Some(RespValue::Array(None)));
                     }
-                    
+
+                    // Sanity limit: Redis commands rarely exceed a few thousand elements
+                    if count > 1_048_576 {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                            format!("Array size {} exceeds maximum allowed (1048576)", count)));
+                    }
+
                     let mut array = Vec::with_capacity(count as usize);
                     for _ in 0..count {
                         if let Some(value) = self.next()? {
