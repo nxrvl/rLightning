@@ -729,7 +729,10 @@ impl Server {
 
         // CLIENT - connection management commands handled here with access to per-connection state
         if cmd_lower == "client" {
-            let response = Self::handle_client_command(&cmd.args, connections, conn_id)?;
+            let response = match Self::handle_client_command(&cmd.args, connections, conn_id) {
+                Ok(resp) => resp,
+                Err(e) => RespValue::Error(format!("ERR {}", e)),
+            };
             if let Ok(bytes) = response.serialize() {
                 response_buffer.extend_from_slice(&bytes);
             }
@@ -1355,37 +1358,29 @@ impl Server {
                 let result = CURRENT_DB_INDEX.scope(db_index, async {
                     transaction::handle_exec(tx_state, command_handler, engine, db_index).await
                 }).await?;
-                // Log transaction commands to AOF wrapped in MULTI/EXEC
+                // Log transaction commands to AOF wrapped in MULTI/EXEC as a single
+                // atomic batch to prevent interleaving with concurrent clients
                 if let Some(persistence_mgr) = persistence
                     && let RespValue::Array(Some(_)) = &result {
                         // Transaction succeeded (not aborted by WATCH)
-                        // Log MULTI first
-                        let multi_cmd = RespCommand {
-                            name: b"MULTI".to_vec(),
-                            args: vec![],
-                        };
-                        let _ = persistence_mgr.log_command(multi_cmd, aof_sync_policy).await;
-                        // Log each write command
+                        // Build the entire transaction as a single batch
+                        let mut batch = Vec::with_capacity(queued_commands.len() + 2);
+                        batch.push(RespCommand { name: b"MULTI".to_vec(), args: vec![] });
                         for queued_cmd in &queued_commands {
                             let qcmd_lower = queued_cmd.name.to_lowercase();
                             if ReplicationManager::is_write_command(&qcmd_lower) {
-                                let resp_cmd = RespCommand {
+                                batch.push(RespCommand {
                                     name: queued_cmd.name.as_bytes().to_vec(),
                                     args: queued_cmd.args.clone(),
-                                };
-                                let _ = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await;
+                                });
                             }
                         }
-                        // Log EXEC to complete the transaction boundary
-                        let exec_cmd = RespCommand {
-                            name: b"EXEC".to_vec(),
-                            args: vec![],
-                        };
-                        let _ = persistence_mgr.log_command(exec_cmd, aof_sync_policy).await;
+                        batch.push(RespCommand { name: b"EXEC".to_vec(), args: vec![] });
+                        let _ = persistence_mgr.log_commands_batch_for_db(batch, aof_sync_policy, db_index).await;
                     }
                 return Ok(result);
             },
-            "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args),
+            "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args, db_index),
             "unwatch" => return transaction::handle_unwatch(tx_state),
             _ => {}
         }
@@ -1406,7 +1401,7 @@ impl Server {
                     name: cmd.name.as_bytes().to_vec(),
                     args: cmd.args.clone(),
                 };
-                if let Err(e) = persistence_mgr.log_command(resp_cmd, aof_sync_policy).await {
+                if let Err(e) = persistence_mgr.log_command_for_db(resp_cmd, aof_sync_policy, db_index).await {
                     error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
                     // Command already executed; log the error but don't fail the response
                 }

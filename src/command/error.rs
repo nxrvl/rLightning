@@ -36,10 +36,10 @@ impl std::fmt::Display for CommandError {
                 write!(f, "WRONGTYPE Operation against a key holding the wrong kind of value")
             }
             CommandError::InvalidArgument(msg) => {
-                write!(f, "invalid argument: ERR {}", msg)
+                write!(f, "ERR {}", msg)
             }
             CommandError::UnknownCommand(cmd) => {
-                write!(f, "unknown command: {}", cmd.to_lowercase())
+                write!(f, "ERR unknown command '{}'", cmd.to_lowercase())
             }
             CommandError::NotANumber => {
                 write!(f, "ERR value is not an integer or out of range")
