@@ -504,6 +504,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize persistence manager with the configured settings
     let persistence = PersistenceManager::new(Arc::clone(&storage), persistence_config);
 
+    // Load persisted data (RDB/AOF) and start background persistence tasks
+    if let Err(e) = persistence.init().await {
+        error!("Failed to initialize persistence: {}", e);
+        return Err(Box::<dyn std::error::Error>::from(std::io::Error::other(
+            format!("Persistence initialization error: {}", e),
+        )));
+    }
+
     // Create replication configuration
     let replication_config = ReplicationConfig {
         master_host: settings.replication.master_host.clone(),

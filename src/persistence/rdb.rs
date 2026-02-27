@@ -27,6 +27,7 @@ const TYPE_SET: u8 = 2;
 const TYPE_ZSET: u8 = 3;
 const TYPE_HASH: u8 = 4;
 const TYPE_STREAM: u8 = 5;
+const TYPE_DB_SELECT: u8 = 254;
 const TYPE_EOF: u8 = 255;
 
 fn data_type_to_marker(dt: &RedisDataType) -> u8 {
@@ -118,9 +119,10 @@ impl RdbPersistence {
             hasher.update(&magic);
             hasher.update(&[version]);
             
-            // Read data: (key, value, data_type, ttl)
+            // Read data: (db_index, key, value, data_type, ttl)
             #[allow(clippy::type_complexity)]
-            let mut data: Vec<(Vec<u8>, Vec<u8>, RedisDataType, Option<Duration>)> = Vec::new();
+            let mut data: Vec<(usize, Vec<u8>, Vec<u8>, RedisDataType, Option<Duration>)> = Vec::new();
+            let mut current_db: usize = 0;
 
             loop {
                 let type_marker = reader.read_u8()
@@ -130,6 +132,22 @@ impl RdbPersistence {
 
                 if type_marker == TYPE_EOF {
                     break;
+                }
+
+                // Handle DB selector
+                if type_marker == TYPE_DB_SELECT {
+                    let db_idx = reader.read_u8()
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&[db_idx]);
+                    let idx = db_idx as usize;
+                    if idx >= crate::storage::engine::NUM_DATABASES {
+                        return Err(PersistenceError::CorruptedFile(
+                            format!("RDB contains DB selector {} which exceeds max databases ({})",
+                                    idx, crate::storage::engine::NUM_DATABASES)
+                        ));
+                    }
+                    current_db = idx;
+                    continue;
                 }
 
                 let data_type = marker_to_data_type(type_marker)
@@ -181,7 +199,7 @@ impl RdbPersistence {
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&value);
 
-                data.push((key, value, data_type, expiry));
+                data.push((current_db, key, value, data_type, expiry));
             }
 
             // Read and verify checksum
@@ -198,11 +216,16 @@ impl RdbPersistence {
             }
 
             // Transfer loaded data to the storage engine with correct data types
+            // Uses CURRENT_DB_INDEX task-local to route to the correct database
             tokio::runtime::Handle::current().block_on(async {
-                for (key, value, data_type, ttl) in data {
-                    let result = engine.set_with_type(key.clone(), value, data_type.clone(), ttl).await;
+                use crate::storage::engine::CURRENT_DB_INDEX;
+                for (db_idx, key, value, data_type, ttl) in data {
+                    let engine_ref = &engine;
+                    let result = CURRENT_DB_INDEX.scope(db_idx, async move {
+                        engine_ref.set_with_type(key.clone(), value, data_type.clone(), ttl).await
+                    }).await;
                     if let Err(e) = result {
-                        warn!(key = ?String::from_utf8_lossy(&key), data_type = ?data_type, "Error restoring key from RDB: {:?}", e);
+                        warn!(db = db_idx, "Error restoring key from RDB: {:?}", e);
                     }
                 }
             });
@@ -228,10 +251,10 @@ impl RdbPersistence {
         // Create a temporary file path
         let temp_path = self.path.with_extension("tmp");
         
-        // Get a consistent snapshot of the data
-        let data = self.engine.snapshot().await
+        // Get a consistent snapshot of all databases
+        let all_dbs = self.engine.snapshot_all_dbs().await
             .map_err(|e| PersistenceError::RdbSnapshotFailed(format!("Failed to get data snapshot: {:?}", e)))?;
-        
+
         // Perform file writing in a blocking task
         let temp_path_clone = temp_path.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<(), PersistenceError> {
@@ -240,88 +263,101 @@ impl RdbPersistence {
                 fs::create_dir_all(parent)
                     .map_err(|e| PersistenceError::DirectoryCreationFailed(e.to_string()))?;
             }
-            
+
             let file = File::create(&temp_path_clone)
                 .map_err(PersistenceError::Io)?;
-            
+
             let mut writer = BufWriter::new(file);
-            
+
             // Initialize CRC32 hasher
             let mut hasher = Hasher::new();
-            
+
             // Write magic string and version
             writer.write_all(RDB_MAGIC_STRING)
                 .map_err(PersistenceError::Io)?;
             hasher.update(RDB_MAGIC_STRING);
-            
+
             writer.write_u8(RDB_VERSION)
                 .map_err(PersistenceError::Io)?;
             hasher.update(&[RDB_VERSION]);
-            
-            // Write data
-            for (key, item) in data.iter() {
-                let type_marker = data_type_to_marker(&item.data_type);
-                
-                writer.write_u8(type_marker)
-                    .map_err(PersistenceError::Io)?;
-                hasher.update(&[type_marker]);
-                
-                // Write key
-                writer.write_u32::<BigEndian>(key.len() as u32)
-                    .map_err(PersistenceError::Io)?;
-                hasher.update(&(key.len() as u32).to_be_bytes());
-                
-                writer.write_all(key)
-                    .map_err(PersistenceError::Io)?;
-                hasher.update(key);
-                
-                // Write expiry information
-                if let Some(ttl) = item.ttl() {
-                    writer.write_u8(1) // Has expiry
-                        .map_err(PersistenceError::Io)?;
-                    hasher.update(&[1]);
-                    
-                    // Calculate absolute expiry time as a Unix timestamp
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    
-                    let expiry_time = now + ttl.as_secs();
-                    
-                    writer.write_u64::<BigEndian>(expiry_time)
-                        .map_err(PersistenceError::Io)?;
-                    hasher.update(&expiry_time.to_be_bytes());
-                } else {
-                    writer.write_u8(0) // No expiry
-                        .map_err(PersistenceError::Io)?;
-                    hasher.update(&[0]);
+
+            // Write data from all databases
+            for (db_idx, data) in all_dbs.iter().enumerate() {
+                if data.is_empty() {
+                    continue; // Skip empty databases
                 }
-                
-                // Write value (raw bytes for all types - collection types are already bincode-serialized)
-                writer.write_u32::<BigEndian>(item.value.len() as u32)
+
+                // Write DB selector marker
+                writer.write_u8(TYPE_DB_SELECT)
                     .map_err(PersistenceError::Io)?;
-                hasher.update(&(item.value.len() as u32).to_be_bytes());
-                
-                writer.write_all(&item.value)
+                hasher.update(&[TYPE_DB_SELECT]);
+                writer.write_u8(db_idx as u8)
                     .map_err(PersistenceError::Io)?;
-                hasher.update(&item.value);
+                hasher.update(&[db_idx as u8]);
+
+                for (key, item) in data.iter() {
+                    let type_marker = data_type_to_marker(&item.data_type);
+
+                    writer.write_u8(type_marker)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&[type_marker]);
+
+                    // Write key
+                    writer.write_u32::<BigEndian>(key.len() as u32)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&(key.len() as u32).to_be_bytes());
+
+                    writer.write_all(key)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(key);
+
+                    // Write expiry information
+                    if let Some(ttl) = item.ttl() {
+                        writer.write_u8(1) // Has expiry
+                            .map_err(PersistenceError::Io)?;
+                        hasher.update(&[1]);
+
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+
+                        let expiry_time = now + ttl.as_secs();
+
+                        writer.write_u64::<BigEndian>(expiry_time)
+                            .map_err(PersistenceError::Io)?;
+                        hasher.update(&expiry_time.to_be_bytes());
+                    } else {
+                        writer.write_u8(0) // No expiry
+                            .map_err(PersistenceError::Io)?;
+                        hasher.update(&[0]);
+                    }
+
+                    // Write value (raw bytes for all types - collection types are already bincode-serialized)
+                    writer.write_u32::<BigEndian>(item.value.len() as u32)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&(item.value.len() as u32).to_be_bytes());
+
+                    writer.write_all(&item.value)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&item.value);
+                }
             }
-            
+
             // Write EOF marker
             writer.write_u8(TYPE_EOF)
                 .map_err(PersistenceError::Io)?;
             hasher.update(&[TYPE_EOF]);
-            
+
             // Write CRC32 checksum
             let checksum = hasher.finalize();
             writer.write_u32::<BigEndian>(checksum)
                 .map_err(PersistenceError::Io)?;
-            
+
             // Ensure all data is flushed to disk
             writer.flush()
                 .map_err(PersistenceError::Io)?;
-            
+
             Ok(())
         }).await.map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?;
         
