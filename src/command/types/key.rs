@@ -453,18 +453,21 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 
     // Parse options
     let mut replace = false;
-    for arg in args.iter().skip(3) {
-        match bytes_to_string(arg)?.to_uppercase().as_str() {
+    let mut i = 3;
+    while i < args.len() {
+        match bytes_to_string(&args[i])?.to_uppercase().as_str() {
             "REPLACE" => replace = true,
             "ABSTTL" => {} // Accept but ignore
-            "IDLETIME" => {} // Accept but ignore
-            "FREQ" => {}     // Accept but ignore
+            "IDLETIME" | "FREQ" => {
+                i += 1; // Skip the value argument
+            }
             _ => {
                 return Err(CommandError::InvalidArgument(
                     "Unsupported RESTORE option".to_string(),
                 ));
             }
         }
+        i += 1;
     }
 
     // Deserialize: first byte is type, rest is value

@@ -132,8 +132,12 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             return Err(CommandError::WrongType);
         }
     } else {
-        // List doesn't exist, return nil (or empty array with count)
-        return Ok(RespValue::BulkString(None));
+        // List doesn't exist: return empty array when count is specified, nil otherwise
+        return if count.is_some() {
+            Ok(RespValue::Array(Some(vec![])))
+        } else {
+            Ok(RespValue::BulkString(None))
+        };
     }
 
     // Get the current list
@@ -216,7 +220,12 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             return Err(CommandError::WrongType);
         }
     } else {
-        return Ok(RespValue::BulkString(None));
+        // List doesn't exist: return empty array when count is specified, nil otherwise
+        return if count.is_some() {
+            Ok(RespValue::Array(Some(vec![])))
+        } else {
+            Ok(RespValue::BulkString(None))
+        };
     }
 
     // Get the current list
