@@ -57,9 +57,15 @@ impl HybridPersistence {
         Ok(())
     }
     
-    /// Append a command to the AOF
+    /// Append a single command to the AOF
+    #[allow(dead_code)]
     pub async fn append_command(&self, command: RespCommand, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
         self.aof.append_command(command, sync_policy).await
+    }
+
+    /// Append a batch of commands to the AOF atomically
+    pub async fn append_commands_batch(&self, commands: Vec<RespCommand>, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
+        self.aof.append_commands_batch(commands, sync_policy).await
     }
     
     /// Schedule periodic RDB snapshots and AOF rewrites
