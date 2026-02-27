@@ -15,6 +15,9 @@ tokio::task_local! {
     /// The currently active database index for this task/connection.
     /// Defaults to 0 (primary database) if not set.
     pub static CURRENT_DB_INDEX: usize;
+    /// Whether the current task is inside a MULTI/EXEC transaction execution.
+    /// When true, commands should skip their own key locking since EXEC already holds locks.
+    pub static IN_TRANSACTION: bool;
 }
 
 /// Number of databases supported (Redis default is 16)
@@ -39,6 +42,8 @@ pub enum SetResult {
 struct ExpirationEntry {
     expires_at: Instant,
     key: Vec<u8>,
+    /// Database index this key belongs to (for multi-DB expiration)
+    db_index: usize,
 }
 
 impl PartialOrd for ExpirationEntry {
@@ -135,8 +140,9 @@ pub struct StorageEngine {
     key_count: AtomicU64,
     /// Priority queue for efficient TTL management (O(log n) operations)
     expiration_queue: RwLock<BinaryHeap<ExpirationEntry>>,
-    /// Pattern index for common prefixes (optimizes KEYS command)
-    prefix_index: RwLock<HashMap<String, Vec<Vec<u8>>>>,
+    /// Pattern index for common prefixes (optimizes KEYS command), keyed by (db_index, prefix)
+    #[allow(clippy::type_complexity)]
+    prefix_index: RwLock<HashMap<(usize, String), Vec<Vec<u8>>>>,
     /// Additional databases (1-15) for multi-database support (SELECT/MOVE)
     extra_dbs: Vec<DashMap<Vec<u8>, StorageItem>>,
     /// Per-key version counter for WATCH (optimistic locking) support
@@ -144,7 +150,21 @@ pub struct StorageEngine {
     /// Global version counter for generating unique version numbers
     global_version: AtomicU64,
     /// Per-key mutexes for transaction-level locking (MULTI/EXEC isolation)
+    /// Keys are DB-scoped (prefixed with db_index) to prevent cross-DB contention
     key_locks: DashMap<Vec<u8>, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-database flush epoch counters for WATCH invalidation on FLUSHDB/FLUSHALL.
+    /// Each database has its own epoch so FLUSHDB on one DB doesn't invalidate watches on another.
+    flush_epochs: Vec<AtomicU64>,
+    /// Cross-database operation lock for snapshot consistency.
+    /// snapshot_all_dbs acquires a write lock to get a consistent view across all DBs.
+    /// Cross-DB operations (MOVE, SWAPDB) acquire a read lock so they don't run during snapshots.
+    cross_db_lock: RwLock<()>,
+    /// Packed mapping from logical database index to physical database index.
+    /// Each logical DB occupies 4 bits (one nibble): logical DB i is at bits [i*4, i*4+3].
+    /// SWAPDB atomically swaps both nibbles via a single atomic store, eliminating the
+    /// race window where two separate AtomicUsize stores could let concurrent readers
+    /// see an intermediate state (both logical DBs pointing to the same physical DB).
+    db_mapping: AtomicU64,
 }
 
 impl StorageEngine {
@@ -168,6 +188,9 @@ impl StorageEngine {
             key_versions: DashMap::with_capacity(256),
             global_version: AtomicU64::new(1),
             key_locks: DashMap::with_capacity(256),
+            flush_epochs: (0..NUM_DATABASES).map(|_| AtomicU64::new(0)).collect(),
+            cross_db_lock: RwLock::new(()),
+            db_mapping: AtomicU64::new(Self::identity_db_mapping()),
         });
         
         // Start the expiration task
@@ -189,47 +212,113 @@ impl StorageEngine {
         });
     }
     
-    /// Returns a reference to the currently active database based on the task-local db index.
-    /// Falls back to database 0 if no task-local is set (e.g., background tasks).
-    pub fn active_db(&self) -> &DashMap<Vec<u8>, StorageItem> {
-        let idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
-        if idx == 0 {
+    /// Build the identity db_mapping: logical DB i maps to physical DB i.
+    /// Packed as nibbles in a u64: DB 0 at bits [0:3], DB 1 at bits [4:7], etc.
+    const fn identity_db_mapping() -> u64 {
+        let mut mapping = 0u64;
+        let mut i = 0;
+        while i < NUM_DATABASES {
+            mapping |= (i as u64) << (i * 4);
+            i += 1;
+        }
+        mapping
+    }
+
+    /// Extract the physical database index for a given logical index from the packed mapping.
+    #[inline(always)]
+    fn physical_index_from_mapping(mapping: u64, logical_idx: usize) -> usize {
+        ((mapping >> (logical_idx * 4)) & 0xF) as usize
+    }
+
+    /// Returns a reference to a physical database by its physical index.
+    /// Physical index 0 = self.data, physical index 1-15 = self.extra_dbs[0..14].
+    fn get_physical_db(&self, physical_idx: usize) -> &DashMap<Vec<u8>, StorageItem> {
+        if physical_idx == 0 {
             &self.data
-        } else if idx < NUM_DATABASES {
-            &self.extra_dbs[idx - 1]
+        } else if physical_idx < NUM_DATABASES {
+            &self.extra_dbs[physical_idx - 1]
         } else {
-            &self.data // Fallback to DB 0 for invalid index
+            &self.data // Fallback to physical DB 0
         }
     }
 
-    /// Efficient expiration using priority queue + probabilistic sampling
+    /// Returns a reference to the currently active database based on the task-local db index.
+    /// Falls back to database 0 if no task-local is set (e.g., background tasks).
+    /// Uses packed db_mapping for logical-to-physical translation so SWAPDB works atomically
+    /// (a single AtomicU64 load gives a consistent snapshot of the entire mapping).
+    pub fn active_db(&self) -> &DashMap<Vec<u8>, StorageItem> {
+        let logical_idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+        if logical_idx < NUM_DATABASES {
+            let mapping = self.db_mapping.load(Ordering::Acquire);
+            let physical_idx = Self::physical_index_from_mapping(mapping, logical_idx);
+            self.get_physical_db(physical_idx)
+        } else {
+            self.get_physical_db(0) // Fallback to DB 0 for invalid index
+        }
+    }
+
+    /// Get the current flush epoch for a specific database (for WATCH invalidation on FLUSH operations)
+    pub fn get_flush_epoch_for_db(&self, db_index: usize) -> u64 {
+        self.flush_epochs[db_index].load(Ordering::Acquire)
+    }
+
+    /// Helper: get the current task-local database index (defaults to 0)
+    fn current_db_idx() -> usize {
+        CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0)
+    }
+
+    /// Helper: create a DB-scoped key for version tracking and key locks.
+    /// Prefixes the key with the db_index to prevent cross-DB collisions.
+    fn db_scoped_key(db_index: usize, key: &[u8]) -> Vec<u8> {
+        let mut scoped = Vec::with_capacity(key.len() + 8);
+        scoped.extend_from_slice(&(db_index as u64).to_le_bytes());
+        scoped.extend_from_slice(key);
+        scoped
+    }
+
+    /// Get a reference to a specific database by logical index.
+    /// Uses packed db_mapping for logical-to-physical translation.
+    pub fn get_db_by_index(&self, db_index: usize) -> &DashMap<Vec<u8>, StorageItem> {
+        if db_index < NUM_DATABASES {
+            let mapping = self.db_mapping.load(Ordering::Acquire);
+            let physical_idx = Self::physical_index_from_mapping(mapping, db_index);
+            self.get_physical_db(physical_idx)
+        } else {
+            self.get_physical_db(0)
+        }
+    }
+
+    /// Efficient expiration using priority queue + probabilistic sampling (all databases)
     async fn process_expired_keys(&self) {
         let now = Instant::now();
         let mut removed_count = 0;
         const MAX_REMOVALS_PER_CYCLE: usize = 100;
-        
+
         // Phase 1: Process expired keys from priority queue (O(log n) per removal)
         {
             let mut queue = self.expiration_queue.write().await;
-            
+
             while let Some(entry) = queue.peek() {
                 if entry.expires_at > now {
                     break; // No more expired keys in queue
                 }
-                
+
                 let expired_entry = queue.pop().unwrap();
                 drop(queue); // Release queue lock early
 
+                // Get the correct database for this entry
+                let db = self.get_db_by_index(expired_entry.db_index);
+
                 // Only remove the key if it is actually expired (it may have been refreshed with a new TTL)
-                let should_remove = match self.data.get(&expired_entry.key) {
+                let should_remove = match db.get(&expired_entry.key) {
                     Some(item) => item.is_expired(),
                     None => false, // Key already deleted
                 };
                 if should_remove
-                    && let Some((k, item)) = self.data.remove(&expired_entry.key) {
+                    && let Some((k, item)) = db.remove(&expired_entry.key) {
                         if !item.is_expired() {
                             // Key was refreshed concurrently — put it back
-                            self.data.insert(k, item);
+                            db.insert(k, item);
                         } else {
                             let size = Self::calculate_size(&k, &item.value) as u64;
                             self.current_memory.fetch_sub(size, Ordering::AcqRel);
@@ -237,58 +326,63 @@ impl StorageEngine {
                             removed_count += 1;
                         }
                     }
-                
+
                 // Limit removals per cycle to avoid blocking
                 if removed_count >= MAX_REMOVALS_PER_CYCLE {
                     break;
                 }
-                
+
                 // Reacquire queue lock for next iteration
                 queue = self.expiration_queue.write().await;
             }
         }
-        
-        // Phase 2: Probabilistic sampling for keys not in queue (cleanup)
+
+        // Phase 2: Probabilistic sampling for keys not in queue (cleanup across all DBs)
         // This handles keys that might have been missed or expired through lazy deletion
         if removed_count < MAX_REMOVALS_PER_CYCLE / 2 {
             self.probabilistic_cleanup().await;
         }
     }
-    
-    /// Probabilistic cleanup for keys not tracked in expiration queue
+
+    /// Probabilistic cleanup for keys not tracked in expiration queue (all databases)
     async fn probabilistic_cleanup(&self) {
         const SAMPLE_SIZE: usize = 20;
-        let mut keys_to_remove = Vec::new();
 
-        // Sample keys starting from a random offset to avoid always checking the same keys
-        let len = self.data.len();
-        let skip = if len > SAMPLE_SIZE { fastrand::usize(0..len) } else { 0 };
-        let mut sampled_count = 0;
-        for entry in self.data.iter().skip(skip) {
-            if sampled_count >= SAMPLE_SIZE {
-                break;
-            }
-            sampled_count += 1;
+        // Sample from all databases, not just DB 0
+        for db_idx in 0..NUM_DATABASES {
+            let db = self.get_db_by_index(db_idx);
+            let mut keys_to_remove = Vec::new();
 
-            if entry.value().is_expired() {
-                keys_to_remove.push(entry.key().clone());
-            }
-        }
-        // Wrap around to sample from the beginning if we hit the end
-        if sampled_count < SAMPLE_SIZE && skip > 0 {
-            for entry in self.data.iter().take(SAMPLE_SIZE - sampled_count) {
+            let len = db.len();
+            if len == 0 { continue; }
+            let skip = if len > SAMPLE_SIZE { fastrand::usize(0..len) } else { 0 };
+            let mut sampled_count = 0;
+            for entry in db.iter().skip(skip) {
+                if sampled_count >= SAMPLE_SIZE {
+                    break;
+                }
+                sampled_count += 1;
+
                 if entry.value().is_expired() {
                     keys_to_remove.push(entry.key().clone());
                 }
             }
-        }
-        
-        // Remove expired keys found in this sample
-        for key in keys_to_remove {
-            if let Some((k, item)) = self.data.remove(&key) {
-                let size = Self::calculate_size(&k, &item.value) as u64;
-                self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                self.key_count.fetch_sub(1, Ordering::AcqRel);
+            // Wrap around to sample from the beginning if we hit the end
+            if sampled_count < SAMPLE_SIZE && skip > 0 {
+                for entry in db.iter().take(SAMPLE_SIZE - sampled_count) {
+                    if entry.value().is_expired() {
+                        keys_to_remove.push(entry.key().clone());
+                    }
+                }
+            }
+
+            // Remove expired keys found in this sample
+            for key in keys_to_remove {
+                if let Some((k, item)) = db.remove(&key) {
+                    let size = Self::calculate_size(&k, &item.value) as u64;
+                    self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                }
             }
         }
     }
@@ -314,23 +408,34 @@ impl StorageEngine {
         }
     }
     
-    /// Add a key to the expiration queue
+    /// Add a key to the expiration queue (with current database index)
     async fn add_to_expiration_queue(&self, key: Vec<u8>, expires_at: Instant) {
+        let db_index = Self::current_db_idx();
+        self.add_to_expiration_queue_for_db(key, expires_at, db_index).await;
+    }
+
+    /// Add a key to the expiration queue for a specific database.
+    /// Used by cross-DB operations (e.g. MOVE) that need to enqueue TTL
+    /// in a database other than the current task-local one.
+    async fn add_to_expiration_queue_for_db(&self, key: Vec<u8>, expires_at: Instant, db_index: usize) {
         let mut queue = self.expiration_queue.write().await;
-        queue.push(ExpirationEntry { expires_at, key });
+        queue.push(ExpirationEntry { expires_at, key, db_index });
     }
     
-    /// Remove a key from expiration queue (used when TTL is removed)
+    /// Remove a key from expiration queue for the current database (used when TTL is removed).
+    /// Only removes entries matching both the key AND the current database index,
+    /// so removing TTL from `foo` in DB 0 won't affect `foo` in DB 1.
     async fn remove_from_expiration_queue(&self, key: &[u8]) {
+        let db_index = Self::current_db_idx();
         let mut queue = self.expiration_queue.write().await;
         // Note: BinaryHeap doesn't support efficient removal by key
         // In practice, we'll let the background task clean up stale entries
         // This is acceptable since the queue will filter out non-existent keys
-        
-        // For now, we rebuild the queue without the target key (expensive but rare operation)
+
+        // Rebuild the queue without the target key+db entry (expensive but rare operation)
         let entries: Vec<ExpirationEntry> = queue.drain().collect();
         for entry in entries {
-            if entry.key != key {
+            if !(entry.key == key && entry.db_index == db_index) {
                 queue.push(entry);
             }
         }
@@ -342,21 +447,29 @@ impl StorageEngine {
         "data:", "config:", "stats:", "log:", "queue:", "job:"
     ];
     
-    /// Update prefix indices when a key is added or removed
+    /// Update prefix indices when a key is added or removed (DB-scoped)
     async fn update_prefix_indices(&self, key: &[u8], is_insert: bool) {
+        let db_idx = Self::current_db_idx();
+        self.update_prefix_indices_for_db(key, is_insert, db_idx).await;
+    }
+
+    /// Update prefix indices for a specific database index.
+    /// Used by cross-DB operations (MOVE) that need to update the destination DB's prefix index.
+    async fn update_prefix_indices_for_db(&self, key: &[u8], is_insert: bool, db_idx: usize) {
         if let Ok(key_str) = std::str::from_utf8(key) {
             let mut index = self.prefix_index.write().await;
-            
+
             for &prefix in Self::INDEXED_PREFIXES {
                 if key_str.starts_with(prefix) {
-                    let entry = index.entry(prefix.to_string()).or_insert_with(Vec::new);
+                    let idx_key = (db_idx, prefix.to_string());
+                    let entry = index.entry(idx_key.clone()).or_insert_with(Vec::new);
                     if is_insert {
                         entry.push(key.to_vec());
                     } else {
                         entry.retain(|k| k != key);
                         // Clean up empty entries
                         if entry.is_empty() {
-                            index.remove(prefix);
+                            index.remove(&idx_key);
                         }
                     }
                     break; // Only index the first matching prefix
@@ -365,14 +478,15 @@ impl StorageEngine {
         }
     }
     
-    /// Extract prefix from a pattern for index lookup
-    fn extract_prefix_from_pattern(&self, pattern: &str) -> Option<String> {
+    /// Extract prefix from a pattern for index lookup (returns DB-scoped key)
+    fn extract_prefix_from_pattern(&self, pattern: &str) -> Option<(usize, String)> {
         // Check if pattern is a simple prefix pattern like "user:*"
         if pattern.ends_with('*') && !pattern[..pattern.len()-1].contains('*') {
             let prefix = &pattern[..pattern.len()-1];
             // Only return if it's one of our indexed prefixes
             if Self::INDEXED_PREFIXES.contains(&prefix) {
-                return Some(prefix.to_string());
+                let db_idx = Self::current_db_idx();
+                return Some((db_idx, prefix.to_string()));
             }
         }
         None
@@ -387,60 +501,77 @@ impl StorageEngine {
             if self.config.eviction_policy == EvictionPolicy::NoEviction {
                 return Err(StorageError::MemoryLimitExceeded);
             }
-            
-            // Evict items until we have enough space
+
+            // Evict items until we have enough space (search across all databases)
             while self.current_memory.load(Ordering::Acquire) as usize + required_size > self.config.max_memory {
-                // If there are no more items to evict, fail
-                if self.data.is_empty() {
+                // Check if there are any items to evict across all DBs
+                let total_keys: usize = self.data.len()
+                    + self.extra_dbs.iter().map(|db| db.len()).sum::<usize>();
+                if total_keys == 0 {
                     return Err(StorageError::MemoryLimitExceeded);
                 }
-                
-                // Find a victim based on the eviction policy
-                let victim_key = match self.config.eviction_policy {
-                    EvictionPolicy::LRU => {
-                        // Find the oldest accessed item
-                        self.data.iter()
-                            .min_by_key(|item| item.value().last_accessed)
-                            .map(|item| item.key().clone())
-                    },
-                    EvictionPolicy::Random => {
-                        // Pick a random key by skipping a random number of entries
-                        let len = self.data.len();
-                        if len == 0 {
-                            None
-                        } else {
-                            let skip = fastrand::usize(0..len);
-                            self.data.iter().nth(skip).map(|item| item.key().clone())
-                        }
-                    },
-                    EvictionPolicy::LFU => {
-                        // LFU not yet implemented, fall back to LRU
-                        tracing::warn!("LFU eviction policy not yet implemented, falling back to LRU");
-                        self.data.iter()
-                            .min_by_key(|item| item.value().last_accessed)
-                            .map(|item| item.key().clone())
-                    },
-                    _ => {
-                        // NoEviction is handled above, this is unreachable
-                        None
+
+                // Helper: find victim in a single DB
+                let find_victim_in_db = |db: &DashMap<Vec<u8>, StorageItem>| -> Option<Vec<u8>> {
+                    match self.config.eviction_policy {
+                        EvictionPolicy::LRU | EvictionPolicy::LFU => {
+                            db.iter()
+                                .min_by_key(|item| item.value().last_accessed)
+                                .map(|item| item.key().clone())
+                        },
+                        EvictionPolicy::Random => {
+                            let len = db.len();
+                            if len == 0 { None }
+                            else {
+                                let skip = fastrand::usize(0..len);
+                                db.iter().nth(skip).map(|item| item.key().clone())
+                            }
+                        },
+                        _ => None,
                     }
                 };
-                
-                // Remove the victim
-                if let Some(key) = victim_key {
-                    if let Some((k, item)) = self.data.remove(&key) {
+
+                // Find the best victim across all databases
+                let mut best_victim: Option<(Vec<u8>, usize, Instant)> = None; // (key, db_idx, last_accessed)
+                for db_idx in 0..NUM_DATABASES {
+                    let db = self.get_db_by_index(db_idx);
+                    if let Some(victim_key) = find_victim_in_db(db) {
+                        let should_replace = if self.config.eviction_policy == EvictionPolicy::Random {
+                            best_victim.is_none() // For random, just pick the first one found
+                        } else {
+                            // For LRU/LFU, compare last_accessed times
+                            if let Some(entry) = db.get(&victim_key) {
+                                match &best_victim {
+                                    None => true,
+                                    Some((_, _, best_time)) => entry.value().last_accessed < *best_time,
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        if should_replace {
+                            let la = db.get(&victim_key)
+                                .map(|e| e.value().last_accessed)
+                                .unwrap_or(Instant::now());
+                            best_victim = Some((victim_key, db_idx, la));
+                        }
+                    }
+                }
+
+                // Remove the victim from the correct database
+                if let Some((key, db_idx, _)) = best_victim {
+                    let db = self.get_db_by_index(db_idx);
+                    if let Some((k, item)) = db.remove(&key) {
                         let size = Self::calculate_size(&k, &item.value) as u64;
                         self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        // Decrement key count for evicted keys
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                     }
                 } else {
-                    // Somehow we have no items to evict
                     return Err(StorageError::MemoryLimitExceeded);
                 }
             }
         }
-        
+
         Ok(())
     }
     
@@ -490,11 +621,16 @@ impl StorageEngine {
                 }
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
+                // Bump version while OccupiedEntry still holds the shard lock,
+                // preventing a TOCTOU race with del_if_version_matches (MSETNX rollback).
+                self.bump_key_version(&key);
                 false
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                entry.insert(item);
+                // Bind RefMut to keep shard lock held during version bump
+                let _ref = entry.insert(item);
+                self.bump_key_version(&key);
                 true
             }
         };
@@ -509,9 +645,6 @@ impl StorageEngine {
             self.update_prefix_indices(&key, true).await;
             self.key_count.fetch_add(1, Ordering::AcqRel);
         }
-
-        // Bump key version for WATCH support
-        self.bump_key_version(&key);
         // Increment write counters
         self.increment_write_counters().await;
 
@@ -579,6 +712,37 @@ impl StorageEngine {
         }
     }
     
+    /// Atomically delete a key only if its version matches the expected value.
+    /// This prevents a TOCTOU race where a concurrent SET between a version check
+    /// and a del could have its value incorrectly deleted.
+    /// Used by MSETNX rollback to safely undo insertions without affecting concurrent writers.
+    pub async fn del_if_version_matches(&self, key: &[u8], expected_version: u64) -> bool {
+        use dashmap::mapref::entry::Entry;
+        match self.active_db().entry(key.to_vec()) {
+            Entry::Occupied(entry) => {
+                // While holding the entry's shard lock, check the version.
+                // A concurrent SET would need this same shard lock to write AND bump the
+                // version, so the version we read here is guaranteed consistent with the entry.
+                let db_idx = Self::current_db_idx();
+                let scoped = Self::db_scoped_key(db_idx, key);
+                let current_version = self.key_versions.get(&scoped).map(|v| *v).unwrap_or(0);
+                if current_version != expected_version {
+                    // Version changed - a concurrent writer overwrote this key, leave it alone
+                    return false;
+                }
+                // Version matches - safe to delete
+                let (k, item) = entry.remove_entry();
+                let size = Self::calculate_size(&k, &item.value) as u64;
+                self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                self.update_prefix_indices(&k, false).await;
+                self.key_count.fetch_sub(1, Ordering::AcqRel);
+                self.bump_key_version(&k);
+                true
+            }
+            Entry::Vacant(_) => false, // Key already gone
+        }
+    }
+
     /// Check if a key exists in the storage engine
     pub async fn exists(&self, key: &[u8]) -> StorageResult<bool> {
         // Check if the key exists and is not expired
@@ -705,15 +869,21 @@ impl StorageEngine {
         let mut prefix_index = self.prefix_index.write().await;
         prefix_index.clear();
 
+        // Bump flush epoch for ALL databases so WATCH detects the flush
+        for epoch in &self.flush_epochs {
+            epoch.fetch_add(1, Ordering::SeqCst);
+        }
+
         // Increment write counters
         self.increment_write_counters().await;
 
         Ok(())
     }
-    
+
     /// Flush the current database (the active database, not all databases)
     pub async fn flush_db(&self) -> StorageResult<()> {
         let db = self.active_db();
+        let db_idx = Self::current_db_idx();
         let size: u64 = db.iter()
             .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
             .sum();
@@ -722,15 +892,25 @@ impl StorageEngine {
         // Recalculate total key count across all databases
         let total: u64 = self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();
         self.key_count.store(total, Ordering::Release);
+
+        // Clear prefix index entries for this DB
+        let mut prefix_index = self.prefix_index.write().await;
+        prefix_index.retain(|(idx, _), _| *idx != db_idx);
+
+        // Bump flush epoch only for the flushed database (not other DBs)
+        self.flush_epochs[db_idx].fetch_add(1, Ordering::SeqCst);
+
         Ok(())
     }
     
-    /// Get a snapshot of the current data (the active database).
-    /// Note: Extra databases (1-15) are excluded because the persistence layer
-    /// does not yet support per-database serialization, and merging all databases
-    /// into a flat HashMap would silently lose data when keys share names across databases.
+    /// Get a snapshot of database 0 (for backward compatibility).
     pub async fn snapshot(&self) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
-        let db = self.active_db();
+        self.snapshot_db(0).await
+    }
+
+    /// Get a snapshot of a specific database by index.
+    pub async fn snapshot_db(&self, db_index: usize) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
+        let db = self.get_db_by_index(db_index);
         let mut snapshot = HashMap::with_capacity(db.len());
 
         for item in db.iter() {
@@ -740,6 +920,19 @@ impl StorageEngine {
         }
 
         Ok(snapshot)
+    }
+
+    /// Get a snapshot of all databases (for multi-DB persistence).
+    /// Returns a Vec indexed by database number, each containing the DB's data.
+    /// Acquires an exclusive cross-DB lock to prevent MOVE/SWAPDB from running
+    /// during the snapshot, ensuring a consistent view across all databases.
+    pub async fn snapshot_all_dbs(&self) -> StorageResult<Vec<HashMap<Vec<u8>, StorageItem>>> {
+        let _guard = self.cross_db_lock.write().await;
+        let mut snapshots = Vec::with_capacity(NUM_DATABASES);
+        for db_idx in 0..NUM_DATABASES {
+            snapshots.push(self.snapshot_db(db_idx).await?);
+        }
+        Ok(snapshots)
     }
     
     /// Register a write counter to be incremented on data modifications
@@ -756,22 +949,65 @@ impl StorageEngine {
         }
     }
 
-    /// Bump the version counter for a specific key (used by WATCH for optimistic locking)
+    /// Bump the version counter for a specific key (DB-scoped for WATCH isolation)
     pub fn bump_key_version(&self, key: &[u8]) {
-        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
-        self.key_versions.insert(key.to_vec(), new_version);
+        let db_idx = Self::current_db_idx();
+        self.bump_key_version_for_db(key, db_idx);
     }
 
-    /// Get the current version of a key (returns 0 if key has never been modified)
+    /// Bump the version counter for a specific key and return the new version.
+    /// This combines bump + get into a single operation to avoid a race window
+    /// where another writer could bump the version between separate bump/get calls.
+    pub fn bump_and_get_key_version(&self, key: &[u8]) -> u64 {
+        let db_idx = Self::current_db_idx();
+        let scoped = Self::db_scoped_key(db_idx, key);
+        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
+        self.key_versions.insert(scoped, new_version);
+        new_version
+    }
+
+    /// Bump the version counter for a specific key in a specific database.
+    /// Used by cross-DB operations (e.g. MOVE) that need to invalidate WATCH
+    /// in the destination database.
+    pub fn bump_key_version_for_db(&self, key: &[u8], db_index: usize) {
+        let scoped = Self::db_scoped_key(db_index, key);
+        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
+        self.key_versions.insert(scoped, new_version);
+    }
+
+    /// Get the current version of a key using the task-local DB index
+    #[allow(dead_code)]
     pub fn get_key_version(&self, key: &[u8]) -> u64 {
-        self.key_versions.get(key).map(|v| *v).unwrap_or(0)
+        let db_idx = Self::current_db_idx();
+        self.get_key_version_for_db(key, db_idx)
+    }
+
+    /// Get the current version of a key for a specific database
+    pub fn get_key_version_for_db(&self, key: &[u8], db_index: usize) -> u64 {
+        let scoped = Self::db_scoped_key(db_index, key);
+        self.key_versions.get(&scoped).map(|v| *v).unwrap_or(0)
+    }
+
+    /// Check if the current task is inside a MULTI/EXEC transaction execution.
+    pub fn in_transaction() -> bool {
+        IN_TRANSACTION.try_with(|v| *v).unwrap_or(false)
     }
 
     /// Lock multiple keys in sorted order for transaction isolation.
-    /// Keys are sorted and deduplicated to prevent deadlocks.
+    /// Keys are DB-scoped, sorted and deduplicated to prevent deadlocks.
     /// Returns a KeyLockGuard that releases all locks when dropped.
+    /// If already inside a transaction (EXEC holds locks), returns an empty guard to avoid deadlock.
     pub async fn lock_keys(&self, keys: &[Vec<u8>]) -> KeyLockGuard {
-        let mut sorted_keys: Vec<Vec<u8>> = keys.to_vec();
+        // If we're already inside a MULTI/EXEC execution, EXEC already holds the locks.
+        // Acquiring them again would deadlock (tokio::sync::Mutex is not re-entrant).
+        if Self::in_transaction() {
+            return KeyLockGuard { _guards: Vec::new() };
+        }
+
+        let db_idx = Self::current_db_idx();
+        let mut sorted_keys: Vec<Vec<u8>> = keys.iter()
+            .map(|k| Self::db_scoped_key(db_idx, k))
+            .collect();
         sorted_keys.sort();
         sorted_keys.dedup();
 
@@ -938,6 +1174,9 @@ impl StorageEngine {
                     })?;
                 }
             },
+            // Transaction markers are no-ops during replay - the commands within
+            // the transaction have already been executed individually
+            b"MULTI" | b"EXEC" | b"DISCARD" => {},
             _ => {
                 tracing::warn!("Unknown command during AOF replay: {:?}", String::from_utf8_lossy(&command.name));
             }
@@ -984,13 +1223,11 @@ impl StorageEngine {
         self.key_count.load(Ordering::Acquire)
     }
 
-    /// Get the key count for a specific database
+    /// Get the key count for a specific database (logical index, uses db_mapping).
     #[allow(dead_code)]
     pub fn get_db_key_count(&self, db_index: usize) -> u64 {
-        if db_index == 0 {
-            self.data.len() as u64
-        } else if db_index < NUM_DATABASES {
-            self.extra_dbs[db_index - 1].len() as u64
+        if db_index < NUM_DATABASES {
+            self.get_db_by_index(db_index).len() as u64
         } else {
             0
         }
@@ -1037,12 +1274,13 @@ impl StorageEngine {
         Ok(random_key)
     }
 
-    /// Get a reference to a specific database (0 = primary, 1-15 = extra)
+    /// Get a reference to a specific database by logical index (0-15).
+    /// Uses db_mapping for logical-to-physical translation.
     pub fn get_db(&self, index: usize) -> Option<&DashMap<Vec<u8>, StorageItem>> {
-        if index == 0 {
-            Some(&self.data)
-        } else if index < NUM_DATABASES {
-            Some(&self.extra_dbs[index - 1])
+        if index < NUM_DATABASES {
+            let mapping = self.db_mapping.load(Ordering::Acquire);
+            let physical_idx = Self::physical_index_from_mapping(mapping, index);
+            Some(self.get_physical_db(physical_idx))
         } else {
             None
         }
@@ -1160,13 +1398,6 @@ impl StorageEngine {
             return Ok(false);
         };
 
-        // Check if destination exists (non-expired) and we're not replacing
-        if !replace
-            && let Some(entry) = db.get(&dst)
-                && !entry.value().is_expired() {
-                    return Ok(false);
-                }
-
         // Clone with fresh timestamps but same TTL
         let mut new_item = StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
         if let Some(expires_at) = src_item.expires_at {
@@ -1179,33 +1410,64 @@ impl StorageEngine {
         }
 
         let required_size = Self::calculate_size(&dst, &src_item.value);
+
+        // When replace=false, do a quick non-locking check to avoid evicting unrelated
+        // keys for a COPY that will be a no-op.  The authoritative check is still inside
+        // the entry API below (under the shard lock), so a concurrent insert between
+        // this peek and the entry() call is handled correctly.
+        if !replace
+            && let Some(existing) = db.get(&dst)
+            && !existing.is_expired()
+        {
+            return Ok(false);
+        }
+
         self.maybe_evict(required_size).await?;
 
-        // Use entry API for atomic insert-or-replace with correct memory/key accounting
+        // Use entry API for atomic check-and-insert, eliminating the TOCTOU race
+        // where a concurrent insert between a separate exists-check and the entry()
+        // call could be silently overwritten even when replace=false.
         use dashmap::mapref::entry::Entry;
-        match db.entry(dst.clone()) {
+        let is_new_key = match db.entry(dst.clone()) {
             Entry::Occupied(mut occ) => {
+                // Atomically check replace permission under the shard lock
+                if !replace && !occ.get().is_expired() {
+                    return Ok(false);
+                }
                 let old_size = Self::calculate_size(&dst, &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 occ.insert(new_item);
+                // Bump version while OccupiedEntry still holds the shard lock
+                self.bump_key_version(&dst);
+                false
             }
             Entry::Vacant(vac) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                vac.insert(new_item);
-                self.update_prefix_indices(&dst, true).await;
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                // Bind RefMut to keep shard lock held during version bump
+                let _ref = vac.insert(new_item);
+                self.bump_key_version(&dst);
+                true
             }
-        }
+        };
 
-        // Bump key version for WATCH support
-        self.bump_key_version(&dst);
+        if is_new_key {
+            self.update_prefix_indices(&dst, true).await;
+            self.key_count.fetch_add(1, Ordering::AcqRel);
+        }
         self.increment_write_counters().await;
         Ok(true)
     }
 
-    /// Move a key from the current (active) database to another database
+    /// Move a key from the current (active) database to another database.
+    /// Acquires a shared cross-DB lock to prevent snapshot_all_dbs from running
+    /// concurrently, which would otherwise see inconsistent cross-DB state.
+    ///
+    /// The source key is atomically extracted (entry API remove) before touching the
+    /// destination, preventing a TOCTOU race where a concurrent write to the source
+    /// between a clone and a delete would be silently lost.
     pub async fn move_key(&self, key: &[u8], dst_db: usize) -> StorageResult<bool> {
+        let _cross_db_guard = self.cross_db_lock.read().await;
         let src_db_idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
         if dst_db == src_db_idx {
             return Ok(false);  // Cannot move to the same database
@@ -1217,35 +1479,153 @@ impl StorageEngine {
         let dst = self.get_db(dst_db).unwrap();
         let src = self.active_db();
 
-        // Check if key exists in destination
-        if dst.contains_key(key) {
-            return Ok(false);
-        }
-
-        // Get the source item
-        let src_item = if let Some(entry) = src.get(key) {
-            if entry.value().is_expired() {
-                drop(entry);
-                self.remove_expired_key(key).await;
-                return Ok(false);
+        // Atomically extract the source item using the entry API.
+        // This eliminates the TOCTOU race where a concurrent SET to the source
+        // between a clone() and a del() would lose the concurrent write's data.
+        use dashmap::mapref::entry::Entry;
+        let (src_key, src_item) = match src.entry(key.to_vec()) {
+            Entry::Occupied(occ) => {
+                if occ.get().is_expired() {
+                    let (k, item) = occ.remove_entry();
+                    // Bookkeeping for expired key removal
+                    let size = Self::calculate_size(&k, &item.value) as u64;
+                    self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    return Ok(false);
+                }
+                occ.remove_entry()
             }
-            entry.value().clone()
-        } else {
-            return Ok(false);
+            Entry::Vacant(_) => return Ok(false),
         };
 
-        // Track the moved item's memory in the global counter
-        // (self.del will decrement for the source, so we add for the destination first)
-        let moved_size = Self::calculate_size(key, &src_item.value) as u64;
-        self.current_memory.fetch_add(moved_size, Ordering::AcqRel);
+        // Source is now atomically removed.  Try to insert into destination.
+        let src_expires_at = src_item.expires_at;
+        match dst.entry(key.to_vec()) {
+            Entry::Occupied(_) => {
+                // Destination already exists - MOVE fails (Redis semantics).
+                // Re-insert the source item to restore original state.
+                src.insert(src_key, src_item);
+                return Ok(false);
+            }
+            Entry::Vacant(vac) => {
+                drop(vac.insert(src_item));
+            }
+        }
 
-        // Insert into destination database
-        dst.insert(key.to_vec(), src_item);
+        // Move succeeded - do bookkeeping for both source removal and destination insertion.
+        // Memory: source removal subtracts, destination insertion adds the same size → net 0.
+        // Key count: source removal subtracts 1, destination insertion adds 1 → net 0.
+        // So neither global counter needs updating.
 
-        // Remove from source database (this decrements current_memory)
-        self.del(key).await?;
+        // Source-side bookkeeping: prefix index removal and WATCH invalidation.
+        self.update_prefix_indices(&src_key, false).await;
+        self.bump_key_version(&src_key);
+
+        // Destination-side bookkeeping: prefix index, WATCH, and TTL re-enqueue.
+        self.update_prefix_indices_for_db(key, true, dst_db).await;
+        self.bump_key_version_for_db(key, dst_db);
+
+        if let Some(expires_at) = src_expires_at
+            && expires_at > Instant::now() {
+                self.add_to_expiration_queue_for_db(key.to_vec(), expires_at, dst_db).await;
+            }
 
         Ok(true)
+    }
+
+    /// Swap two databases atomically using logical-to-physical mapping.
+    /// Instead of physically moving data (collect/clear/reinsert which races with concurrent
+    /// writers), this swaps the db_mapping entries so logical indices point to swapped physical
+    /// databases. The data swap is effectively instant, eliminating the race window.
+    pub async fn swap_db(&self, db1: usize, db2: usize) -> StorageResult<()> {
+        if db1 >= NUM_DATABASES || db2 >= NUM_DATABASES {
+            return Err(StorageError::InvalidDatabase);
+        }
+        if db1 == db2 {
+            return Ok(());
+        }
+
+        // Acquire exclusive cross-DB lock to prevent concurrent snapshots and cross-DB ops
+        let _guard = self.cross_db_lock.write().await;
+
+        // Compute the new mapping but do NOT store it yet.  We rewrite the
+        // expiration queue and prefix index first, while concurrent writers still
+        // use the OLD mapping and therefore add entries with old-style logical
+        // db indices.  Only after the metadata is consistent do we flip the
+        // mapping in a single atomic store.  This eliminates the window where a
+        // post-swap concurrent write's metadata entry gets incorrectly
+        // double-swapped by the rewrite.
+        let mapping = self.db_mapping.load(Ordering::Acquire);
+        let phys1 = Self::physical_index_from_mapping(mapping, db1);
+        let phys2 = Self::physical_index_from_mapping(mapping, db2);
+        let mut new_mapping = mapping;
+        new_mapping &= !(0xF_u64 << (db1 * 4)); // Clear db1's nibble
+        new_mapping |= (phys2 as u64) << (db1 * 4); // Set db1 → phys2
+        new_mapping &= !(0xF_u64 << (db2 * 4)); // Clear db2's nibble
+        new_mapping |= (phys1 as u64) << (db2 * 4); // Set db2 → phys1
+
+        // Fix expiration queue BEFORE the mapping swap: entries still carry
+        // pre-swap logical db indices, so the rewrite is straightforward.
+        {
+            let mut queue = self.expiration_queue.write().await;
+            let old_entries: Vec<ExpirationEntry> = std::iter::from_fn(|| queue.pop()).collect();
+            for entry in old_entries {
+                let new_db_index = if entry.db_index == db1 {
+                    db2
+                } else if entry.db_index == db2 {
+                    db1
+                } else {
+                    entry.db_index
+                };
+                queue.push(ExpirationEntry {
+                    expires_at: entry.expires_at,
+                    key: entry.key,
+                    db_index: new_db_index,
+                });
+            }
+        }
+
+        // Swap prefix index entries BEFORE the mapping swap.
+        {
+            let mut prefix_index = self.prefix_index.write().await;
+            // Collect entries for both databases
+            let db1_entries: Vec<_> = prefix_index.iter()
+                .filter(|((idx, _), _)| *idx == db1)
+                .map(|((_, prefix), keys)| (prefix.clone(), keys.clone()))
+                .collect();
+            let db2_entries: Vec<_> = prefix_index.iter()
+                .filter(|((idx, _), _)| *idx == db2)
+                .map(|((_, prefix), keys)| (prefix.clone(), keys.clone()))
+                .collect();
+            // Remove old entries for both databases
+            prefix_index.retain(|(idx, _), _| *idx != db1 && *idx != db2);
+            // Re-insert with swapped db indices
+            for (prefix, keys) in db1_entries {
+                prefix_index.insert((db2, prefix), keys);
+            }
+            for (prefix, keys) in db2_entries {
+                prefix_index.insert((db1, prefix), keys);
+            }
+        }
+
+        // NOW flip the mapping in a single atomic store.  From this point on,
+        // active_db()/get_db() resolve logical indices through the new mapping.
+        self.db_mapping.store(new_mapping, Ordering::Release);
+
+        // Bump key versions for all keys in both databases to invalidate WATCHes.
+        // Use the physical db references directly since we just swapped the mapping.
+        let db1_phys = self.get_physical_db(phys1);
+        let db2_phys = self.get_physical_db(phys2);
+        for entry in db1_phys.iter() {
+            self.bump_key_version_for_db(entry.key(), db1);
+            self.bump_key_version_for_db(entry.key(), db2);
+        }
+        for entry in db2_phys.iter() {
+            self.bump_key_version_for_db(entry.key(), db1);
+            self.bump_key_version_for_db(entry.key(), db2);
+        }
+
+        Ok(())
     }
 
     /// Get a raw StorageItem reference for OBJECT/DUMP commands
@@ -1327,11 +1707,12 @@ impl StorageEngine {
         Ok(true)
     }
 
-    /// Count keys that belong to a given hash slot
+    /// Count keys that belong to a given hash slot (cluster mode uses logical DB 0)
     pub async fn count_keys_in_slot(&self, slot: u16) -> usize {
         use crate::cluster::slot::key_hash_slot;
+        let db = self.get_db_by_index(0);
         let mut count = 0;
-        for entry in self.data.iter() {
+        for entry in db.iter() {
             if key_hash_slot(entry.key()) == slot {
                 count += 1;
             }
@@ -1339,11 +1720,12 @@ impl StorageEngine {
         count
     }
 
-    /// Get keys that belong to a given hash slot (up to count)
+    /// Get keys that belong to a given hash slot (up to count, cluster mode uses logical DB 0)
     pub async fn get_keys_in_slot(&self, slot: u16, count: usize) -> Vec<Vec<u8>> {
         use crate::cluster::slot::key_hash_slot;
+        let db = self.get_db_by_index(0);
         let mut keys = Vec::new();
-        for entry in self.data.iter() {
+        for entry in db.iter() {
             if key_hash_slot(entry.key()) == slot {
                 keys.push(entry.key().clone());
                 if keys.len() >= count {
@@ -1366,9 +1748,11 @@ impl StorageEngine {
     // ========== Atomic Primitives ==========
 
     /// Atomically set a key only if it does NOT exist (SET NX).
-    /// Returns true if the key was set, false if it already existed.
+    /// Returns (inserted, version) where version is the key version set on insert (0 if not inserted).
+    /// Returning the version allows callers (e.g. MSETNX rollback) to detect concurrent overwrites
+    /// without a gap between insert and version capture.
     #[allow(dead_code)]
-    pub async fn set_nx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<bool> {
+    pub async fn set_nx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<(bool, u64)> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
@@ -1388,7 +1772,11 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let (inserted, replaced_expired) = match self.active_db().entry(key.clone()) {
+        // Capture version inside the entry match block while the DashMap shard lock
+        // is still held. This prevents a concurrent SET from overwriting the key
+        // between our insert and version bump, which would cause MSETNX rollback
+        // to incorrectly delete the concurrent writer's value.
+        let (inserted, replaced_expired, version) = match self.active_db().entry(key.clone()) {
             Entry::Occupied(occ) => {
                 // Key exists - check if expired
                 if occ.get().is_expired() {
@@ -1397,16 +1785,21 @@ impl StorageEngine {
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                     occ.insert(item);
+                    // Bump version while OccupiedEntry still holds the shard lock
+                    let v = self.bump_and_get_key_version(&key);
                     // Replaced expired key - DashMap entry already exists, don't increment key_count
-                    (true, true)
+                    (true, true, v)
                 } else {
-                    (false, false)
+                    (false, false, 0)
                 }
             }
             Entry::Vacant(vac) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                vac.insert(item);
-                (true, false)
+                // insert() returns a RefMut that holds the shard lock
+                let _ref = vac.insert(item);
+                // Bump version while RefMut still holds the shard lock
+                let v = self.bump_and_get_key_version(&key);
+                (true, false, v)
             }
         };
 
@@ -1418,11 +1811,10 @@ impl StorageEngine {
             if !replaced_expired {
                 self.key_count.fetch_add(1, Ordering::AcqRel);
             }
-            self.bump_key_version(&key);
             self.increment_write_counters().await;
         }
 
-        Ok(inserted)
+        Ok((inserted, version))
     }
 
     /// Atomically set a key only if it DOES exist (SET XX).
@@ -1462,6 +1854,8 @@ impl StorageEngine {
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                     occ.insert(item);
+                    // Bump version while OccupiedEntry still holds the shard lock
+                    self.bump_key_version(&key);
                     true
                 }
             }
@@ -1472,7 +1866,6 @@ impl StorageEngine {
             if let Some(expires_at) = expires_at {
                 self.add_to_expiration_queue(key.clone(), expires_at).await;
             }
-            self.bump_key_version(&key);
             self.increment_write_counters().await;
         }
 
@@ -1550,6 +1943,9 @@ impl StorageEngine {
                         item.expires_at = preserved_expires;
                     }
                     occ.insert(item);
+                    // Bump version while OccupiedEntry still holds the shard lock,
+                    // preventing TOCTOU race with del_if_version_matches (MSETNX rollback).
+                    self.bump_key_version(&key);
                     let effective_expires = if keepttl && effectively_exists {
                         preserved_expires
                     } else {
@@ -1566,7 +1962,9 @@ impl StorageEngine {
                     (false, None, false, None)
                 } else {
                     self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                    vac.insert(item);
+                    // Bind RefMut to keep shard lock held during version bump
+                    let _ref = vac.insert(item);
+                    self.bump_key_version(&key);
                     (true, None, true, new_expires_at)
                 }
             }
@@ -1580,7 +1978,6 @@ impl StorageEngine {
                 self.update_prefix_indices(&key, true).await;
                 self.key_count.fetch_add(1, Ordering::AcqRel);
             }
-            self.bump_key_version(&key);
             self.increment_write_counters().await;
         }
 
@@ -1838,7 +2235,8 @@ impl StorageEngine {
     }
 
     /// Atomically get and delete a key. Returns the old value if it existed.
-    pub fn atomic_getdel(&self, key: &[u8]) -> Option<Vec<u8>> {
+    /// Returns Err(WrongType) if the key exists but is not a string type.
+    pub fn atomic_getdel(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
         use dashmap::mapref::entry::Entry;
         match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(occ) => {
@@ -1848,7 +2246,9 @@ impl StorageEngine {
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     occ.remove();
                     self.bump_key_version(key);
-                    None
+                    Ok(None)
+                } else if occ.get().data_type != RedisDataType::String {
+                    Err(StorageError::WrongType)
                 } else {
                     let old_value = occ.get().value.clone();
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
@@ -1856,10 +2256,10 @@ impl StorageEngine {
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     occ.remove();
                     self.bump_key_version(key);
-                    Some(old_value)
+                    Ok(Some(old_value))
                 }
             }
-            Entry::Vacant(_) => None,
+            Entry::Vacant(_) => Ok(None),
         }
     }
 
@@ -1879,23 +2279,29 @@ impl StorageEngine {
         let old_value = match self.active_db().entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
+                if !expired && occ.get().data_type != RedisDataType::String {
+                    return Err(StorageError::WrongType);
+                }
                 let old = if expired { None } else { Some(occ.get().value.clone()) };
                 let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 let item = StorageItem::new(value);
                 occ.insert(item);
+                // Bump version while OccupiedEntry still holds the shard lock
+                self.bump_key_version(&key);
                 old
             }
             Entry::Vacant(vac) => {
                 self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
-                vac.insert(StorageItem::new(value));
+                // Bind RefMut to keep shard lock held during version bump
+                let _ref = vac.insert(StorageItem::new(value));
+                self.bump_key_version(&key);
                 None
             }
         };
 
-        self.bump_key_version(&key);
         self.increment_write_counters().await;
         Ok(old_value)
     }
@@ -2268,11 +2674,12 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // First set_nx should succeed
-        let result = storage.set_nx(b"nx_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+        let (result, version) = storage.set_nx(b"nx_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
         assert!(result);
+        assert!(version > 0, "version should be non-zero on successful insert");
 
         // Second set_nx on same key should fail
-        let result = storage.set_nx(b"nx_key".to_vec(), b"value2".to_vec(), None).await.unwrap();
+        let (result, _) = storage.set_nx(b"nx_key".to_vec(), b"value2".to_vec(), None).await.unwrap();
         assert!(!result);
 
         // Value should still be the first one
@@ -2289,7 +2696,7 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
 
         // set_nx should succeed since key is expired
-        let result = storage.set_nx(b"nx_exp".to_vec(), b"new".to_vec(), None).await.unwrap();
+        let (result, _) = storage.set_nx(b"nx_exp".to_vec(), b"new".to_vec(), None).await.unwrap();
         assert!(result);
 
         let val = storage.get(b"nx_exp").await.unwrap();
@@ -2473,7 +2880,7 @@ mod tests {
         storage.set(b"gd_key".to_vec(), b"value".to_vec(), None).await.unwrap();
 
         // GETDEL should return the value and delete
-        let val = storage.atomic_getdel(b"gd_key");
+        let val = storage.atomic_getdel(b"gd_key").unwrap();
         assert_eq!(val, Some(b"value".to_vec()));
 
         // Key should be gone
@@ -2481,7 +2888,7 @@ mod tests {
         assert_eq!(val, None);
 
         // GETDEL on non-existent key
-        let val = storage.atomic_getdel(b"gd_key");
+        let val = storage.atomic_getdel(b"gd_key").unwrap();
         assert_eq!(val, None);
     }
 
@@ -2514,7 +2921,7 @@ mod tests {
             let sc = Arc::clone(&success_count);
             handles.push(tokio::spawn(async move {
                 let val = format!("value_{}", i).into_bytes();
-                if s.set_nx(b"race_key".to_vec(), val, None).await.unwrap() {
+                if s.set_nx(b"race_key".to_vec(), val, None).await.unwrap().0 {
                     sc.fetch_add(1, Ordering::SeqCst);
                 }
             }));

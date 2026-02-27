@@ -279,7 +279,10 @@ pub async fn decrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
 
-    let new_value = engine.atomic_incr(&args[0], -decrement)?;
+    let neg_decrement = decrement.checked_neg().ok_or_else(|| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let new_value = engine.atomic_incr(&args[0], neg_decrement)?;
     Ok(RespValue::Integer(new_value))
 }
 
@@ -393,9 +396,10 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let mut current_value = engine.get(&key).await?.unwrap_or_default();
 
     // Extend the current value if necessary
-    let required_len = offset + value_to_set.len();
-    // Redis limits strings to 512MB
     const MAX_STRING_SIZE: usize = 512 * 1024 * 1024;
+    let required_len = offset.checked_add(value_to_set.len()).ok_or_else(|| {
+        CommandError::InvalidArgument("string exceeds maximum allowed size (512MB)".to_string())
+    })?;
     if required_len > MAX_STRING_SIZE {
         return Err(CommandError::InvalidArgument(
             "string exceeds maximum allowed size (512MB)".to_string(),
@@ -432,45 +436,55 @@ pub async fn getset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::BulkString(old_value))
 }
 
-/// Redis MSETNX command - Set multiple key-value pairs, only if none of the keys exist
-/// Uses set_with_options NX for each key. If any key exists, none are set.
+/// Redis MSETNX command - Set multiple key-value pairs, only if none of the keys exist.
+/// Uses lock_keys for cross-key coordination (prevents races between concurrent MSETNX/EXEC)
+/// and set_nx per key for per-key atomicity (prevents races with concurrent SET operations).
 pub async fn msetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    // First pass: check if any key exists (without setting)
-    for i in (0..args.len()).step_by(2) {
-        if engine.exists(&args[i]).await? {
-            return Ok(RespValue::Integer(0));
-        }
-    }
+    // Collect all keys for atomic locking
+    let keys: Vec<Vec<u8>> = (0..args.len()).step_by(2).map(|i| args[i].clone()).collect();
 
-    // Second pass: set all keys using NX to ensure atomicity per-key.
-    // If a concurrent client creates a key between our check and set,
-    // the NX flag will prevent overwriting it.
-    let mut all_set = true;
-    let mut set_keys = Vec::new();
+    // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions
+    let _guard = engine.lock_keys(&keys).await;
+
+    // Use set_nx per key for per-key atomicity via DashMap's entry API.
+    // This prevents the TOCTOU race where a concurrent SET (which bypasses lock_keys)
+    // could create a key between an exists() check and a set() call.
+    // Track (key, version_after_insert) so rollback can avoid deleting a concurrent writer's value.
+    let mut inserted_keys: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut all_inserted = true;
+
     for i in (0..args.len()).step_by(2) {
-        match engine.set_with_options(
-            args[i].clone(), args[i+1].clone(), None, true, false, false, false
-        ).await? {
-            SetResult::Ok => {
-                set_keys.push(args[i].clone());
+        match engine.set_nx(args[i].clone(), args[i + 1].clone(), None).await {
+            Ok((true, version)) => {
+                inserted_keys.push((args[i].clone(), version));
             }
-            SetResult::NotSet => {
-                // A key was created concurrently; roll back what we set
-                all_set = false;
+            Ok((false, _)) => {
+                // Key already existed - rollback all previously inserted keys
+                all_inserted = false;
                 break;
             }
-            _ => {}
+            Err(e) => {
+                // Storage error - rollback and propagate
+                for (key, version) in &inserted_keys {
+                    // Atomically delete only if version still matches - prevents TOCTOU race
+                    // where a concurrent SET between version check and del could be lost
+                    engine.del_if_version_matches(key, *version).await;
+                }
+                return Err(CommandError::from(e));
+            }
         }
     }
 
-    if !all_set {
-        // Roll back: delete keys we already set
-        for key in &set_keys {
-            let _ = engine.del(key).await;
+    if !all_inserted {
+        // Rollback: atomically delete keys we inserted, but only if their version hasn't changed.
+        // del_if_version_matches checks version and deletes within the same DashMap shard lock,
+        // preventing a TOCTOU race where a concurrent SET could be lost.
+        for (key, version) in &inserted_keys {
+            engine.del_if_version_matches(key, *version).await;
         }
         return Ok(RespValue::Integer(0));
     }
@@ -738,23 +752,14 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis GETDEL command - Get the value of a key and delete it
-/// Uses atomic_getdel for thread-safe get-and-delete
+/// Uses atomic_getdel for thread-safe get-and-delete with atomic type checking
 pub async fn getdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
     let key = &args[0];
-
-    // Check type before atomic operation
-    if engine.exists(key).await? {
-        let key_type = engine.get_type(key).await?;
-        if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" {
-            return Err(CommandError::WrongType);
-        }
-    }
-
-    let value = engine.atomic_getdel(key);
+    let value = engine.atomic_getdel(key)?;
     Ok(RespValue::BulkString(value))
 }
 
