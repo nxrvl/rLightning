@@ -24,9 +24,16 @@ register('transactions', async (redis, prefix) => {
   results.push(await runTest('MULTI_DISCARD', cat, async () => {
     const k = key(prefix, 'tx:discard');
     await redis.set(k, 'original');
-    await redis.call('MULTI');
-    await redis.call('SET', k, 'changed');
-    await redis.call('DISCARD');
+    // Use a dedicated connection to ensure MULTI/DISCARD run on the same connection
+    const conn = redis.duplicate();
+    try {
+      await conn.connect();
+      await conn.call('MULTI');
+      await conn.call('SET', k, 'changed');
+      await conn.call('DISCARD');
+    } finally {
+      conn.disconnect();
+    }
     const val = await redis.get(k);
     assertEqual('original', val);
     await redis.del(k);
