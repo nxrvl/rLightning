@@ -1,0 +1,154 @@
+========================================================================
+  rLightning vs Redis - Multi-Language Compatibility Report
+  Generated: 2026-03-02 23:18:27
+========================================================================
+
+------------------------------------------------------------------------
+  OVERALL SUMMARY
+------------------------------------------------------------------------
+
+  Client               Server           Total   Pass   Fail   Skip     Rate
+  -------------------------------------------------------------------
+  go-client            redis              145    145      0      0   100.0%
+  go-client            rlightning         145    142      3      0    97.9%
+
+  js-client            redis              145    145      0      0   100.0%
+  js-client            rlightning         145    142      3      0    97.9%
+
+  python-client        redis              145    145      0      0   100.0%
+  python-client        rlightning         145    142      3      0    97.9%
+
+------------------------------------------------------------------------
+  PER-CATEGORY PASS RATES
+------------------------------------------------------------------------
+
+  [GO]
+    Category                            redis      rlightning    Delta
+    -----------------------------------------------------------------
+    advanced_types             11/11  (100.0%)  10/11  ( 90.9%)  -9.1% !!
+    connection                  8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    edge_cases                 10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    go_specific                 5/5   (100.0%)   5/5   (100.0%)  +0.0%
+    hashes                     10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    js_specific                           N/A             N/A       ---
+    keys                       14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    lists                      11/11  (100.0%)  11/11  (100.0%)  +0.0%
+    pipeline                    5/5   (100.0%)   4/5   ( 80.0%)  -20.0% !!
+    pubsub                      4/4   (100.0%)   4/4   (100.0%)  +0.0%
+    python_specific                       N/A             N/A       ---
+    scripting                   6/6   (100.0%)   6/6   (100.0%)  +0.0%
+    server                      7/7   (100.0%)   6/7   ( 85.7%)  -14.3% !!
+    sets                        9/9   (100.0%)   9/9   (100.0%)  +0.0%
+    sorted_sets                14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    streams                     8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    strings                    18/18  (100.0%)  18/18  (100.0%)  +0.0%
+    transactions                5/5   (100.0%)   5/5   (100.0%)  +0.0%
+
+  [JS]
+    Category                            redis      rlightning    Delta
+    -----------------------------------------------------------------
+    advanced_types             11/11  (100.0%)  10/11  ( 90.9%)  -9.1% !!
+    connection                  8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    edge_cases                 10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    go_specific                           N/A             N/A       ---
+    hashes                     10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    js_specific                 5/5   (100.0%)   5/5   (100.0%)  +0.0%
+    keys                       14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    lists                      11/11  (100.0%)  11/11  (100.0%)  +0.0%
+    pipeline                    5/5   (100.0%)   4/5   ( 80.0%)  -20.0% !!
+    pubsub                      4/4   (100.0%)   4/4   (100.0%)  +0.0%
+    python_specific                       N/A             N/A       ---
+    scripting                   6/6   (100.0%)   6/6   (100.0%)  +0.0%
+    server                      7/7   (100.0%)   6/7   ( 85.7%)  -14.3% !!
+    sets                        9/9   (100.0%)   9/9   (100.0%)  +0.0%
+    sorted_sets                14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    streams                     8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    strings                    18/18  (100.0%)  18/18  (100.0%)  +0.0%
+    transactions                5/5   (100.0%)   5/5   (100.0%)  +0.0%
+
+  [PYTHON]
+    Category                            redis      rlightning    Delta
+    -----------------------------------------------------------------
+    advanced_types             11/11  (100.0%)  10/11  ( 90.9%)  -9.1% !!
+    connection                  8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    edge_cases                 10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    go_specific                           N/A             N/A       ---
+    hashes                     10/10  (100.0%)  10/10  (100.0%)  +0.0%
+    js_specific                           N/A             N/A       ---
+    keys                       14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    lists                      11/11  (100.0%)  11/11  (100.0%)  +0.0%
+    pipeline                    5/5   (100.0%)   4/5   ( 80.0%)  -20.0% !!
+    pubsub                      4/4   (100.0%)   4/4   (100.0%)  +0.0%
+    python_specific             5/5   (100.0%)   5/5   (100.0%)  +0.0%
+    scripting                   6/6   (100.0%)   6/6   (100.0%)  +0.0%
+    server                      7/7   (100.0%)   6/7   ( 85.7%)  -14.3% !!
+    sets                        9/9   (100.0%)   9/9   (100.0%)  +0.0%
+    sorted_sets                14/14  (100.0%)  14/14  (100.0%)  +0.0%
+    streams                     8/8   (100.0%)   8/8   (100.0%)  +0.0%
+    strings                    18/18  (100.0%)  18/18  (100.0%)  +0.0%
+    transactions                5/5   (100.0%)   5/5   (100.0%)  +0.0%
+
+------------------------------------------------------------------------
+  COMPATIBILITY GAPS (Pass on Redis, Fail on rLightning)
+------------------------------------------------------------------------
+
+  [GO] 3 compatibility gap(s):
+
+    - [advanced_types] GEOHASH_accuracy
+      Status: fail
+      Error: assertion failed: Paris geohash should start with 'u0'
+
+    - [pipeline] pipeline_with_errors
+      Status: fail
+      Error: GET should succeed: WRONGTYPE Operation against a key holding the wrong kind of value
+
+    - [server] CONFIG_SET_and_GET
+      Status: fail
+      Error: expected allkeys-lru, got 
+
+  [JS] 3 compatibility gap(s):
+
+    - [advanced_types] GEOHASH_accuracy
+      Status: fail
+      Error: assertion failed: Paris geohash should start with 'u0'
+
+    - [pipeline] pipeline_with_errors
+      Status: fail
+      Error: assertion failed: GET should succeed
+
+    - [server] CONFIG_SET_and_GET
+      Status: fail
+      Error: expected "allkeys-lru", got ""
+
+  [PYTHON] 3 compatibility gap(s):
+
+    - [advanced_types] GEOHASH_accuracy
+      Status: fail
+      Error: assertion failed: Paris geohash should start with 'u0'
+
+    - [pipeline] pipeline_with_errors
+      Status: fail
+      Error: expected 'string_val', got server:ResponseError
+
+    - [server] CONFIG_SET_and_GET
+      Status: fail
+      Error: expected 'allkeys-lru', got ''
+
+------------------------------------------------------------------------
+  REVERSE GAPS (Fail on Redis, Pass on rLightning)
+------------------------------------------------------------------------
+
+  [GO] None
+
+  [JS] None
+
+  [PYTHON] None
+
+========================================================================
+  VERDICT
+========================================================================
+
+  9 COMPATIBILITY GAP(S) DETECTED across 3 client(s).
+  Review the gaps above and consider fixing the rLightning implementation.
+
+========================================================================
