@@ -41,14 +41,19 @@ func testTransactions(ctx context.Context, rdb *redis.Client, prefix string) []T
 		defer rdb.Del(ctx, k)
 		rdb.Set(ctx, k, "original", 0)
 
-		// Use raw commands for MULTI/DISCARD
-		err := rdb.Do(ctx, "MULTI").Err()
-		if err != nil {
+		// Use a dedicated connection for MULTI/DISCARD since these are
+		// connection-stateful commands that must execute on the same connection
+		conn := rdb.Conn()
+		defer conn.Close()
+
+		multiCmd := redis.NewCmd(ctx, "MULTI")
+		if err := conn.Process(ctx, multiCmd); err != nil {
 			return err
 		}
-		rdb.Do(ctx, "SET", k, "changed")
-		err = rdb.Do(ctx, "DISCARD").Err()
-		if err != nil {
+		setCmd := redis.NewCmd(ctx, "SET", k, "changed")
+		conn.Process(ctx, setCmd)
+		discardCmd := redis.NewCmd(ctx, "DISCARD")
+		if err := conn.Process(ctx, discardCmd); err != nil {
 			return err
 		}
 

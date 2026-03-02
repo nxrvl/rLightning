@@ -11,10 +11,17 @@ register('server', async (redis, prefix) => {
   }));
 
   results.push(await runTest('CONFIG_SET_and_GET', cat, async () => {
-    await redis.config('SET', 'maxmemory-policy', 'allkeys-lru');
-    const res = await redis.config('GET', 'maxmemory-policy');
-    // ioredis returns flat array: ['maxmemory-policy', 'allkeys-lru']
-    assertEqual('allkeys-lru', res[1]);
+    // Save original value to restore later
+    const orig = await redis.config('GET', 'maxmemory-policy');
+    const origVal = orig[1];
+    try {
+      await redis.config('SET', 'maxmemory-policy', 'allkeys-lru');
+      const res = await redis.config('GET', 'maxmemory-policy');
+      // ioredis returns flat array: ['maxmemory-policy', 'allkeys-lru']
+      assertEqual('allkeys-lru', res[1]);
+    } finally {
+      await redis.config('SET', 'maxmemory-policy', origVal);
+    }
   }));
 
   results.push(await runTest('FLUSHDB', cat, async () => {

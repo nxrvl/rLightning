@@ -1,1 +1,5 @@
 results/
+node_modules/
+__pycache__/
+*.pyc
+go-client/test-runner

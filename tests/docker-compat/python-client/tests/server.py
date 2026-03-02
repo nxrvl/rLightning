@@ -17,9 +17,15 @@ def test_server(r, prefix):
     results.append(run_test("CONFIG_GET", cat, t_config_get))
 
     def t_config_set():
-        r.config_set("maxmemory-policy", "allkeys-lru")
-        res = r.config_get("maxmemory-policy")
-        assert_equal("allkeys-lru", res["maxmemory-policy"])
+        # Save original value to restore later
+        orig = r.config_get("maxmemory-policy")
+        orig_val = orig["maxmemory-policy"]
+        try:
+            r.config_set("maxmemory-policy", "allkeys-lru")
+            res = r.config_get("maxmemory-policy")
+            assert_equal("allkeys-lru", res["maxmemory-policy"])
+        finally:
+            r.config_set("maxmemory-policy", orig_val)
     results.append(run_test("CONFIG_SET_and_GET", cat, t_config_set))
 
     def t_flushdb():
