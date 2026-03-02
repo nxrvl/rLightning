@@ -26,9 +26,18 @@ def test_transactions(r, prefix):
         k = key(prefix, "tx:discard")
         try:
             r.set(k, "original")
-            r.execute_command("MULTI")
-            r.execute_command("SET", k, "changed")
-            r.execute_command("DISCARD")
+            # Use a dedicated connection for MULTI/DISCARD since these are
+            # connection-stateful commands that must execute on the same connection
+            conn = r.connection_pool.get_connection("MULTI")
+            try:
+                conn.send_command("MULTI")
+                conn.read_response()
+                conn.send_command("SET", k, "changed")
+                conn.read_response()  # QUEUED
+                conn.send_command("DISCARD")
+                conn.read_response()
+            finally:
+                r.connection_pool.release(conn)
             assert_equal("original", r.get(k))
         finally:
             r.delete(k)

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -23,6 +24,14 @@ func testServer(ctx context.Context, rdb *redis.Client, prefix string) []TestRes
 	}))
 
 	results = append(results, RunTest("CONFIG_SET_and_GET", cat, func() error {
+		// Save original value to restore later
+		origRes, err := rdb.ConfigGet(ctx, "maxmemory-policy").Result()
+		if err != nil {
+			return err
+		}
+		origVal := origRes["maxmemory-policy"]
+		defer rdb.ConfigSet(ctx, "maxmemory-policy", origVal)
+
 		// Set maxmemory-policy and read it back
 		if err := rdb.ConfigSet(ctx, "maxmemory-policy", "allkeys-lru").Err(); err != nil {
 			return err
@@ -94,7 +103,7 @@ func testServer(ctx context.Context, rdb *redis.Client, prefix string) []TestRes
 
 	results = append(results, RunTest("WAIT_with_timeout", cat, func() error {
 		// WAIT 0 replicas with 100ms timeout - should return immediately
-		n, err := rdb.Wait(ctx, 0, 100*1).Result() // 100ms timeout, 0 replicas
+		n, err := rdb.Wait(ctx, 0, 100*time.Millisecond).Result()
 		if err != nil {
 			return err
 		}

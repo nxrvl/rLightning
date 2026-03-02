@@ -90,13 +90,17 @@ if [[ "$NO_CLEANUP" == true ]]; then
     trap - EXIT
 fi
 
-# Check Docker availability
+# Check dependencies
 if ! command -v docker &>/dev/null; then
     error "Docker is not installed or not in PATH"
     exit 1
 fi
 if ! docker info &>/dev/null; then
     error "Docker daemon is not running"
+    exit 1
+fi
+if ! command -v python3 &>/dev/null; then
+    error "python3 is required but not installed (used for JSON parsing and report generation)"
     exit 1
 fi
 
@@ -250,11 +254,17 @@ for server in "${SERVERS[@]}"; do
         # We check the JSON output to determine actual success.
         run_test_client "$client" "$server" "$result_file" "$log_file"
 
-        # Validate and summarize JSON output
-        if [[ -s "$result_file" ]] && python3 -c "import json; json.load(open('$result_file'))" 2>/dev/null; then
-            total=$(python3 -c "import json; r=json.load(open('$result_file')); print(r.get('summary', {}).get('total', len(r.get('results', []))))")
-            passed=$(python3 -c "import json; r=json.load(open('$result_file')); print(r.get('summary', {}).get('passed', sum(1 for t in r.get('results', []) if t.get('status') == 'pass')))")
-            failed=$(python3 -c "import json; r=json.load(open('$result_file')); print(r.get('summary', {}).get('failed', 0))")
+        # Validate and summarize JSON output (pass file path as argument to avoid injection)
+        if [[ -s "$result_file" ]] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$result_file" 2>/dev/null; then
+            read -r total passed failed <<< "$(python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1]))
+s = r.get('summary', {})
+t = s.get('total', len(r.get('results', [])))
+p = s.get('passed', sum(1 for x in r.get('results', []) if x.get('status') == 'pass'))
+f = s.get('failed', 0)
+print(t, p, f)
+" "$result_file")"
 
             if [[ "$failed" -gt 0 ]]; then
                 warn "  Results: ${passed}/${total} passed, ${failed} failed"
