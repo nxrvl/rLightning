@@ -72,6 +72,31 @@ docker run -d -p 6379:6379 rlightning:latest
 - **Comprehensive Redis protocol testing** in containerized environment
 - **Automatic cleanup** of test containers
 
+### Multi-Language Compatibility Tests
+
+The `tests/docker-compat/` directory contains a comprehensive multi-language compatibility test suite that tests rLightning against real Redis 7 using Go (go-redis/v9), JavaScript (ioredis), and Python (redis-py) client libraries. Each language implements 145 tests across 15 categories.
+
+```bash
+# Run full suite end-to-end (local mode - uses local Go/Node/Python, Docker for servers)
+cd tests/docker-compat && ./run-tests.sh --local
+
+# Run full suite with Docker clients (requires Docker networking for package downloads)
+cd tests/docker-compat && ./run-tests.sh
+
+# Run individual client against a server
+REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
+  go run ./tests/docker-compat/go-client/...
+REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
+  node tests/docker-compat/js-client/index.js
+REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
+  python tests/docker-compat/python-client/test_compat.py
+
+# Generate comparison report from collected results
+python tests/docker-compat/report/generate-report.py tests/docker-compat/results/
+```
+
+**Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Streams, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands
+
 ### Benchmarking
 
 ```bash
