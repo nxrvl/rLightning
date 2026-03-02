@@ -1,5 +1,6 @@
 """Category 11: Lua Scripting tests."""
 
+import redis as redis_lib
 from .framework import register, run_test, key, assert_equal, assert_true
 
 
@@ -38,13 +39,12 @@ def test_scripting(r, prefix):
     results.append(run_test("EVALSHA_after_SCRIPT_LOAD", cat, t_evalsha))
 
     def t_error_handling():
+        errored = False
         try:
             r.eval("return redis.call('GET')", 0)
-            raise Exception("should have raised error")
-        except Exception as e:
-            if "should have raised error" in str(e):
-                raise
-            # Expected error
+        except redis_lib.exceptions.ResponseError:
+            errored = True
+        assert_true(errored, "EVAL with bad call should raise ResponseError")
     results.append(run_test("script_error_handling", cat, t_error_handling))
 
     def t_call_vs_pcall():
@@ -52,12 +52,12 @@ def test_scripting(r, prefix):
         try:
             r.set(k, "string_val")
             # redis.call raises error on WRONGTYPE
+            errored = False
             try:
                 r.eval("return redis.call('LPUSH', KEYS[1], 'bad')", 1, k)
-                raise Exception("redis.call should propagate WRONGTYPE error")
-            except Exception as e:
-                if "redis.call should propagate" in str(e):
-                    raise
+            except redis_lib.exceptions.ResponseError:
+                errored = True
+            assert_true(errored, "redis.call should propagate WRONGTYPE error")
             # pcall catches the error
             res = r.eval(
                 "local ok, err = pcall(redis.call, 'LPUSH', KEYS[1], 'bad'); "

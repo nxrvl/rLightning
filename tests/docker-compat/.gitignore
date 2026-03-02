@@ -2,4 +2,5 @@ results/
 node_modules/
 __pycache__/
 *.pyc
+.venv/
 go-client/test-runner

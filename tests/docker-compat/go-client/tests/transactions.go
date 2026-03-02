@@ -51,7 +51,9 @@ func testTransactions(ctx context.Context, rdb *redis.Client, prefix string) []T
 			return err
 		}
 		setCmd := redis.NewCmd(ctx, "SET", k, "changed")
-		conn.Process(ctx, setCmd)
+		if err := conn.Process(ctx, setCmd); err != nil {
+			return err
+		}
 		discardCmd := redis.NewCmd(ctx, "DISCARD")
 		if err := conn.Process(ctx, discardCmd); err != nil {
 			return err

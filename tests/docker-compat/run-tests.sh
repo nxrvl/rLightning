@@ -137,8 +137,12 @@ run_test_client() {
                     node "$SCRIPT_DIR/js-client/index.js" > "$result_file" 2>"$log_file" || true
                 ;;
             python-client)
+                local py_bin="python3"
+                if [[ -x "$SCRIPT_DIR/python-client/.venv/bin/python" ]]; then
+                    py_bin="$SCRIPT_DIR/python-client/.venv/bin/python"
+                fi
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="pytest:" \
-                    python3 "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
+                    "$py_bin" "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
                 ;;
         esac
     else
@@ -199,7 +203,11 @@ elif [[ "$LOCAL_MODE" == true ]]; then
 
     if [[ -d "$SCRIPT_DIR/python-client" ]]; then
         log "  Installing python-client dependencies..."
-        (cd "$SCRIPT_DIR/python-client" && pip3 install -r requirements.txt -q 2>&1) || { error "Failed to install python-client dependencies"; exit 1; }
+        VENV_DIR="$SCRIPT_DIR/python-client/.venv"
+        if [[ ! -d "$VENV_DIR" ]]; then
+            python3 -m venv "$VENV_DIR" 2>&1 || { error "Failed to create Python venv"; exit 1; }
+        fi
+        ("$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/python-client/requirements.txt" -q 2>&1) || { error "Failed to install python-client dependencies"; exit 1; }
     fi
 
     success "Local build complete"
