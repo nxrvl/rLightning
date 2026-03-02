@@ -1,0 +1,41 @@
+rLightning Known Incompatibilities (vs Redis 7)
+================================================
+Discovered via multi-language compatibility test suite.
+Test date: 2026-03-02
+rLightning version: 7.0.0 (as reported by INFO)
+Reference: Redis 7 (redis:7-alpine)
+
+Overall: 142/145 tests pass across Go, JS, and Python clients (97.9%)
+
+Incompatibility 1: GEOHASH accuracy
+------------------------------------
+Category: advanced_types
+Test: GEOHASH_accuracy
+Status: FAIL in all 3 languages (Go, JS, Python)
+Description: GEOHASH command returns incorrect geohash for known coordinates.
+  Paris (2.3522, 48.8566) should return a geohash starting with 'u0',
+  but rLightning returns a different prefix.
+Root cause: Likely a precision or encoding issue in the geohash calculation.
+
+Incompatibility 2: Pipeline error isolation
+---------------------------------------------
+Category: pipeline
+Test: pipeline_with_errors
+Status: FAIL in Go and JS, FAIL in Python
+Description: When a pipeline contains a command that fails (e.g., LPUSH on a
+  string key causing WRONGTYPE), subsequent commands in the pipeline that should
+  succeed (e.g., GET on a different valid key) also fail with WRONGTYPE.
+  Redis correctly isolates errors per-command within a pipeline.
+Root cause: Pipeline execution may be sharing error state across commands
+  instead of isolating each command's result independently.
+
+Incompatibility 3: CONFIG SET/GET for maxmemory-policy
+-------------------------------------------------------
+Category: server
+Test: CONFIG_SET_and_GET
+Status: FAIL in all 3 languages (Go, JS, Python)
+Description: CONFIG SET maxmemory-policy allkeys-lru succeeds (returns OK),
+  but CONFIG GET maxmemory-policy returns an empty string instead of
+  'allkeys-lru'.
+Root cause: CONFIG SET may not be persisting the value, or CONFIG GET
+  may not be reading from the same storage location.

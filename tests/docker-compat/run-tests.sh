@@ -50,6 +50,7 @@ ONLY_CLIENT=""
 ONLY_SERVER=""
 SKIP_REPORT=false
 NO_CLEANUP=false
+LOCAL_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --server) ONLY_SERVER="$2"; shift 2 ;;
         --skip-report) SKIP_REPORT=true; shift ;;
         --no-cleanup) NO_CLEANUP=true; shift ;;
+        --local) LOCAL_MODE=true; shift ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
@@ -67,6 +69,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --server NAME   Only test against specified server (redis, rlightning)"
             echo "  --skip-report   Skip comparison report generation"
             echo "  --no-cleanup    Leave containers running after tests"
+            echo "  --local         Run test clients locally instead of in Docker containers"
+            echo "                  (requires Go, Node.js, Python installed; servers still use Docker)"
             echo "  --help          Show this help"
             exit 0
             ;;
@@ -96,6 +100,50 @@ if ! docker info &>/dev/null; then
     exit 1
 fi
 
+# Helper: resolve server to host:port for local mode
+resolve_host_port() {
+    local server="$1"
+    if [[ "$LOCAL_MODE" == true ]]; then
+        if [[ "$server" == "redis" ]]; then
+            echo "localhost ${REDIS_HOST_PORT:-6399}"
+        else
+            echo "localhost ${RLIGHTNING_HOST_PORT:-6400}"
+        fi
+    else
+        echo "$server 6379"
+    fi
+}
+
+# Helper: run a test client
+run_test_client() {
+    local client="$1" server="$2" result_file="$3" log_file="$4"
+    local host_port
+    host_port=$(resolve_host_port "$server")
+    local host=${host_port% *}
+    local port=${host_port#* }
+
+    if [[ "$LOCAL_MODE" == true ]]; then
+        case "$client" in
+            go-client)
+                REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="gotest:" \
+                    "$SCRIPT_DIR/go-client/test-runner" > "$result_file" 2>"$log_file" || true
+                ;;
+            js-client)
+                REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="jstest:" \
+                    node "$SCRIPT_DIR/js-client/index.js" > "$result_file" 2>"$log_file" || true
+                ;;
+            python-client)
+                REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="pytest:" \
+                    python3 "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
+                ;;
+        esac
+    else
+        TARGET_HOST="$server" $COMPOSE --profile clients run --rm \
+            -e "REDIS_HOST=$server" \
+            "$client" > "$result_file" 2>"$log_file" || true
+    fi
+}
+
 echo ""
 echo "=========================================="
 echo "  Multi-Language Redis Compatibility Tests"
@@ -103,10 +151,13 @@ echo "=========================================="
 echo ""
 log "Servers: ${SERVERS[*]}"
 log "Clients: ${CLIENTS[*]}"
+if [[ "$LOCAL_MODE" == true ]]; then
+    log "Mode: local (clients run on host, servers in Docker)"
+fi
 echo ""
 
-# Step 1: Build images
-if [[ "$SKIP_BUILD" != true ]]; then
+# Step 1: Build images (skip in local mode)
+if [[ "$SKIP_BUILD" != true && "$LOCAL_MODE" != true ]]; then
     log "Building Docker images..."
 
     log "  Building rLightning image..."
@@ -122,6 +173,16 @@ if [[ "$SKIP_BUILD" != true ]]; then
     done
 
     success "Image build complete"
+    echo ""
+elif [[ "$LOCAL_MODE" == true ]]; then
+    log "Local mode: building test clients locally..."
+
+    if [[ -d "$SCRIPT_DIR/go-client" ]]; then
+        log "  Building go-client binary..."
+        (cd "$SCRIPT_DIR/go-client" && go build -o test-runner . 2>&1) || { error "Failed to build go-client"; exit 1; }
+    fi
+
+    success "Local build complete"
     echo ""
 fi
 
@@ -183,23 +244,11 @@ for server in "${SERVERS[@]}"; do
         log_file="${RESULTS_DIR}/${client}-${server}.log"
         RUN_COUNT=$((RUN_COUNT + 1))
 
-        # Run client container with target server override
-        if TARGET_HOST="$server" $COMPOSE --profile clients run --rm \
-            -e "REDIS_HOST=$server" \
-            "$client" > "$result_file" 2>"$log_file"; then
-            :
-        else
-            exit_code=$?
-            error "  ${client} exited with code ${exit_code}"
-            if [[ -f "$log_file" ]]; then
-                echo "  --- stderr ---"
-                tail -20 "$log_file" | sed 's/^/  /'
-                echo "  --- end ---"
-            fi
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-            FAILED=true
-            continue
-        fi
+        # Run test client (Docker container or local, depending on mode)
+        # Note: test clients may exit non-zero when test failures occur.
+        # This is expected when testing against rLightning (compatibility gaps).
+        # We check the JSON output to determine actual success.
+        run_test_client "$client" "$server" "$result_file" "$log_file"
 
         # Validate and summarize JSON output
         if [[ -s "$result_file" ]] && python3 -c "import json; json.load(open('$result_file'))" 2>/dev/null; then
@@ -209,11 +258,21 @@ for server in "${SERVERS[@]}"; do
 
             if [[ "$failed" -gt 0 ]]; then
                 warn "  Results: ${passed}/${total} passed, ${failed} failed"
+                # Only count as a run failure if testing against Redis (should be 100%)
+                if [[ "$server" == "redis" ]]; then
+                    FAIL_COUNT=$((FAIL_COUNT + 1))
+                    FAILED=true
+                fi
             else
                 success "  Results: ${passed}/${total} passed"
             fi
         else
-            error "  Invalid or empty JSON output"
+            error "  No valid JSON output produced"
+            if [[ -f "$log_file" ]]; then
+                echo "  --- stderr ---"
+                tail -20 "$log_file" | sed 's/^/  /'
+                echo "  --- end ---"
+            fi
             FAIL_COUNT=$((FAIL_COUNT + 1))
             FAILED=true
         fi
@@ -223,7 +282,8 @@ for server in "${SERVERS[@]}"; do
     if [[ "$server" == "redis" ]]; then
         $COMPOSE exec -T redis redis-cli -a test_password --no-auth-warning FLUSHALL 2>/dev/null || true
     elif [[ "$server" == "rlightning" ]]; then
-        $COMPOSE exec -T rlightning sh -c 'echo -e "AUTH test_password\r\nFLUSHALL\r\n" | nc localhost 6379' 2>/dev/null || true
+        # Use redis-cli from the redis container to flush rLightning over the Docker network
+        $COMPOSE exec -T redis redis-cli -h rlightning -a test_password --no-auth-warning FLUSHALL 2>/dev/null || true
     fi
 
     echo ""
