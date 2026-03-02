@@ -1,6 +1,7 @@
 """Category 14: Edge Cases & Error Handling tests."""
 
 import threading
+import redis as redis_lib
 from .framework import (
     register, run_test, key, assert_equal, assert_true,
     assert_equal_int,
@@ -15,13 +16,15 @@ def test_edge_cases(r, prefix):
         k = key(prefix, "edge:wrongtype")
         try:
             r.set(k, "string_value")
+            errored = False
+            err_msg = ""
             try:
                 r.lpush(k, "bad")
-                raise Exception("expected WRONGTYPE error")
-            except Exception as e:
-                if "expected WRONGTYPE" in str(e):
-                    raise
-                assert_true("WRONGTYPE" in str(e), f"error should be WRONGTYPE: {e}")
+            except redis_lib.exceptions.ResponseError as e:
+                errored = True
+                err_msg = str(e)
+            assert_true(errored, "LPUSH on string key should raise ResponseError")
+            assert_true("WRONGTYPE" in err_msg, f"error should be WRONGTYPE: {err_msg}")
         finally:
             r.delete(k)
     results.append(run_test("wrong_type_error", cat, t_wrongtype))
@@ -125,12 +128,12 @@ def test_edge_cases(r, prefix):
 
             k3 = key(prefix, "edge:intnan")
             r.set(k3, "notanumber")
+            errored = False
             try:
                 r.incr(k3)
-                raise Exception("expected error for INCR on non-numeric")
-            except Exception as e:
-                if "expected error for INCR" in str(e):
-                    raise
+            except redis_lib.exceptions.ResponseError:
+                errored = True
+            assert_true(errored, "INCR on non-numeric should raise ResponseError")
             r.delete(k3)
         finally:
             r.delete(k)
