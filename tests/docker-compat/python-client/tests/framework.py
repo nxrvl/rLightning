@@ -28,8 +28,11 @@ def run_test(name, category, fn):
     except SkipError as e:
         result["status"] = "skip"
         result["details"] = str(e)
-    except Exception as e:
+    except AssertionError as e:
         result["status"] = "fail"
+        result["error"] = str(e)
+    except Exception as e:
+        result["status"] = "error"
         result["error"] = str(e)
     result["duration_ms"] = round((time.time() - start) * 1000, 2)
     return result

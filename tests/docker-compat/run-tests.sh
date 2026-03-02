@@ -192,6 +192,16 @@ elif [[ "$LOCAL_MODE" == true ]]; then
         (cd "$SCRIPT_DIR/go-client" && go build -o test-runner . 2>&1) || { error "Failed to build go-client"; exit 1; }
     fi
 
+    if [[ -d "$SCRIPT_DIR/js-client" ]]; then
+        log "  Installing js-client dependencies..."
+        (cd "$SCRIPT_DIR/js-client" && npm install --production 2>&1) || { error "Failed to install js-client dependencies"; exit 1; }
+    fi
+
+    if [[ -d "$SCRIPT_DIR/python-client" ]]; then
+        log "  Installing python-client dependencies..."
+        (cd "$SCRIPT_DIR/python-client" && pip3 install -r requirements.txt -q 2>&1) || { error "Failed to install python-client dependencies"; exit 1; }
+    fi
+
     success "Local build complete"
     echo ""
 fi
