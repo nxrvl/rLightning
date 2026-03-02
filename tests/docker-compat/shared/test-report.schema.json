@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Redis Compatibility Test Report",
+  "description": "Standardized test result format for multi-language Redis compatibility testing",
+  "type": "object",
+  "required": ["client", "server", "timestamp", "results", "summary"],
+  "properties": {
+    "client": {
+      "type": "object",
+      "required": ["language", "library", "version"],
+      "properties": {
+        "language": {
+          "type": "string",
+          "description": "Programming language (go, javascript, python)"
+        },
+        "library": {
+          "type": "string",
+          "description": "Redis client library name"
+        },
+        "version": {
+          "type": "string",
+          "description": "Library version"
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["redis", "rlightning", "unknown"]
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the test run started"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "description": "Total test suite duration in milliseconds"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "category", "status"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Test name (unique within category)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Test category (e.g., connection, strings, hashes, lists)"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "skip", "error"],
+            "description": "pass=succeeded, fail=assertion failed, skip=not run, error=unexpected error"
+          },
+          "duration_ms": {
+            "type": "number",
+            "description": "Individual test duration in milliseconds"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if status is fail or error"
+          },
+          "details": {
+            "type": "string",
+            "description": "Additional context about the test result"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "passed", "failed", "skipped", "errored"],
+      "properties": {
+        "total": {
+          "type": "integer"
+        },
+        "passed": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "errored": {
+          "type": "integer"
+        },
+        "pass_rate": {
+          "type": "number",
+          "description": "Pass rate as a percentage (0-100)"
+        },
+        "categories": {
+          "type": "object",
+          "description": "Per-category pass rates",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "passed": {
+                "type": "integer"
+              },
+              "pass_rate": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

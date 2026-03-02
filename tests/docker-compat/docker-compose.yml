@@ -1,0 +1,98 @@
+# Docker Compose for multi-language Redis compatibility testing
+# Tests rLightning against real Redis 7 using Go, JavaScript, and Python clients
+#
+# Usage:
+#   ./run-tests.sh                         # Full test suite
+#   docker compose up -d redis rlightning  # Just start servers
+#   docker compose down -v                 # Clean up
+
+services:
+  # Real Redis 7.x as the reference implementation
+  redis:
+    image: redis:7-alpine
+    container_name: compat-test-redis
+    networks:
+      - compat-test
+    command: >
+      redis-server
+      --requirepass test_password
+      --save ""
+      --appendonly no
+      --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    tmpfs:
+      - /data
+
+  # rLightning instance under test
+  rlightning:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning
+    networks:
+      - compat-test
+    command: ["rlightning", "--master-password", "test_password"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # Go test client (go-redis/redis v9)
+  go-client:
+    build:
+      context: ./go-client
+    container_name: compat-test-go
+    networks:
+      - compat-test
+    environment:
+      REDIS_HOST: ${TARGET_HOST:-redis}
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: test_password
+      TEST_PREFIX: "gotest:"
+    profiles:
+      - go-client
+      - clients
+
+  # JavaScript test client (ioredis)
+  js-client:
+    build:
+      context: ./js-client
+    container_name: compat-test-js
+    networks:
+      - compat-test
+    environment:
+      REDIS_HOST: ${TARGET_HOST:-redis}
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: test_password
+      TEST_PREFIX: "jstest:"
+    profiles:
+      - js-client
+      - clients
+
+  # Python test client (redis-py)
+  python-client:
+    build:
+      context: ./python-client
+    container_name: compat-test-python
+    networks:
+      - compat-test
+    environment:
+      REDIS_HOST: ${TARGET_HOST:-redis}
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: test_password
+      TEST_PREFIX: "pytest:"
+    profiles:
+      - python-client
+      - clients
+
+networks:
+  compat-test:
+    driver: bridge
