@@ -1,7 +1,6 @@
 """Test framework for redis-py compatibility testing."""
 
 import time
-import traceback
 
 _registry = []
 
@@ -109,6 +108,3 @@ def assert_list_equal_unordered(expected, actual):
             raise AssertionError(f"sorted mismatch at {i}: expected {e[i]!r}, got {a[i]!r}")
 
 
-class AssertionError(Exception):
-    """Custom assertion error for test framework."""
-    pass
