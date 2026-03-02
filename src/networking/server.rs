@@ -1163,7 +1163,14 @@ impl Server {
                 }
             }
             Err(err) => {
-                Self::send_error_to_writer(socket_writer, err.to_string(), client_addr_str).await?;
+                // Serialize error into pipeline response buffer (not directly to socket)
+                // to maintain correct response ordering in pipelined commands
+                let error_resp = RespValue::Error(err.to_string());
+                if let Ok(bytes) = error_resp.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                } else {
+                    Self::send_error_to_writer(socket_writer, err.to_string(), client_addr_str).await?;
+                }
             }
         }
 
@@ -1391,7 +1398,12 @@ impl Server {
         }
 
         // Execute the command first, then log to AOF only on success
-        let result = command_handler.process(cmd.clone(), db_index).await?;
+        // Catch CommandError and convert to error response instead of propagating,
+        // so pipeline error isolation works correctly (each command's error is independent)
+        let result = match command_handler.process(cmd.clone(), db_index).await {
+            Ok(value) => value,
+            Err(err) => return Ok(RespValue::Error(err.to_string())),
+        };
 
         // Log to AOF if persistence is enabled, command succeeded, and it's a write command
         // Skip AUTH commands to avoid persisting passwords in the AOF file
@@ -1418,7 +1430,7 @@ impl Server {
                             match security_mgr.authenticate_with_username(client_addr_str, "default", &password_str) {
                                 Ok(_) => {},
                                 Err(e) => {
-                                    return Err(crate::command::CommandError::InvalidArgument(e));
+                                    return Ok(RespValue::Error(format!("ERR {}", e)));
                                 }
                             }
                         } else if cmd.args.len() == 2 {
@@ -1428,7 +1440,7 @@ impl Server {
                             match security_mgr.authenticate_with_username(client_addr_str, &username, &password_str) {
                                 Ok(_) => {},
                                 Err(e) => {
-                                    return Err(crate::command::CommandError::InvalidArgument(e));
+                                    return Ok(RespValue::Error(format!("ERR {}", e)));
                                 }
                             }
                         }
