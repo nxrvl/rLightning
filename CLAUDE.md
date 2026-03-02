@@ -92,7 +92,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
   python tests/docker-compat/python-client/test_compat.py
 
 # Generate comparison report from collected results
-python tests/docker-compat/report/generate-report.py tests/docker-compat/results/
+python tests/docker-compat/report/generate-report.py --results-dir tests/docker-compat/results/
 ```
 
 **Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Streams, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands
