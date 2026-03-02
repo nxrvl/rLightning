@@ -164,8 +164,14 @@ echo ""
 if [[ "$SKIP_BUILD" != true && "$LOCAL_MODE" != true ]]; then
     log "Building Docker images..."
 
-    log "  Building rLightning image..."
-    $COMPOSE build rlightning
+    # Only build rlightning image if it's in the server list
+    for server in "${SERVERS[@]}"; do
+        if [[ "$server" == "rlightning" ]]; then
+            log "  Building rLightning image..."
+            $COMPOSE build rlightning
+            break
+        fi
+    done
 
     for client in "${CLIENTS[@]}"; do
         if [[ -d "$SCRIPT_DIR/${client}" ]]; then
@@ -194,36 +200,55 @@ fi
 mkdir -p "$RESULTS_DIR"
 rm -f "$RESULTS_DIR"/*.json "$RESULTS_DIR"/*.log
 
-# Step 3: Start server infrastructure
+# Step 3: Start server infrastructure (only those requested by --server filter)
 log "Starting server infrastructure..."
-$COMPOSE up -d redis rlightning
+$COMPOSE up -d "${SERVERS[@]}"
 
-log "Waiting for Redis 7 to be healthy..."
-for i in $(seq 1 30); do
-    if $COMPOSE exec -T redis redis-cli -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
-        success "  Redis 7 is ready"
-        break
+for server in "${SERVERS[@]}"; do
+    if [[ "$server" == "redis" ]]; then
+        log "Waiting for Redis 7 to be healthy..."
+        for i in $(seq 1 30); do
+            if $COMPOSE exec -T redis redis-cli -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                success "  Redis 7 is ready"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                error "Redis 7 failed to start within 30 seconds"
+                $COMPOSE logs redis
+                exit 1
+            fi
+            sleep 1
+        done
+    elif [[ "$server" == "rlightning" ]]; then
+        # Need redis container for its redis-cli to probe rlightning over Docker network
+        if ! $COMPOSE ps --status running redis 2>/dev/null | grep -q redis; then
+            $COMPOSE up -d redis
+            for i in $(seq 1 15); do
+                if $COMPOSE exec -T redis redis-cli -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                    break
+                fi
+                if [[ $i -eq 15 ]]; then
+                    error "Helper Redis container failed to start within 15 seconds"
+                    $COMPOSE logs redis
+                    exit 1
+                fi
+                sleep 1
+            done
+        fi
+        log "Waiting for rLightning to be healthy..."
+        for i in $(seq 1 30); do
+            if $COMPOSE exec -T redis redis-cli -h rlightning -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                success "  rLightning is ready"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                error "rLightning failed to start within 30 seconds"
+                $COMPOSE logs rlightning
+                exit 1
+            fi
+            sleep 1
+        done
     fi
-    if [[ $i -eq 30 ]]; then
-        error "Redis 7 failed to start within 30 seconds"
-        $COMPOSE logs redis
-        exit 1
-    fi
-    sleep 1
-done
-
-log "Waiting for rLightning to be healthy..."
-for i in $(seq 1 30); do
-    if $COMPOSE exec -T redis redis-cli -h rlightning -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
-        success "  rLightning is ready"
-        break
-    fi
-    if [[ $i -eq 30 ]]; then
-        error "rLightning failed to start within 30 seconds"
-        $COMPOSE logs rlightning
-        exit 1
-    fi
-    sleep 1
 done
 
 echo ""
@@ -256,18 +281,23 @@ for server in "${SERVERS[@]}"; do
 
         # Validate and summarize JSON output (pass file path as argument to avoid injection)
         if [[ -s "$result_file" ]] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$result_file" 2>/dev/null; then
-            read -r total passed failed <<< "$(python3 -c "
+            read -r total passed failed errored <<< "$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1]))
 s = r.get('summary', {})
 t = s.get('total', len(r.get('results', [])))
 p = s.get('passed', sum(1 for x in r.get('results', []) if x.get('status') == 'pass'))
 f = s.get('failed', 0)
-print(t, p, f)
+e = s.get('errored', sum(1 for x in r.get('results', []) if x.get('status') == 'error'))
+print(t, p, f, e)
 " "$result_file")"
 
-            if [[ "$failed" -gt 0 ]]; then
-                warn "  Results: ${passed}/${total} passed, ${failed} failed"
+            if [[ "$failed" -gt 0 || "$errored" -gt 0 ]]; then
+                _detail="${passed}/${total} passed, ${failed} failed"
+                if [[ "$errored" -gt 0 ]]; then
+                    _detail="${_detail}, ${errored} errored"
+                fi
+                warn "  Results: ${_detail}"
                 # Only count as a run failure if testing against Redis (should be 100%)
                 if [[ "$server" == "redis" ]]; then
                     FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -344,7 +374,10 @@ fi
 
 echo ""
 
-if [[ "$FAILED" == true ]]; then
+if [[ "$RUN_COUNT" -eq 0 ]]; then
+    error "No test runs were executed - check --client and --server values"
+    exit 1
+elif [[ "$FAILED" == true ]]; then
     error "Some test runs failed - check logs in ${RESULTS_DIR}/"
     exit 1
 else
