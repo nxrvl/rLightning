@@ -11,6 +11,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: compat-test-redis
+    ports:
+      - "${REDIS_HOST_PORT:-6399}:6379"
     networks:
       - compat-test
     command: >
@@ -35,6 +37,8 @@ services:
       dockerfile: Dockerfile
     image: rlightning:compat-test
     container_name: compat-test-rlightning
+    ports:
+      - "${RLIGHTNING_HOST_PORT:-6400}:6379"
     networks:
       - compat-test
     command: ["rlightning", "--master-password", "test_password"]

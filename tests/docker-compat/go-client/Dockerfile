@@ -1,8 +1,10 @@
 FROM golang:1.21-alpine AS builder
 
+RUN apk add --no-cache git
+
 WORKDIR /app
-COPY go.mod ./
-RUN go mod download 2>/dev/null; go mod tidy
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /test-runner .
 
