@@ -347,6 +347,8 @@ impl Server {
                                     &mut in_subscription_mode,
                                     &security,
                                     protocol_version,
+                                    &connections,
+                                    conn_id,
                                 ).await;
 
                                 if let Err(e) = result {
@@ -760,6 +762,7 @@ impl Server {
                             }
                         }
                         *in_subscription_mode = true;
+                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
                         Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
@@ -786,6 +789,7 @@ impl Server {
                             }
                         }
                         *in_subscription_mode = true;
+                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
                         Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
@@ -832,6 +836,7 @@ impl Server {
                             }
                         }
                         *in_subscription_mode = true;
+                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
                         Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
@@ -1177,6 +1182,20 @@ impl Server {
         Ok(DispatchAction::Continue)
     }
 
+    /// Update sub/psub counts on ClientInfo from PubSubManager state
+    async fn update_sub_counts(
+        pubsub: &Arc<PubSubManager>,
+        client_id: ClientId,
+        connections: &Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
+    ) {
+        let (sub, psub) = pubsub.get_subscription_counts(client_id).await;
+        if let Some(mut info) = connections.get_mut(&conn_id) {
+            info.sub = sub;
+            info.psub = psub;
+        }
+    }
+
     /// Handle CLIENT subcommands with access to real connection tracking data
     fn handle_client_command(
         args: &[Vec<u8>],
@@ -1462,6 +1481,8 @@ impl Server {
         in_subscription_mode: &mut bool,
         security: &Option<Arc<SecurityManager>>,
         protocol_version: ProtocolVersion,
+        connections: &Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
     ) -> Result<(), NetworkError> {
         // Combine partial buffer if needed
         if !partial_command_buffer.is_empty() {
@@ -1498,6 +1519,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                     }
                                 }
                                 "unsubscribe" => {
@@ -1508,6 +1530,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
@@ -1534,6 +1557,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                     }
                                 }
                                 "punsubscribe" => {
@@ -1544,6 +1568,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
@@ -1570,6 +1595,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                     }
                                 }
                                 "sunsubscribe" => {
@@ -1580,6 +1606,7 @@ impl Server {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
+                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
