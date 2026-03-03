@@ -160,7 +160,9 @@ async fn test_is_write_command() {
     assert!(ReplicationManager::is_write_command("hset"));
     assert!(ReplicationManager::is_write_command("zadd"));
     assert!(ReplicationManager::is_write_command("sadd"));
+    assert!(ReplicationManager::is_write_command("xreadgroup"));
     assert!(!ReplicationManager::is_write_command("get"));
+    assert!(!ReplicationManager::is_write_command("xread"));
     assert!(!ReplicationManager::is_write_command("lrange"));
     assert!(!ReplicationManager::is_write_command("info"));
     assert!(!ReplicationManager::is_write_command("ping"));

@@ -254,11 +254,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** XREADGROUP modifies consumer group state (moves entries to consumers' PEL) but these mutations may not be properly replayed. With Task 12 complete (full command handler for replay), verify this works end-to-end.
 
-- [ ] Verify XREADGROUP is classified as a write command in `is_read_only_command()` (not in the exclusion list)
-- [ ] With Task 12's full replay handler, verify AOF replay handles XREADGROUP correctly
-- [ ] Write test: XREADGROUP, AOF save, restart, verify consumer state preserved
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Verify XREADGROUP is classified as a write command in `is_read_only_command()` (not in the exclusion list)
+- [x] With Task 12's full replay handler, verify AOF replay handles XREADGROUP correctly
+- [x] Write test: XREADGROUP, AOF save, restart, verify consumer state preserved
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
