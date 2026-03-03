@@ -74,7 +74,7 @@ docker run -d -p 6379:6379 rlightning:latest
 
 ### Multi-Language Compatibility Tests
 
-The `tests/docker-compat/` directory contains a comprehensive multi-language compatibility test suite that tests rLightning against real Redis 7 using Go (go-redis/v9), JavaScript (ioredis), and Python (redis-py) client libraries. Each language implements 145 tests across 15 categories.
+The `tests/docker-compat/` directory contains a comprehensive multi-language compatibility test suite that tests rLightning against real Redis 7 using Go (go-redis/v9), JavaScript (ioredis), and Python (redis-py) client libraries. Each language implements ~231 tests across 24 categories.
 
 ```bash
 # Run full suite end-to-end (local mode - uses local Go/Node/Python, Docker for servers)
@@ -95,7 +95,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
 python tests/docker-compat/report/generate-report.py --results-dir tests/docker-compat/results/
 ```
 
-**Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Streams, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands
+**Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Lua Scripting Advanced, Streams, Streams Advanced, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands, ACL & Security, Blocking Commands, Memory Management & Eviction, Persistence (RDB/AOF), Replication, Cluster Mode, Sentinel
 
 ### Benchmarking
 
@@ -118,19 +118,24 @@ cargo bench --bench storage_bench -- set_get
 
 1. **Networking (`src/networking/`)**:
    - RESP2 and RESP3 protocol support with HELLO negotiation and per-connection protocol version tracking
-   - RESP3 response conversion: Map type for HGETALL/CONFIG, Set type for SMEMBERS, Double for float commands, native Null/Boolean/Push types
+   - RESP3 response conversion: Map type for HGETALL/CONFIG/XINFO/HSCAN/ZSCAN/SSCAN/XRANGE/XREAD/COMMAND DOCS, Set type for SMEMBERS, Double for float commands, native Null/Boolean/Push types
+   - Pipeline error isolation: per-command errors in a pipeline are captured as RespValue::Error instead of killing the entire pipeline
    - Connection tracking via `Arc<DashMap<u64, ClientInfo>>` for real CLIENT LIST/INFO/ID/SETNAME
    - Async TCP server with Tokio, per-connection state (db_index, protocol_version, client name, subscriptions)
    - Buffered I/O with pipeline support and unified command dispatch (fast/slow path)
 
 2. **Storage Engine (`src/storage/`)**:
-   - Lock-free concurrent access via DashMap with atomic read-modify-write primitives (`atomic_incr`, `atomic_append`, `atomic_modify`, `atomic_getdel`, etc.)
+   - Lock-free concurrent access via DashMap with atomic read-modify-write primitives (`atomic_incr`, `atomic_append`, `atomic_modify`, `atomic_getdel`, `atomic_get_set_expiry`, etc.)
+   - Atomic operations for all mutable data types: strings, lists, sets, sorted sets, geo (via `atomic_modify`)
+   - Cross-key atomicity via `lock_keys()` with sorted-order deadlock prevention (MSET, SMOVE, GEOSEARCHSTORE)
    - Conditional SET operations: `set_nx()`, `set_xx()`, `set_with_options()` for NX/XX/GET flag combinations
    - Multi-database support (16 databases, SELECT routing via task-local `CURRENT_DB_INDEX`)
+   - Runtime config store: `runtime_config` DashMap for CONFIG SET/GET with glob pattern matching
    - Hash storage: single-key HashMap (bincode-serialized) with dedicated methods (`hash_set`, `hash_get`, `hash_getall`, etc.)
    - Transaction key locking: `lock_keys()` with sorted-order deadlock prevention, key versioning for WATCH
    - All data types: strings, hashes, lists, sets, sorted sets, streams, HLL, bitmaps
    - TTL handling (lazy + periodic with priority queue), configurable eviction (LRU, LFU, Random)
+   - Periodic cleanup of stale `key_locks`/`key_versions` entries (every 60 seconds)
    - Blocking command infrastructure (per-key wait queues)
 
 3. **Command Handler (`src/command/`)**:
@@ -139,13 +144,17 @@ cargo bench --bench storage_bench -- set_get
    - Per-type handlers in `src/command/types/`
 
 4. **Persistence (`src/persistence/`)**:
-   - RDB snapshot persistence with background save, supports all data types (strings, lists, sets, sorted sets, hashes, streams)
-   - AOF logging with configurable sync (always/everysec/no), rewrite generates correct reconstruction commands per type
+   - RDB snapshot persistence with background save, supports all data types across all 16 databases
+   - AOF logging with configurable sync (always/everysec/no), atomic batch staging to prevent partial writes
+   - AOF rewrite generates correct reconstruction commands per type, including stream consumer groups and pending entries
+   - Full AOF replay via CommandHandler (routes all commands, not just a subset)
    - Hybrid persistence model (RDB + AOF combined)
 
 5. **Replication (`src/replication/`)**:
    - Full and partial sync (PSYNC) with replication backlog
-   - Command stream propagation, replica read-only mode
+   - Command stream propagation with per-database routing (SELECT-aware, not hardcoded to DB 0)
+   - Transaction atomicity: MULTI/EXEC blocks from master preserved as transactions on replicas
+   - Replica read-only mode
    - FAILOVER command support
 
 6. **Security (`src/security/`)**:
