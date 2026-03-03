@@ -535,15 +535,15 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/python-client/tests/sentinel.py`
 - Modify: `tests/docker-compat/docker-compose.yml` (add sentinel containers)
 
-- [ ] **SENTINEL_master_info**: SENTINEL MASTER mymaster — verify master host/port/flags
-- [ ] **SENTINEL_replicas**: SENTINEL REPLICAS mymaster — verify replica list
-- [ ] **SENTINEL_sentinels**: SENTINEL SENTINELS mymaster — verify sentinel peer list
-- [ ] **SENTINEL_get_master_addr**: SENTINEL GET-MASTER-ADDR-BY-NAME mymaster — verify address
-- [ ] **SENTINEL_ckquorum**: SENTINEL CKQUORUM mymaster — verify quorum check
-- [ ] **SENTINEL_failover**: Simulate master failure, verify failover completes, new master elected
-- [ ] **SENTINEL_client_discovery**: Connect via sentinel, verify automatic master discovery
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **SENTINEL_master_info**: SENTINEL MASTER mymaster — verify master host/port/flags
+- [x] **SENTINEL_replicas**: SENTINEL REPLICAS mymaster — verify replica list
+- [x] **SENTINEL_sentinels**: SENTINEL SENTINELS mymaster — verify sentinel peer list
+- [x] **SENTINEL_get_master_addr**: SENTINEL GET-MASTER-ADDR-BY-NAME mymaster — verify address
+- [x] **SENTINEL_ckquorum**: SENTINEL CKQUORUM mymaster — verify quorum check
+- [x] **SENTINEL_failover**: Simulate master failure, verify failover completes, new master elected
+- [x] **SENTINEL_client_discovery**: Connect via sentinel, verify automatic master discovery
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 

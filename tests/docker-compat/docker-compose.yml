@@ -256,6 +256,179 @@ services:
     profiles:
       - cluster
 
+  # Redis Sentinel nodes (3 sentinels monitoring the redis master)
+  redis-sentinel-1:
+    image: redis:7-alpine
+    container_name: compat-test-redis-sentinel-1
+    ports:
+      - "${REDIS_SENTINEL_PORT_1:-26399}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - redis-sentinel-1-data:/data
+    entrypoint: []
+    command: >
+      sh -c 'cp /etc/redis/sentinel.conf /data/sentinel.conf &&
+             redis-sentinel /data/sentinel.conf'
+    configs:
+      - source: redis-sentinel-conf
+        target: /etc/redis/sentinel.conf
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    profiles:
+      - sentinel
+
+  redis-sentinel-2:
+    image: redis:7-alpine
+    container_name: compat-test-redis-sentinel-2
+    ports:
+      - "${REDIS_SENTINEL_PORT_2:-26400}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - redis-sentinel-2-data:/data
+    entrypoint: []
+    command: >
+      sh -c 'cp /etc/redis/sentinel.conf /data/sentinel.conf &&
+             redis-sentinel /data/sentinel.conf'
+    configs:
+      - source: redis-sentinel-conf
+        target: /etc/redis/sentinel.conf
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    profiles:
+      - sentinel
+
+  redis-sentinel-3:
+    image: redis:7-alpine
+    container_name: compat-test-redis-sentinel-3
+    ports:
+      - "${REDIS_SENTINEL_PORT_3:-26401}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - redis-sentinel-3-data:/data
+    entrypoint: []
+    command: >
+      sh -c 'cp /etc/redis/sentinel.conf /data/sentinel.conf &&
+             redis-sentinel /data/sentinel.conf'
+    configs:
+      - source: redis-sentinel-conf
+        target: /etc/redis/sentinel.conf
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    profiles:
+      - sentinel
+
+  # rLightning Sentinel nodes (3 sentinels monitoring the rlightning master)
+  rlightning-sentinel-1:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-sentinel-1
+    ports:
+      - "${RLIGHTNING_SENTINEL_PORT_1:-26402}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-sentinel-1.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    depends_on:
+      rlightning:
+        condition: service_healthy
+      rlightning-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/26379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - sentinel
+
+  rlightning-sentinel-2:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-sentinel-2
+    ports:
+      - "${RLIGHTNING_SENTINEL_PORT_2:-26403}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-sentinel-2.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    depends_on:
+      rlightning:
+        condition: service_healthy
+      rlightning-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/26379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - sentinel
+
+  rlightning-sentinel-3:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-sentinel-3
+    ports:
+      - "${RLIGHTNING_SENTINEL_PORT_3:-26404}:26379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-sentinel-3.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    depends_on:
+      rlightning:
+        condition: service_healthy
+      rlightning-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/26379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - sentinel
+
   # Go test client (go-redis/redis v9)
   go-client:
     build:
@@ -303,6 +476,15 @@ services:
     profiles:
       - python-client
       - clients
+
+configs:
+  redis-sentinel-conf:
+    file: ./config/redis-sentinel.conf
+
+volumes:
+  redis-sentinel-1-data:
+  redis-sentinel-2-data:
+  redis-sentinel-3-data:
 
 networks:
   compat-test:

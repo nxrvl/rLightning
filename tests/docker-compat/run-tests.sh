@@ -146,6 +146,20 @@ resolve_cluster_host_port() {
     fi
 }
 
+# Helper: resolve sentinel host:port for local mode
+resolve_sentinel_host_port() {
+    local server="$1"
+    if [[ "$LOCAL_MODE" == true ]]; then
+        if [[ "$server" == "redis" ]]; then
+            echo "localhost ${REDIS_SENTINEL_PORT_1:-26399}"
+        else
+            echo "localhost ${RLIGHTNING_SENTINEL_PORT_1:-26402}"
+        fi
+    else
+        echo "${server}-sentinel-1 26379"
+    fi
+}
+
 # Helper: run a test client
 run_test_client() {
     local client="$1" server="$2" result_file="$3" log_file="$4"
@@ -168,18 +182,27 @@ run_test_client() {
     cluster_host=${cluster_host_port% *}
     cluster_port=${cluster_host_port#* }
 
+    # Resolve sentinel host:port if sentinels are running
+    local sentinel_host="" sentinel_port=""
+    local sentinel_host_port
+    sentinel_host_port=$(resolve_sentinel_host_port "$server")
+    sentinel_host=${sentinel_host_port% *}
+    sentinel_port=${sentinel_host_port#* }
+
     if [[ "$LOCAL_MODE" == true ]]; then
         case "$client" in
             go-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="gotest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
+                    REDIS_SENTINEL_HOST="$sentinel_host" REDIS_SENTINEL_PORT="$sentinel_port" \
                     "$SCRIPT_DIR/go-client/test-runner" > "$result_file" 2>"$log_file" || true
                 ;;
             js-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="jstest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
+                    REDIS_SENTINEL_HOST="$sentinel_host" REDIS_SENTINEL_PORT="$sentinel_port" \
                     node "$SCRIPT_DIR/js-client/index.js" > "$result_file" 2>"$log_file" || true
                 ;;
             python-client)
@@ -190,6 +213,7 @@ run_test_client() {
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="pytest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
+                    REDIS_SENTINEL_HOST="$sentinel_host" REDIS_SENTINEL_PORT="$sentinel_port" \
                     "$py_bin" "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
                 ;;
         esac
@@ -200,6 +224,8 @@ run_test_client() {
             -e "REDIS_REPLICA_PORT=6379" \
             -e "REDIS_CLUSTER_HOST=${server}-cluster-1" \
             -e "REDIS_CLUSTER_PORT=6379" \
+            -e "REDIS_SENTINEL_HOST=${server}-sentinel-1" \
+            -e "REDIS_SENTINEL_PORT=26379" \
             "$client" > "$result_file" 2>"$log_file" || true
     fi
 }
@@ -453,6 +479,86 @@ for server in "${SERVERS[@]}"; do
                 sleep 1
             done
         fi
+    fi
+done
+
+# Step 3d: Start sentinel infrastructure for sentinel tests
+log "Starting sentinel infrastructure..."
+for server in "${SERVERS[@]}"; do
+    # Sentinels depend on replicas being up (sentinel profile depends on replication)
+    $COMPOSE --profile sentinel up -d "${server}-sentinel-1" "${server}-sentinel-2" "${server}-sentinel-3" 2>/dev/null || true
+
+    if [[ "$server" == "redis" ]]; then
+        log "Waiting for Redis sentinel nodes to be healthy..."
+        for node_num in 1 2 3; do
+            node_name="redis-sentinel-${node_num}"
+            for i in $(seq 1 30); do
+                if $COMPOSE exec -T "${node_name}" redis-cli -p 26379 ping 2>/dev/null | grep -q PONG; then
+                    success "  ${node_name} is ready"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  ${node_name} failed to start — sentinel tests will be skipped"
+                fi
+                sleep 1
+            done
+        done
+
+        # Wait for sentinels to discover each other and the master
+        log "Waiting for Redis sentinels to discover topology..."
+        for i in $(seq 1 30); do
+            sentinel_info=$($COMPOSE exec -T redis-sentinel-1 redis-cli -p 26379 SENTINEL MASTER mymaster 2>/dev/null || true)
+            if echo "$sentinel_info" | grep -q "master"; then
+                success "  Redis sentinels have discovered the master"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                warn "  Redis sentinels did not discover master — sentinel tests may fail"
+            fi
+            sleep 1
+        done
+    elif [[ "$server" == "rlightning" ]]; then
+        log "Waiting for rLightning sentinel nodes to be healthy..."
+        for node_num in 1 2 3; do
+            node_name="rlightning-sentinel-${node_num}"
+            for i in $(seq 1 30); do
+                if $COMPOSE exec -T redis redis-cli -h "${node_name}" -p 26379 ping 2>/dev/null | grep -q PONG; then
+                    success "  ${node_name} is ready"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  ${node_name} failed to start — sentinel tests will be skipped"
+                fi
+                sleep 1
+            done
+        done
+
+        # Configure rLightning sentinels to monitor the master
+        log "Configuring rLightning sentinels to monitor master..."
+        for node_num in 1 2 3; do
+            node_name="rlightning-sentinel-${node_num}"
+            $COMPOSE exec -T redis redis-cli -h "${node_name}" -p 26379 -a test_password --no-auth-warning \
+                SENTINEL MONITOR mymaster rlightning 6379 2 2>/dev/null || true
+            $COMPOSE exec -T redis redis-cli -h "${node_name}" -p 26379 -a test_password --no-auth-warning \
+                SENTINEL SET mymaster auth-pass test_password 2>/dev/null || true
+            $COMPOSE exec -T redis redis-cli -h "${node_name}" -p 26379 -a test_password --no-auth-warning \
+                SENTINEL SET mymaster down-after-milliseconds 5000 2>/dev/null || true
+        done
+
+        # Wait for sentinels to discover topology
+        log "Waiting for rLightning sentinels to discover topology..."
+        for i in $(seq 1 30); do
+            sentinel_info=$($COMPOSE exec -T redis redis-cli -h rlightning-sentinel-1 -p 26379 -a test_password --no-auth-warning \
+                SENTINEL MASTER mymaster 2>/dev/null || true)
+            if echo "$sentinel_info" | grep -q "master"; then
+                success "  rLightning sentinels have discovered the master"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                warn "  rLightning sentinels did not discover master — sentinel tests may fail"
+            fi
+            sleep 1
+        done
     fi
 done
 
