@@ -2,6 +2,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::command::utils::{bytes_to_string, parse_ttl};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::{SetResult, StorageEngine};
+use crate::storage::item::RedisDataType;
 
 /// Redis SET command - Set the string value of a key
 /// Uses set_with_options() for atomic NX/XX/GET handling
@@ -169,30 +170,20 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis GET command - Get the value of a key
+/// Uses atomic_read for thread-safe single-lookup type check + value read
 pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let key = args[0].clone();
+    let key = &args[0];
 
-    // Check the type first - returns "none" for non-existent keys
-    let key_type = engine.get_type(&key).await?;
+    // Single DashMap lookup: type check + value read atomically
+    let value = engine.atomic_read(key, RedisDataType::String, |data| {
+        Ok(data.cloned())
+    })?;
 
-    if key_type == "none" {
-        return Ok(RespValue::BulkString(None));
-    }
-
-    // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
-        return Err(CommandError::WrongType);
-    }
-
-    // Otherwise, treat it as a string and get the value
-    match engine.get(&key).await? {
-        Some(value) => Ok(RespValue::BulkString(Some(value))),
-        None => Ok(RespValue::BulkString(None)),
-    }
+    Ok(RespValue::BulkString(value))
 }
 
 /// Redis MGET command - Return the values of all specified keys
@@ -371,31 +362,21 @@ pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 }
 
 /// Redis SETRANGE command - Overwrite part of a string at key starting at the specified offset
+/// Uses atomic_modify for thread-safe read-modify-write with TTL preservation
 pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
     let value_to_set = args[2].clone();
-    
+
     // Parse offset
     let offset = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
         CommandError::InvalidArgument("Offset is not a valid integer".to_string())
     })?;
-    
-    // Check if the key exists and get its type
-    let key_type = engine.get_type(&key).await?;
-    
-    // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
-        return Err(CommandError::WrongType);
-    }
-    
-    // Get the current value or create an empty one
-    let mut current_value = engine.get(&key).await?.unwrap_or_default();
 
-    // Extend the current value if necessary
+    // Validate size before acquiring lock
     const MAX_STRING_SIZE: usize = 512 * 1024 * 1024;
     let required_len = offset.checked_add(value_to_set.len()).ok_or_else(|| {
         CommandError::InvalidArgument("string exceeds maximum allowed size (512MB)".to_string())
@@ -405,21 +386,25 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             "string exceeds maximum allowed size (512MB)".to_string(),
         ));
     }
-    if current_value.len() < required_len {
-        current_value.resize(required_len, 0); // Pad with null bytes
-    }
-    
-    // Overwrite the specified range
-    for (i, &byte) in value_to_set.iter().enumerate() {
-        current_value[offset + i] = byte;
-    }
-    
-    // Store the modified value, preserving existing TTL
-    let existing_ttl = engine.ttl(&key).await?;
-    engine.set(key, current_value.clone(), existing_ttl).await?;
 
-    // Return the new length
-    Ok(RespValue::Integer(current_value.len() as i64))
+    // Atomic read-modify-write: type check, pad, overwrite, preserve TTL
+    let new_len = engine.atomic_modify(&key, RedisDataType::String, |current| {
+        let mut val = current.map(|v| v.clone()).unwrap_or_default();
+
+        if val.len() < required_len {
+            val.resize(required_len, 0); // Pad with null bytes
+        }
+
+        // Overwrite the specified range
+        for (i, &byte) in value_to_set.iter().enumerate() {
+            val[offset + i] = byte;
+        }
+
+        let new_len = val.len() as i64;
+        Ok((Some(val), new_len))
+    })?;
+
+    Ok(RespValue::Integer(new_len))
 }
 
 /// Redis GETSET command - Set the string value of a key and return its old value
@@ -658,6 +643,7 @@ pub async fn pttl(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
 /// Redis GETEX command - Get the value of a key and optionally set its expiration
 /// Options: EX seconds, PX milliseconds, EXAT unix-time-seconds, PXAT unix-time-milliseconds, PERSIST
+/// Uses atomic_get_set_expiry for thread-safe get-with-expiry-change
 pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -665,24 +651,8 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Check type
-    if engine.exists(key).await? {
-        let key_type = engine.get_type(key).await?;
-        if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
-            return Err(CommandError::WrongType);
-        }
-    }
-
-    // Get the value first
-    let value = engine.get(key).await?;
-
-    // If key doesn't exist, return nil regardless of options
-    if value.is_none() {
-        return Ok(RespValue::BulkString(None));
-    }
-
-    // Parse and apply expiration option if provided
-    if args.len() >= 2 {
+    // Parse expiration option before acquiring lock
+    let new_expiry: Option<Option<std::time::Duration>> = if args.len() >= 2 {
         let option = bytes_to_string(&args[1])?.to_uppercase();
 
         match option.as_str() {
@@ -696,7 +666,7 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if seconds <= 0 {
                     return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
                 }
-                engine.expire(key, Some(std::time::Duration::from_secs(seconds as u64))).await?;
+                Some(Some(std::time::Duration::from_secs(seconds as u64)))
             },
             "PX" => {
                 if args.len() != 3 {
@@ -708,7 +678,7 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if millis <= 0 {
                     return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
                 }
-                engine.expire(key, Some(std::time::Duration::from_millis(millis as u64))).await?;
+                Some(Some(std::time::Duration::from_millis(millis as u64)))
             },
             "EXAT" => {
                 if args.len() != 3 {
@@ -720,7 +690,16 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if timestamp <= 0 {
                     return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
                 }
-                engine.expire_at(key, timestamp).await?;
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if timestamp <= now_unix {
+                    // Past timestamp - set a zero duration so key expires immediately
+                    Some(Some(std::time::Duration::from_secs(0)))
+                } else {
+                    Some(Some(std::time::Duration::from_secs((timestamp - now_unix) as u64)))
+                }
             },
             "PXAT" => {
                 if args.len() != 3 {
@@ -732,13 +711,21 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if timestamp_ms <= 0 {
                     return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
                 }
-                engine.pexpire_at(key, timestamp_ms).await?;
+                let now_unix_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                if timestamp_ms <= now_unix_ms {
+                    Some(Some(std::time::Duration::from_secs(0)))
+                } else {
+                    Some(Some(std::time::Duration::from_millis((timestamp_ms - now_unix_ms) as u64)))
+                }
             },
             "PERSIST" => {
                 if args.len() != 2 {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
-                engine.expire(key, None).await?;
+                Some(None) // Remove expiry
             },
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
@@ -746,8 +733,12 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 )));
             }
         }
-    }
+    } else {
+        None // No expiry change
+    };
 
+    // Atomic get + expiry modification in single lock hold
+    let value = engine.atomic_get_set_expiry(key, new_expiry).await?;
     Ok(RespValue::BulkString(value))
 }
 
@@ -1933,4 +1924,212 @@ mod tests {
         let val = engine.get(b"sg_key").await.unwrap().unwrap();
         assert_eq!(val, b"val2");
     }
-} 
+
+    #[tokio::test]
+    async fn test_setrange_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Test basic SETRANGE on empty key (creates key with null padding)
+        let args = vec![b"sr_key".to_vec(), b"5".to_vec(), b"Hello".to_vec()];
+        let result = setrange(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(10)); // 5 null bytes + "Hello"
+
+        let val = engine.get(b"sr_key").await.unwrap().unwrap();
+        assert_eq!(val.len(), 10);
+        assert_eq!(&val[5..], b"Hello");
+        assert_eq!(&val[..5], &[0, 0, 0, 0, 0]);
+
+        // Test SETRANGE overwriting part of existing value
+        let args = vec![b"sr_key".to_vec(), b"0".to_vec(), b"World".to_vec()];
+        let result = setrange(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(10));
+        let val = engine.get(b"sr_key").await.unwrap().unwrap();
+        assert_eq!(&val[..5], b"World");
+        assert_eq!(&val[5..], b"Hello");
+    }
+
+    #[tokio::test]
+    async fn test_setrange_preserves_ttl() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Set a key with TTL
+        engine.set(b"ttl_key".to_vec(), b"hello".to_vec(),
+            Some(std::time::Duration::from_secs(3600))).await.unwrap();
+
+        // SETRANGE should preserve the TTL
+        let args = vec![b"ttl_key".to_vec(), b"0".to_vec(), b"world".to_vec()];
+        setrange(&engine, &args).await.unwrap();
+
+        // TTL should still be set
+        let ttl = engine.ttl(b"ttl_key").await.unwrap();
+        assert!(ttl.is_some(), "TTL should be preserved after SETRANGE");
+    }
+
+    #[tokio::test]
+    async fn test_setrange_wrongtype() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Create a list key
+        engine.set_with_type(b"list_key".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+
+        // SETRANGE on a list key should return WRONGTYPE
+        let args = vec![b"list_key".to_vec(), b"0".to_vec(), b"hello".to_vec()];
+        let result = setrange(&engine, &args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_setrange_concurrent() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Initialize key with enough space
+        engine.set(b"concurrent_sr".to_vec(), vec![0u8; 100], None).await.unwrap();
+
+        // Spawn multiple tasks doing SETRANGE on overlapping ranges
+        let mut handles = Vec::new();
+        for i in 0u8..10 {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let offset = (i as usize) * 10;
+                let value = vec![b'A' + i; 10];
+                let args = vec![
+                    b"concurrent_sr".to_vec(),
+                    offset.to_string().into_bytes(),
+                    value,
+                ];
+                setrange(&engine, &args).await.unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify final value has exactly 100 bytes and each 10-byte segment
+        // is filled with a single character (no interleaving/corruption)
+        let val = engine.get(b"concurrent_sr").await.unwrap().unwrap();
+        assert_eq!(val.len(), 100);
+        for i in 0u8..10 {
+            let segment = &val[(i as usize) * 10..(i as usize + 1) * 10];
+            // Each segment should be all the same byte (from one of the tasks)
+            assert!(
+                segment.iter().all(|&b| b == segment[0]),
+                "Segment {} has mixed bytes (data corruption from race condition): {:?}",
+                i, segment
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_setrange_concurrent_overlapping() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Multiple tasks writing to the SAME offset - tests atomicity
+        let num_tasks = 20;
+        let mut handles = Vec::new();
+        for i in 0u8..num_tasks {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let value = vec![b'A' + i; 5];
+                let args = vec![
+                    b"overlap_sr".to_vec(),
+                    b"0".to_vec(),
+                    value,
+                ];
+                setrange(&engine, &args).await.unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // The final value should be from exactly one of the tasks (no mixed bytes)
+        let val = engine.get(b"overlap_sr").await.unwrap().unwrap();
+        assert_eq!(val.len(), 5);
+        assert!(
+            val.iter().all(|&b| b == val[0]),
+            "Value has mixed bytes from different tasks: {:?}",
+            val
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_atomic_wrongtype() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Create a list key
+        engine.set_with_type(b"list_key2".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+
+        // GET on a list key should return WRONGTYPE
+        let args = vec![b"list_key2".to_vec()];
+        let result = get(&engine, &args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_atomic_nonexistent() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // GET on nonexistent key should return nil
+        let args = vec![b"no_such_key".to_vec()];
+        let result = get(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_getex_atomic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Set a key
+        engine.set(b"getex_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+
+        // GETEX with EX should return value and set TTL
+        let args = vec![b"getex_key".to_vec(), b"EX".to_vec(), b"3600".to_vec()];
+        let result = getex(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
+
+        // Verify TTL was set
+        let ttl = engine.ttl(b"getex_key").await.unwrap();
+        assert!(ttl.is_some(), "TTL should be set after GETEX EX");
+
+        // GETEX with PERSIST should remove TTL
+        let args = vec![b"getex_key".to_vec(), b"PERSIST".to_vec()];
+        let result = getex(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
+
+        let ttl = engine.ttl(b"getex_key").await.unwrap();
+        assert!(ttl.is_none(), "TTL should be removed after GETEX PERSIST");
+    }
+
+    #[tokio::test]
+    async fn test_getex_atomic_nonexistent() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // GETEX on nonexistent key should return nil
+        let args = vec![b"no_key".to_vec(), b"EX".to_vec(), b"100".to_vec()];
+        let result = getex(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn test_getex_atomic_wrongtype() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        engine.set_with_type(b"list_getex".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+
+        let args = vec![b"list_getex".to_vec(), b"EX".to_vec(), b"100".to_vec()];
+        let result = getex(&engine, &args).await;
+        assert!(result.is_err());
+    }
+}

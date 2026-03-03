@@ -2365,6 +2365,62 @@ impl StorageEngine {
         }
     }
 
+    /// Atomically get a string value and optionally modify its expiration.
+    /// Used by GETEX for thread-safe get-with-expiry-change.
+    ///
+    /// `new_expiry`:
+    ///   - None: don't change expiry
+    ///   - Some(None): remove expiry (PERSIST)
+    ///   - Some(Some(duration)): set new expiry
+    ///
+    /// Returns the value if the key exists and is a string type.
+    pub async fn atomic_get_set_expiry(
+        &self,
+        key: &[u8],
+        new_expiry: Option<Option<Duration>>,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        // Phase 1: Synchronous DashMap access (holds shard lock)
+        let (value, queue_action) = {
+            if let Some(mut entry) = self.active_db().get_mut(key) {
+                let item = entry.value_mut();
+
+                if item.is_expired() {
+                    (None, None)
+                } else if item.data_type != RedisDataType::String {
+                    return Err(StorageError::WrongType);
+                } else {
+                    let value = item.value.clone();
+
+                    let queue_action = match new_expiry {
+                        None => None,
+                        Some(None) => {
+                            item.remove_expiry();
+                            None
+                        }
+                        Some(Some(duration)) => {
+                            item.expire(duration);
+                            let expires_at = Instant::now() + duration;
+                            Some(expires_at)
+                        }
+                    };
+
+                    item.touch();
+                    (Some(value), queue_action)
+                }
+            } else {
+                (None, None)
+            }
+            // DashMap shard lock released here
+        };
+
+        // Phase 2: Async expiration queue work (no DashMap lock held)
+        if let Some(expires_at) = queue_action {
+            self.add_to_expiration_queue(key.to_vec(), expires_at).await;
+        }
+
+        Ok(value)
+    }
+
     /// Atomically get the old value and set a new value.
     pub async fn atomic_getset(&self, key: Vec<u8>, value: Vec<u8>) -> StorageResult<Option<Vec<u8>>> {
         if key.len() > self.config.max_key_size {
