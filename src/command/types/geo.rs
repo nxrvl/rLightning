@@ -82,6 +82,20 @@ fn geohash_to_string(hash: u64) -> String {
     result
 }
 
+/// Encode longitude/latitude into a standard geohash base32 string (11 characters).
+/// Uses the standard geohash latitude range [-90, 90] (not the internal Mercator range),
+/// matching Redis's GEOHASH command output and geohash.org convention.
+fn geohash_string_from_lonlat(longitude: f64, latitude: f64) -> String {
+    let lat_offset = (latitude - (-90.0)) / (90.0 - (-90.0));
+    let long_offset = (longitude - GEO_LONG_MIN) / (GEO_LONG_MAX - GEO_LONG_MIN);
+
+    let lat_bits = (lat_offset * ((1u64 << GEO_STEP_MAX) as f64)) as u64;
+    let long_bits = (long_offset * ((1u64 << GEO_STEP_MAX) as f64)) as u64;
+
+    let hash = interleave(long_bits, lat_bits);
+    geohash_to_string(hash)
+}
+
 // --- Distance Calculation ---
 
 /// Haversine distance between two points in meters.
@@ -473,7 +487,10 @@ pub async fn geohash(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
             match ss.iter().find(|(_, m)| m == member) {
                 Some((score, _)) => {
                     let hash = *score as u64;
-                    let hash_str = geohash_to_string(hash);
+                    // Decode internal hash (Mercator range) back to lon/lat,
+                    // then re-encode with standard geohash range [-90, 90] for lat
+                    let (lon, lat) = geohash_decode(hash);
+                    let hash_str = geohash_string_from_lonlat(lon, lat);
                     RespValue::BulkString(Some(hash_str.into_bytes()))
                 }
                 None => RespValue::BulkString(None),
@@ -2080,5 +2097,111 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_geohash_known_reference_values() {
+        // Paris (2.3522, 48.8566) — should start with "u09t"
+        let paris_str = geohash_string_from_lonlat(2.3522, 48.8566);
+        assert!(
+            paris_str.starts_with("u09t"),
+            "Paris geohash should start with 'u09t', got '{}'",
+            paris_str
+        );
+
+        // Rome (12.4964, 41.9028) — should start with "sr2y"
+        let rome_str = geohash_string_from_lonlat(12.4964, 41.9028);
+        assert!(
+            rome_str.starts_with("sr2y"),
+            "Rome geohash should start with 'sr2y', got '{}'",
+            rome_str
+        );
+
+        // New York (-74.006, 40.7128) — should start with "dr5r"
+        let ny_str = geohash_string_from_lonlat(-74.006, 40.7128);
+        assert!(
+            ny_str.starts_with("dr5r"),
+            "New York geohash should start with 'dr5r', got '{}'",
+            ny_str
+        );
+    }
+
+    #[test]
+    fn test_geohash_interleave_convention() {
+        // Verify standard geohash string encoding produces correct results
+        // Palermo (13.361389, 38.115556) — Redis GEOHASH reference: starts with "sqc8b"
+        let hash_str = geohash_string_from_lonlat(13.361389, 38.115556);
+        assert!(
+            hash_str.starts_with("sqc8b"),
+            "Palermo geohash should start with 'sqc8b', got '{}'",
+            hash_str
+        );
+
+        // Catania (15.087269, 37.502669) — Redis GEOHASH reference: starts with "sqdtr"
+        let hash_str = geohash_string_from_lonlat(15.087269, 37.502669);
+        assert!(
+            hash_str.starts_with("sqdtr"),
+            "Catania geohash should start with 'sqdtr', got '{}'",
+            hash_str
+        );
+    }
+
+    #[tokio::test]
+    async fn test_geohash_accuracy_via_command() {
+        let engine = setup().await;
+
+        // Add known cities
+        geoadd_helper(
+            &engine,
+            "cities",
+            &[
+                (2.3522, 48.8566, "Paris"),
+                (12.4964, 41.9028, "Rome"),
+                (-74.006, 40.7128, "NewYork"),
+            ],
+        )
+        .await;
+
+        let result = geohash(
+            &engine,
+            &[
+                b"cities".to_vec(),
+                b"Paris".to_vec(),
+                b"Rome".to_vec(),
+                b"NewYork".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        if let RespValue::Array(Some(items)) = result {
+            assert_eq!(items.len(), 3);
+
+            // Paris should start with "u09t"
+            if let RespValue::BulkString(Some(data)) = &items[0] {
+                let s = String::from_utf8_lossy(data);
+                assert!(s.starts_with("u09t"), "Paris: expected 'u09t...', got '{}'", s);
+            } else {
+                panic!("Expected BulkString for Paris");
+            }
+
+            // Rome should start with "sr2y"
+            if let RespValue::BulkString(Some(data)) = &items[1] {
+                let s = String::from_utf8_lossy(data);
+                assert!(s.starts_with("sr2y"), "Rome: expected 'sr2y...', got '{}'", s);
+            } else {
+                panic!("Expected BulkString for Rome");
+            }
+
+            // New York should start with "dr5r"
+            if let RespValue::BulkString(Some(data)) = &items[2] {
+                let s = String::from_utf8_lossy(data);
+                assert!(s.starts_with("dr5r"), "NewYork: expected 'dr5r...', got '{}'", s);
+            } else {
+                panic!("Expected BulkString for NewYork");
+            }
+        } else {
+            panic!("Expected Array");
+        }
     }
 }
