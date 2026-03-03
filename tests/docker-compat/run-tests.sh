@@ -132,6 +132,20 @@ resolve_replica_host_port() {
     fi
 }
 
+# Helper: resolve cluster node 1 host:port for local mode
+resolve_cluster_host_port() {
+    local server="$1"
+    if [[ "$LOCAL_MODE" == true ]]; then
+        if [[ "$server" == "redis" ]]; then
+            echo "localhost ${REDIS_CLUSTER_PORT_1:-6403}"
+        else
+            echo "localhost ${RLIGHTNING_CLUSTER_PORT_1:-6406}"
+        fi
+    else
+        echo "${server}-cluster-1 6379"
+    fi
+}
+
 # Helper: run a test client
 run_test_client() {
     local client="$1" server="$2" result_file="$3" log_file="$4"
@@ -147,16 +161,25 @@ run_test_client() {
     replica_host=${replica_host_port% *}
     replica_port=${replica_host_port#* }
 
+    # Resolve cluster host:port if cluster is running
+    local cluster_host="" cluster_port=""
+    local cluster_host_port
+    cluster_host_port=$(resolve_cluster_host_port "$server")
+    cluster_host=${cluster_host_port% *}
+    cluster_port=${cluster_host_port#* }
+
     if [[ "$LOCAL_MODE" == true ]]; then
         case "$client" in
             go-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="gotest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
+                    REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
                     "$SCRIPT_DIR/go-client/test-runner" > "$result_file" 2>"$log_file" || true
                 ;;
             js-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="jstest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
+                    REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
                     node "$SCRIPT_DIR/js-client/index.js" > "$result_file" 2>"$log_file" || true
                 ;;
             python-client)
@@ -166,6 +189,7 @@ run_test_client() {
                 fi
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="pytest:" \
                     REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
+                    REDIS_CLUSTER_HOST="$cluster_host" REDIS_CLUSTER_PORT="$cluster_port" \
                     "$py_bin" "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
                 ;;
         esac
@@ -174,6 +198,8 @@ run_test_client() {
             -e "REDIS_HOST=$server" \
             -e "REDIS_REPLICA_HOST=${server}-replica" \
             -e "REDIS_REPLICA_PORT=6379" \
+            -e "REDIS_CLUSTER_HOST=${server}-cluster-1" \
+            -e "REDIS_CLUSTER_PORT=6379" \
             "$client" > "$result_file" 2>"$log_file" || true
     fi
 }
@@ -325,6 +351,108 @@ for server in "${SERVERS[@]}"; do
             fi
             sleep 1
         done
+    fi
+done
+
+# Step 3c: Start cluster infrastructure for cluster tests
+log "Starting cluster infrastructure..."
+for server in "${SERVERS[@]}"; do
+    # Start the 3 cluster nodes
+    $COMPOSE --profile cluster up -d "${server}-cluster-1" "${server}-cluster-2" "${server}-cluster-3" 2>/dev/null || true
+
+    if [[ "$server" == "redis" ]]; then
+        log "Waiting for Redis cluster nodes to be healthy..."
+        all_cluster_ready=true
+        for node_num in 1 2 3; do
+            node_name="redis-cluster-${node_num}"
+            for i in $(seq 1 30); do
+                if $COMPOSE exec -T "${node_name}" redis-cli -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                    success "  ${node_name} is ready"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  ${node_name} failed to start — cluster tests will be skipped"
+                    all_cluster_ready=false
+                fi
+                sleep 1
+            done
+        done
+
+        # Initialize the Redis cluster if all nodes are ready
+        if [[ "$all_cluster_ready" == true ]]; then
+            log "Initializing Redis cluster..."
+            $COMPOSE exec -T redis-cluster-1 redis-cli -a test_password --no-auth-warning \
+                --cluster create redis-cluster-1:6379 redis-cluster-2:6379 redis-cluster-3:6379 \
+                --cluster-replicas 0 --cluster-yes 2>/dev/null || warn "  Redis cluster init returned non-zero (may already be initialized)"
+
+            # Wait for cluster to converge
+            for i in $(seq 1 30); do
+                cluster_info=$($COMPOSE exec -T redis-cluster-1 redis-cli -a test_password --no-auth-warning cluster info 2>/dev/null || true)
+                if echo "$cluster_info" | grep -q "cluster_state:ok"; then
+                    success "  Redis cluster is ready (cluster_state:ok)"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  Redis cluster did not converge — cluster tests may fail"
+                fi
+                sleep 1
+            done
+        fi
+    elif [[ "$server" == "rlightning" ]]; then
+        log "Waiting for rLightning cluster nodes to be healthy..."
+        all_cluster_ready=true
+        for node_num in 1 2 3; do
+            node_name="rlightning-cluster-${node_num}"
+            for i in $(seq 1 30); do
+                if $COMPOSE exec -T redis redis-cli -h "${node_name}" -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                    success "  ${node_name} is ready"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  ${node_name} failed to start — cluster tests will be skipped"
+                    all_cluster_ready=false
+                fi
+                sleep 1
+            done
+        done
+
+        # Initialize the rLightning cluster using CLUSTER MEET + ADDSLOTS
+        if [[ "$all_cluster_ready" == true ]]; then
+            log "Initializing rLightning cluster..."
+            # Node 1 meets nodes 2 and 3
+            $COMPOSE exec -T redis redis-cli -h rlightning-cluster-1 -a test_password --no-auth-warning \
+                CLUSTER MEET rlightning-cluster-2 6379 2>/dev/null || true
+            $COMPOSE exec -T redis redis-cli -h rlightning-cluster-1 -a test_password --no-auth-warning \
+                CLUSTER MEET rlightning-cluster-3 6379 2>/dev/null || true
+
+            sleep 2
+
+            # Assign slots: node1 gets 0-5460, node2 gets 5461-10922, node3 gets 10923-16383
+            log "  Assigning slots to rLightning cluster nodes..."
+            slots_1=$(seq 0 5460 | tr '\n' ' ')
+            slots_2=$(seq 5461 10922 | tr '\n' ' ')
+            slots_3=$(seq 10923 16383 | tr '\n' ' ')
+
+            $COMPOSE exec -T redis redis-cli -h rlightning-cluster-1 -a test_password --no-auth-warning \
+                CLUSTER ADDSLOTS $slots_1 2>/dev/null || true
+            $COMPOSE exec -T redis redis-cli -h rlightning-cluster-2 -a test_password --no-auth-warning \
+                CLUSTER ADDSLOTS $slots_2 2>/dev/null || true
+            $COMPOSE exec -T redis redis-cli -h rlightning-cluster-3 -a test_password --no-auth-warning \
+                CLUSTER ADDSLOTS $slots_3 2>/dev/null || true
+
+            # Wait for cluster to converge
+            for i in $(seq 1 30); do
+                cluster_info=$($COMPOSE exec -T redis redis-cli -h rlightning-cluster-1 -a test_password --no-auth-warning cluster info 2>/dev/null || true)
+                if echo "$cluster_info" | grep -q "cluster_state:ok"; then
+                    success "  rLightning cluster is ready (cluster_state:ok)"
+                    break
+                fi
+                if [[ $i -eq 30 ]]; then
+                    warn "  rLightning cluster did not converge — cluster tests may fail"
+                fi
+                sleep 1
+            done
+        fi
     fi
 done
 

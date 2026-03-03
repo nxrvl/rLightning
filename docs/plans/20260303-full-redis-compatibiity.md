@@ -512,18 +512,18 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/python-client/tests/cluster.py`
 - Modify: `tests/docker-compat/docker-compose.yml` (add 3-node cluster for both Redis and rLightning)
 
-- [ ] **CLUSTER_INFO**: Verify CLUSTER INFO returns cluster_state, cluster_slots_assigned, cluster_size
-- [ ] **CLUSTER_NODES**: Verify CLUSTER NODES returns node list with correct format
-- [ ] **CLUSTER_SLOTS**: Verify CLUSTER SLOTS returns slot ranges with master/replica info
-- [ ] **CLUSTER_SHARDS**: Verify CLUSTER SHARDS returns shard information (Redis 7.0+)
-- [ ] **CLUSTER_hash_tag**: Verify {tag} keys hash to same slot — SET {user}.name, SET {user}.email, verify same slot
-- [ ] **CLUSTER_MOVED_redirect**: Access key on wrong node, verify MOVED error with correct slot and target
-- [ ] **CLUSTER_KEYSLOT**: Verify CLUSTER KEYSLOT returns correct CRC16 mod 16384
-- [ ] **CLUSTER_COUNTKEYSINSLOT**: Verify key counting per slot
-- [ ] **CLUSTER_cross_slot_error**: Verify CROSSSLOT error for multi-key commands on different slots
-- [ ] **READONLY_mode**: READONLY on replica node, verify reads succeed
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **CLUSTER_INFO**: Verify CLUSTER INFO returns cluster_state, cluster_slots_assigned, cluster_size
+- [x] **CLUSTER_NODES**: Verify CLUSTER NODES returns node list with correct format
+- [x] **CLUSTER_SLOTS**: Verify CLUSTER SLOTS returns slot ranges with master/replica info
+- [x] **CLUSTER_SHARDS**: Verify CLUSTER SHARDS returns shard information (Redis 7.0+)
+- [x] **CLUSTER_hash_tag**: Verify {tag} keys hash to same slot — SET {user}.name, SET {user}.email, verify same slot
+- [x] **CLUSTER_MOVED_redirect**: Access key on wrong node, verify MOVED error with correct slot and target
+- [x] **CLUSTER_KEYSLOT**: Verify CLUSTER KEYSLOT returns correct CRC16 mod 16384
+- [x] **CLUSTER_COUNTKEYSINSLOT**: Verify key counting per slot
+- [x] **CLUSTER_cross_slot_error**: Verify CROSSSLOT error for multi-key commands on different slots
+- [x] **READONLY_mode**: READONLY on replica node, verify reads succeed
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 
