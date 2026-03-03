@@ -49,6 +49,58 @@ services:
       retries: 10
       start_period: 10s
 
+  # Redis 7.x replica (replicaof the redis master)
+  redis-replica:
+    image: redis:7-alpine
+    container_name: compat-test-redis-replica
+    ports:
+      - "${REDIS_REPLICA_HOST_PORT:-6401}:6379"
+    networks:
+      - compat-test
+    command: >
+      redis-server
+      --requirepass test_password
+      --masterauth test_password
+      --replicaof redis 6379
+      --save ""
+      --appendonly no
+      --loglevel warning
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    profiles:
+      - replication
+
+  # rLightning replica (replicaof the rlightning master)
+  rlightning-replica:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-replica
+    ports:
+      - "${RLIGHTNING_REPLICA_HOST_PORT:-6402}:6379"
+    networks:
+      - compat-test
+    command: ["rlightning", "--master-password", "test_password", "--master-host", "rlightning", "--master-port", "6379"]
+    depends_on:
+      rlightning:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - replication
+
   # Go test client (go-redis/redis v9)
   go-client:
     build:

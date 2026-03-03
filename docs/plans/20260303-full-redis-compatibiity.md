@@ -490,17 +490,17 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/python-client/tests/replication.py`
 - Modify: `tests/docker-compat/docker-compose.yml` (add master + replica containers for both Redis and rLightning)
 
-- [ ] **INFO_replication**: Verify INFO replication section on master (role:master, connected_slaves)
-- [ ] **REPLICAOF_basic**: Configure replica, verify it connects to master
-- [ ] **REPLICATION_data_sync**: SET key on master, verify key appears on replica
-- [ ] **REPLICATION_multi_commands**: SET multiple keys on master, verify all replicated
-- [ ] **REPLICATION_expiry**: SET key with TTL on master, verify TTL replicated
-- [ ] **REPLICA_read_only**: Verify writes to replica return READONLY error
-- [ ] **REPLICATION_after_reconnect**: Disconnect replica, write to master, reconnect, verify partial sync
-- [ ] **WAIT_command**: SET key, WAIT 1 0 (wait for 1 replica, no timeout), verify acknowledged
-- [ ] **REPLICATION_SELECT**: Master uses SELECT 3 + SET, verify replica DB 3 has key
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **INFO_replication**: Verify INFO replication section on master (role:master, connected_slaves)
+- [x] **REPLICAOF_basic**: Configure replica, verify it connects to master
+- [x] **REPLICATION_data_sync**: SET key on master, verify key appears on replica
+- [x] **REPLICATION_multi_commands**: SET multiple keys on master, verify all replicated
+- [x] **REPLICATION_expiry**: SET key with TTL on master, verify TTL replicated
+- [x] **REPLICA_read_only**: Verify writes to replica return READONLY error
+- [x] **REPLICATION_after_reconnect**: Disconnect replica, write to master, reconnect, verify partial sync
+- [x] **WAIT_command**: SET key, WAIT 1 0 (wait for 1 replica, no timeout), verify acknowledged
+- [x] **REPLICATION_SELECT**: Master uses SELECT 3 + SET, verify replica DB 3 has key
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 

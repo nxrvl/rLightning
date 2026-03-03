@@ -118,6 +118,20 @@ resolve_host_port() {
     fi
 }
 
+# Helper: resolve replica host:port for local mode
+resolve_replica_host_port() {
+    local server="$1"
+    if [[ "$LOCAL_MODE" == true ]]; then
+        if [[ "$server" == "redis" ]]; then
+            echo "localhost ${REDIS_REPLICA_HOST_PORT:-6401}"
+        else
+            echo "localhost ${RLIGHTNING_REPLICA_HOST_PORT:-6402}"
+        fi
+    else
+        echo "${server}-replica 6379"
+    fi
+}
+
 # Helper: run a test client
 run_test_client() {
     local client="$1" server="$2" result_file="$3" log_file="$4"
@@ -126,14 +140,23 @@ run_test_client() {
     local host=${host_port% *}
     local port=${host_port#* }
 
+    # Resolve replica host:port if replicas are running
+    local replica_host="" replica_port=""
+    local replica_host_port
+    replica_host_port=$(resolve_replica_host_port "$server")
+    replica_host=${replica_host_port% *}
+    replica_port=${replica_host_port#* }
+
     if [[ "$LOCAL_MODE" == true ]]; then
         case "$client" in
             go-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="gotest:" \
+                    REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     "$SCRIPT_DIR/go-client/test-runner" > "$result_file" 2>"$log_file" || true
                 ;;
             js-client)
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="jstest:" \
+                    REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     node "$SCRIPT_DIR/js-client/index.js" > "$result_file" 2>"$log_file" || true
                 ;;
             python-client)
@@ -142,12 +165,15 @@ run_test_client() {
                     py_bin="$SCRIPT_DIR/python-client/.venv/bin/python"
                 fi
                 REDIS_HOST="$host" REDIS_PORT="$port" REDIS_PASSWORD=test_password TEST_PREFIX="pytest:" \
+                    REDIS_REPLICA_HOST="$replica_host" REDIS_REPLICA_PORT="$replica_port" \
                     "$py_bin" "$SCRIPT_DIR/python-client/test_compat.py" > "$result_file" 2>"$log_file" || true
                 ;;
         esac
     else
         TARGET_HOST="$server" $COMPOSE --profile clients run --rm \
             -e "REDIS_HOST=$server" \
+            -e "REDIS_REPLICA_HOST=${server}-replica" \
+            -e "REDIS_REPLICA_PORT=6379" \
             "$client" > "$result_file" 2>"$log_file" || true
     fi
 }
@@ -263,6 +289,39 @@ for server in "${SERVERS[@]}"; do
                 error "rLightning failed to start within 30 seconds"
                 $COMPOSE logs rlightning
                 exit 1
+            fi
+            sleep 1
+        done
+    fi
+done
+
+# Step 3b: Start replica infrastructure for replication tests
+log "Starting replica infrastructure..."
+for server in "${SERVERS[@]}"; do
+    replica="${server}-replica"
+    $COMPOSE --profile replication up -d "$replica" 2>/dev/null || true
+
+    if [[ "$server" == "redis" ]]; then
+        log "Waiting for Redis replica to be healthy..."
+        for i in $(seq 1 30); do
+            if $COMPOSE exec -T redis redis-cli -h redis-replica -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                success "  Redis replica is ready"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                warn "  Redis replica failed to start — replication tests will be skipped"
+            fi
+            sleep 1
+        done
+    elif [[ "$server" == "rlightning" ]]; then
+        log "Waiting for rLightning replica to be healthy..."
+        for i in $(seq 1 30); do
+            if $COMPOSE exec -T redis redis-cli -h rlightning-replica -a test_password --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+                success "  rLightning replica is ready"
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                warn "  rLightning replica failed to start — replication tests will be skipped"
             fi
             sleep 1
         done

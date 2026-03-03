@@ -21,6 +21,7 @@ require('./tests/persistence');
 require('./tests/acl');
 require('./tests/blocking');
 require('./tests/memory');
+require('./tests/replication');
 require('./tests/js_specific');
 
 async function main() {
