@@ -25,6 +25,7 @@ import tests.streams
 import tests.advanced
 import tests.edge_cases
 import tests.server
+import tests.persistence
 import tests.python_specific
 
 

@@ -401,17 +401,17 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 New Docker-based comparison test category testing persistence behavior against real Redis 7.
 
-- [ ] **RDB_SAVE_and_RESTORE**: BGSAVE, wait, verify LASTSAVE timestamp changes
-- [ ] **AOF_append_and_replay**: CONFIG SET appendonly yes, write data, verify data survives container restart
-- [ ] **PERSIST_across_restart**: SET keys with TTL, restart container, verify keys and TTLs survived
-- [ ] **RDB_background_save**: SET data, BGSAVE, verify DBSIZE after restart
-- [ ] **CONFIG_persistence_settings**: CONFIG SET/GET for `save`, `appendonly`, `appendfsync`
-- [ ] **DEBUG_SLEEP_during_save**: Verify server remains responsive during BGSAVE
-- [ ] **MULTI_DB_persistence**: SET keys in DB 0 and DB 3, restart, verify both databases restored
-- [ ] **LARGE_VALUE_persistence**: SET 1MB value, restart, verify value intact
-- [ ] Implement in all 3 languages (Go, JS, Python) following existing framework patterns
-- [ ] Run full comparison suite — must pass on both Redis and rLightning
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] **RDB_SAVE_and_RESTORE**: BGSAVE, wait, verify LASTSAVE timestamp changes
+- [x] **AOF_append_and_replay**: CONFIG SET appendonly yes, write data, verify data survives container restart
+- [x] **PERSIST_across_restart**: SET keys with TTL, restart container, verify keys and TTLs survived
+- [x] **RDB_background_save**: SET data, BGSAVE, verify DBSIZE after restart
+- [x] **CONFIG_persistence_settings**: CONFIG SET/GET for `save`, `appendonly`, `appendfsync`
+- [x] **DEBUG_SLEEP_during_save**: Verify server remains responsive during BGSAVE
+- [x] **MULTI_DB_persistence**: SET keys in DB 0 and DB 3, restart, verify both databases restored
+- [x] **LARGE_VALUE_persistence**: SET 1MB value, restart, verify value intact
+- [x] Implement in all 3 languages (Go, JS, Python) following existing framework patterns
+- [x] Run full comparison suite — must pass on both Redis and rLightning
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
 
 ---
 
