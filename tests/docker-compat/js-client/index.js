@@ -25,6 +25,7 @@ require('./tests/replication');
 require('./tests/cluster');
 require('./tests/sentinel');
 require('./tests/streams_advanced');
+require('./tests/scripting_advanced');
 require('./tests/js_specific');
 
 async function main() {
