@@ -209,12 +209,20 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     Ok(RespValue::Array(Some(values)))
 }
 
-/// Redis MSET command - Set multiple key-value pairs
+/// Redis MSET command - Set multiple key-value pairs atomically.
+/// Uses lock_keys for cross-key coordination (sorted order prevents deadlocks).
+/// Redis guarantees MSET is atomic — all keys are set or none are visible to concurrent clients.
 pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
     
+    // Collect all keys for atomic locking
+    let keys: Vec<Vec<u8>> = (0..args.len()).step_by(2).map(|i| args[i].clone()).collect();
+
+    // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions/MSETNX
+    let _guard = engine.lock_keys(&keys).await;
+
     for i in (0..args.len()).step_by(2) {
         engine.set(args[i].clone(), args[i+1].clone(), None).await?;
     }
@@ -2131,5 +2139,209 @@ mod tests {
         let args = vec![b"list_getex".to_vec(), b"EX".to_vec(), b"100".to_vec()];
         let result = getex(&engine, &args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mset_basic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // MSET with 3 key-value pairs
+        let args = vec![
+            b"k1".to_vec(), b"v1".to_vec(),
+            b"k2".to_vec(), b"v2".to_vec(),
+            b"k3".to_vec(), b"v3".to_vec(),
+        ];
+        let result = mset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // Verify all keys are set
+        let r1 = get(&engine, &[b"k1".to_vec()]).await.unwrap();
+        assert_eq!(r1, RespValue::BulkString(Some(b"v1".to_vec())));
+        let r2 = get(&engine, &[b"k2".to_vec()]).await.unwrap();
+        assert_eq!(r2, RespValue::BulkString(Some(b"v2".to_vec())));
+        let r3 = get(&engine, &[b"k3".to_vec()]).await.unwrap();
+        assert_eq!(r3, RespValue::BulkString(Some(b"v3".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_mset_wrong_args() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Odd number of arguments
+        let args = vec![b"k1".to_vec(), b"v1".to_vec(), b"k2".to_vec()];
+        let result = mset(&engine, &args).await;
+        assert!(result.is_err());
+
+        // Empty arguments
+        let result = mset(&engine, &[]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_mset_concurrent_no_partial_state() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Spawn multiple tasks that MSET the same keys to different values.
+        // Each task sets k1=<task_id>, k2=<task_id>, k3=<task_id>.
+        // After all tasks complete, all keys should have the same value
+        // (whichever task ran last), demonstrating no partial states.
+        let num_tasks = 20;
+        let mut handles = Vec::new();
+        for task_id in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let val = format!("task_{task_id}").into_bytes();
+                let args = vec![
+                    b"mset_ck1".to_vec(), val.clone(),
+                    b"mset_ck2".to_vec(), val.clone(),
+                    b"mset_ck3".to_vec(), val,
+                ];
+                mset(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All three keys must have the same value (from whatever MSET ran last)
+        let r1 = engine.get(b"mset_ck1").await.unwrap().unwrap();
+        let r2 = engine.get(b"mset_ck2").await.unwrap().unwrap();
+        let r3 = engine.get(b"mset_ck3").await.unwrap().unwrap();
+        assert_eq!(r1, r2, "k1 and k2 should match (no partial MSET state)");
+        assert_eq!(r2, r3, "k2 and k3 should match (no partial MSET state)");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_mset_concurrent_independent_keys() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Each task MSETs a unique pair of keys. After all tasks,
+        // every key should be set correctly.
+        let num_tasks = 50;
+        let mut handles = Vec::new();
+        for task_id in 0..num_tasks {
+            let eng = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let k1 = format!("mset_ik_{task_id}_a").into_bytes();
+                let k2 = format!("mset_ik_{task_id}_b").into_bytes();
+                let val = format!("val_{task_id}").into_bytes();
+                let args = vec![k1, val.clone(), k2, val];
+                mset(&eng, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Verify all keys exist with correct values
+        for task_id in 0..num_tasks {
+            let k1 = format!("mset_ik_{task_id}_a").into_bytes();
+            let k2 = format!("mset_ik_{task_id}_b").into_bytes();
+            let expected = format!("val_{task_id}").into_bytes();
+            let v1 = engine.get(&k1).await.unwrap().unwrap();
+            let v2 = engine.get(&k2).await.unwrap().unwrap();
+            assert_eq!(v1, expected);
+            assert_eq!(v2, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_msetnx_basic() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // MSETNX should succeed when none of the keys exist
+        let args = vec![
+            b"nx1".to_vec(), b"v1".to_vec(),
+            b"nx2".to_vec(), b"v2".to_vec(),
+        ];
+        let result = msetnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // Verify keys were set
+        let r1 = get(&engine, &[b"nx1".to_vec()]).await.unwrap();
+        assert_eq!(r1, RespValue::BulkString(Some(b"v1".to_vec())));
+        let r2 = get(&engine, &[b"nx2".to_vec()]).await.unwrap();
+        assert_eq!(r2, RespValue::BulkString(Some(b"v2".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_msetnx_existing_key_rollback() {
+        let config = StorageConfig::default();
+        let engine = Arc::new(StorageEngine::new(config));
+
+        // Pre-set one key
+        engine.set(b"nxe2".to_vec(), b"existing".to_vec(), None).await.unwrap();
+
+        // MSETNX with one existing key should fail and rollback
+        let args = vec![
+            b"nxe1".to_vec(), b"new1".to_vec(),
+            b"nxe2".to_vec(), b"new2".to_vec(),  // This key exists
+            b"nxe3".to_vec(), b"new3".to_vec(),
+        ];
+        let result = msetnx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // nxe1 should NOT exist (rolled back)
+        let r1 = get(&engine, &[b"nxe1".to_vec()]).await.unwrap();
+        assert_eq!(r1, RespValue::BulkString(None));
+
+        // nxe2 should still have original value
+        let r2 = get(&engine, &[b"nxe2".to_vec()]).await.unwrap();
+        assert_eq!(r2, RespValue::BulkString(Some(b"existing".to_vec())));
+
+        // nxe3 should NOT exist (never attempted, loop broke at nxe2)
+        let r3 = get(&engine, &[b"nxe3".to_vec()]).await.unwrap();
+        assert_eq!(r3, RespValue::BulkString(None));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_msetnx_concurrent_only_one_wins() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Multiple tasks try MSETNX on the same keys. Exactly one should succeed.
+        let num_tasks = 20;
+        let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+
+        for task_id in 0..num_tasks {
+            let eng = engine.clone();
+            let res = results.clone();
+            handles.push(tokio::spawn(async move {
+                let val = format!("task_{task_id}").into_bytes();
+                let args = vec![
+                    b"msetnx_ck1".to_vec(), val.clone(),
+                    b"msetnx_ck2".to_vec(), val,
+                ];
+                let result = msetnx(&eng, &args).await.unwrap();
+                if let RespValue::Integer(n) = result {
+                    res.lock().unwrap().push(n);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let results = results.lock().unwrap();
+        let successes = results.iter().filter(|&&r| r == 1).count();
+        let failures = results.iter().filter(|&&r| r == 0).count();
+
+        // Exactly one task should have succeeded
+        assert_eq!(successes, 1, "Exactly one MSETNX should succeed");
+        assert_eq!(failures, num_tasks - 1, "All other MSETNXs should fail");
+
+        // Both keys should have the same value (from the winning task)
+        let v1 = engine.get(b"msetnx_ck1").await.unwrap().unwrap();
+        let v2 = engine.get(b"msetnx_ck2").await.unwrap().unwrap();
+        assert_eq!(v1, v2, "Both keys should have the winning task's value");
     }
 }

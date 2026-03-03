@@ -111,11 +111,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** MSET (lines 222-232) sets keys one-by-one in a loop. Redis guarantees MSET is atomic.
 
-- [ ] MSET: Use `lock_keys()` (sorted order for deadlock prevention) → set all keys → release locks
-- [ ] MSETNX: Review existing lock-based implementation (lines 442-493), fix remaining TOCTOU gaps in rollback logic
-- [ ] Write concurrent tests: multiple MSET operations from parallel tasks, verify no partial states
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] MSET: Use `lock_keys()` (sorted order for deadlock prevention) → set all keys → release locks
+- [x] MSETNX: Review existing lock-based implementation (lines 442-493), fix remaining TOCTOU gaps in rollback logic
+- [x] Write concurrent tests: multiple MSET operations from parallel tasks, verify no partial states
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
