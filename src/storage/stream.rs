@@ -23,6 +23,7 @@ impl StreamEntryId {
 
     /// Parse a stream entry ID from a string like "1526919030474-55"
     /// Supports special values: "*", "-", "+", and incomplete IDs like "1526919030474"
+    #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<Self> {
         if s == "-" {
             return Some(Self::min());

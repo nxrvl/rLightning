@@ -221,12 +221,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** `process_command()` (engine.rs:1039-1196) only handles ~9 command types. ~60 write commands are silently dropped during AOF replay, causing data loss on recovery.
 
-- [ ] Create a `CommandHandler` instance during AOF load and route replay through `cmd_handler.process()` instead of manual `process_command()` switch
-- [ ] Handle async properly (existing code already uses `block_on()` inside `spawn_blocking`)
-- [ ] Keep `process_command()` as bootstrap fallback if needed
-- [ ] Write tests: AOF replay for LPUSH, SREM, HDEL, ZINCRBY, GEOADD, PFADD, SETBIT, XGROUP, APPEND, INCR, RENAME
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Create a `CommandHandler` instance during AOF load and route replay through `cmd_handler.process()` instead of manual `process_command()` switch
+- [x] Handle async properly (existing code already uses `block_on()` inside `spawn_blocking`)
+- [x] Keep `process_command()` as bootstrap fallback if needed
+- [x] Write tests: AOF replay for LPUSH, SREM, HDEL, ZINCRBY, GEOADD, PFADD, SETBIT, XGROUP, APPEND, INCR, RENAME
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

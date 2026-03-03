@@ -11,6 +11,8 @@ use tokio::io::{AsyncWriteExt, BufWriter as TokioBufWriter};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{self, Duration, MissedTickBehavior};
 
+use crate::command::Command;
+use crate::command::handler::CommandHandler;
 use crate::networking::resp::{RespCommand, RespValue};
 use crate::persistence::config::{AofSyncPolicy, PersistenceConfig};
 use crate::persistence::error::PersistenceError;
@@ -218,42 +220,47 @@ impl AofPersistence {
             debug!(path = ?self.path, "No AOF file found, skipping load");
             return Ok(());
         }
-        
+
         info!(path = ?self.path, "Loading AOF file");
-        
+
         // Perform file reading in a blocking task
         let path = self.path.clone();
         let engine = self.engine.clone();
-        
+
         tokio::task::spawn_blocking(move || -> Result<(), PersistenceError> {
             let file = File::open(&path)
                 .map_err(PersistenceError::Io)?;
-            
+
             let reader = BufReader::new(file);
             let mut line_count = 0;
             let mut command_count = 0;
             let mut current_db: usize = 0;
             let mut skip_until_valid_select = false;
 
+            // Create a CommandHandler for full command replay.
+            // This routes through the same dispatch as live client commands,
+            // ensuring all 400+ commands are properly handled during recovery.
+            let cmd_handler = CommandHandler::new(engine.clone());
+
             // Process each line
             let mut parser = resp_parser::RespParser::new(reader);
-            
+
             while let Ok(Some(value)) = parser.next() {
                 line_count += 1;
-                
+
                 // Convert value to command
                 let command = match value {
                     RespValue::Array(Some(array)) => {
                         if array.is_empty() {
                             continue;
                         }
-                        
+
                         let name = match &array[0] {
                             RespValue::BulkString(Some(s)) => s.clone(),
                             RespValue::SimpleString(s) => s.as_bytes().to_vec(),
                             _ => continue,
                         };
-                        
+
                         let args = array[1..].iter()
                             .filter_map(|arg| match arg {
                                 RespValue::BulkString(Some(s)) => Some(s.clone()),
@@ -261,19 +268,19 @@ impl AofPersistence {
                                 _ => None,
                             })
                             .collect();
-                        
+
                         RespCommand { name, args }
                     },
                     _ => continue,
                 };
-                
+
                 // Execute the command (handling SELECT for DB routing)
                 tokio::runtime::Handle::current().block_on(async {
-                    use crate::storage::engine::CURRENT_DB_INDEX;
+                    let cmd_name = String::from_utf8_lossy(&command.name).to_string();
+                    let upper_name = cmd_name.to_uppercase();
 
-                    // Check if this is a SELECT command to switch DB context
-                    let upper_name: Vec<u8> = command.name.iter().map(|b| b.to_ascii_uppercase()).collect();
-                    if upper_name == b"SELECT" {
+                    // Handle SELECT to switch DB context
+                    if upper_name == "SELECT" {
                         if let Some(arg) = command.args.first()
                             && let Ok(s) = std::str::from_utf8(arg)
                                 && let Ok(idx) = s.parse::<usize>() {
@@ -292,21 +299,32 @@ impl AofPersistence {
                     // Skip commands if we encountered an invalid SELECT -
                     // we don't know which DB they were intended for
                     if skip_until_valid_select {
-                        warn!(command = ?command, "Skipping AOF command after invalid SELECT");
+                        warn!("Skipping AOF command after invalid SELECT: {}", cmd_name);
                         return;
                     }
 
-                    let result = CURRENT_DB_INDEX.scope(current_db, async {
-                        engine.process_command(&command).await
-                    }).await;
-                    if let Err(e) = result {
-                        warn!(command = ?command, "Error processing AOF command: {:?}", e);
-                    } else {
-                        command_count += 1;
+                    // Skip commands that don't make sense during AOF replay
+                    if is_replay_skip_command(&upper_name) {
+                        return;
+                    }
+
+                    // Route through the full CommandHandler for complete command coverage
+                    let cmd = Command {
+                        name: cmd_name,
+                        args: command.args,
+                    };
+
+                    match cmd_handler.process(cmd, current_db).await {
+                        Ok(_) => {
+                            command_count += 1;
+                        }
+                        Err(e) => {
+                            warn!("Error during AOF replay for '{}': {:?}", upper_name, e);
+                        }
                     }
                 });
             }
-            
+
             info!(path = ?path, commands = command_count, lines = line_count,
                   "Successfully loaded commands from AOF file");
             Ok(())
@@ -616,6 +634,38 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
 }
 
 /// Helper function to check if a command is read-only
+/// Commands that should be skipped during AOF replay.
+/// These include transaction markers (individual commands within transactions
+/// are already logged separately), blocking commands (which would deadlock
+/// during replay), and server/connection/replication commands that don't
+/// contribute to data state reconstruction.
+fn is_replay_skip_command(upper_name: &str) -> bool {
+    matches!(upper_name,
+        // Transaction markers — commands within the transaction are logged individually
+        "MULTI" | "EXEC" | "DISCARD" |
+        // Blocking commands — would deadlock or alter state incorrectly during replay
+        "BLPOP" | "BRPOP" | "BLMOVE" | "BLMPOP" |
+        "BZPOPMIN" | "BZPOPMAX" | "BZMPOP" |
+        // Pub/Sub — no subscribers exist during replay
+        "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" |
+        "SSUBSCRIBE" | "SUNSUBSCRIBE" | "PUBLISH" | "SPUBLISH" |
+        // Persistence commands — must not trigger saves during replay
+        "SAVE" | "BGSAVE" | "BGREWRITEAOF" | "SHUTDOWN" |
+        // Monitoring/debug — not data-modifying
+        "MONITOR" | "DEBUG" | "SLOWLOG" | "LATENCY" |
+        // Connection — no client context during replay
+        "AUTH" | "HELLO" | "QUIT" | "RESET" | "CLIENT" | "COMMAND" |
+        // Replication wait — no replicas during replay
+        "WAIT" | "WAITAOF" |
+        // Cluster/replication/sentinel — server-level, not data operations
+        "CLUSTER" | "SENTINEL" | "REPLICAOF" | "SLAVEOF" |
+        "REPLCONF" | "PSYNC" | "FAILOVER" |
+        "ASKING" | "READONLY" | "READWRITE" |
+        // Module/ACL — handled at server level
+        "MODULE" | "ACL"
+    )
+}
+
 fn is_read_only_command(command: &[u8]) -> bool {
     let upper: Vec<u8> = command.iter().map(|b| b.to_ascii_uppercase()).collect();
     matches!(upper.as_slice(),
@@ -1094,5 +1144,305 @@ mod tests {
         // Verify the data was correctly restored
         assert_eq!(engine2.get(b"mykey").await.unwrap(), Some(b"myvalue".to_vec()));
         assert_eq!(engine2.get(b"counter").await.unwrap(), Some(b"42".to_vec()));
+    }
+
+    /// Write a list of RespCommands directly to a file in RESP format,
+    /// then load them via `AofPersistence::load()` which uses CommandHandler.
+    fn write_resp_commands_to_file(path: &std::path::Path, commands: &[RespCommand]) {
+        use std::io::Write;
+        let mut file = File::create(path).unwrap();
+        for cmd in commands {
+            // Write RESP array: *N\r\n then each element as $len\r\ndata\r\n
+            let total = 1 + cmd.args.len();
+            write!(file, "*{}\r\n", total).unwrap();
+            // Command name
+            write!(file, "${}\r\n", cmd.name.len()).unwrap();
+            file.write_all(&cmd.name).unwrap();
+            write!(file, "\r\n").unwrap();
+            // Arguments
+            for arg in &cmd.args {
+                write!(file, "${}\r\n", arg.len()).unwrap();
+                file.write_all(arg).unwrap();
+                write!(file, "\r\n").unwrap();
+            }
+        }
+        file.flush().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_lpush() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"LPUSH".to_vec(), args: vec![b"mylist".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        // LPUSH pushes left, so order is a, b, c from left to right
+        let val = engine.get(b"mylist").await.unwrap().unwrap();
+        let list: Vec<Vec<u8>> = bincode::deserialize(&val).unwrap();
+        assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_srem() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"SADD".to_vec(), args: vec![b"myset".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
+            RespCommand { name: b"SREM".to_vec(), args: vec![b"myset".to_vec(), b"b".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        let val = engine.get(b"myset").await.unwrap().unwrap();
+        let set: HashSet<Vec<u8>> = bincode::deserialize(&val).unwrap();
+        assert!(set.contains(&b"a".to_vec()));
+        assert!(!set.contains(&b"b".to_vec()));
+        assert!(set.contains(&b"c".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_hdel() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"HSET".to_vec(), args: vec![b"myhash".to_vec(), b"f1".to_vec(), b"v1".to_vec(), b"f2".to_vec(), b"v2".to_vec(), b"f3".to_vec(), b"v3".to_vec()] },
+            RespCommand { name: b"HDEL".to_vec(), args: vec![b"myhash".to_vec(), b"f2".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        let fields = engine.hash_getall(b"myhash").unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|(k, v)| k == b"f1" && v == b"v1"));
+        assert!(fields.iter().any(|(k, v)| k == b"f3" && v == b"v3"));
+        assert!(!fields.iter().any(|(k, _)| k == b"f2"));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_zincrby() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"ZADD".to_vec(), args: vec![b"myzset".to_vec(), b"1.0".to_vec(), b"alice".to_vec()] },
+            RespCommand { name: b"ZINCRBY".to_vec(), args: vec![b"myzset".to_vec(), b"2.5".to_vec(), b"alice".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        let val = engine.get(b"myzset").await.unwrap().unwrap();
+        let zset: SortedSetData = bincode::deserialize(&val).unwrap();
+        assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&3.5));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_geoadd() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"GEOADD".to_vec(), args: vec![
+                b"mygeo".to_vec(),
+                b"13.361389".to_vec(), b"38.115556".to_vec(), b"Palermo".to_vec(),
+                b"15.087269".to_vec(), b"37.502669".to_vec(), b"Catania".to_vec(),
+            ] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        // Geo data is stored as a sorted set
+        let val = engine.get(b"mygeo").await.unwrap();
+        assert!(val.is_some(), "GEOADD should have created the geo key");
+        assert_eq!(engine.get_type(b"mygeo").await.unwrap(), "zset");
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_pfadd() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"PFADD".to_vec(), args: vec![b"myhll".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        let val = engine.get(b"myhll").await.unwrap();
+        assert!(val.is_some(), "PFADD should have created the HLL key");
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_setbit() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"mybits".to_vec(), b"7".to_vec(), b"1".to_vec()] },
+            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"mybits".to_vec(), b"0".to_vec(), b"1".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        let val = engine.get(b"mybits").await.unwrap();
+        assert!(val.is_some(), "SETBIT should have created the bitmap key");
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_xgroup() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"XADD".to_vec(), args: vec![
+                b"mystream".to_vec(), b"1-0".to_vec(), b"field".to_vec(), b"value".to_vec()
+            ] },
+            RespCommand { name: b"XGROUP".to_vec(), args: vec![
+                b"CREATE".to_vec(), b"mystream".to_vec(), b"mygroup".to_vec(), b"0".to_vec()
+            ] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        // Verify the stream exists with the consumer group
+        let val = engine.get(b"mystream").await.unwrap();
+        assert!(val.is_some(), "XADD should have created the stream");
+        let stream: crate::storage::stream::StreamData = bincode::deserialize(&val.unwrap()).unwrap();
+        assert!(stream.groups.contains_key("mygroup"), "XGROUP CREATE should have created the consumer group");
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"SET".to_vec(), args: vec![b"mykey".to_vec(), b"Hello".to_vec()] },
+            RespCommand { name: b"APPEND".to_vec(), args: vec![b"mykey".to_vec(), b" World".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        assert_eq!(engine.get(b"mykey").await.unwrap(), Some(b"Hello World".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_incr() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"SET".to_vec(), args: vec![b"counter".to_vec(), b"10".to_vec()] },
+            RespCommand { name: b"INCR".to_vec(), args: vec![b"counter".to_vec()] },
+            RespCommand { name: b"INCRBY".to_vec(), args: vec![b"counter".to_vec(), b"5".to_vec()] },
+            RespCommand { name: b"DECR".to_vec(), args: vec![b"counter".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        // 10 + 1 + 5 - 1 = 15
+        assert_eq!(engine.get(b"counter").await.unwrap(), Some(b"15".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"SET".to_vec(), args: vec![b"oldkey".to_vec(), b"myvalue".to_vec()] },
+            RespCommand { name: b"RENAME".to_vec(), args: vec![b"oldkey".to_vec(), b"newkey".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        assert_eq!(engine.get(b"oldkey").await.unwrap(), None);
+        assert_eq!(engine.get(b"newkey").await.unwrap(), Some(b"myvalue".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_mixed_commands() {
+        // Comprehensive test: replay a sequence of diverse commands through CommandHandler
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            // String operations
+            RespCommand { name: b"SET".to_vec(), args: vec![b"str".to_vec(), b"hello".to_vec()] },
+            RespCommand { name: b"APPEND".to_vec(), args: vec![b"str".to_vec(), b" world".to_vec()] },
+            // List operations
+            RespCommand { name: b"RPUSH".to_vec(), args: vec![b"list".to_vec(), b"1".to_vec(), b"2".to_vec()] },
+            RespCommand { name: b"LPUSH".to_vec(), args: vec![b"list".to_vec(), b"0".to_vec()] },
+            // Set operations
+            RespCommand { name: b"SADD".to_vec(), args: vec![b"set".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
+            RespCommand { name: b"SREM".to_vec(), args: vec![b"set".to_vec(), b"b".to_vec()] },
+            // Hash operations
+            RespCommand { name: b"HSET".to_vec(), args: vec![b"hash".to_vec(), b"f1".to_vec(), b"v1".to_vec()] },
+            RespCommand { name: b"HDEL".to_vec(), args: vec![b"hash".to_vec(), b"f1".to_vec()] },
+            RespCommand { name: b"HSET".to_vec(), args: vec![b"hash".to_vec(), b"f2".to_vec(), b"v2".to_vec()] },
+            // Sorted set operations
+            RespCommand { name: b"ZADD".to_vec(), args: vec![b"zset".to_vec(), b"1.0".to_vec(), b"x".to_vec(), b"2.0".to_vec(), b"y".to_vec()] },
+            RespCommand { name: b"ZINCRBY".to_vec(), args: vec![b"zset".to_vec(), b"3.0".to_vec(), b"x".to_vec()] },
+            // Counter
+            RespCommand { name: b"SET".to_vec(), args: vec![b"cnt".to_vec(), b"0".to_vec()] },
+            RespCommand { name: b"INCR".to_vec(), args: vec![b"cnt".to_vec()] },
+            RespCommand { name: b"INCR".to_vec(), args: vec![b"cnt".to_vec()] },
+            // Bitmap
+            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"bits".to_vec(), b"7".to_vec(), b"1".to_vec()] },
+            // HyperLogLog
+            RespCommand { name: b"PFADD".to_vec(), args: vec![b"hll".to_vec(), b"x".to_vec(), b"y".to_vec()] },
+            // Key management
+            RespCommand { name: b"RENAME".to_vec(), args: vec![b"str".to_vec(), b"str2".to_vec()] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+
+        // Verify string (renamed)
+        assert_eq!(engine.get(b"str").await.unwrap(), None);
+        assert_eq!(engine.get(b"str2").await.unwrap(), Some(b"hello world".to_vec()));
+
+        // Verify list: RPUSH [1,2] then LPUSH [0] -> [0,1,2]
+        let list_val = engine.get(b"list").await.unwrap().unwrap();
+        let list: Vec<Vec<u8>> = bincode::deserialize(&list_val).unwrap();
+        assert_eq!(list, vec![b"0".to_vec(), b"1".to_vec(), b"2".to_vec()]);
+
+        // Verify set: {a, c} (b removed)
+        let set_val = engine.get(b"set").await.unwrap().unwrap();
+        let set: HashSet<Vec<u8>> = bincode::deserialize(&set_val).unwrap();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&b"a".to_vec()));
+        assert!(set.contains(&b"c".to_vec()));
+
+        // Verify hash: {f2: v2} (f1 deleted)
+        let fields = engine.hash_getall(b"hash").unwrap();
+        assert_eq!(fields.len(), 1);
+        assert!(fields.iter().any(|(k, v)| k == b"f2" && v == b"v2"));
+
+        // Verify sorted set: x=4.0 (1.0 + 3.0), y=2.0
+        let zset_val = engine.get(b"zset").await.unwrap().unwrap();
+        let zset: SortedSetData = bincode::deserialize(&zset_val).unwrap();
+        assert_eq!(zset.scores.get(&b"x".to_vec()), Some(&4.0));
+        assert_eq!(zset.scores.get(&b"y".to_vec()), Some(&2.0));
+
+        // Verify counter: 2
+        assert_eq!(engine.get(b"cnt").await.unwrap(), Some(b"2".to_vec()));
+
+        // Verify bitmap exists
+        assert!(engine.get(b"bits").await.unwrap().is_some());
+
+        // Verify HLL exists
+        assert!(engine.get(b"hll").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_aof_full_replay_skips_transaction_markers() {
+        // MULTI/EXEC/DISCARD should be silently skipped
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        write_resp_commands_to_file(&aof_path, &[
+            RespCommand { name: b"MULTI".to_vec(), args: vec![] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"k1".to_vec(), b"v1".to_vec()] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"k2".to_vec(), b"v2".to_vec()] },
+            RespCommand { name: b"EXEC".to_vec(), args: vec![] },
+        ]);
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+        assert_eq!(engine.get(b"k1").await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(engine.get(b"k2").await.unwrap(), Some(b"v2".to_vec()));
     }
 }
