@@ -554,20 +554,20 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/js-client/tests/streams_advanced.js`
 - Create: `tests/docker-compat/python-client/tests/streams_advanced.py`
 
-- [ ] **XGROUP_CREATE**: Create consumer group, verify with XINFO GROUPS
-- [ ] **XREADGROUP_basic**: Create group, XREADGROUP, verify message delivered to consumer
-- [ ] **XREADGROUP_pending**: XREADGROUP without ACK, verify message in pending list (XPENDING)
-- [ ] **XACK_basic**: Read message, XACK, verify removed from pending list
-- [ ] **XCLAIM_basic**: Read message on consumer1, XCLAIM to consumer2, verify transfer
-- [ ] **XAUTOCLAIM_basic**: Read message, wait, XAUTOCLAIM with min-idle, verify reclaim
-- [ ] **XPENDING_summary**: Check pending summary (consumers, min-id, max-id, count)
-- [ ] **XPENDING_detail**: Check per-consumer pending detail
-- [ ] **XINFO_STREAM**: Verify full stream info including length, groups, first/last entry
-- [ ] **XINFO_CONSUMERS**: Verify consumer info including name, pending count, idle time
-- [ ] **XTRIM_MAXLEN**: Add entries, XTRIM MAXLEN 5, verify only 5 remain
-- [ ] **XTRIM_MINID**: Add entries, XTRIM MINID, verify entries before ID removed
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **XGROUP_CREATE**: Create consumer group, verify with XINFO GROUPS
+- [x] **XREADGROUP_basic**: Create group, XREADGROUP, verify message delivered to consumer
+- [x] **XREADGROUP_pending**: XREADGROUP without ACK, verify message in pending list (XPENDING)
+- [x] **XACK_basic**: Read message, XACK, verify removed from pending list
+- [x] **XCLAIM_basic**: Read message on consumer1, XCLAIM to consumer2, verify transfer
+- [x] **XAUTOCLAIM_basic**: Read message, wait, XAUTOCLAIM with min-idle, verify reclaim
+- [x] **XPENDING_summary**: Check pending summary (consumers, min-id, max-id, count)
+- [x] **XPENDING_detail**: Check per-consumer pending detail
+- [x] **XINFO_STREAM**: Verify full stream info including length, groups, first/last entry
+- [x] **XINFO_CONSUMERS**: Verify consumer info including name, pending count, idle time
+- [x] **XTRIM_MAXLEN**: Add entries, XTRIM MAXLEN 5, verify only 5 remain
+- [x] **XTRIM_MINID**: Add entries, XTRIM MINID, verify entries before ID removed
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 
