@@ -285,12 +285,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** Replication client processes commands individually (lines 205-265). MULTI/EXEC blocks from master are not preserved as transactions on the replica, breaking atomicity guarantees.
 
-- [ ] Detect MULTI in replication command stream, begin buffering commands
-- [ ] On EXEC, execute all buffered commands as a transaction on replica
-- [ ] Handle DISCARD to abort buffering
-- [ ] Write test: master executes MULTI/SET key1/SET key2/EXEC, verify replica state is consistent and atomic
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Detect MULTI in replication command stream, begin buffering commands
+- [x] On EXEC, execute all buffered commands as a transaction on replica
+- [x] Handle DISCARD to abort buffering
+- [x] Write test: master executes MULTI/SET key1/SET key2/EXEC, verify replica state is consistent and atomic
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

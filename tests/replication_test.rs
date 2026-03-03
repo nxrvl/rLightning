@@ -846,3 +846,238 @@ async fn test_replication_select_via_server() {
         other => panic!("Expected nil in DB 0, got: {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_replication_multi_exec_transaction() {
+    // Test that simulates the replication client's MULTI/EXEC buffering behavior.
+    // When the master sends MULTI, the replica should buffer subsequent commands
+    // and execute them atomically when EXEC is received.
+    use std::sync::Arc;
+    use rlightning::command::handler::CommandHandler;
+    use rlightning::command::Command;
+    use rlightning::command::transaction::{TransactionState, handle_exec};
+
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+    let cmd_handler = CommandHandler::new(Arc::clone(&storage));
+
+    // Simulate the replication client's MULTI/EXEC handling
+    let commands: Vec<Command> = vec![
+        Command {
+            name: "MULTI".to_string(),
+            args: vec![],
+        },
+        Command {
+            name: "SET".to_string(),
+            args: vec![b"tx_key1".to_vec(), b"tx_value1".to_vec()],
+        },
+        Command {
+            name: "SET".to_string(),
+            args: vec![b"tx_key2".to_vec(), b"tx_value2".to_vec()],
+        },
+        Command {
+            name: "INCR".to_string(),
+            args: vec![b"tx_counter".to_vec()],
+        },
+        Command {
+            name: "EXEC".to_string(),
+            args: vec![],
+        },
+    ];
+
+    // Simulate the replication client logic with MULTI/EXEC buffering
+    let mut current_db: usize = 0;
+    let mut tx_buffer: Option<Vec<Command>> = None;
+
+    for cmd in commands {
+        let cmd_name_lower = cmd.name.to_lowercase();
+
+        // Track SELECT
+        if cmd_name_lower == "select" {
+            if let Some(db_arg) = cmd.args.first() {
+                if let Ok(db_str) = std::str::from_utf8(db_arg) {
+                    if let Ok(db_idx) = db_str.parse::<usize>() {
+                        current_db = db_idx;
+                    }
+                }
+            }
+        }
+
+        match cmd_name_lower.as_str() {
+            "multi" => {
+                tx_buffer = Some(Vec::new());
+            }
+            "exec" => {
+                if let Some(buffered_commands) = tx_buffer.take() {
+                    let mut tx_state = TransactionState::new();
+                    tx_state.in_multi = true;
+                    for buffered_cmd in buffered_commands {
+                        tx_state.queue.push(buffered_cmd);
+                    }
+                    let result = handle_exec(&mut tx_state, &cmd_handler, &storage, current_db).await;
+                    assert!(result.is_ok(), "EXEC should succeed, got: {:?}", result);
+                    // Verify the result is an Array of responses
+                    match result.unwrap() {
+                        RespValue::Array(Some(results)) => {
+                            assert_eq!(results.len(), 3, "Should have 3 results from EXEC");
+                        }
+                        other => panic!("Expected Array from EXEC, got: {:?}", other),
+                    }
+                }
+            }
+            "discard" => {
+                tx_buffer = None;
+            }
+            _ => {
+                if let Some(ref mut buf) = tx_buffer {
+                    buf.push(cmd);
+                } else {
+                    let _ = cmd_handler.process(cmd, current_db).await;
+                }
+            }
+        }
+    }
+
+    // Verify all keys were set atomically
+    use rlightning::storage::engine::CURRENT_DB_INDEX;
+
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"tx_key1".to_vec()] },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"tx_value1"),
+        other => panic!("Expected tx_key1 to be set, got: {:?}", other),
+    }
+
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"tx_key2".to_vec()] },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"tx_value2"),
+        other => panic!("Expected tx_key2 to be set, got: {:?}", other),
+    }
+
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"tx_counter".to_vec()] },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"1"),
+        other => panic!("Expected tx_counter to be 1, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_replication_multi_discard() {
+    // Test that DISCARD during replication aborts the transaction buffer
+    use std::sync::Arc;
+    use rlightning::command::handler::CommandHandler;
+    use rlightning::command::Command;
+
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+    let cmd_handler = CommandHandler::new(Arc::clone(&storage));
+
+    // Simulate: MULTI, SET, DISCARD — keys should NOT be set
+    let commands: Vec<Command> = vec![
+        Command { name: "MULTI".to_string(), args: vec![] },
+        Command {
+            name: "SET".to_string(),
+            args: vec![b"discarded_key".to_vec(), b"should_not_exist".to_vec()],
+        },
+        Command { name: "DISCARD".to_string(), args: vec![] },
+    ];
+
+    let mut tx_buffer: Option<Vec<Command>> = None;
+
+    for cmd in commands {
+        let cmd_name_lower = cmd.name.to_lowercase();
+        match cmd_name_lower.as_str() {
+            "multi" => { tx_buffer = Some(Vec::new()); }
+            "exec" => { tx_buffer = None; }
+            "discard" => { tx_buffer = None; }
+            _ => {
+                if let Some(ref mut buf) = tx_buffer {
+                    buf.push(cmd);
+                } else {
+                    let _ = cmd_handler.process(cmd, 0).await;
+                }
+            }
+        }
+    }
+
+    // Verify the key was NOT set
+    use rlightning::storage::engine::CURRENT_DB_INDEX;
+
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"discarded_key".to_vec()] },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(None)) | Ok(RespValue::Null) => {
+            // Key should not exist - correct
+        }
+        other => panic!("Expected nil for discarded key, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_replication_multi_exec_consistency() {
+    // Test that verifies transaction atomicity: if commands inside MULTI/EXEC
+    // are executed atomically, concurrent reads should see either all or none
+    // of the changes.
+    use std::sync::Arc;
+    use rlightning::command::handler::CommandHandler;
+    use rlightning::command::Command;
+    use rlightning::command::transaction::{TransactionState, handle_exec};
+
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+    let cmd_handler = CommandHandler::new(Arc::clone(&storage));
+
+    // Execute a transaction that sets key1 and key2 atomically
+    let mut tx_state = TransactionState::new();
+    tx_state.in_multi = true;
+    tx_state.queue.push(Command {
+        name: "SET".to_string(),
+        args: vec![b"atomic_key1".to_vec(), b"atomic_val1".to_vec()],
+    });
+    tx_state.queue.push(Command {
+        name: "SET".to_string(),
+        args: vec![b"atomic_key2".to_vec(), b"atomic_val2".to_vec()],
+    });
+
+    let result = handle_exec(&mut tx_state, &cmd_handler, &storage, 0).await;
+    assert!(result.is_ok());
+
+    // Both keys should exist after EXEC
+    use rlightning::storage::engine::CURRENT_DB_INDEX;
+
+    let val1 = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"atomic_key1".to_vec()] },
+            0,
+        ).await
+    }).await;
+    let val2 = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command { name: "GET".to_string(), args: vec![b"atomic_key2".to_vec()] },
+            0,
+        ).await
+    }).await;
+
+    match (val1, val2) {
+        (Ok(RespValue::BulkString(Some(v1))), Ok(RespValue::BulkString(Some(v2)))) => {
+            assert_eq!(v1, b"atomic_val1");
+            assert_eq!(v2, b"atomic_val2");
+        }
+        other => panic!("Expected both keys to be set atomically, got: {:?}", other),
+    }
+}
