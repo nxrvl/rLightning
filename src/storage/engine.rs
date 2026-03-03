@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BinaryHeap};
+use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1927,6 +1927,14 @@ impl StorageEngine {
     }
 
     /// Get the encoding type string for a key (for OBJECT ENCODING)
+    ///
+    /// Returns encoding strings matching Redis 7.x behavior:
+    /// - String: "int" (parseable as i64), "embstr" (<=44 bytes), "raw" (>44 bytes)
+    /// - List: "listpack" (<=128 elements, all <=64 bytes), "quicklist" otherwise
+    /// - Set: "listpack" (<=128 elements, all <=64 bytes), "hashtable" otherwise
+    /// - Hash: "listpack" (<=128 fields, all keys+values <=64 bytes), "hashtable" otherwise
+    /// - ZSet: "listpack" (<=128 elements, all <=64 bytes), "skiplist" otherwise
+    /// - Stream: "stream"
     pub async fn get_encoding(&self, key: &[u8]) -> StorageResult<Option<String>> {
         if let Some(entry) = self.active_db().get(key) {
             if entry.value().is_expired() {
@@ -1936,7 +1944,6 @@ impl StorageEngine {
             }
             let encoding = match &entry.value().data_type {
                 RedisDataType::String => {
-                    // Check if it's an integer
                     if let Ok(s) = std::str::from_utf8(&entry.value().value) {
                         if s.parse::<i64>().is_ok() {
                             "int"
@@ -1949,10 +1956,51 @@ impl StorageEngine {
                         "raw"
                     }
                 }
-                RedisDataType::List => "listpack",
-                RedisDataType::Set => "listpack",
-                RedisDataType::Hash => "listpack",
-                RedisDataType::ZSet => "listpack",
+                RedisDataType::List => {
+                    if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&entry.value().value) {
+                        if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
+                            "listpack"
+                        } else {
+                            "quicklist"
+                        }
+                    } else {
+                        "quicklist"
+                    }
+                }
+                RedisDataType::Set => {
+                    if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value) {
+                        if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
+                            "listpack"
+                        } else {
+                            "hashtable"
+                        }
+                    } else {
+                        "hashtable"
+                    }
+                }
+                RedisDataType::Hash => {
+                    if let Ok(map) = bincode::deserialize::<HashMap<Vec<u8>, Vec<u8>>>(&entry.value().value) {
+                        if map.len() <= 128 && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64) {
+                            "listpack"
+                        } else {
+                            "hashtable"
+                        }
+                    } else {
+                        "hashtable"
+                    }
+                }
+                RedisDataType::ZSet => {
+                    use crate::command::types::sorted_set::SortedSetData;
+                    if let Ok(ss) = bincode::deserialize::<SortedSetData>(&entry.value().value) {
+                        if ss.scores.len() <= 128 && ss.scores.keys().all(|k| k.len() <= 64) {
+                            "listpack"
+                        } else {
+                            "skiplist"
+                        }
+                    } else {
+                        "skiplist"
+                    }
+                }
                 RedisDataType::Stream => "stream",
             };
             Ok(Some(encoding.to_string()))
