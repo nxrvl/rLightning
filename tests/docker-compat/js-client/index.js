@@ -19,6 +19,7 @@ require('./tests/edge_cases');
 require('./tests/server');
 require('./tests/persistence');
 require('./tests/acl');
+require('./tests/blocking');
 require('./tests/js_specific');
 
 async function main() {

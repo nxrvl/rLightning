@@ -444,18 +444,18 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/js-client/tests/blocking.js`
 - Create: `tests/docker-compat/python-client/tests/blocking.py`
 
-- [ ] **BLPOP_with_data**: LPUSH then BLPOP, verify immediate return
-- [ ] **BLPOP_timeout**: BLPOP on empty key with 1s timeout, verify timeout return
-- [ ] **BLPOP_multi_key**: BLPOP on multiple keys, LPUSH to second key, verify correct key returned
-- [ ] **BRPOP_basic**: Same as BLPOP but from right side
-- [ ] **BLMOVE_basic**: BLMOVE from source to dest list, verify move
-- [ ] **BLMPOP_basic**: BLMPOP with LEFT/RIGHT direction
-- [ ] **BZPOPMIN_basic**: BZPOPMIN with data and timeout variants
-- [ ] **BZPOPMAX_basic**: BZPOPMAX with data and timeout variants
-- [ ] **BLOCKING_concurrent**: Producer-consumer pattern — one goroutine/thread pushes after delay, another BLPOP waits
-- [ ] **BLOCKING_timeout_accuracy**: Verify timeout duration is within acceptable range (±100ms)
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **BLPOP_with_data**: LPUSH then BLPOP, verify immediate return
+- [x] **BLPOP_timeout**: BLPOP on empty key with 1s timeout, verify timeout return
+- [x] **BLPOP_multi_key**: BLPOP on multiple keys, LPUSH to second key, verify correct key returned
+- [x] **BRPOP_basic**: Same as BLPOP but from right side
+- [x] **BLMOVE_basic**: BLMOVE from source to dest list, verify move
+- [x] **BLMPOP_basic**: BLMPOP with LEFT/RIGHT direction
+- [x] **BZPOPMIN_basic**: BZPOPMIN with data and timeout variants
+- [x] **BZPOPMAX_basic**: BZPOPMAX with data and timeout variants
+- [x] **BLOCKING_concurrent**: Producer-consumer pattern — one goroutine/thread pushes after delay, another BLPOP waits
+- [x] **BLOCKING_timeout_accuracy**: Verify timeout duration is within acceptable range (±100ms)
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 
