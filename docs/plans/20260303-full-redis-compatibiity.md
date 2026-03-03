@@ -301,11 +301,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** HELLO command's SETNAME option (~line 1972) is acknowledged but the client name is discarded.
 
-- [ ] Pass `connections` DashMap and `conn_id` to `handle_hello_command()`
-- [ ] Update `ClientInfo.name` when SETNAME option is provided
-- [ ] Write test: HELLO 3 SETNAME "myconn" → CLIENT GETNAME returns "myconn"
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Pass `connections` DashMap and `conn_id` to `handle_hello_command()`
+- [x] Update `ClientInfo.name` when SETNAME option is provided
+- [x] Write test: HELLO 3 SETNAME "myconn" → CLIENT GETNAME returns "myconn"
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

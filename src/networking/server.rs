@@ -631,7 +631,7 @@ impl Server {
 
         // HELLO - protocol negotiation
         if cmd_lower == "hello" {
-            let (response, new_version) = Self::handle_hello_command(&cmd.args, *protocol_version, security, client_addr_str);
+            let (response, new_version) = Self::handle_hello_command(&cmd.args, *protocol_version, security, client_addr_str, connections, conn_id);
             *protocol_version = new_version;
             if let Ok(bytes) = response.serialize() {
                 response_buffer.extend_from_slice(&bytes);
@@ -1940,6 +1940,8 @@ impl Server {
         current_version: ProtocolVersion,
         security: &Option<Arc<crate::security::SecurityManager>>,
         client_addr: &str,
+        connections: &Arc<DashMap<u64, ClientInfo>>,
+        conn_id: u64,
     ) -> (RespValue, ProtocolVersion) {
         // HELLO [protover [AUTH username password] [SETNAME clientname]]
         let mut new_version = current_version;
@@ -1982,14 +1984,22 @@ impl Server {
                     i += 3;
                 }
                 "SETNAME" => {
-                    // SETNAME clientname - we acknowledge but don't track client names yet
                     if i + 1 >= args.len() {
                         return (
                             RespValue::Error("ERR Syntax error in HELLO option 'setname'".to_string()),
                             current_version,
                         );
                     }
-                    // Client name tracking is a future enhancement
+                    let name = String::from_utf8_lossy(&args[i + 1]).to_string();
+                    if name.contains(' ') {
+                        return (
+                            RespValue::Error("ERR Client names cannot contain spaces, newlines or special characters.".to_string()),
+                            current_version,
+                        );
+                    }
+                    if let Some(mut info) = connections.get_mut(&conn_id) {
+                        info.name = name;
+                    }
                     i += 2;
                 }
                 _ => {
@@ -2224,5 +2234,101 @@ mod tests {
         let id1 = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
         let id2 = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
         assert!(id2 > id1, "Client IDs should be monotonically increasing");
+    }
+
+    #[test]
+    fn test_hello_setname_updates_connection_tracker() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        // HELLO 3 SETNAME "myconn" should store the client name
+        let (response, version) = Server::handle_hello_command(
+            &args(&["3", "SETNAME", "myconn"]),
+            ProtocolVersion::RESP2,
+            &None,
+            "127.0.0.1:12345",
+            &connections,
+            conn_id,
+        );
+
+        // Should negotiate RESP3
+        assert_eq!(version, ProtocolVersion::RESP3);
+
+        // Response should not be an error
+        match &response {
+            RespValue::Error(e) => panic!("Expected success, got error: {}", e),
+            _ => {}
+        }
+
+        // CLIENT GETNAME should now return "myconn"
+        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"myconn".to_vec())));
+    }
+
+    #[test]
+    fn test_hello_setname_rejects_spaces() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        let (response, _version) = Server::handle_hello_command(
+            &args(&["3", "SETNAME", "my conn"]),
+            ProtocolVersion::RESP2,
+            &None,
+            "127.0.0.1:12345",
+            &connections,
+            conn_id,
+        );
+
+        match response {
+            RespValue::Error(msg) => assert!(msg.contains("cannot contain spaces"), "Expected space rejection error, got: {}", msg),
+            _ => panic!("Expected error for name with spaces"),
+        }
+    }
+
+    #[test]
+    fn test_hello_setname_without_protover() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        // HELLO with no args (just negotiate, keep current protocol)
+        let (response, version) = Server::handle_hello_command(
+            &args(&[]),
+            ProtocolVersion::RESP2,
+            &None,
+            "127.0.0.1:12345",
+            &connections,
+            conn_id,
+        );
+
+        assert_eq!(version, ProtocolVersion::RESP2);
+        match &response {
+            RespValue::Error(e) => panic!("Expected success, got error: {}", e),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_hello_setname_missing_value() {
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+
+        // HELLO 3 SETNAME (missing client name value)
+        let (response, _version) = Server::handle_hello_command(
+            &args(&["3", "SETNAME"]),
+            ProtocolVersion::RESP2,
+            &None,
+            "127.0.0.1:12345",
+            &connections,
+            conn_id,
+        );
+
+        match response {
+            RespValue::Error(msg) => assert!(msg.contains("Syntax error"), "Expected syntax error, got: {}", msg),
+            _ => panic!("Expected error for missing SETNAME value"),
+        }
     }
 }
