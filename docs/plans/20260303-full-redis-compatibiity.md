@@ -74,14 +74,14 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** CONFIG SET is a stub that returns OK but stores nothing (connection.rs:287-295). CONFIG GET has a hardcoded 4-parameter match (server.rs:54-90), missing `maxmemory-policy` and most other parameters.
 
-- [ ] Add `runtime_config: DashMap<String, String>` field to `StorageEngine`
-- [ ] Seed from config at startup: `maxmemory`, `maxmemory-policy`, `port`, `timeout`, `databases`, `bind`, `requirepass`, `hz`, `appendonly`, `appendfsync`, `save`, `tcp-backlog`, `tcp-keepalive`
-- [ ] Rewrite CONFIG GET to read from `runtime_config` with glob pattern matching (`CONFIG GET *`, `CONFIG GET max*`)
-- [ ] Rewrite CONFIG SET to write to `runtime_config`; for `maxmemory-policy`, also update actual eviction policy in engine
-- [ ] Write tests: CONFIG SET→GET roundtrip, glob patterns, behavior change on `maxmemory-policy` SET
-- [ ] Run multi-language compat test `CONFIG_SET_and_GET` — must pass all 3 clients
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Add `runtime_config: DashMap<String, String>` field to `StorageEngine`
+- [x] Seed from config at startup: `maxmemory`, `maxmemory-policy`, `port`, `timeout`, `databases`, `bind`, `requirepass`, `hz`, `appendonly`, `appendfsync`, `save`, `tcp-backlog`, `tcp-keepalive`
+- [x] Rewrite CONFIG GET to read from `runtime_config` with glob pattern matching (`CONFIG GET *`, `CONFIG GET max*`)
+- [x] Rewrite CONFIG SET to write to `runtime_config`; for `maxmemory-policy`, also update actual eviction policy in engine
+- [x] Write tests: CONFIG SET→GET roundtrip, glob patterns, behavior change on `maxmemory-policy` SET
+- [x] Run multi-language compat test `CONFIG_SET_and_GET` — must pass all 3 clients
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
