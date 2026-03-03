@@ -422,18 +422,18 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/js-client/tests/acl.js`
 - Create: `tests/docker-compat/python-client/tests/acl.py`
 
-- [ ] **ACL_SETUSER_basic**: Create user with specific permissions, verify access
-- [ ] **ACL_SETUSER_command_restrictions**: Create user with restricted commands, verify denied commands return NOPERM
-- [ ] **ACL_SETUSER_key_patterns**: Create user with key pattern restrictions (~key:*), verify access control
-- [ ] **ACL_DELUSER**: Create user, delete, verify deleted user cannot AUTH
-- [ ] **ACL_LIST**: Create multiple users, verify ACL LIST returns all
-- [ ] **ACL_WHOAMI**: AUTH as different users, verify ACL WHOAMI returns correct username
-- [ ] **ACL_LOG**: Execute denied command, verify ACL LOG records the denial
-- [ ] **ACL_CAT**: Verify ACL CAT returns command categories
-- [ ] **AUTH_username_password**: Test named user authentication (AUTH username password)
-- [ ] **AUTH_default_user**: Test default user password authentication
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **ACL_SETUSER_basic**: Create user with specific permissions, verify access
+- [x] **ACL_SETUSER_command_restrictions**: Create user with restricted commands, verify denied commands return NOPERM
+- [x] **ACL_SETUSER_key_patterns**: Create user with key pattern restrictions (~key:*), verify access control
+- [x] **ACL_DELUSER**: Create user, delete, verify deleted user cannot AUTH
+- [x] **ACL_LIST**: Create multiple users, verify ACL LIST returns all
+- [x] **ACL_WHOAMI**: AUTH as different users, verify ACL WHOAMI returns correct username
+- [x] **ACL_LOG**: Execute denied command, verify ACL LOG records the denial
+- [x] **ACL_CAT**: Verify ACL CAT returns command categories
+- [x] **AUTH_username_password**: Test named user authentication (AUTH username password)
+- [x] **AUTH_default_user**: Test default user password authentication
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 

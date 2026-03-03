@@ -26,6 +26,7 @@ import tests.advanced
 import tests.edge_cases
 import tests.server
 import tests.persistence
+import tests.acl
 import tests.python_specific
 
 
