@@ -410,6 +410,15 @@ impl PubSubManager {
             .unwrap_or(0)
     }
 
+    /// Get separate channel and pattern subscription counts for CLIENT LIST
+    /// Returns (sub_count, psub_count) where sub_count includes channels + shard channels
+    pub async fn get_subscription_counts(&self, client_id: ClientId) -> (usize, usize) {
+        let clients = self.clients.read().await;
+        clients.get(&client_id)
+            .map(|c| (c.channels.len() + c.shard_channels.len(), c.patterns.len()))
+            .unwrap_or((0, 0))
+    }
+
     /// Check if a client is registered
     #[allow(dead_code)]
     pub async fn is_client_registered(&self, client_id: ClientId) -> bool {

@@ -316,12 +316,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** CLIENT LIST always shows sub=0 psub=0 instead of actual subscription counts.
 
-- [ ] Add `sub_count` and `psub_count` fields to `ClientInfo` (or use AtomicUsize)
-- [ ] Increment on SUBSCRIBE/PSUBSCRIBE, decrement on UNSUBSCRIBE/PUNSUBSCRIBE
-- [ ] Update CLIENT LIST output to use real counts
-- [ ] Write test: SUBSCRIBE to 3 channels, verify CLIENT LIST shows sub=3
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Add `sub_count` and `psub_count` fields to `ClientInfo` (or use AtomicUsize)
+- [x] Increment on SUBSCRIBE/PSUBSCRIBE, decrement on UNSUBSCRIBE/PUNSUBSCRIBE
+- [x] Update CLIENT LIST output to use real counts
+- [x] Write test: SUBSCRIBE to 3 channels, verify CLIENT LIST shows sub=3
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
