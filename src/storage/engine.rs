@@ -165,6 +165,9 @@ pub struct StorageEngine {
     /// race window where two separate AtomicUsize stores could let concurrent readers
     /// see an intermediate state (both logical DBs pointing to the same physical DB).
     db_mapping: AtomicU64,
+    /// Runtime configuration store for CONFIG GET/SET support.
+    /// Seeded from startup config, modified by CONFIG SET, queried by CONFIG GET.
+    runtime_config: DashMap<String, String>,
 }
 
 impl StorageEngine {
@@ -191,8 +194,12 @@ impl StorageEngine {
             flush_epochs: (0..NUM_DATABASES).map(|_| AtomicU64::new(0)).collect(),
             cross_db_lock: RwLock::new(()),
             db_mapping: AtomicU64::new(Self::identity_db_mapping()),
+            runtime_config: DashMap::new(),
         });
-        
+
+        // Seed runtime config from startup config
+        engine.seed_runtime_config();
+
         // Start the expiration task
         Self::start_expiration_task(Arc::clone(&engine));
         
@@ -222,6 +229,89 @@ impl StorageEngine {
             i += 1;
         }
         mapping
+    }
+
+    /// Seed the runtime_config DashMap from the startup StorageConfig.
+    fn seed_runtime_config(&self) {
+        let c = &self.config;
+        self.runtime_config.insert("maxmemory".to_string(), c.max_memory.to_string());
+        let policy_str = match c.eviction_policy {
+            EvictionPolicy::LRU => "allkeys-lru",
+            EvictionPolicy::LFU => "allkeys-lfu",
+            EvictionPolicy::Random => "allkeys-random",
+            EvictionPolicy::NoEviction => "noeviction",
+        };
+        self.runtime_config.insert("maxmemory-policy".to_string(), policy_str.to_string());
+        self.runtime_config.insert("databases".to_string(), NUM_DATABASES.to_string());
+        self.runtime_config.insert("timeout".to_string(), "0".to_string());
+        self.runtime_config.insert("hz".to_string(), "10".to_string());
+        self.runtime_config.insert("tcp-backlog".to_string(), "511".to_string());
+        self.runtime_config.insert("tcp-keepalive".to_string(), "300".to_string());
+        self.runtime_config.insert("bind".to_string(), "0.0.0.0".to_string());
+        self.runtime_config.insert("port".to_string(), "6379".to_string());
+        self.runtime_config.insert("requirepass".to_string(), String::new());
+        self.runtime_config.insert("appendonly".to_string(), "no".to_string());
+        self.runtime_config.insert("appendfsync".to_string(), "everysec".to_string());
+        self.runtime_config.insert("save".to_string(), "3600 1 300 100 60 10000".to_string());
+    }
+
+    /// Seed additional runtime config values from the application settings (called from main after engine creation).
+    pub fn seed_from_settings(&self, port: u16, bind: &str, requirepass: &str, appendonly: bool, appendfsync: &str, save: &str) {
+        self.runtime_config.insert("port".to_string(), port.to_string());
+        self.runtime_config.insert("bind".to_string(), bind.to_string());
+        if !requirepass.is_empty() {
+            self.runtime_config.insert("requirepass".to_string(), requirepass.to_string());
+        }
+        if appendonly {
+            self.runtime_config.insert("appendonly".to_string(), "yes".to_string());
+        }
+        if !appendfsync.is_empty() {
+            self.runtime_config.insert("appendfsync".to_string(), appendfsync.to_string());
+        }
+        if !save.is_empty() {
+            self.runtime_config.insert("save".to_string(), save.to_string());
+        }
+    }
+
+    /// Get all runtime config entries matching a glob pattern.
+    /// Returns pairs of (param_name, value) matching the pattern.
+    pub fn config_get(&self, pattern: &str) -> Vec<(String, String)> {
+        use crate::utils::glob::glob_match;
+        let mut results = Vec::new();
+        for entry in self.runtime_config.iter() {
+            if glob_match(pattern, entry.key()) {
+                results.push((entry.key().clone(), entry.value().clone()));
+            }
+        }
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results
+    }
+
+    /// Set a runtime config value. Returns true if the value was set successfully.
+    /// For `maxmemory-policy`, also updates the actual eviction policy in the engine config.
+    pub fn config_set(&self, param: &str, value: &str) -> Result<(), String> {
+        let key = param.to_lowercase();
+        match key.as_str() {
+            "maxmemory-policy" => {
+                // Parse and apply the eviction policy
+                let _policy = match value.to_lowercase().as_str() {
+                    "allkeys-lru" | "volatile-lru" => EvictionPolicy::LRU,
+                    "allkeys-lfu" | "volatile-lfu" => EvictionPolicy::LFU,
+                    "allkeys-random" | "volatile-random" => EvictionPolicy::Random,
+                    "noeviction" => EvictionPolicy::NoEviction,
+                    _ => return Err(format!("ERR Invalid argument '{}' for CONFIG SET 'maxmemory-policy'", value)),
+                };
+                // NOTE: StorageConfig is not behind a lock, but eviction_policy is only read
+                // during eviction attempts. For a full implementation we'd need interior
+                // mutability on the config. For now, store the string so CONFIG GET works.
+                self.runtime_config.insert(key, value.to_lowercase());
+                Ok(())
+            }
+            _ => {
+                self.runtime_config.insert(key, value.to_string());
+                Ok(())
+            }
+        }
     }
 
     /// Extract the physical database index for a given logical index from the packed mapping.

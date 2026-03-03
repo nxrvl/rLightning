@@ -51,39 +51,33 @@ pub async fn auth(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis CONFIG command - Get or set server configuration
-pub async fn config(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+pub async fn config(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let subcommand = bytes_to_string(&args[0])?.to_uppercase();
-    
+
     match subcommand.as_str() {
         "GET" => {
-            if args.len() != 2 {
+            if args.len() < 2 {
                 return Err(CommandError::WrongNumberOfArguments);
             }
-            
-            let param = bytes_to_string(&args[1])?;
-            
-            // Just return some placeholder values for requested parameters
-            let value = match param.to_lowercase().as_str() {
-                "maxmemory" => "0",
-                "port" => "6379",
-                "timeout" => "0",
-                "databases" => "16",
-                _ => "", // Unknown parameter
-            };
-            
-            let result = vec![
-                RespValue::BulkString(Some(param.into_bytes())),
-                RespValue::BulkString(Some(value.as_bytes().to_vec())),
-            ];
-            
+
+            // Redis supports multiple patterns: CONFIG GET pattern [pattern ...]
+            let mut result = Vec::new();
+            for arg in &args[1..] {
+                let pattern = bytes_to_string(arg)?.to_lowercase();
+                for (key, value) in engine.config_get(&pattern) {
+                    result.push(RespValue::BulkString(Some(key.into_bytes())));
+                    result.push(RespValue::BulkString(Some(value.into_bytes())));
+                }
+            }
+
             Ok(RespValue::Array(Some(result)))
         },
         _ => {
-            // We don't support other CONFIG subcommands in our simple implementation
+            // CONFIG HELP and other unhandled subcommands
             Ok(RespValue::SimpleString("OK".to_string()))
         }
     }
@@ -340,6 +334,7 @@ pub async fn randomkey(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::types::connection::config_set;
     use crate::storage::engine::StorageConfig;
     use std::sync::Arc;
     
@@ -370,7 +365,8 @@ mod tests {
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"maxmemory".to_vec())));
-            assert_eq!(items[1], RespValue::BulkString(Some(b"0".to_vec())));
+            // Default StorageConfig has max_memory = 128 * 1024 * 1024 = 134217728
+            assert_eq!(items[1], RespValue::BulkString(Some(b"134217728".to_vec())));
         } else {
             panic!("Expected array response from CONFIG GET");
         }
@@ -537,5 +533,150 @@ mod tests {
             }
             assert!(found, "RESP serialization should contain proper cursor format");
         }
+    }
+
+    fn extract_config_pairs(result: RespValue) -> Vec<(String, String)> {
+        if let RespValue::Array(Some(items)) = result {
+            let mut pairs = Vec::new();
+            for chunk in items.chunks(2) {
+                if let (RespValue::BulkString(Some(k)), RespValue::BulkString(Some(v))) = (&chunk[0], &chunk[1]) {
+                    pairs.push((
+                        String::from_utf8_lossy(k).to_string(),
+                        String::from_utf8_lossy(v).to_string(),
+                    ));
+                }
+            }
+            pairs
+        } else {
+            panic!("Expected array response from CONFIG GET");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_config_set_get_roundtrip() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // CONFIG SET a custom param then CONFIG GET it back
+        let set_args = vec![b"my-custom-param".to_vec(), b"hello-world".to_vec()];
+        let result = config_set(&engine, &set_args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        let get_args = vec![b"GET".to_vec(), b"my-custom-param".to_vec()];
+        let result = config(&engine, &get_args).await.unwrap();
+        let pairs = extract_config_pairs(result);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("my-custom-param".to_string(), "hello-world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_config_set_get_multiple() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // CONFIG SET multiple params at once
+        let set_args = vec![
+            b"param-a".to_vec(), b"val-a".to_vec(),
+            b"param-b".to_vec(), b"val-b".to_vec(),
+        ];
+        let result = config_set(&engine, &set_args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // Retrieve each
+        let get_args = vec![b"GET".to_vec(), b"param-a".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "val-a");
+
+        let get_args = vec![b"GET".to_vec(), b"param-b".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "val-b");
+    }
+
+    #[tokio::test]
+    async fn test_config_get_glob_patterns() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // The engine is seeded with defaults including maxmemory, maxmemory-policy, port, etc.
+        // Test wildcard: CONFIG GET max*
+        let get_args = vec![b"GET".to_vec(), b"max*".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"maxmemory"), "max* should match maxmemory");
+        assert!(keys.contains(&"maxmemory-policy"), "max* should match maxmemory-policy");
+
+        // Test CONFIG GET * returns all seeded params
+        let get_args = vec![b"GET".to_vec(), b"*".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+        assert!(keys.contains(&"maxmemory".to_string()));
+        assert!(keys.contains(&"port".to_string()));
+        assert!(keys.contains(&"databases".to_string()));
+        assert!(keys.contains(&"appendonly".to_string()));
+        assert!(keys.contains(&"appendfsync".to_string()));
+        assert!(keys.contains(&"save".to_string()));
+        assert!(keys.contains(&"hz".to_string()));
+        assert!(keys.contains(&"tcp-backlog".to_string()));
+        assert!(keys.contains(&"tcp-keepalive".to_string()));
+        assert!(keys.contains(&"bind".to_string()));
+        assert!(keys.contains(&"timeout".to_string()));
+        assert!(keys.contains(&"requirepass".to_string()));
+
+        // Test exact match for a non-existent param returns empty
+        let get_args = vec![b"GET".to_vec(), b"nonexistent-param-xyz".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_config_set_maxmemory_policy() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // Default should be allkeys-lru
+        let get_args = vec![b"GET".to_vec(), b"maxmemory-policy".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs[0].1, "allkeys-lru");
+
+        // Set to noeviction
+        let set_args = vec![b"maxmemory-policy".to_vec(), b"noeviction".to_vec()];
+        let result = config_set(&engine, &set_args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs[0].1, "noeviction");
+
+        // Set to allkeys-lfu
+        let set_args = vec![b"maxmemory-policy".to_vec(), b"allkeys-lfu".to_vec()];
+        config_set(&engine, &set_args).await.unwrap();
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs[0].1, "allkeys-lfu");
+
+        // Invalid policy should return error
+        let set_args = vec![b"maxmemory-policy".to_vec(), b"invalid-policy".to_vec()];
+        let result = config_set(&engine, &set_args).await.unwrap();
+        if let RespValue::Error(msg) = result {
+            assert!(msg.contains("Invalid argument"));
+        } else {
+            panic!("Expected error for invalid maxmemory-policy");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_config_set_overwrite() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // Set a value
+        let set_args = vec![b"timeout".to_vec(), b"100".to_vec()];
+        config_set(&engine, &set_args).await.unwrap();
+
+        let get_args = vec![b"GET".to_vec(), b"timeout".to_vec()];
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs[0].1, "100");
+
+        // Overwrite the value
+        let set_args = vec![b"timeout".to_vec(), b"200".to_vec()];
+        config_set(&engine, &set_args).await.unwrap();
+
+        let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
+        assert_eq!(pairs[0].1, "200");
     }
 } 

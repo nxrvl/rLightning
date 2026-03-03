@@ -501,6 +501,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the storage engine
     let storage = StorageEngine::new(storage_config);
 
+    // Seed runtime config from application settings
+    let appendonly = matches!(settings.persistence.mode, PersistenceMode::AOF | PersistenceMode::Hybrid);
+    let appendfsync_str = match settings.persistence.aof_sync_policy {
+        AofSyncPolicy::Always => "always",
+        AofSyncPolicy::EverySecond => "everysec",
+        AofSyncPolicy::None => "no",
+    };
+    storage.seed_from_settings(
+        settings.server.port,
+        &settings.server.host,
+        &settings.security.password,
+        appendonly,
+        appendfsync_str,
+        "", // use defaults for save
+    );
+
     // Initialize persistence manager with the configured settings
     let persistence = PersistenceManager::new(Arc::clone(&storage), persistence_config);
 

@@ -284,13 +284,18 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
 // ---- CONFIG enhancements ----
 
 /// Redis CONFIG SET command - Set configuration parameters
-pub async fn config_set(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
+pub async fn config_set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // CONFIG SET param value [param value ...]
     if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    // Accept the parameters but don't actually modify runtime config in this implementation
-    // A full implementation would update StorageConfig, networking config, etc.
+    for pair in args.chunks(2) {
+        let param = bytes_to_string(&pair[0])?;
+        let value = bytes_to_string(&pair[1])?;
+        if let Err(e) = engine.config_set(&param, &value) {
+            return Ok(RespValue::Error(e));
+        }
+    }
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
