@@ -389,50 +389,72 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let mut ss = load_sorted_set(engine, key).await?.unwrap_or_default();
-    let mut added: i64 = 0;
-    let mut changed: i64 = 0;
-
+    // Parse and validate all geo entries before entering the atomic section
+    let mut entries = Vec::new();
     while idx + 2 < args.len() {
         let lon = parse_float_arg(&args[idx], "longitude")?;
         let lat = parse_float_arg(&args[idx + 1], "latitude")?;
-        let member = &args[idx + 2];
+        let member = args[idx + 2].clone();
         idx += 3;
 
         validate_longitude(lon)?;
         validate_latitude(lat)?;
 
         let score = geohash_encode(lon, lat) as f64;
-
-        // Check if member already exists
-        if let Some(pos) = ss.iter().position(|(_, m)| m == member) {
-            if nx {
-                continue; // NX: only add new, skip existing
-            }
-            let old_score = ss[pos].0;
-            ss[pos].0 = score;
-            if ch && (old_score - score).abs() > f64::EPSILON {
-                changed += 1;
-            }
-        } else {
-            if xx {
-                continue; // XX: only update existing, skip new
-            }
-            ss.push((score, member.clone()));
-            added += 1;
-        }
+        entries.push((score, member));
     }
 
-    ss.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(&b.1))
-    });
+    let result = engine.atomic_modify(key, RedisDataType::ZSet, |current| {
+        let mut ss: SortedSet = match current {
+            Some(data) => {
+                let ss_data = bincode::deserialize::<SortedSetData>(data)
+                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+                ss_data.entries.into_iter()
+                    .map(|(score, member)| (score.into_inner(), member))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
 
-    save_sorted_set(engine, key, &ss).await?;
+        let mut added: i64 = 0;
+        let mut changed: i64 = 0;
 
-    // CH flag: return added + changed; otherwise just added
-    let result = if ch { added + changed } else { added };
+        for (score, member) in &entries {
+            if let Some(pos) = ss.iter().position(|(_, m)| m == member) {
+                if nx {
+                    continue;
+                }
+                let old_score = ss[pos].0;
+                ss[pos].0 = *score;
+                if ch && (old_score - score).abs() > f64::EPSILON {
+                    changed += 1;
+                }
+            } else {
+                if xx {
+                    continue;
+                }
+                ss.push((*score, member.clone()));
+                added += 1;
+            }
+        }
+
+        ss.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let mut ss_data = SortedSetData::new();
+        for (score, member) in &ss {
+            ss_data.insert(*score, member.clone());
+        }
+        let serialized = bincode::serialize(&ss_data)
+            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+
+        let result = if ch { added + changed } else { added };
+        Ok((Some(serialized), result))
+    })?;
+
     Ok(RespValue::Integer(result))
 }
 
@@ -567,6 +589,9 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     let dest = &args[0];
     let source = &args[1];
 
+    // Lock both source and destination keys for cross-key atomicity
+    let _guard = engine.lock_keys(&[source.clone(), dest.clone()]).await;
+
     let ss = match load_sorted_set(engine, source).await? {
         Some(ss) => ss,
         None => {
@@ -595,8 +620,8 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         &ss, center_lon, center_lat, &shape, &unit, count, any, sort,
     );
 
-    // Build destination sorted set
-    let dest_ss: SortedSet = results
+    // Build destination sorted set and write atomically
+    let dest_entries: Vec<(f64, Vec<u8>)> = results
         .iter()
         .map(|r| {
             let score = if storedist { r.dist } else { r.hash as f64 };
@@ -604,10 +629,24 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         })
         .collect();
 
-    let count = dest_ss.len() as i64;
-    save_sorted_set(engine, dest, &dest_ss).await?;
+    let entry_count = dest_entries.len() as i64;
 
-    Ok(RespValue::Integer(count))
+    engine.atomic_modify(dest, RedisDataType::ZSet, |_current| {
+        // Overwrite destination entirely with search results
+        if dest_entries.is_empty() {
+            Ok((None, ()))
+        } else {
+            let mut ss_data = SortedSetData::new();
+            for (score, member) in &dest_entries {
+                ss_data.insert(*score, member.clone());
+            }
+            let serialized = bincode::serialize(&ss_data)
+                .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+            Ok((Some(serialized), ()))
+        }
+    })?;
+
+    Ok(RespValue::Integer(entry_count))
 }
 
 /// GEORADIUS key longitude latitude radius M|KM|FT|MI
@@ -2203,5 +2242,92 @@ mod tests {
         } else {
             panic!("Expected Array");
         }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_geoadd_same_key() {
+        let engine = StorageEngine::new(StorageConfig::default());
+        let key = b"geotest:concurrent".to_vec();
+
+        // 10 tasks, each adding 10 unique members
+        let num_tasks = 10usize;
+        let members_per_task = 10usize;
+
+        let mut handles = Vec::new();
+        for task_id in 0..num_tasks {
+            let engine_clone = engine.clone();
+            let key_clone = key.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..members_per_task {
+                    let lon = -180.0 + ((task_id * members_per_task + i) as f64 * 3.0) % 360.0;
+                    let lat = -85.0 + ((task_id * members_per_task + i) as f64 * 1.5) % 170.0;
+                    let member = format!("member_{}_{}", task_id, i);
+                    let args: Vec<Vec<u8>> = vec![
+                        key_clone.clone(),
+                        format!("{}", lon).into_bytes(),
+                        format!("{}", lat).into_bytes(),
+                        member.into_bytes(),
+                    ];
+                    let result = geoadd(&engine_clone, &args).await;
+                    assert!(result.is_ok(), "GEOADD failed: {:?}", result);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Verify all members were added - use ZCARD equivalent via load_sorted_set
+        let ss = load_sorted_set(&engine, &key).await.unwrap().unwrap();
+        assert_eq!(
+            ss.len(),
+            num_tasks * members_per_task,
+            "Expected {} members, got {}",
+            num_tasks * members_per_task,
+            ss.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_geoadd_with_updates() {
+        let engine = StorageEngine::new(StorageConfig::default());
+        let key = b"geotest:concurrent_update".to_vec();
+
+        // First add a member
+        let args: Vec<Vec<u8>> = vec![
+            key.clone(),
+            b"2.3522".to_vec(),
+            b"48.8566".to_vec(),
+            b"Paris".to_vec(),
+        ];
+        geoadd(&engine, &args).await.unwrap();
+
+        // 10 tasks all updating the same member concurrently
+        let num_tasks = 10usize;
+        let mut handles = Vec::new();
+        for task_id in 0..num_tasks {
+            let engine_clone = engine.clone();
+            let key_clone = key.clone();
+            handles.push(tokio::spawn(async move {
+                let lon = 2.0 + task_id as f64 * 0.1;
+                let lat = 48.0 + task_id as f64 * 0.1;
+                let args: Vec<Vec<u8>> = vec![
+                    key_clone,
+                    format!("{}", lon).into_bytes(),
+                    format!("{}", lat).into_bytes(),
+                    b"Paris".to_vec(),
+                ];
+                geoadd(&engine_clone, &args).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Verify only 1 member exists (updates, not new adds)
+        let ss = load_sorted_set(&engine, &key).await.unwrap().unwrap();
+        assert_eq!(ss.len(), 1, "Should have exactly 1 member after updates");
     }
 }

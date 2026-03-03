@@ -158,11 +158,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** GEOADD and GEOSEARCHSTORE use load-modify-save pattern for sorted set data.
 
-- [ ] GEOADD: `atomic_modify()` with sorted set data deserialization
-- [ ] GEOSEARCHSTORE: `atomic_modify()` on destination key
-- [ ] Write concurrent GEOADD tests
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] GEOADD: `atomic_modify()` with sorted set data deserialization
+- [x] GEOSEARCHSTORE: `atomic_modify()` on destination key with `lock_keys()` for cross-key atomicity
+- [x] Write concurrent GEOADD tests (same-key parallel adds + concurrent updates)
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
