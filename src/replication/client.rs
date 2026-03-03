@@ -204,6 +204,7 @@ impl ReplicationClient {
     /// Process commands from the master
     async fn process_commands(&self, socket: &mut TcpStream) -> Result<(), ReplicationError> {
         let mut buffer = BytesMut::with_capacity(self.buffer_size);
+        let mut current_db: usize = 0;
         
         loop {
             // Read data from the master
@@ -235,9 +236,19 @@ impl ReplicationClient {
                             Ok(cmd) => {
                                 debug!("Processing command from master: {:?}", cmd);
                                 
-                                // Execute the command
+                                // Track SELECT commands to maintain correct database context
+                                if cmd.name.eq_ignore_ascii_case("SELECT")
+                                    && let Some(db_arg) = cmd.args.first()
+                                    && let Ok(db_str) = std::str::from_utf8(db_arg)
+                                    && let Ok(db_idx) = db_str.parse::<usize>()
+                                {
+                                    current_db = db_idx;
+                                    debug!("Replication: switched to database {}", current_db);
+                                }
+                                
+                                // Execute the command with the tracked database index
                                 let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
-                                if let Err(e) = cmd_handler.process(cmd, 0).await {
+                                if let Err(e) = cmd_handler.process(cmd, current_db).await {
                                     error!("Error processing command from master: {}", e);
                                 }
                                 

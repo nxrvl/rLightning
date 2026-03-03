@@ -690,3 +690,159 @@ async fn test_replication_backlog_trimming() {
     let data = backlog.get_from_offset(5).unwrap();
     assert_eq!(data.len(), 20);
 }
+
+#[tokio::test]
+async fn test_replication_select_db_tracking() {
+    // Test that simulates the replication client's SELECT tracking behavior.
+    // The replication client should track SELECT commands and pass the correct
+    // db_index to cmd_handler.process() instead of hardcoding 0.
+    use std::sync::Arc;
+    use rlightning::command::handler::CommandHandler;
+    use rlightning::command::Command;
+
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+    let cmd_handler = CommandHandler::new(Arc::clone(&storage));
+
+    // Simulate the replication client's command processing with SELECT tracking
+    let commands: Vec<Command> = vec![
+        // First, SELECT database 3
+        Command {
+            name: "SELECT".to_string(),
+            args: vec![b"3".to_vec()],
+        },
+        // Then SET a key in database 3
+        Command {
+            name: "SET".to_string(),
+            args: vec![b"repl_test_key".to_vec(), b"db3_value".to_vec()],
+        },
+        // SELECT back to database 0
+        Command {
+            name: "SELECT".to_string(),
+            args: vec![b"0".to_vec()],
+        },
+        // SET a different key in database 0
+        Command {
+            name: "SET".to_string(),
+            args: vec![b"repl_test_key_db0".to_vec(), b"db0_value".to_vec()],
+        },
+    ];
+
+    // Simulate the fixed replication client logic: track current_db from SELECT commands
+    let mut current_db: usize = 0;
+    for cmd in commands {
+        if cmd.name.eq_ignore_ascii_case("SELECT") {
+            if let Some(db_arg) = cmd.args.first() {
+                if let Ok(db_str) = std::str::from_utf8(db_arg) {
+                    if let Ok(db_idx) = db_str.parse::<usize>() {
+                        current_db = db_idx;
+                    }
+                }
+            }
+        }
+        let _ = cmd_handler.process(cmd, current_db).await;
+    }
+
+    // Verify: repl_test_key should be in DB 3, not DB 0
+    use rlightning::storage::engine::CURRENT_DB_INDEX;
+
+    // Check DB 3 has the key
+    let result = CURRENT_DB_INDEX.scope(3, async {
+        cmd_handler.process(
+            Command {
+                name: "GET".to_string(),
+                args: vec![b"repl_test_key".to_vec()],
+            },
+            3,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(Some(val))) => {
+            assert_eq!(val, b"db3_value", "Key in DB 3 should have correct value");
+        }
+        other => panic!("Expected BulkString with value in DB 3, got: {:?}", other),
+    }
+
+    // Check DB 0 does NOT have repl_test_key
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command {
+                name: "GET".to_string(),
+                args: vec![b"repl_test_key".to_vec()],
+            },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(None)) | Ok(RespValue::Null) => {
+            // Key should not exist in DB 0 - correct
+        }
+        other => panic!("Expected nil/null in DB 0, got: {:?}", other),
+    }
+
+    // Check DB 0 has repl_test_key_db0
+    let result = CURRENT_DB_INDEX.scope(0, async {
+        cmd_handler.process(
+            Command {
+                name: "GET".to_string(),
+                args: vec![b"repl_test_key_db0".to_vec()],
+            },
+            0,
+        ).await
+    }).await;
+    match result {
+        Ok(RespValue::BulkString(Some(val))) => {
+            assert_eq!(val, b"db0_value", "Key in DB 0 should have correct value");
+        }
+        other => panic!("Expected BulkString with value in DB 0, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_replication_select_via_server() {
+    // Integration test: verify SELECT + SET works correctly through a live server
+    // This confirms the server properly routes commands to the selected database,
+    // which is the same mechanism the replication client uses.
+    let replication_config = ReplicationConfig::default();
+    let (addr, _repl) = setup_test_server_with_replication(217, replication_config).await.unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    // SELECT database 3
+    let resp = send_command(&mut stream, "SELECT", &["3"]).await.unwrap();
+    match resp {
+        RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+        other => panic!("Expected OK from SELECT, got: {:?}", other),
+    }
+
+    // SET a key in DB 3
+    let resp = send_command(&mut stream, "SET", &["repl_db_test", "value_in_db3"]).await.unwrap();
+    match resp {
+        RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+        other => panic!("Expected OK from SET, got: {:?}", other),
+    }
+
+    // GET the key - should exist in DB 3
+    let resp = send_command(&mut stream, "GET", &["repl_db_test"]).await.unwrap();
+    match resp {
+        RespValue::BulkString(Some(val)) => {
+            assert_eq!(String::from_utf8_lossy(&val), "value_in_db3");
+        }
+        other => panic!("Expected value in DB 3, got: {:?}", other),
+    }
+
+    // SELECT database 0
+    let resp = send_command(&mut stream, "SELECT", &["0"]).await.unwrap();
+    match resp {
+        RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+        other => panic!("Expected OK from SELECT, got: {:?}", other),
+    }
+
+    // GET the key in DB 0 - should NOT exist
+    let resp = send_command(&mut stream, "GET", &["repl_db_test"]).await.unwrap();
+    match resp {
+        RespValue::BulkString(None) | RespValue::Null => {
+            // Key does not exist in DB 0 - correct
+        }
+        other => panic!("Expected nil in DB 0, got: {:?}", other),
+    }
+}

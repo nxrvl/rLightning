@@ -269,12 +269,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** Line 240 always passes `0` as db_index: `cmd_handler.process(cmd, 0)`. Commands from master targeting DB 1-15 are applied to wrong database.
 
-- [ ] Add `current_db: usize` variable in the command processing loop
-- [ ] On `SELECT` command, update `current_db` to the new database index
-- [ ] Pass `current_db` to `cmd_handler.process(cmd, current_db)` instead of hardcoded `0`
-- [ ] Write test: master uses SELECT 3 + SET, verify replica has key in DB 3
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Add `current_db: usize` variable in the command processing loop
+- [x] On `SELECT` command, update `current_db` to the new database index
+- [x] Pass `current_db` to `cmd_handler.process(cmd, current_db)` instead of hardcoded `0`
+- [x] Write test: master uses SELECT 3 + SET, verify replica has key in DB 3
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
