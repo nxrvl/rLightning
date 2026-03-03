@@ -149,7 +149,7 @@ impl ReplicationClient {
 
                 // Parse the master's replication ID and offset
                 let parts: Vec<&str> = s.split_whitespace().collect();
-                if parts.len() >= 2 {
+                if parts.len() >= 3 {
                     let master_replid = parts[1].to_string();
                     let offset = parts[2].parse::<u64>().unwrap_or(0);
 
@@ -245,6 +245,10 @@ impl ReplicationClient {
         // Transaction buffering: when we receive MULTI from master, buffer commands
         // until EXEC or DISCARD so they execute atomically on the replica.
         let mut tx_buffer: Option<Vec<Command>> = None;
+        // Create the command handler once and reuse it for all commands.
+        // CommandHandler::new() spawns a background cleanup task, so creating one
+        // per command would leak unbounded background tasks.
+        let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
 
         loop {
             // Read data from the master
@@ -300,10 +304,6 @@ impl ReplicationClient {
                                                 "Replication: executing EXEC with {} buffered commands",
                                                 commands.len()
                                             );
-                                            let cmd_handler =
-                                                crate::command::handler::CommandHandler::new(
-                                                    self.engine.clone(),
-                                                );
                                             let mut tx_state = TransactionState::new();
                                             // Set up the transaction state: mark as in_multi and queue commands
                                             tx_state.in_multi = true;
@@ -359,10 +359,6 @@ impl ReplicationClient {
                                             buf.push(cmd);
                                         } else {
                                             // Normal command outside transaction
-                                            let cmd_handler =
-                                                crate::command::handler::CommandHandler::new(
-                                                    self.engine.clone(),
-                                                );
                                             if let Err(e) =
                                                 cmd_handler.process(cmd, current_db).await
                                             {

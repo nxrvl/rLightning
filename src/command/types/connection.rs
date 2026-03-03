@@ -688,13 +688,30 @@ pub async fn info_expanded(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
     if include_all || section == "memory" {
         let used_memory = engine.get_used_memory();
         let used_memory_human = format_memory_human(used_memory);
+        // Read maxmemory and maxmemory-policy from runtime config
+        let maxmemory_results = engine.config_get("maxmemory");
+        let maxmemory: u64 = maxmemory_results
+            .first()
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
+        let maxmemory_human = if maxmemory > 0 {
+            format_memory_human(maxmemory)
+        } else {
+            "0B".to_string()
+        };
+        let policy_results = engine.config_get("maxmemory-policy");
+        let maxmemory_policy = policy_results
+            .first()
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "noeviction".to_string());
         sections.push(format!(
-            "# Memory\r\nused_memory:{}\r\nused_memory_human:{}\r\nused_memory_rss:{}\r\nused_memory_rss_human:{}\r\nused_memory_peak:{}\r\nused_memory_peak_human:{}\r\nused_memory_peak_perc:100.00%\r\nused_memory_overhead:0\r\nused_memory_startup:0\r\nused_memory_dataset:{}\r\nused_memory_dataset_perc:100.00%\r\nallocator_allocated:{}\r\nallocator_active:{}\r\nallocator_resident:{}\r\ntotal_system_memory:0\r\ntotal_system_memory_human:0B\r\nused_memory_lua:0\r\nused_memory_vm_eval:0\r\nused_memory_lua_human:0B\r\nused_memory_scripts_eval:0\r\nused_memory_scripts_human:0B\r\nnumber_of_cached_scripts:0\r\nnumber_of_functions:0\r\nnumber_of_libraries:0\r\nused_memory_vm_functions:0\r\nused_memory_vm_total:0\r\nused_memory_vm_total_human:0B\r\nused_memory_functions:0\r\nused_memory_scripts:0\r\nmaxmemory:0\r\nmaxmemory_human:0B\r\nmaxmemory_policy:noeviction\r\nallocator_frag_ratio:1.0\r\nallocator_frag_bytes:0\r\nallocator_rss_ratio:1.0\r\nallocator_rss_bytes:0\r\nrss_overhead_ratio:1.0\r\nrss_overhead_bytes:0\r\nmem_fragmentation_ratio:1.0\r\nmem_fragmentation_bytes:0\r\nmem_not_counted_for_evict:0\r\nmem_replication_backlog:0\r\nmem_total_replication_buffers:0\r\nmem_clients_slaves:0\r\nmem_clients_normal:0\r\nmem_cluster_links:0\r\nmem_aof_buffer:0\r\nmem_allocator:rust-global\r\nactive_defrag_running:0\r\nlazyfree_pending_objects:0\r\nlazyfreed_objects:0\r\n",
+            "# Memory\r\nused_memory:{}\r\nused_memory_human:{}\r\nused_memory_rss:{}\r\nused_memory_rss_human:{}\r\nused_memory_peak:{}\r\nused_memory_peak_human:{}\r\nused_memory_peak_perc:100.00%\r\nused_memory_overhead:0\r\nused_memory_startup:0\r\nused_memory_dataset:{}\r\nused_memory_dataset_perc:100.00%\r\nallocator_allocated:{}\r\nallocator_active:{}\r\nallocator_resident:{}\r\ntotal_system_memory:0\r\ntotal_system_memory_human:0B\r\nused_memory_lua:0\r\nused_memory_vm_eval:0\r\nused_memory_lua_human:0B\r\nused_memory_scripts_eval:0\r\nused_memory_scripts_human:0B\r\nnumber_of_cached_scripts:0\r\nnumber_of_functions:0\r\nnumber_of_libraries:0\r\nused_memory_vm_functions:0\r\nused_memory_vm_total:0\r\nused_memory_vm_total_human:0B\r\nused_memory_functions:0\r\nused_memory_scripts:0\r\nmaxmemory:{}\r\nmaxmemory_human:{}\r\nmaxmemory_policy:{}\r\nallocator_frag_ratio:1.0\r\nallocator_frag_bytes:0\r\nallocator_rss_ratio:1.0\r\nallocator_rss_bytes:0\r\nrss_overhead_ratio:1.0\r\nrss_overhead_bytes:0\r\nmem_fragmentation_ratio:1.0\r\nmem_fragmentation_bytes:0\r\nmem_not_counted_for_evict:0\r\nmem_replication_backlog:0\r\nmem_total_replication_buffers:0\r\nmem_clients_slaves:0\r\nmem_clients_normal:0\r\nmem_cluster_links:0\r\nmem_aof_buffer:0\r\nmem_allocator:rust-global\r\nactive_defrag_running:0\r\nlazyfree_pending_objects:0\r\nlazyfreed_objects:0\r\n",
             used_memory, used_memory_human,
             used_memory, used_memory_human,
             used_memory, used_memory_human,
             used_memory,
             used_memory, used_memory, used_memory,
+            maxmemory, maxmemory_human, maxmemory_policy,
         ));
     }
 

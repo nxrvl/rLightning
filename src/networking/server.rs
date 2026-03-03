@@ -1334,6 +1334,13 @@ impl Server {
                 if let Some(repl) = replication {
                     if cmd_lower == "exec" {
                         if let RespValue::Array(Some(_)) = &response {
+                            // Wrap transaction commands with MULTI/EXEC so replicas
+                            // can replay them atomically.
+                            let multi_cmd = RespCommand {
+                                name: b"MULTI".to_vec(),
+                                args: vec![],
+                            };
+                            repl.propagate_command(&multi_cmd).await;
                             for queued_cmd in &queued_for_repl {
                                 let qcmd_lower = queued_cmd.name.to_lowercase();
                                 if ReplicationManager::is_write_command(&qcmd_lower) {
@@ -1344,6 +1351,11 @@ impl Server {
                                     repl.propagate_command(&repl_cmd).await;
                                 }
                             }
+                            let exec_cmd = RespCommand {
+                                name: b"EXEC".to_vec(),
+                                args: vec![],
+                            };
+                            repl.propagate_command(&exec_cmd).await;
                         }
                     } else if ReplicationManager::is_write_command(&cmd_lower) {
                         let repl_cmd = RespCommand {
