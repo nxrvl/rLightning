@@ -446,7 +446,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::var("RUST_LOG").is_err() {
         let log_level = &settings.logging.level;
         if EnvFilter::try_new(log_level).is_ok() {
-            info!("Configuration specifies log level '{}' (note: tracing subscriber already initialized)", log_level);
+            info!(
+                "Configuration specifies log level '{}' (note: tracing subscriber already initialized)",
+                log_level
+            );
         } else {
             warn!(
                 "Invalid log level '{}' in configuration, using default",
@@ -502,7 +505,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = StorageEngine::new(storage_config);
 
     // Seed runtime config from application settings
-    let appendonly = matches!(settings.persistence.mode, PersistenceMode::AOF | PersistenceMode::Hybrid);
+    let appendonly = matches!(
+        settings.persistence.mode,
+        PersistenceMode::AOF | PersistenceMode::Hybrid
+    );
     let appendfsync_str = match settings.persistence.aof_sync_policy {
         AofSyncPolicy::Always => "always",
         AofSyncPolicy::EverySecond => "everysec",

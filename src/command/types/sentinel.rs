@@ -19,11 +19,10 @@ pub async fn sentinel_command(
     }
 
     match sentinel_mgr {
-        Some(mgr) => {
-            mgr.handle_sentinel_command(args)
-                .await
-                .map_err(CommandError::InternalError)
-        }
+        Some(mgr) => mgr
+            .handle_sentinel_command(args)
+            .await
+            .map_err(CommandError::InternalError),
         None => {
             let subcommand = String::from_utf8_lossy(&args[0]).to_uppercase();
             match subcommand.as_str() {
@@ -31,7 +30,8 @@ pub async fn sentinel_command(
                     b"0000000000000000000000000000000000000000".to_vec(),
                 ))),
                 "HELP" => Ok(RespValue::SimpleString(
-                    "SENTINEL commands are not available - sentinel mode is not enabled".to_string(),
+                    "SENTINEL commands are not available - sentinel mode is not enabled"
+                        .to_string(),
                 )),
                 _ => Ok(RespValue::Error(
                     "ERR This instance has sentinel support disabled".to_string(),

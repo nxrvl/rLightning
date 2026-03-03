@@ -1,5 +1,5 @@
-use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
@@ -20,7 +20,9 @@ pub async fn module_command(_engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
         "LOAD" => module_load(&args[1..]).await,
         "LOADEX" => module_loadex(&args[1..]).await,
         "UNLOAD" => module_unload(&args[1..]).await,
-        _ => Err(CommandError::InvalidArgument("Unknown subcommand or wrong number of arguments for 'module' command".to_string())),
+        _ => Err(CommandError::InvalidArgument(
+            "Unknown subcommand or wrong number of arguments for 'module' command".to_string(),
+        )),
     }
 }
 
@@ -59,16 +61,17 @@ async fn module_unload(args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let name = bytes_to_string(&args[0])?;
-    Err(CommandError::InternalError(
-        format!("ERR Error unloading module: no such module with that name '{}'. rLightning does not support Redis C-extension modules.", name)
-    ))
+    Err(CommandError::InternalError(format!(
+        "ERR Error unloading module: no such module with that name '{}'. rLightning does not support Redis C-extension modules.",
+        name
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::storage::engine::StorageConfig;
+    use std::sync::Arc;
 
     fn create_test_engine() -> Arc<StorageEngine> {
         let config = StorageConfig::default();
@@ -99,7 +102,11 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CommandError::InternalError(msg) => {
-                assert!(msg.contains("not supported"), "Error should mention not supported: {}", msg);
+                assert!(
+                    msg.contains("not supported"),
+                    "Error should mention not supported: {}",
+                    msg
+                );
             }
             other => panic!("Expected InternalError, got: {:?}", other),
         }
@@ -128,7 +135,11 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CommandError::InternalError(msg) => {
-                assert!(msg.contains("not supported"), "Error should mention not supported: {}", msg);
+                assert!(
+                    msg.contains("not supported"),
+                    "Error should mention not supported: {}",
+                    msg
+                );
             }
             other => panic!("Expected InternalError, got: {:?}", other),
         }
@@ -151,8 +162,16 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CommandError::InternalError(msg) => {
-                assert!(msg.contains("mymodule"), "Error should mention module name: {}", msg);
-                assert!(msg.contains("not support"), "Error should mention not supported: {}", msg);
+                assert!(
+                    msg.contains("mymodule"),
+                    "Error should mention module name: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("not support"),
+                    "Error should mention not supported: {}",
+                    msg
+                );
             }
             other => panic!("Expected InternalError, got: {:?}", other),
         }
@@ -184,7 +203,11 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CommandError::InvalidArgument(msg) => {
-                assert!(msg.contains("Unknown subcommand"), "Error should mention unknown subcommand: {}", msg);
+                assert!(
+                    msg.contains("Unknown subcommand"),
+                    "Error should mention unknown subcommand: {}",
+                    msg
+                );
             }
             other => panic!("Expected InvalidArgument, got: {:?}", other),
         }

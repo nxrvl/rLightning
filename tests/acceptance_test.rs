@@ -1991,6 +1991,7 @@ async fn acceptance_test_module_commands() {
     let resp = client.send_command_str("MODULE", &["LIST"]).await.unwrap();
     assert!(
         matches!(&resp, RespValue::Array(Some(arr)) if arr.is_empty()),
-        "MODULE LIST should return empty array, got: {:?}", resp
+        "MODULE LIST should return empty array, got: {:?}",
+        resp
     );
 }

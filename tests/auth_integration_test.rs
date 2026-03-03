@@ -4,11 +4,11 @@ pub mod auth_integration_tests {
     use std::time::Duration;
     use tokio::time::sleep;
 
+    use rlightning::networking::client::Client;
+    use rlightning::networking::resp::RespValue;
+    use rlightning::networking::server::Server;
     use rlightning::security::{SecurityConfig, SecurityManager};
     use rlightning::storage::engine::{StorageConfig, StorageEngine};
-    use rlightning::networking::client::Client;
-    use rlightning::networking::server::Server;
-    use rlightning::networking::resp::RespValue;
 
     const TEST_PASSWORD: &str = "testpassword123";
     const DEFAULT_TEST_PORT: u16 = 17000;
@@ -20,16 +20,17 @@ pub mod auth_integration_tests {
             acl_file: None,
         }
     }
-    
+
     /// Sets up a test server with the specified port offset and security configuration
     async fn setup_test_server_with_security(
         port_offset: u16,
         storage_config: StorageConfig,
         security_config: SecurityConfig,
     ) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-        setup_test_server_with_optional_security(port_offset, storage_config, Some(security_config)).await
+        setup_test_server_with_optional_security(port_offset, storage_config, Some(security_config))
+            .await
     }
-    
+
     /// Helper to set up a test server with optional security
     async fn setup_test_server_with_optional_security(
         port_offset: u16,
@@ -39,7 +40,7 @@ pub mod auth_integration_tests {
         let port = DEFAULT_TEST_PORT + port_offset;
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
         let storage = Arc::new(StorageEngine::new(storage_config));
-        
+
         let mut server_builder = Server::new(addr, Arc::clone(&storage))
             .with_connection_limit(100)
             .with_buffer_size(1024 * 1024); // Use 1MB buffer size for tests (up from 1KB)
@@ -48,7 +49,7 @@ pub mod auth_integration_tests {
             let security_manager = Arc::new(SecurityManager::new(sec_conf));
             server_builder = server_builder.with_security(security_manager);
         }
-        
+
         let server = server_builder;
 
         tokio::spawn(async move {
@@ -61,9 +62,11 @@ pub mod auth_integration_tests {
 
         Ok(addr)
     }
-    
+
     /// Creates a new Redis client connected to the specified address
-    async fn create_client(addr: SocketAddr) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
+    async fn create_client(
+        addr: SocketAddr,
+    ) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
         let client = match Client::connect(addr).await {
             Ok(client) => client,
             Err(e) => {
@@ -119,7 +122,8 @@ pub mod auth_integration_tests {
         // ACL validates the password and returns WRONGPASS error
         assert!(
             matches!(&auth_response, RespValue::Error(msg) if msg.contains("WRONGPASS") || msg.contains("invalid")),
-            "AUTH with wrong password should return WRONGPASS error, got: {:?}", auth_response
+            "AUTH with wrong password should return WRONGPASS error, got: {:?}",
+            auth_response
         );
     }
 
@@ -173,9 +177,12 @@ pub mod auth_integration_tests {
             .send_command_str("PING", &[])
             .await
             .expect("Failed to send PING command");
-        assert_eq!(ping_response_after_auth, RespValue::SimpleString("PONG".to_string()));
+        assert_eq!(
+            ping_response_after_auth,
+            RespValue::SimpleString("PONG".to_string())
+        );
     }
-    
+
     #[tokio::test]
     async fn test_auth_wrong_number_of_arguments() {
         let storage_config = StorageConfig::default();
@@ -210,4 +217,4 @@ pub mod auth_integration_tests {
 }
 
 // Need to add this to tests/lib.rs
-// pub mod auth_integration_test; 
+// pub mod auth_integration_test;

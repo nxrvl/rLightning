@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
-use crate::storage::engine::{StorageEngine, NUM_DATABASES, CURRENT_DB_INDEX};
+use crate::storage::engine::{CURRENT_DB_INDEX, NUM_DATABASES, StorageEngine};
 use crate::storage::item::RedisDataType;
 
 /// Redis COPY command - Copy the value stored at the source key to the destination key
@@ -32,7 +32,9 @@ pub async fn copy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
                 let db_str = bytes_to_string(&args[i + 1])?;
                 let db = db_str.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if db >= NUM_DATABASES {
                     return Err(CommandError::InvalidArgument(
@@ -170,29 +172,27 @@ pub async fn expireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             return Ok(RespValue::Integer(0));
         }
         // GT: Set expiry only when the new expiry is greater than current
-        if gt
-            && let Some(current) = current_ttl {
-                let now_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let new_remaining = timestamp - now_unix;
-                if new_remaining <= current.as_secs() as i64 {
-                    return Ok(RespValue::Integer(0));
-                }
+        if gt && let Some(current) = current_ttl {
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let new_remaining = timestamp - now_unix;
+            if new_remaining <= current.as_secs() as i64 {
+                return Ok(RespValue::Integer(0));
             }
+        }
         // LT: Set expiry only when the new expiry is less than current
-        if lt
-            && let Some(current) = current_ttl {
-                let now_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let new_remaining = timestamp - now_unix;
-                if new_remaining >= current.as_secs() as i64 {
-                    return Ok(RespValue::Integer(0));
-                }
+        if lt && let Some(current) = current_ttl {
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let new_remaining = timestamp - now_unix;
+            if new_remaining >= current.as_secs() as i64 {
+                return Ok(RespValue::Integer(0));
             }
+        }
     }
 
     match engine.expire_at(key, timestamp).await? {
@@ -243,28 +243,26 @@ pub async fn pexpireat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt
-            && let Some(current) = current_ttl {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let new_remaining_ms = timestamp_ms - now_ms;
-                if new_remaining_ms <= current.as_millis() as i64 {
-                    return Ok(RespValue::Integer(0));
-                }
+        if gt && let Some(current) = current_ttl {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let new_remaining_ms = timestamp_ms - now_ms;
+            if new_remaining_ms <= current.as_millis() as i64 {
+                return Ok(RespValue::Integer(0));
             }
-        if lt
-            && let Some(current) = current_ttl {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let new_remaining_ms = timestamp_ms - now_ms;
-                if new_remaining_ms >= current.as_millis() as i64 {
-                    return Ok(RespValue::Integer(0));
-                }
+        }
+        if lt && let Some(current) = current_ttl {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let new_remaining_ms = timestamp_ms - now_ms;
+            if new_remaining_ms >= current.as_millis() as i64 {
+                return Ok(RespValue::Integer(0));
             }
+        }
     }
 
     match engine.pexpire_at(key, timestamp_ms).await? {
@@ -324,19 +322,14 @@ pub async fn object(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let help = vec![
                 RespValue::BulkString(Some(b"OBJECT subcommands:".to_vec())),
                 RespValue::BulkString(Some(
-                    b"ENCODING <key> - Return the encoding of the object stored at <key>."
-                        .to_vec(),
+                    b"ENCODING <key> - Return the encoding of the object stored at <key>.".to_vec(),
                 )),
                 RespValue::BulkString(Some(
-                    b"FREQ <key> - Return the access frequency index of the key."
-                        .to_vec(),
+                    b"FREQ <key> - Return the access frequency index of the key.".to_vec(),
                 )),
+                RespValue::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
                 RespValue::BulkString(Some(
-                    b"HELP - Return subcommand help summary.".to_vec(),
-                )),
-                RespValue::BulkString(Some(
-                    b"IDLETIME <key> - Return the idle time of the key in seconds."
-                        .to_vec(),
+                    b"IDLETIME <key> - Return the idle time of the key in seconds.".to_vec(),
                 )),
                 RespValue::BulkString(Some(
                     b"REFCOUNT <key> - Return the reference count of the object stored at <key>."
@@ -352,9 +345,7 @@ pub async fn object(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let key = &args[1];
             match engine.get_encoding(key).await? {
                 Some(encoding) => Ok(RespValue::BulkString(Some(encoding.into_bytes()))),
-                None => Err(CommandError::InvalidArgument(
-                    "no such key".to_string(),
-                )),
+                None => Err(CommandError::InvalidArgument("no such key".to_string())),
             }
         }
         "IDLETIME" => {
@@ -364,9 +355,7 @@ pub async fn object(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let key = &args[1];
             match engine.get_idle_time(key).await? {
                 Some(idle) => Ok(RespValue::Integer(idle as i64)),
-                None => Err(CommandError::InvalidArgument(
-                    "no such key".to_string(),
-                )),
+                None => Err(CommandError::InvalidArgument("no such key".to_string())),
             }
         }
         "REFCOUNT" => {
@@ -378,9 +367,7 @@ pub async fn object(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 // rLightning always reports refcount of 1
                 Ok(RespValue::Integer(1))
             } else {
-                Err(CommandError::InvalidArgument(
-                    "no such key".to_string(),
-                ))
+                Err(CommandError::InvalidArgument("no such key".to_string()))
             }
         }
         "FREQ" => {
@@ -392,9 +379,7 @@ pub async fn object(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 // Frequency tracking not implemented; return 0
                 Ok(RespValue::Integer(0))
             } else {
-                Err(CommandError::InvalidArgument(
-                    "no such key".to_string(),
-                ))
+                Err(CommandError::InvalidArgument("no such key".to_string()))
             }
         }
         _ => Err(CommandError::InvalidArgument(format!(
@@ -493,7 +478,10 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         None
     };
 
-    match engine.restore_key(key, value, data_type, ttl, replace).await {
+    match engine
+        .restore_key(key, value, data_type, ttl, replace)
+        .await
+    {
         Ok(true) => Ok(RespValue::SimpleString("OK".to_string())),
         Ok(false) => Err(CommandError::InvalidArgument(
             "Target key name already exists".to_string(),
@@ -537,24 +525,20 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if i + 2 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
-                limit_offset = Some(
-                    bytes_to_string(&args[i + 1])?
-                        .parse::<usize>()
-                        .map_err(|_| {
-                            CommandError::InvalidArgument(
-                                "value is not an integer or out of range".to_string(),
-                            )
-                        })?,
-                );
-                limit_count = Some(
-                    bytes_to_string(&args[i + 2])?
-                        .parse::<usize>()
-                        .map_err(|_| {
-                            CommandError::InvalidArgument(
-                                "value is not an integer or out of range".to_string(),
-                            )
-                        })?,
-                );
+                limit_offset = Some(bytes_to_string(&args[i + 1])?.parse::<usize>().map_err(
+                    |_| {
+                        CommandError::InvalidArgument(
+                            "value is not an integer or out of range".to_string(),
+                        )
+                    },
+                )?);
+                limit_count = Some(bytes_to_string(&args[i + 2])?.parse::<usize>().map_err(
+                    |_| {
+                        CommandError::InvalidArgument(
+                            "value is not an integer or out of range".to_string(),
+                        )
+                    },
+                )?);
                 i += 3;
             }
             "STORE" => {
@@ -617,8 +601,7 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
         "zset" => {
             if let Some(value) = engine.get(key).await? {
-                let zset: Vec<(f64, Vec<u8>)> =
-                    bincode::deserialize(&value).unwrap_or_default();
+                let zset: Vec<(f64, Vec<u8>)> = bincode::deserialize(&value).unwrap_or_default();
                 zset.into_iter().map(|(_, member)| member).collect()
             } else {
                 vec![]
@@ -649,9 +632,11 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             numeric_pairs.push((num, elem.clone()));
         }
         if desc {
-            numeric_pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            numeric_pairs
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         } else {
-            numeric_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            numeric_pairs
+                .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
         elements = numeric_pairs.into_iter().map(|(_, v)| v).collect();
     }
@@ -666,9 +651,8 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Handle STORE option
     if let Some(store) = store_key {
         let count = elements.len() as i64;
-        let serialized = bincode::serialize(&elements).map_err(|e| {
-            CommandError::InternalError(format!("Serialization error: {}", e))
-        })?;
+        let serialized = bincode::serialize(&elements)
+            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
             .set_with_type(store, serialized, RedisDataType::List, None)
             .await?;
@@ -703,16 +687,12 @@ pub async fn wait_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let _numreplicas = bytes_to_string(&args[0])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
-    let _timeout = bytes_to_string(&args[1])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
+    let _numreplicas = bytes_to_string(&args[0])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let _timeout = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
 
     // Since we're a standalone server with no replicas, return 0 immediately
     Ok(RespValue::Integer(0))
@@ -724,21 +704,15 @@ pub async fn waitaof(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let _numlocal = bytes_to_string(&args[0])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
-    let _numreplicas = bytes_to_string(&args[1])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
-    let _timeout = bytes_to_string(&args[2])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-        })?;
+    let _numlocal = bytes_to_string(&args[0])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let _numreplicas = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
+    let _timeout = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+    })?;
 
     // Return [local, replicas] - standalone server, return [0, 0]
     Ok(RespValue::Array(Some(vec![
@@ -759,7 +733,9 @@ pub async fn select(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     })?;
 
     if db >= NUM_DATABASES {
-        return Err(CommandError::InvalidArgument("DB index is out of range".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "DB index is out of range".to_string(),
+        ));
     }
 
     // The actual database switching is handled at the server level
@@ -1100,10 +1076,7 @@ mod tests {
         // Non-existent key
         let result = expireat(
             &engine,
-            &[
-                b"nonexistent".to_vec(),
-                future_ts.to_string().into_bytes(),
-            ],
+            &[b"nonexistent".to_vec(), future_ts.to_string().into_bytes()],
         )
         .await
         .unwrap();
@@ -1148,9 +1121,7 @@ mod tests {
             .set(b"et_key".to_vec(), b"value".to_vec(), None)
             .await
             .unwrap();
-        let result = expiretime(&engine, &[b"et_key".to_vec()])
-            .await
-            .unwrap();
+        let result = expiretime(&engine, &[b"et_key".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(-1));
 
         // Key with expiration
@@ -1158,9 +1129,7 @@ mod tests {
             .expire(b"et_key", Some(Duration::from_secs(100)))
             .await
             .unwrap();
-        let result = expiretime(&engine, &[b"et_key".to_vec()])
-            .await
-            .unwrap();
+        let result = expiretime(&engine, &[b"et_key".to_vec()]).await.unwrap();
         if let RespValue::Integer(ts) = result {
             let now_ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1189,9 +1158,7 @@ mod tests {
             .unwrap();
 
         // Without expiration
-        let result = pexpiretime(&engine, &[b"pet_key".to_vec()])
-            .await
-            .unwrap();
+        let result = pexpiretime(&engine, &[b"pet_key".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(-1));
 
         // With expiration
@@ -1199,9 +1166,7 @@ mod tests {
             .expire(b"pet_key", Some(Duration::from_secs(100)))
             .await
             .unwrap();
-        let result = pexpiretime(&engine, &[b"pet_key".to_vec()])
-            .await
-            .unwrap();
+        let result = pexpiretime(&engine, &[b"pet_key".to_vec()]).await.unwrap();
         if let RespValue::Integer(ts_ms) = result {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1232,10 +1197,7 @@ mod tests {
         let result = object(&engine, &[b"ENCODING".to_vec(), b"num".to_vec()])
             .await
             .unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"int".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"int".to_vec())));
 
         // Short string encoding
         engine
@@ -1245,10 +1207,7 @@ mod tests {
         let result = object(&engine, &[b"ENCODING".to_vec(), b"short".to_vec()])
             .await
             .unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"embstr".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"embstr".to_vec())));
 
         // Long string encoding
         let long_str = "a".repeat(100);
@@ -1259,10 +1218,7 @@ mod tests {
         let result = object(&engine, &[b"ENCODING".to_vec(), b"long".to_vec()])
             .await
             .unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"raw".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"raw".to_vec())));
 
         // Non-existent key
         let result = object(&engine, &[b"ENCODING".to_vec(), b"nope".to_vec()]).await;
@@ -1280,7 +1236,12 @@ mod tests {
         // Small list (<=128 elements, all <=64 bytes) -> "listpack"
         let small_list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
         engine
-            .set_with_type(b"small_list".to_vec(), bincode::serialize(&small_list).unwrap(), RedisDataType::List, None)
+            .set_with_type(
+                b"small_list".to_vec(),
+                bincode::serialize(&small_list).unwrap(),
+                RedisDataType::List,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_list".to_vec()])
@@ -1293,7 +1254,12 @@ mod tests {
         small_set.insert(b"x".to_vec());
         small_set.insert(b"y".to_vec());
         engine
-            .set_with_type(b"small_set".to_vec(), bincode::serialize(&small_set).unwrap(), RedisDataType::Set, None)
+            .set_with_type(
+                b"small_set".to_vec(),
+                bincode::serialize(&small_set).unwrap(),
+                RedisDataType::Set,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_set".to_vec()])
@@ -1306,7 +1272,12 @@ mod tests {
         small_hash.insert(b"field1".to_vec(), b"val1".to_vec());
         small_hash.insert(b"field2".to_vec(), b"val2".to_vec());
         engine
-            .set_with_type(b"small_hash".to_vec(), bincode::serialize(&small_hash).unwrap(), RedisDataType::Hash, None)
+            .set_with_type(
+                b"small_hash".to_vec(),
+                bincode::serialize(&small_hash).unwrap(),
+                RedisDataType::Hash,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_hash".to_vec()])
@@ -1320,7 +1291,12 @@ mod tests {
         small_zset.insert(1.0, b"mem1".to_vec());
         small_zset.insert(2.0, b"mem2".to_vec());
         engine
-            .set_with_type(b"small_zset".to_vec(), bincode::serialize(&small_zset).unwrap(), RedisDataType::ZSet, None)
+            .set_with_type(
+                b"small_zset".to_vec(),
+                bincode::serialize(&small_zset).unwrap(),
+                RedisDataType::ZSet,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_zset".to_vec()])
@@ -1338,9 +1314,16 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Large list (>128 elements) -> "quicklist"
-        let large_list: Vec<Vec<u8>> = (0..200).map(|i| format!("item{}", i).into_bytes()).collect();
+        let large_list: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("item{}", i).into_bytes())
+            .collect();
         engine
-            .set_with_type(b"large_list".to_vec(), bincode::serialize(&large_list).unwrap(), RedisDataType::List, None)
+            .set_with_type(
+                b"large_list".to_vec(),
+                bincode::serialize(&large_list).unwrap(),
+                RedisDataType::List,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_list".to_vec()])
@@ -1349,9 +1332,16 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"quicklist".to_vec())));
 
         // Large set (>128 elements) -> "hashtable"
-        let large_set: HashSet<Vec<u8>> = (0..200).map(|i| format!("item{}", i).into_bytes()).collect();
+        let large_set: HashSet<Vec<u8>> = (0..200)
+            .map(|i| format!("item{}", i).into_bytes())
+            .collect();
         engine
-            .set_with_type(b"large_set".to_vec(), bincode::serialize(&large_set).unwrap(), RedisDataType::Set, None)
+            .set_with_type(
+                b"large_set".to_vec(),
+                bincode::serialize(&large_set).unwrap(),
+                RedisDataType::Set,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_set".to_vec()])
@@ -1362,10 +1352,18 @@ mod tests {
         // Large hash (>128 fields) -> "hashtable"
         let mut large_hash: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         for i in 0..200 {
-            large_hash.insert(format!("f{}", i).into_bytes(), format!("v{}", i).into_bytes());
+            large_hash.insert(
+                format!("f{}", i).into_bytes(),
+                format!("v{}", i).into_bytes(),
+            );
         }
         engine
-            .set_with_type(b"large_hash".to_vec(), bincode::serialize(&large_hash).unwrap(), RedisDataType::Hash, None)
+            .set_with_type(
+                b"large_hash".to_vec(),
+                bincode::serialize(&large_hash).unwrap(),
+                RedisDataType::Hash,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_hash".to_vec()])
@@ -1380,7 +1378,12 @@ mod tests {
             large_zset.insert(i as f64, format!("m{}", i).into_bytes());
         }
         engine
-            .set_with_type(b"large_zset".to_vec(), bincode::serialize(&large_zset).unwrap(), RedisDataType::ZSet, None)
+            .set_with_type(
+                b"large_zset".to_vec(),
+                bincode::serialize(&large_zset).unwrap(),
+                RedisDataType::ZSet,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_zset".to_vec()])
@@ -1391,7 +1394,12 @@ mod tests {
         // List with large element (>64 bytes) -> "quicklist"
         let list_big_elem: Vec<Vec<u8>> = vec!["a".repeat(100).into_bytes()];
         engine
-            .set_with_type(b"list_big_elem".to_vec(), bincode::serialize(&list_big_elem).unwrap(), RedisDataType::List, None)
+            .set_with_type(
+                b"list_big_elem".to_vec(),
+                bincode::serialize(&list_big_elem).unwrap(),
+                RedisDataType::List,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"list_big_elem".to_vec()])
@@ -1403,7 +1411,12 @@ mod tests {
         let mut set_big_elem: HashSet<Vec<u8>> = HashSet::new();
         set_big_elem.insert("a".repeat(100).into_bytes());
         engine
-            .set_with_type(b"set_big_elem".to_vec(), bincode::serialize(&set_big_elem).unwrap(), RedisDataType::Set, None)
+            .set_with_type(
+                b"set_big_elem".to_vec(),
+                bincode::serialize(&set_big_elem).unwrap(),
+                RedisDataType::Set,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"set_big_elem".to_vec()])
@@ -1415,7 +1428,12 @@ mod tests {
         let mut hash_big_val: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         hash_big_val.insert(b"k".to_vec(), "a".repeat(100).into_bytes());
         engine
-            .set_with_type(b"hash_big_val".to_vec(), bincode::serialize(&hash_big_val).unwrap(), RedisDataType::Hash, None)
+            .set_with_type(
+                b"hash_big_val".to_vec(),
+                bincode::serialize(&hash_big_val).unwrap(),
+                RedisDataType::Hash,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"hash_big_val".to_vec()])
@@ -1427,7 +1445,12 @@ mod tests {
         let mut hash_big_key: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         hash_big_key.insert("k".repeat(100).into_bytes(), b"v".to_vec());
         engine
-            .set_with_type(b"hash_big_key".to_vec(), bincode::serialize(&hash_big_key).unwrap(), RedisDataType::Hash, None)
+            .set_with_type(
+                b"hash_big_key".to_vec(),
+                bincode::serialize(&hash_big_key).unwrap(),
+                RedisDataType::Hash,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"hash_big_key".to_vec()])
@@ -1439,7 +1462,12 @@ mod tests {
         let mut zset_big_mem = SortedSetData::new();
         zset_big_mem.insert(1.0, "m".repeat(100).into_bytes());
         engine
-            .set_with_type(b"zset_big_mem".to_vec(), bincode::serialize(&zset_big_mem).unwrap(), RedisDataType::ZSet, None)
+            .set_with_type(
+                b"zset_big_mem".to_vec(),
+                bincode::serialize(&zset_big_mem).unwrap(),
+                RedisDataType::ZSet,
+                None,
+            )
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"zset_big_mem".to_vec()])
@@ -1534,7 +1562,11 @@ mod tests {
         // Restore with TTL
         let result = restore(
             &engine,
-            &[b"restored_ttl".to_vec(), b"5000".to_vec(), serialized.clone()],
+            &[
+                b"restored_ttl".to_vec(),
+                b"5000".to_vec(),
+                serialized.clone(),
+            ],
         )
         .await
         .unwrap();
@@ -1630,11 +1662,7 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        let list = vec![
-            b"banana".to_vec(),
-            b"apple".to_vec(),
-            b"cherry".to_vec(),
-        ];
+        let list = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
         let serialized = bincode::serialize(&list).unwrap();
         engine
             .set_with_type(b"fruits".to_vec(), serialized, RedisDataType::List, None)
@@ -1655,7 +1683,10 @@ mod tests {
                     }
                 })
                 .collect();
-            assert_eq!(values, vec![b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]);
+            assert_eq!(
+                values,
+                vec![b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]
+            );
         }
     }
 
@@ -1749,11 +1780,7 @@ mod tests {
         // SORT_RO with STORE should fail
         let result = sort_ro(
             &engine,
-            &[
-                b"ro_list".to_vec(),
-                b"STORE".to_vec(),
-                b"dst".to_vec(),
-            ],
+            &[b"ro_list".to_vec(), b"STORE".to_vec(), b"dst".to_vec()],
         )
         .await;
         assert!(result.is_err());

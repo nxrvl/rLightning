@@ -3,7 +3,6 @@
 /// Tests the SENTINEL command through a running server instance,
 /// verifying monitoring, failover, SDOWN/ODOWN detection,
 /// and configuration management.
-
 mod test_utils;
 
 use std::net::SocketAddr;
@@ -78,7 +77,10 @@ fn is_error(val: &RespValue) -> bool {
 
 /// Helper to check if response is null
 fn is_null(val: &RespValue) -> bool {
-    matches!(val, RespValue::Null | RespValue::BulkString(None) | RespValue::Array(None))
+    matches!(
+        val,
+        RespValue::Null | RespValue::BulkString(None) | RespValue::Array(None)
+    )
 }
 
 #[tokio::test]
@@ -90,7 +92,10 @@ async fn test_sentinel_myid_via_client() {
     let (addr, _sentinel) = setup_sentinel_server(800, config).await.unwrap();
     let mut client = create_client(addr).await.unwrap();
 
-    let response = client.send_command_str("SENTINEL", &["MYID"]).await.unwrap();
+    let response = client
+        .send_command_str("SENTINEL", &["MYID"])
+        .await
+        .unwrap();
     let id = resp_string(&response);
     assert_eq!(id.len(), 40, "Sentinel ID should be 40 chars, got: {}", id);
 }
@@ -106,7 +111,10 @@ async fn test_sentinel_monitor_and_masters_via_client() {
 
     // Monitor a master
     let response = client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
     assert_eq!(resp_string(&response), "OK");
@@ -131,7 +139,10 @@ async fn test_sentinel_master_info_via_client() {
 
     // Monitor a master
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -166,7 +177,10 @@ async fn test_sentinel_get_master_addr_by_name_via_client() {
 
     // Monitor a master
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -195,7 +209,11 @@ async fn test_sentinel_get_master_addr_nonexistent_via_client() {
         .send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "nonexistent"])
         .await
         .unwrap();
-    assert!(is_null(&response), "Should return null for nonexistent master, got: {:?}", response);
+    assert!(
+        is_null(&response),
+        "Should return null for nonexistent master, got: {:?}",
+        response
+    );
 }
 
 #[tokio::test]
@@ -209,7 +227,10 @@ async fn test_sentinel_remove_via_client() {
 
     // Monitor and then remove
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -239,13 +260,19 @@ async fn test_sentinel_set_options_via_client() {
 
     // Monitor
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
     // Set down-after-milliseconds
     let response = client
-        .send_command_str("SENTINEL", &["SET", "mymaster", "down-after-milliseconds", "10000"])
+        .send_command_str(
+            "SENTINEL",
+            &["SET", "mymaster", "down-after-milliseconds", "10000"],
+        )
         .await
         .unwrap();
     assert_eq!(resp_string(&response), "OK");
@@ -267,7 +294,10 @@ async fn test_sentinel_ckquorum_via_client() {
 
     // Monitor with quorum 1 (we alone are enough)
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "1"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "1"],
+        )
         .await
         .unwrap();
 
@@ -290,7 +320,10 @@ async fn test_sentinel_replicas_via_client() {
 
     // Monitor
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -322,7 +355,10 @@ async fn test_sentinel_sentinels_via_client() {
 
     // Monitor
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -346,11 +382,17 @@ async fn test_sentinel_reset_via_client() {
 
     // Monitor two masters
     client
-        .send_command_str("SENTINEL", &["MONITOR", "master1", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "master1", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
     client
-        .send_command_str("SENTINEL", &["MONITOR", "master2", "127.0.0.2", "6380", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "master2", "127.0.0.2", "6380", "2"],
+        )
         .await
         .unwrap();
 
@@ -373,13 +415,19 @@ async fn test_sentinel_is_master_down_by_addr_via_client() {
 
     // Monitor
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
     // Query master down status
     let response = client
-        .send_command_str("SENTINEL", &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "6379", "0", "*"])
+        .send_command_str(
+            "SENTINEL",
+            &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "6379", "0", "*"],
+        )
         .await
         .unwrap();
     let fields = resp_array(&response);
@@ -469,7 +517,10 @@ async fn test_sentinel_disabled_mode_via_client() {
         .send_command_str("SENTINEL", &["MASTERS"])
         .await
         .unwrap();
-    assert!(is_error(&response), "MASTERS should fail when sentinel disabled");
+    assert!(
+        is_error(&response),
+        "MASTERS should fail when sentinel disabled"
+    );
 }
 
 #[tokio::test]
@@ -488,17 +539,13 @@ async fn test_sentinel_sdown_detection_via_manager() {
         .unwrap();
 
     // Create monitor and simulate timeout
-    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(
-        Arc::clone(sentinel.state()),
-        50,
-    );
+    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(Arc::clone(sentinel.state()), 50);
 
     // Simulate timeout by setting last_ping_reply to the past
     {
         let mut state = sentinel.state().write().await;
         let master = state.masters.get_mut("mymaster").unwrap();
-        master.last_ping_reply =
-            std::time::Instant::now() - Duration::from_millis(200);
+        master.last_ping_reply = std::time::Instant::now() - Duration::from_millis(200);
     }
 
     // Run monitor check
@@ -515,15 +562,14 @@ async fn test_sentinel_sdown_detection_via_manager() {
     // Verify via client
     let mut client = create_client(addr).await.unwrap();
     let response = client
-        .send_command_str("SENTINEL", &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "9999", "0", "*"])
+        .send_command_str(
+            "SENTINEL",
+            &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "9999", "0", "*"],
+        )
         .await
         .unwrap();
     let fields = resp_array(&response);
-    assert_eq!(
-        resp_int(&fields[0]),
-        1,
-        "Master should be reported as down"
-    );
+    assert_eq!(resp_int(&fields[0]), 1, "Master should be reported as down");
 }
 
 #[tokio::test]
@@ -546,10 +592,7 @@ async fn test_sentinel_failover_via_manager() {
     {
         let mut state = sentinel.state().write().await;
         let master = state.masters.get_mut("mymaster").unwrap();
-        let mut replica = rlightning::sentinel::ReplicaEntry::new(
-            "10.0.0.1".to_string(),
-            9998,
-        );
+        let mut replica = rlightning::sentinel::ReplicaEntry::new("10.0.0.1".to_string(), 9998);
         replica.repl_offset = 1000;
         master.replicas.push(replica);
     }
@@ -563,9 +606,8 @@ async fn test_sentinel_failover_via_manager() {
     }
 
     // Run failover
-    let failover = rlightning::sentinel::failover::FailoverOrchestrator::new(
-        Arc::clone(sentinel.state()),
-    );
+    let failover =
+        rlightning::sentinel::failover::FailoverOrchestrator::new(Arc::clone(sentinel.state()));
 
     let result = failover.run_full_failover("mymaster").await;
     assert!(result.is_ok(), "Failover should succeed: {:?}", result);
@@ -628,7 +670,10 @@ async fn test_sentinel_info_cache_via_client() {
 
     // Monitor
     client
-        .send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"])
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
         .await
         .unwrap();
 
@@ -668,10 +713,7 @@ async fn test_sentinel_monitoring_loop_detects_sdown() {
 
     // The background monitoring loop should detect this, but let's explicitly
     // run a check cycle to verify the detection logic
-    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(
-        Arc::clone(sentinel.state()),
-        50,
-    );
+    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(Arc::clone(sentinel.state()), 50);
     monitor.check_masters().await;
 
     // Verify SDOWN was detected

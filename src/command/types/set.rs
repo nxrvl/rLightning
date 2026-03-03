@@ -8,7 +8,7 @@ use crate::utils::glob::glob_match;
 
 /// Helper enum for SPOP atomic result
 enum SpopResult {
-    Empty(bool),       // bool = has_count argument
+    Empty(bool), // bool = has_count argument
     Single(Vec<u8>),
     Multiple(Vec<Vec<u8>>),
 }
@@ -43,8 +43,12 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
 
-        let serialized = bincode::serialize(&set)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+        let serialized = bincode::serialize(&set).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
         Ok((Some(serialized), added))
     })?;
 
@@ -57,34 +61,36 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let members = &args[1..];
     let members_owned: Vec<Vec<u8>> = members.to_vec();
-    
-    let removed = engine.atomic_modify(key, RedisDataType::Set, |current| {
-        match current {
-            Some(data) => {
-                let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                
-                let mut count = 0i64;
-                for member in &members_owned {
-                    if set.remove(member) {
-                        count += 1;
-                    }
-                }
-                
-                if set.is_empty() {
-                    Ok((None, count))
-                } else {
-                    let serialized = bincode::serialize(&set)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), count))
+
+    let removed = engine.atomic_modify(key, RedisDataType::Set, |current| match current {
+        Some(data) => {
+            let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+
+            let mut count = 0i64;
+            for member in &members_owned {
+                if set.remove(member) {
+                    count += 1;
                 }
             }
-            None => Ok((None, 0)),
+
+            if set.is_empty() {
+                Ok((None, count))
+            } else {
+                let serialized = bincode::serialize(&set).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), count))
+            }
         }
+        None => Ok((None, 0)),
     })?;
 
     Ok(RespValue::Integer(removed))
@@ -95,30 +101,29 @@ pub async fn smembers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
 
     // Get the set
     let set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-                Ok(set) => set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
+        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
+            Ok(set) => set,
+            Err(_) => {
+                return Err(CommandError::WrongType);
             }
         },
         None => {
             // Set doesn't exist, return empty array
             return Ok(RespValue::Array(Some(vec![])));
-        },
+        }
     };
-    
+
     // Convert to an array of bulk strings
-    let result: Vec<RespValue> = set.into_iter()
+    let result: Vec<RespValue> = set
+        .into_iter()
         .map(|member| RespValue::BulkString(Some(member)))
         .collect();
-    
+
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -127,26 +132,24 @@ pub async fn sismember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let member = &args[1];
-    
+
     // Get the set
     let set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-                Ok(set) => set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
+        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
+            Ok(set) => set,
+            Err(_) => {
+                return Err(CommandError::WrongType);
             }
         },
         None => {
             // Set doesn't exist, so member isn't in it
             return Ok(RespValue::Integer(0));
-        },
+        }
     };
-    
+
     // Check if the member exists
     Ok(RespValue::Integer(if set.contains(member) { 1 } else { 0 }))
 }
@@ -156,25 +159,23 @@ pub async fn scard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
+
     // Get the set
     let set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-                Ok(set) => set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
+        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
+            Ok(set) => set,
+            Err(_) => {
+                return Err(CommandError::WrongType);
             }
         },
         None => {
             // Set doesn't exist, return 0
             return Ok(RespValue::Integer(0));
-        },
+        }
     };
-    
+
     Ok(RespValue::Integer(set.len() as i64))
 }
 
@@ -184,7 +185,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let count = if args.len() == 2 {
         match String::from_utf8_lossy(&args[1]).parse::<usize>() {
@@ -194,17 +195,17 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         None
     };
-    
+
     let result = engine.atomic_modify(key, RedisDataType::Set, |current| {
         match current {
             Some(data) => {
                 let set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
                     .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                
+
                 if set.is_empty() {
                     return Ok((Some(data.clone()), SpopResult::Empty(count.is_some())));
                 }
-                
+
                 if let Some(count) = count {
                     // Return multiple elements using Fisher-Yates partial shuffle
                     let actual_count = std::cmp::min(count, set.len());
@@ -214,13 +215,18 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         members.swap(i, j);
                     }
                     let popped: Vec<Vec<u8>> = members[..actual_count].to_vec();
-                    let remaining: HashSet<Vec<u8>> = members[actual_count..].iter().cloned().collect();
-                    
+                    let remaining: HashSet<Vec<u8>> =
+                        members[actual_count..].iter().cloned().collect();
+
                     if remaining.is_empty() {
                         Ok((None, SpopResult::Multiple(popped)))
                     } else {
-                        let serialized = bincode::serialize(&remaining)
-                            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+                        let serialized = bincode::serialize(&remaining).map_err(|e| {
+                            crate::storage::error::StorageError::InternalError(format!(
+                                "Serialization error: {}",
+                                e
+                            ))
+                        })?;
                         Ok((Some(serialized), SpopResult::Multiple(popped)))
                     }
                 } else {
@@ -229,12 +235,16 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     let idx = fastrand::usize(0..members.len());
                     let member = members.swap_remove(idx);
                     let remaining: HashSet<Vec<u8>> = members.into_iter().collect();
-                    
+
                     if remaining.is_empty() {
                         Ok((None, SpopResult::Single(member)))
                     } else {
-                        let serialized = bincode::serialize(&remaining)
-                            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+                        let serialized = bincode::serialize(&remaining).map_err(|e| {
+                            crate::storage::error::StorageError::InternalError(format!(
+                                "Serialization error: {}",
+                                e
+                            ))
+                        })?;
                         Ok((Some(serialized), SpopResult::Single(member)))
                     }
                 }
@@ -242,7 +252,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             None => Ok((None, SpopResult::Empty(count.is_some()))),
         }
     })?;
-    
+
     match result {
         SpopResult::Empty(has_count) => {
             if has_count {
@@ -253,7 +263,8 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
         SpopResult::Single(member) => Ok(RespValue::BulkString(Some(member))),
         SpopResult::Multiple(members) => {
-            let result: Vec<_> = members.into_iter()
+            let result: Vec<_> = members
+                .into_iter()
                 .map(|m| RespValue::BulkString(Some(m)))
                 .collect();
             Ok(RespValue::Array(Some(result)))
@@ -265,9 +276,8 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 async fn get_set(engine: &StorageEngine, key: &[u8]) -> Result<HashSet<Vec<u8>>, CommandError> {
     match engine.get(key).await? {
         Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data)
-                .map_err(|_| CommandError::WrongType)
-        },
+            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)
+        }
         None => Ok(HashSet::new()),
     }
 }
@@ -322,7 +332,9 @@ pub async fn sinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     } else {
         let serialized = bincode::serialize(&result)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+        engine
+            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .await?;
     }
 
     Ok(RespValue::Integer(count))
@@ -376,7 +388,9 @@ pub async fn sunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     } else {
         let serialized = bincode::serialize(&result)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+        engine
+            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .await?;
     }
 
     Ok(RespValue::Integer(count))
@@ -432,7 +446,9 @@ pub async fn sdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     } else {
         let serialized = bincode::serialize(&result)
             .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
-        engine.set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None).await?;
+        engine
+            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .await?;
     }
 
     Ok(RespValue::Integer(count))
@@ -443,7 +459,7 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let count = if args.len() == 2 {
         match String::from_utf8_lossy(&args[1]).parse::<i64>() {
@@ -453,15 +469,13 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     } else {
         None
     };
-    
+
     // Get the set
     let set = match engine.get(key).await? {
-        Some(data) => {
-            match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-                Ok(set) => set,
-                Err(_) => {
-                    return Err(CommandError::WrongType);
-                }
+        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
+            Ok(set) => set,
+            Err(_) => {
+                return Err(CommandError::WrongType);
             }
         },
         None => {
@@ -471,9 +485,9 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             } else {
                 Ok(RespValue::BulkString(None))
             };
-        },
+        }
     };
-    
+
     if set.is_empty() {
         return if count.is_some() {
             Ok(RespValue::Array(Some(vec![])))
@@ -481,7 +495,7 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             Ok(RespValue::BulkString(None))
         };
     }
-    
+
     if let Some(count) = count {
         // Return multiple elements (with possible repetition if count > set size)
         let mut result = Vec::new();
@@ -506,7 +520,7 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
                 result.push(RespValue::BulkString(Some(set_vec[index].clone())));
             }
         }
-        
+
         Ok(RespValue::Array(Some(result)))
     } else {
         // Return single element
@@ -529,45 +543,47 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     if source == destination {
         // Same key: just check membership, no-op if present
-        let exists = engine.atomic_modify(source, RedisDataType::Set, |current| {
-            match current {
-                Some(data) => {
-                    let set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                        .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                    let has_member = set.contains(member);
-                    Ok((Some(data.clone()), has_member))
-                }
-                None => Ok((None, false)),
+        let exists = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
+            Some(data) => {
+                let set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
+                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+                let has_member = set.contains(member);
+                Ok((Some(data.clone()), has_member))
             }
+            None => Ok((None, false)),
         })?;
         return Ok(RespValue::Integer(if exists { 1 } else { 0 }));
     }
 
     // Different keys: use lock_keys for cross-key atomicity
-    let _guard = engine.lock_keys(&[source.clone(), destination.clone()]).await;
+    let _guard = engine
+        .lock_keys(&[source.clone(), destination.clone()])
+        .await;
 
     // Remove from source using atomic_modify
     let member_clone = member.clone();
-    let removed = engine.atomic_modify(source, RedisDataType::Set, |current| {
-        match current {
-            Some(data) => {
-                let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                
-                if !set.remove(&member_clone) {
-                    return Ok((Some(data.clone()), false));
-                }
-                
-                if set.is_empty() {
-                    Ok((None, true))
-                } else {
-                    let serialized = bincode::serialize(&set)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), true))
-                }
+    let removed = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
+        Some(data) => {
+            let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+
+            if !set.remove(&member_clone) {
+                return Ok((Some(data.clone()), false));
             }
-            None => Ok((None, false)),
+
+            if set.is_empty() {
+                Ok((None, true))
+            } else {
+                let serialized = bincode::serialize(&set).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), true))
+            }
         }
+        None => Ok((None, false)),
     })?;
 
     if !removed {
@@ -584,8 +600,12 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         };
 
         set.insert(member_clone.clone());
-        let serialized = bincode::serialize(&set)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+        let serialized = bincode::serialize(&set).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
         Ok((Some(serialized), ()))
     })?;
 
@@ -599,9 +619,11 @@ pub async fn sintercard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     }
 
     // First arg is numkeys
-    let numkeys = String::from_utf8_lossy(&args[0]).parse::<usize>().map_err(|_| {
-        CommandError::InvalidArgument("numkeys must be a positive integer".to_string())
-    })?;
+    let numkeys = String::from_utf8_lossy(&args[0])
+        .parse::<usize>()
+        .map_err(|_| {
+            CommandError::InvalidArgument("numkeys must be a positive integer".to_string())
+        })?;
 
     if numkeys == 0 {
         return Err(CommandError::InvalidArgument(
@@ -624,9 +646,13 @@ pub async fn sintercard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             if i + 1 >= args.len() {
                 return Err(CommandError::WrongNumberOfArguments);
             }
-            limit = String::from_utf8_lossy(&args[i + 1]).parse::<usize>().map_err(|_| {
-                CommandError::InvalidArgument("LIMIT must be a non-negative integer".to_string())
-            })?;
+            limit = String::from_utf8_lossy(&args[i + 1])
+                .parse::<usize>()
+                .map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "LIMIT must be a non-negative integer".to_string(),
+                    )
+                })?;
             i += 2;
         } else {
             return Err(CommandError::InvalidArgument(format!(
@@ -668,8 +694,7 @@ pub async fn smismember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
     let set = match engine.get(key).await? {
         Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data)
-                .map_err(|_| CommandError::WrongType)?
+            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
         }
         None => HashSet::new(),
     };
@@ -712,9 +737,13 @@ pub async fn sscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
-                count = String::from_utf8_lossy(&args[i + 1]).parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("COUNT must be a positive integer".to_string())
-                })?;
+                count = String::from_utf8_lossy(&args[i + 1])
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        CommandError::InvalidArgument(
+                            "COUNT must be a positive integer".to_string(),
+                        )
+                    })?;
                 i += 2;
             }
             _ => {
@@ -729,8 +758,7 @@ pub async fn sscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Get the set
     let set = match engine.get(key).await? {
         Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data)
-                .map_err(|_| CommandError::WrongType)?
+            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
         }
         None => {
             // Key doesn't exist, return cursor 0 with empty array
@@ -784,45 +812,37 @@ mod tests {
     async fn test_set_commands() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Test SADD
-        let sadd_args = vec![
-            b"set1".to_vec(),
-            b"member1".to_vec(),
-            b"member2".to_vec(),
-        ];
+        let sadd_args = vec![b"set1".to_vec(), b"member1".to_vec(), b"member2".to_vec()];
         let result = sadd(&engine, &sadd_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(2)); // Added 2 members
-        
+
         // Add a duplicate and a new member
-        let sadd_args = vec![
-            b"set1".to_vec(),
-            b"member2".to_vec(),
-            b"member3".to_vec(),
-        ];
+        let sadd_args = vec![b"set1".to_vec(), b"member2".to_vec(), b"member3".to_vec()];
         let result = sadd(&engine, &sadd_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Added 1 new member
-        
+
         // Test SISMEMBER
         let sismember_args = vec![b"set1".to_vec(), b"member1".to_vec()];
         let result = sismember(&engine, &sismember_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Is a member
-        
+
         let sismember_args = vec![b"set1".to_vec(), b"nonexistent".to_vec()];
         let result = sismember(&engine, &sismember_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Not a member
-        
+
         // Test SMEMBERS
         let smembers_args = vec![b"set1".to_vec()];
         let result = smembers(&engine, &smembers_args).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 3);
-            
+
             // Verify that all expected members are present
             let mut found_member1 = false;
             let mut found_member2 = false;
             let mut found_member3 = false;
-            
+
             for member in members {
                 if let RespValue::BulkString(Some(data)) = member {
                     if data == b"member1" {
@@ -834,15 +854,14 @@ mod tests {
                     }
                 }
             }
-            
+
             assert!(found_member1, "member1 not found in SMEMBERS results");
             assert!(found_member2, "member2 not found in SMEMBERS results");
             assert!(found_member3, "member3 not found in SMEMBERS results");
-            
         } else {
             panic!("Expected array response from SMEMBERS");
         }
-        
+
         // Test SREM
         let srem_args = vec![
             b"set1".to_vec(),
@@ -851,7 +870,7 @@ mod tests {
         ];
         let result = srem(&engine, &srem_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Removed 1 member
-        
+
         // Verify that the member was removed
         let sismember_args = vec![b"set1".to_vec(), b"member1".to_vec()];
         let result = sismember(&engine, &sismember_args).await.unwrap();
@@ -864,20 +883,33 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create source set {a, b, c}
-        sadd(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        sadd(
+            &engine,
+            &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        )
+        .await
+        .unwrap();
         // Create destination set {d}
-        sadd(&engine, &[b"dst".to_vec(), b"d".to_vec()]).await.unwrap();
+        sadd(&engine, &[b"dst".to_vec(), b"d".to_vec()])
+            .await
+            .unwrap();
 
         // Move "b" from src to dst
-        let result = smove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"b".to_vec()]).await.unwrap();
+        let result = smove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // Verify "b" is no longer in src
-        let result = sismember(&engine, &[b"src".to_vec(), b"b".to_vec()]).await.unwrap();
+        let result = sismember(&engine, &[b"src".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
 
         // Verify "b" is in dst
-        let result = sismember(&engine, &[b"dst".to_vec(), b"b".to_vec()]).await.unwrap();
+        let result = sismember(&engine, &[b"dst".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // src should still have a and c
@@ -890,11 +922,17 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"src".to_vec(), b"a".to_vec()]).await.unwrap();
-        sadd(&engine, &[b"dst".to_vec(), b"d".to_vec()]).await.unwrap();
+        sadd(&engine, &[b"src".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
+        sadd(&engine, &[b"dst".to_vec(), b"d".to_vec()])
+            .await
+            .unwrap();
 
         // Try to move nonexistent member
-        let result = smove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"x".to_vec()]).await.unwrap();
+        let result = smove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"x".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -904,7 +942,12 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Source doesn't exist
-        let result = smove(&engine, &[b"nosrc".to_vec(), b"dst".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = smove(
+            &engine,
+            &[b"nosrc".to_vec(), b"dst".to_vec(), b"a".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -913,10 +956,17 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"src".to_vec(), b"a".to_vec()]).await.unwrap();
+        sadd(&engine, &[b"src".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
 
         // dst doesn't exist yet - smove should create it
-        let result = smove(&engine, &[b"src".to_vec(), b"newdst".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = smove(
+            &engine,
+            &[b"src".to_vec(), b"newdst".to_vec(), b"a".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // src should be deleted (empty after removing only member)
@@ -924,7 +974,9 @@ mod tests {
         assert_eq!(result, RespValue::Integer(0));
 
         // dst should have the member
-        let result = sismember(&engine, &[b"newdst".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = sismember(&engine, &[b"newdst".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
     }
 
@@ -933,11 +985,23 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"s1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
-        sadd(&engine, &[b"s2".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]).await.unwrap();
+        sadd(
+            &engine,
+            &[b"s1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        )
+        .await
+        .unwrap();
+        sadd(
+            &engine,
+            &[b"s2".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+        )
+        .await
+        .unwrap();
 
         // Intersection of s1 and s2 has {b, c} => cardinality 2
-        let result = sintercard(&engine, &[b"2".to_vec(), b"s1".to_vec(), b"s2".to_vec()]).await.unwrap();
+        let result = sintercard(&engine, &[b"2".to_vec(), b"s1".to_vec(), b"s2".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
     }
 
@@ -946,14 +1010,38 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"s1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
-        sadd(&engine, &[b"s2".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]).await.unwrap();
+        sadd(
+            &engine,
+            &[b"s1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        )
+        .await
+        .unwrap();
+        sadd(
+            &engine,
+            &[
+                b"s2".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // Intersection has {a, b, c} = 3, but LIMIT 1
-        let result = sintercard(&engine, &[
-            b"2".to_vec(), b"s1".to_vec(), b"s2".to_vec(),
-            b"LIMIT".to_vec(), b"1".to_vec(),
-        ]).await.unwrap();
+        let result = sintercard(
+            &engine,
+            &[
+                b"2".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1));
     }
 
@@ -962,10 +1050,16 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"s1".to_vec(), b"a".to_vec()]).await.unwrap();
-        sadd(&engine, &[b"s2".to_vec(), b"b".to_vec()]).await.unwrap();
+        sadd(&engine, &[b"s1".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
+        sadd(&engine, &[b"s2".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        let result = sintercard(&engine, &[b"2".to_vec(), b"s1".to_vec(), b"s2".to_vec()]).await.unwrap();
+        let result = sintercard(&engine, &[b"2".to_vec(), b"s1".to_vec(), b"s2".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -974,18 +1068,40 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"myset".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        sadd(
+            &engine,
+            &[
+                b"myset".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
-        let result = smismember(&engine, &[
-            b"myset".to_vec(), b"a".to_vec(), b"x".to_vec(), b"b".to_vec(), b"y".to_vec(),
-        ]).await.unwrap();
+        let result = smismember(
+            &engine,
+            &[
+                b"myset".to_vec(),
+                b"a".to_vec(),
+                b"x".to_vec(),
+                b"b".to_vec(),
+                b"y".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(result, RespValue::Array(Some(vec![
-            RespValue::Integer(1), // a exists
-            RespValue::Integer(0), // x not
-            RespValue::Integer(1), // b exists
-            RespValue::Integer(0), // y not
-        ])));
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![
+                RespValue::Integer(1), // a exists
+                RespValue::Integer(0), // x not
+                RespValue::Integer(1), // b exists
+                RespValue::Integer(0), // y not
+            ]))
+        );
     }
 
     #[tokio::test]
@@ -993,14 +1109,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        let result = smismember(&engine, &[
-            b"nokey".to_vec(), b"a".to_vec(), b"b".to_vec(),
-        ]).await.unwrap();
+        let result = smismember(&engine, &[b"nokey".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        assert_eq!(result, RespValue::Array(Some(vec![
-            RespValue::Integer(0),
-            RespValue::Integer(0),
-        ])));
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(0), RespValue::Integer(0),]))
+        );
     }
 
     #[tokio::test]
@@ -1008,10 +1124,22 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[b"scanset".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        sadd(
+            &engine,
+            &[
+                b"scanset".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // SSCAN with cursor 0
-        let result = sscan(&engine, &[b"scanset".to_vec(), b"0".to_vec()]).await.unwrap();
+        let result = sscan(&engine, &[b"scanset".to_vec(), b"0".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             // First element is cursor
@@ -1035,16 +1163,31 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        sadd(&engine, &[
-            b"scanset2".to_vec(),
-            b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec(), b"delta".to_vec(),
-        ]).await.unwrap();
+        sadd(
+            &engine,
+            &[
+                b"scanset2".to_vec(),
+                b"alpha".to_vec(),
+                b"beta".to_vec(),
+                b"gamma".to_vec(),
+                b"delta".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // SSCAN with MATCH *a*
-        let result = sscan(&engine, &[
-            b"scanset2".to_vec(), b"0".to_vec(),
-            b"MATCH".to_vec(), b"*a*".to_vec(),
-        ]).await.unwrap();
+        let result = sscan(
+            &engine,
+            &[
+                b"scanset2".to_vec(),
+                b"0".to_vec(),
+                b"MATCH".to_vec(),
+                b"*a*".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::Array(Some(members)) = &items[1] {
@@ -1065,7 +1208,9 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        let result = sscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()]).await.unwrap();
+        let result = sscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             if let RespValue::BulkString(Some(cursor)) = &items[0] {
@@ -1084,14 +1229,26 @@ mod tests {
 
         // Add many members
         for i in 0..20 {
-            sadd(&engine, &[b"bigset".to_vec(), format!("member{}", i).into_bytes()]).await.unwrap();
+            sadd(
+                &engine,
+                &[b"bigset".to_vec(), format!("member{}", i).into_bytes()],
+            )
+            .await
+            .unwrap();
         }
 
         // SSCAN with COUNT 5
-        let result = sscan(&engine, &[
-            b"bigset".to_vec(), b"0".to_vec(),
-            b"COUNT".to_vec(), b"5".to_vec(),
-        ]).await.unwrap();
+        let result = sscan(
+            &engine,
+            &[
+                b"bigset".to_vec(),
+                b"0".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::BulkString(Some(cursor)) = &items[0] {
@@ -1142,10 +1299,7 @@ mod tests {
 
         // Add 100 members
         for i in 0..100 {
-            let args = vec![
-                b"srem_race".to_vec(),
-                format!("member_{}", i).into_bytes(),
-            ];
+            let args = vec![b"srem_race".to_vec(), format!("member_{}", i).into_bytes()];
             sadd(&engine, &args).await.unwrap();
         }
 
@@ -1192,10 +1346,7 @@ mod tests {
 
         // Add 50 members
         for i in 0..50 {
-            let args = vec![
-                b"spop_race".to_vec(),
-                format!("member_{}", i).into_bytes(),
-            ];
+            let args = vec![b"spop_race".to_vec(), format!("member_{}", i).into_bytes()];
             sadd(&engine, &args).await.unwrap();
         }
 
@@ -1224,7 +1375,11 @@ mod tests {
 
         // Verify no duplicates
         let unique: HashSet<Vec<u8>> = all_popped.iter().cloned().collect();
-        assert_eq!(unique.len(), all_popped.len(), "SPOP returned duplicate members");
+        assert_eq!(
+            unique.len(),
+            all_popped.len(),
+            "SPOP returned duplicate members"
+        );
         // All 50 members should have been popped
         assert_eq!(all_popped.len(), 50);
     }
@@ -1238,10 +1393,7 @@ mod tests {
 
         // Add 100 members to source
         for i in 0..100 {
-            let args = vec![
-                b"smove_src".to_vec(),
-                format!("member_{}", i).into_bytes(),
-            ];
+            let args = vec![b"smove_src".to_vec(), format!("member_{}", i).into_bytes()];
             sadd(&engine, &args).await.unwrap();
         }
 

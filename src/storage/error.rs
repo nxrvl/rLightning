@@ -1,4 +1,3 @@
-
 use thiserror::Error;
 
 use crate::command;
@@ -33,22 +32,29 @@ pub enum StorageError {
 impl From<StorageError> for crate::command::error::CommandError {
     fn from(error: StorageError) -> Self {
         match error {
-            StorageError::KeyNotFound => 
-                command::CommandError::InvalidArgument("Key not found".to_string()),
+            StorageError::KeyNotFound => {
+                command::CommandError::InvalidArgument("Key not found".to_string())
+            }
             StorageError::WrongType => command::CommandError::WrongType,
-            StorageError::ValueTooLarge => 
-                command::CommandError::InvalidArgument("Value too large".to_string()),
-            StorageError::MemoryLimitExceeded => 
-                command::CommandError::InternalError("Memory limit exceeded".to_string()),
-            StorageError::KeyExists => 
-                command::CommandError::InvalidArgument("Key already exists".to_string()),
-            StorageError::NotANumber =>
-                command::CommandError::InvalidArgument("value is not an integer or out of range".to_string()),
-            StorageError::NotAFloat =>
-                command::CommandError::InvalidArgument("value is not a valid float".to_string()),
-            StorageError::InvalidDatabase =>
-                command::CommandError::InvalidArgument("invalid DB index".to_string()),
+            StorageError::ValueTooLarge => {
+                command::CommandError::InvalidArgument("Value too large".to_string())
+            }
+            StorageError::MemoryLimitExceeded => {
+                command::CommandError::InternalError("Memory limit exceeded".to_string())
+            }
+            StorageError::KeyExists => {
+                command::CommandError::InvalidArgument("Key already exists".to_string())
+            }
+            StorageError::NotANumber => command::CommandError::InvalidArgument(
+                "value is not an integer or out of range".to_string(),
+            ),
+            StorageError::NotAFloat => {
+                command::CommandError::InvalidArgument("value is not a valid float".to_string())
+            }
+            StorageError::InvalidDatabase => {
+                command::CommandError::InvalidArgument("invalid DB index".to_string())
+            }
             StorageError::InternalError(msg) => command::CommandError::InternalError(msg),
         }
     }
-} 
+}

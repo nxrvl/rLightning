@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::command::error::CommandResult;
@@ -200,14 +200,14 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
         }
 
         // Sorted set commands
-        "zadd" | "zrem" | "zincrby" | "zpopmin" | "zpopmax" | "zrangestore"
-        | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" | "zinterstore"
-        | "zunionstore" | "zdiffstore" | "zmpop" => {
+        "zadd" | "zrem" | "zincrby" | "zpopmin" | "zpopmax" | "zrangestore" | "zremrangebyrank"
+        | "zremrangebyscore" | "zremrangebylex" | "zinterstore" | "zunionstore" | "zdiffstore"
+        | "zmpop" => {
             vec![CommandCategory::Write, CommandCategory::SortedSet]
         }
         "zrange" | "zrevrange" | "zscore" | "zcard" | "zcount" | "zrank" | "zrevrank"
-        | "zrangebyscore" | "zrevrangebyscore" | "zrangebylex" | "zrevrangebylex"
-        | "zlexcount" | "zinter" | "zunion" | "zdiff" | "zrandmember" | "zmscore" | "zscan" => {
+        | "zrangebyscore" | "zrevrangebyscore" | "zrangebylex" | "zrevrangebylex" | "zlexcount"
+        | "zinter" | "zunion" | "zdiff" | "zrandmember" | "zmscore" | "zscan" => {
             vec![CommandCategory::Read, CommandCategory::SortedSet]
         }
         "bzpopmin" | "bzpopmax" | "bzmpop" => {
@@ -272,22 +272,20 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
             vec![CommandCategory::Connection]
         }
         "info" | "config" | "monitor" | "flushall" | "flushdb" | "acl" | "command" | "client"
-        | "save" | "bgsave" | "bgrewriteaof" | "lastsave" | "shutdown" | "slowlog"
-        | "latency" | "memory" | "debug" | "swapdb" | "time" | "lolwut" => {
+        | "save" | "bgsave" | "bgrewriteaof" | "lastsave" | "shutdown" | "slowlog" | "latency"
+        | "memory" | "debug" | "swapdb" | "time" | "lolwut" => {
             vec![CommandCategory::Admin, CommandCategory::Server]
         }
 
         // JSON read commands
-        "json.get" | "jsonget" | "get_json" | "getjson"
-        | "json.type" | "jsontype" | "json.resp" | "jsonresp"
-        | "json.objkeys" | "jsonobjkeys" | "json.objlen" | "jsonobjlen"
-        | "json.arrlen" | "jsonarrlen"
-        | "json.mget" | "jsonmget" | "json.arrindex" | "jsonarrindex" => {
+        "json.get" | "jsonget" | "get_json" | "getjson" | "json.type" | "jsontype"
+        | "json.resp" | "jsonresp" | "json.objkeys" | "jsonobjkeys" | "json.objlen"
+        | "jsonobjlen" | "json.arrlen" | "jsonarrlen" | "json.mget" | "jsonmget"
+        | "json.arrindex" | "jsonarrindex" => {
             vec![CommandCategory::Read]
         }
         // JSON write commands
-        "json.set" | "jsonset" | "set_json" | "setjson"
-        | "json.del" | "jsondel"
+        "json.set" | "jsonset" | "set_json" | "setjson" | "json.del" | "jsondel"
         | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim"
         | "json.numincrby" | "jsonnumincrby" => {
             vec![CommandCategory::Write]
@@ -300,33 +298,220 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
 /// Get commands for a given category
 pub fn get_commands_in_category(category: &CommandCategory) -> Vec<&'static str> {
     let all_commands = [
-        "set", "setnx", "setex", "psetex", "mset", "msetnx", "setrange", "getset", "get",
-        "mget", "getrange", "strlen", "substr", "getex", "getdel", "incr", "decr", "incrby",
-        "decrby", "incrbyfloat", "append", "lcs", "del", "unlink", "exists", "type", "object",
-        "dump", "touch", "randomkey", "expire", "pexpire", "expireat", "pexpireat", "persist",
-        "ttl", "pttl", "expiretime", "pexpiretime", "rename", "copy", "move", "restore", "sort",
-        "sort_ro", "keys", "scan", "dbsize", "select", "wait", "waitaof", "lpush", "rpush",
-        "lpushx", "rpushx", "linsert", "lset", "ltrim", "lmove", "lmpop", "lpop", "rpop",
-        "lrange", "lindex", "llen", "lpos", "blpop", "brpop", "blmove", "blmpop", "hset",
-        "hmset", "hsetnx", "hdel", "hincrby", "hincrbyfloat", "hget", "hgetall", "hexists",
-        "hkeys", "hvals", "hlen", "hmget", "hstrlen", "hrandfield", "hscan", "sadd", "srem",
-        "spop", "smove", "smembers", "sismember", "scard", "srandmember", "sinter", "sunion",
-        "sdiff", "sintercard", "smismember", "sscan", "sinterstore", "sunionstore", "sdiffstore",
-        "zadd", "zrem", "zincrby", "zpopmin", "zpopmax", "zrangestore", "zremrangebyrank",
-        "zremrangebyscore", "zremrangebylex", "zinterstore", "zunionstore", "zdiffstore", "zmpop",
-        "zrange", "zrevrange", "zscore", "zcard", "zcount", "zrank", "zrevrank", "zrangebyscore",
-        "zrevrangebyscore", "zrangebylex", "zrevrangebylex", "zlexcount", "zinter", "zunion",
-        "zdiff", "zrandmember", "zmscore", "zscan", "bzpopmin", "bzpopmax", "bzmpop", "setbit",
-        "bitop", "bitfield", "getbit", "bitcount", "bitpos", "bitfield_ro", "pfadd", "pfmerge",
-        "pfcount", "geoadd", "geosearchstore", "geodist", "geohash", "geopos", "geosearch",
-        "georadius", "georadiusbymember", "xadd", "xtrim", "xdel", "xgroup", "xack", "xclaim",
-        "xautoclaim", "xlen", "xrange", "xrevrange", "xinfo", "xpending", "xread", "xreadgroup",
-        "subscribe", "unsubscribe", "psubscribe", "punsubscribe", "publish", "pubsub", "multi",
-        "exec", "discard", "watch", "unwatch", "eval", "evalsha", "eval_ro", "evalsha_ro",
-        "script", "function", "fcall", "fcall_ro", "ping", "echo", "quit", "reset", "hello",
-        "auth", "info", "config", "monitor", "flushall", "flushdb", "acl", "command", "client",
-        "save", "bgsave", "bgrewriteaof", "lastsave", "shutdown", "slowlog", "latency", "memory",
-        "debug", "swapdb", "time", "lolwut",
+        "set",
+        "setnx",
+        "setex",
+        "psetex",
+        "mset",
+        "msetnx",
+        "setrange",
+        "getset",
+        "get",
+        "mget",
+        "getrange",
+        "strlen",
+        "substr",
+        "getex",
+        "getdel",
+        "incr",
+        "decr",
+        "incrby",
+        "decrby",
+        "incrbyfloat",
+        "append",
+        "lcs",
+        "del",
+        "unlink",
+        "exists",
+        "type",
+        "object",
+        "dump",
+        "touch",
+        "randomkey",
+        "expire",
+        "pexpire",
+        "expireat",
+        "pexpireat",
+        "persist",
+        "ttl",
+        "pttl",
+        "expiretime",
+        "pexpiretime",
+        "rename",
+        "copy",
+        "move",
+        "restore",
+        "sort",
+        "sort_ro",
+        "keys",
+        "scan",
+        "dbsize",
+        "select",
+        "wait",
+        "waitaof",
+        "lpush",
+        "rpush",
+        "lpushx",
+        "rpushx",
+        "linsert",
+        "lset",
+        "ltrim",
+        "lmove",
+        "lmpop",
+        "lpop",
+        "rpop",
+        "lrange",
+        "lindex",
+        "llen",
+        "lpos",
+        "blpop",
+        "brpop",
+        "blmove",
+        "blmpop",
+        "hset",
+        "hmset",
+        "hsetnx",
+        "hdel",
+        "hincrby",
+        "hincrbyfloat",
+        "hget",
+        "hgetall",
+        "hexists",
+        "hkeys",
+        "hvals",
+        "hlen",
+        "hmget",
+        "hstrlen",
+        "hrandfield",
+        "hscan",
+        "sadd",
+        "srem",
+        "spop",
+        "smove",
+        "smembers",
+        "sismember",
+        "scard",
+        "srandmember",
+        "sinter",
+        "sunion",
+        "sdiff",
+        "sintercard",
+        "smismember",
+        "sscan",
+        "sinterstore",
+        "sunionstore",
+        "sdiffstore",
+        "zadd",
+        "zrem",
+        "zincrby",
+        "zpopmin",
+        "zpopmax",
+        "zrangestore",
+        "zremrangebyrank",
+        "zremrangebyscore",
+        "zremrangebylex",
+        "zinterstore",
+        "zunionstore",
+        "zdiffstore",
+        "zmpop",
+        "zrange",
+        "zrevrange",
+        "zscore",
+        "zcard",
+        "zcount",
+        "zrank",
+        "zrevrank",
+        "zrangebyscore",
+        "zrevrangebyscore",
+        "zrangebylex",
+        "zrevrangebylex",
+        "zlexcount",
+        "zinter",
+        "zunion",
+        "zdiff",
+        "zrandmember",
+        "zmscore",
+        "zscan",
+        "bzpopmin",
+        "bzpopmax",
+        "bzmpop",
+        "setbit",
+        "bitop",
+        "bitfield",
+        "getbit",
+        "bitcount",
+        "bitpos",
+        "bitfield_ro",
+        "pfadd",
+        "pfmerge",
+        "pfcount",
+        "geoadd",
+        "geosearchstore",
+        "geodist",
+        "geohash",
+        "geopos",
+        "geosearch",
+        "georadius",
+        "georadiusbymember",
+        "xadd",
+        "xtrim",
+        "xdel",
+        "xgroup",
+        "xack",
+        "xclaim",
+        "xautoclaim",
+        "xlen",
+        "xrange",
+        "xrevrange",
+        "xinfo",
+        "xpending",
+        "xread",
+        "xreadgroup",
+        "subscribe",
+        "unsubscribe",
+        "psubscribe",
+        "punsubscribe",
+        "publish",
+        "pubsub",
+        "multi",
+        "exec",
+        "discard",
+        "watch",
+        "unwatch",
+        "eval",
+        "evalsha",
+        "eval_ro",
+        "evalsha_ro",
+        "script",
+        "function",
+        "fcall",
+        "fcall_ro",
+        "ping",
+        "echo",
+        "quit",
+        "reset",
+        "hello",
+        "auth",
+        "info",
+        "config",
+        "monitor",
+        "flushall",
+        "flushdb",
+        "acl",
+        "command",
+        "client",
+        "save",
+        "bgsave",
+        "bgrewriteaof",
+        "lastsave",
+        "shutdown",
+        "slowlog",
+        "latency",
+        "memory",
+        "debug",
+        "swapdb",
+        "time",
+        "lolwut",
     ];
 
     all_commands
@@ -381,10 +566,11 @@ impl AclUser {
             channel_patterns: vec!["*".to_string()],
         };
         if let Some(pass) = password
-            && !pass.is_empty() {
-                user.passwords.push(hash_password(pass));
-                user.nopass = false;
-            }
+            && !pass.is_empty()
+        {
+            user.passwords.push(hash_password(pass));
+            user.nopass = false;
+        }
         user
     }
 
@@ -592,7 +778,10 @@ impl AclUser {
                     // Hashed password (already SHA256)
                     let hash = hash_str.to_string();
                     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                        return Err(format!("Invalid SHA256 hash format in ACL rule: '{}'", rule));
+                        return Err(format!(
+                            "Invalid SHA256 hash format in ACL rule: '{}'",
+                            rule
+                        ));
                     }
                     self.passwords.push(hash);
                     self.nopass = false;
@@ -741,7 +930,11 @@ impl AclManager {
 
         let user = match users.get(username) {
             Some(u) => u,
-            None => return Err("WRONGPASS invalid username-password pair or user is disabled.".to_string()),
+            None => {
+                return Err(
+                    "WRONGPASS invalid username-password pair or user is disabled.".to_string(),
+                );
+            }
         };
 
         if !user.enabled {
@@ -1044,10 +1237,9 @@ impl AclManager {
         // before acquiring sessions lock to avoid ABBA deadlock with
         // check_command_permission (which acquires sessions -> users).
         let (count, remaining_usernames) = {
-            let mut users = self
-                .users
-                .write()
-                .map_err(|_| crate::command::CommandError::InternalError("Lock error".to_string()))?;
+            let mut users = self.users.write().map_err(|_| {
+                crate::command::CommandError::InternalError("Lock error".to_string())
+            })?;
 
             let mut count = 0i64;
             for arg in args {
@@ -1361,33 +1553,28 @@ pub fn hash_password(password: &str) -> String {
 pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
     match cmd.to_lowercase().as_str() {
         // Commands with key at index 0
-        "get" | "set" | "setnx" | "setex" | "psetex" | "getex" | "getdel" | "getset"
-        | "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" | "append" | "strlen"
-        | "getrange" | "setrange" | "substr" | "type"
-        | "expire" | "pexpire" | "expireat" | "pexpireat" | "persist" | "ttl" | "pttl"
-        | "expiretime" | "pexpiretime" | "object" | "dump" | "restore" | "sort"
-        | "sort_ro" | "lpush" | "rpush" | "lpushx" | "rpushx" | "linsert" | "lset"
-        | "ltrim" | "lpop" | "rpop" | "lrange" | "lindex" | "llen" | "lpos" | "hset"
+        "get" | "set" | "setnx" | "setex" | "psetex" | "getex" | "getdel" | "getset" | "incr"
+        | "decr" | "incrby" | "decrby" | "incrbyfloat" | "append" | "strlen" | "getrange"
+        | "setrange" | "substr" | "type" | "expire" | "pexpire" | "expireat" | "pexpireat"
+        | "persist" | "ttl" | "pttl" | "expiretime" | "pexpiretime" | "object" | "dump"
+        | "restore" | "sort" | "sort_ro" | "lpush" | "rpush" | "lpushx" | "rpushx" | "linsert"
+        | "lset" | "ltrim" | "lpop" | "rpop" | "lrange" | "lindex" | "llen" | "lpos" | "hset"
         | "hget" | "hgetall" | "hdel" | "hexists" | "hmset" | "hkeys" | "hvals" | "hlen"
-        | "hmget" | "hincrby" | "hincrbyfloat" | "hsetnx" | "hstrlen" | "hrandfield"
-        | "hscan" | "sadd" | "srem" | "smembers" | "sismember" | "scard" | "spop"
-        | "srandmember" | "smismember" | "sscan" | "zadd" | "zrem" | "zscore" | "zcard"
-        | "zcount" | "zrank" | "zrevrank" | "zincrby" | "zpopmin" | "zpopmax" | "zrandmember"
-        | "zmscore" | "zrange" | "zrevrange" | "zrangebyscore" | "zrevrangebyscore"
-        | "zrangebylex" | "zrevrangebylex" | "zremrangebyrank" | "zremrangebyscore"
-        | "zremrangebylex" | "zlexcount" | "zscan" | "xadd" | "xlen" | "xrange"
-        | "xrevrange" | "xtrim" | "xdel" | "xinfo" | "xgroup" | "xack" | "xpending"
-        | "xclaim" | "xautoclaim" | "setbit" | "getbit" | "bitcount" | "bitpos"
-        | "bitfield" | "bitfield_ro" | "pfadd" | "pfcount" | "geoadd" | "geodist"
-        | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember"
-        | "json.get" | "jsonget" | "get_json" | "getjson"
-        | "json.set" | "jsonset" | "set_json" | "setjson"
-        | "json.type" | "jsontype"
-        | "json.del" | "jsondel" | "json.resp" | "jsonresp"
-        | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim"
-        | "json.objkeys" | "jsonobjkeys" | "json.objlen" | "jsonobjlen"
-        | "json.arrlen" | "jsonarrlen" | "json.numincrby" | "jsonnumincrby"
-        | "json.arrindex" | "jsonarrindex" => vec![0],
+        | "hmget" | "hincrby" | "hincrbyfloat" | "hsetnx" | "hstrlen" | "hrandfield" | "hscan"
+        | "sadd" | "srem" | "smembers" | "sismember" | "scard" | "spop" | "srandmember"
+        | "smismember" | "sscan" | "zadd" | "zrem" | "zscore" | "zcard" | "zcount" | "zrank"
+        | "zrevrank" | "zincrby" | "zpopmin" | "zpopmax" | "zrandmember" | "zmscore" | "zrange"
+        | "zrevrange" | "zrangebyscore" | "zrevrangebyscore" | "zrangebylex" | "zrevrangebylex"
+        | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" | "zlexcount" | "zscan"
+        | "xadd" | "xlen" | "xrange" | "xrevrange" | "xtrim" | "xdel" | "xinfo" | "xgroup"
+        | "xack" | "xpending" | "xclaim" | "xautoclaim" | "setbit" | "getbit" | "bitcount"
+        | "bitpos" | "bitfield" | "bitfield_ro" | "pfadd" | "pfcount" | "geoadd" | "geodist"
+        | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember" | "json.get"
+        | "jsonget" | "get_json" | "getjson" | "json.set" | "jsonset" | "set_json" | "setjson"
+        | "json.type" | "jsontype" | "json.del" | "jsondel" | "json.resp" | "jsonresp"
+        | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim" | "json.objkeys"
+        | "jsonobjkeys" | "json.objlen" | "jsonobjlen" | "json.arrlen" | "jsonarrlen"
+        | "json.numincrby" | "jsonnumincrby" | "json.arrindex" | "jsonarrindex" => vec![0],
 
         // JSON.MGET - all args except the last are keys
         "json.mget" | "jsonmget" => {
@@ -1497,9 +1684,9 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
 
         // XREAD/XREADGROUP - keys follow STREAMS keyword
         "xread" | "xreadgroup" => {
-            let streams_idx = args.iter().position(|a| {
-                String::from_utf8_lossy(a).to_uppercase() == "STREAMS"
-            });
+            let streams_idx = args
+                .iter()
+                .position(|a| String::from_utf8_lossy(a).to_uppercase() == "STREAMS");
             if let Some(idx) = streams_idx {
                 let remaining = args.len() - idx - 1;
                 let num_keys = remaining / 2;
@@ -1517,15 +1704,14 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         "zinterstore" | "zunionstore" | "zdiffstore" => {
             let mut keys = vec![0]; // dest
             if args.len() >= 2
-                && let Ok(numkeys) =
-                    String::from_utf8_lossy(&args[1]).parse::<usize>()
-                {
-                    for i in 0..numkeys {
-                        if 2 + i < args.len() {
-                            keys.push(2 + i);
-                        }
+                && let Ok(numkeys) = String::from_utf8_lossy(&args[1]).parse::<usize>()
+            {
+                for i in 0..numkeys {
+                    if 2 + i < args.len() {
+                        keys.push(2 + i);
                     }
                 }
+            }
             keys
         }
 
@@ -1555,9 +1741,10 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         "eval" | "evalsha" | "eval_ro" | "evalsha_ro" => {
             if args.len() >= 2
                 && let Ok(s) = std::str::from_utf8(&args[1])
-                    && let Ok(numkeys) = s.parse::<usize>() {
-                        return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
-                    }
+                && let Ok(numkeys) = s.parse::<usize>()
+            {
+                return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
+            }
             vec![]
         }
 
@@ -1566,20 +1753,19 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         "fcall" | "fcall_ro" => {
             if args.len() >= 2
                 && let Ok(s) = std::str::from_utf8(&args[1])
-                    && let Ok(numkeys) = s.parse::<usize>() {
-                        return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
-                    }
+                && let Ok(numkeys) = s.parse::<usize>()
+            {
+                return (2..2 + numkeys.min(args.len().saturating_sub(2))).collect();
+            }
             vec![]
         }
 
         // SELECT, PING, AUTH, ACL, etc. - no keys
         "select" | "ping" | "auth" | "acl" | "hello" | "info" | "config" | "monitor"
-        | "flushall" | "flushdb" | "scan" | "dbsize" | "randomkey"
-        | "script" | "function"
-        | "multi" | "exec" | "discard" | "unwatch" | "subscribe"
-        | "unsubscribe" | "psubscribe" | "punsubscribe" | "publish" | "pubsub"
-        | "command" | "client" | "quit" | "reset" | "echo"
-        | "wait" | "waitaof" => vec![],
+        | "flushall" | "flushdb" | "scan" | "dbsize" | "randomkey" | "script" | "function"
+        | "multi" | "exec" | "discard" | "unwatch" | "subscribe" | "unsubscribe" | "psubscribe"
+        | "punsubscribe" | "publish" | "pubsub" | "command" | "client" | "quit" | "reset"
+        | "echo" | "wait" | "waitaof" => vec![],
 
         _ => vec![],
     }
@@ -1867,8 +2053,13 @@ mod tests {
     fn test_acl_list() {
         let mgr = AclManager::new(false, None);
 
-        mgr.handle_setuser(&[b"alice".to_vec(), b"on".to_vec(), b"+@all".to_vec(), b"~*".to_vec()])
-            .unwrap();
+        mgr.handle_setuser(&[
+            b"alice".to_vec(),
+            b"on".to_vec(),
+            b"+@all".to_vec(),
+            b"~*".to_vec(),
+        ])
+        .unwrap();
 
         let result = mgr.handle_list().unwrap();
         if let RespValue::Array(Some(items)) = result {
@@ -1899,18 +2090,12 @@ mod tests {
 
         // Not authenticated - should return "default"
         let result = mgr.handle_whoami("client:1").unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"default".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"default".to_vec())));
 
         // Authenticate as default
         mgr.authenticate("client:2", "default", "pass").unwrap();
         let result = mgr.handle_whoami("client:2").unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"default".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"default".to_vec())));
     }
 
     #[test]
@@ -2100,17 +2285,31 @@ mod tests {
     #[test]
     fn test_get_key_indices() {
         assert_eq!(get_key_indices("get", &[b"key".to_vec()]), vec![0]);
-        assert_eq!(get_key_indices("set", &[b"key".to_vec(), b"val".to_vec()]), vec![0]);
+        assert_eq!(
+            get_key_indices("set", &[b"key".to_vec(), b"val".to_vec()]),
+            vec![0]
+        );
         assert_eq!(
             get_key_indices("mget", &[b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()]),
             vec![0, 1, 2]
         );
         assert_eq!(
-            get_key_indices("mset", &[b"k1".to_vec(), b"v1".to_vec(), b"k2".to_vec(), b"v2".to_vec()]),
+            get_key_indices(
+                "mset",
+                &[
+                    b"k1".to_vec(),
+                    b"v1".to_vec(),
+                    b"k2".to_vec(),
+                    b"v2".to_vec()
+                ]
+            ),
             vec![0, 2]
         );
         assert_eq!(get_key_indices("ping", &[]), Vec::<usize>::new());
-        assert_eq!(get_key_indices("auth", &[b"pass".to_vec()]), Vec::<usize>::new());
+        assert_eq!(
+            get_key_indices("auth", &[b"pass".to_vec()]),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

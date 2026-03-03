@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tokio::time::{self, Interval};
-use dashmap::DashMap;
 
-use crate::storage::error::StorageError;
-use crate::storage::item::{StorageItem, RedisDataType};
 use crate::networking::resp::RespCommand;
+use crate::storage::error::StorageError;
+use crate::storage::item::{RedisDataType, StorageItem};
 
 tokio::task_local! {
     /// The currently active database index for this task/connection.
@@ -75,7 +75,6 @@ pub enum EvictionPolicy {
     /// Don't evict items
     NoEviction,
 }
-
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for EvictionPolicy {
@@ -202,21 +201,21 @@ impl StorageEngine {
 
         // Start the expiration task
         Self::start_expiration_task(Arc::clone(&engine));
-        
+
         engine
     }
-    
+
     /// Start the background task for efficient TTL-based expiration
     fn start_expiration_task(engine: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = engine.expiration_timer.write().await;
             let mut metadata_cleanup_counter: u64 = 0;
-            
+
             loop {
                 interval.tick().await;
                 // Use priority queue for efficient expiration + probabilistic sampling
                 engine.process_expired_keys().await;
-                
+
                 // Periodically clean up stale key_versions and key_locks entries
                 // to prevent unbounded memory growth from WATCH/transaction metadata
                 metadata_cleanup_counter += 1;
@@ -227,7 +226,7 @@ impl StorageEngine {
             }
         });
     }
-    
+
     /// Build the identity db_mapping: logical DB i maps to physical DB i.
     /// Packed as nibbles in a u64: DB 0 at bits [0:3], DB 1 at bits [4:7], etc.
     const fn identity_db_mapping() -> u64 {
@@ -243,42 +242,69 @@ impl StorageEngine {
     /// Seed the runtime_config DashMap from the startup StorageConfig.
     fn seed_runtime_config(&self) {
         let c = &self.config;
-        self.runtime_config.insert("maxmemory".to_string(), c.max_memory.to_string());
+        self.runtime_config
+            .insert("maxmemory".to_string(), c.max_memory.to_string());
         let policy_str = match c.eviction_policy {
             EvictionPolicy::LRU => "allkeys-lru",
             EvictionPolicy::LFU => "allkeys-lfu",
             EvictionPolicy::Random => "allkeys-random",
             EvictionPolicy::NoEviction => "noeviction",
         };
-        self.runtime_config.insert("maxmemory-policy".to_string(), policy_str.to_string());
-        self.runtime_config.insert("databases".to_string(), NUM_DATABASES.to_string());
-        self.runtime_config.insert("timeout".to_string(), "0".to_string());
-        self.runtime_config.insert("hz".to_string(), "10".to_string());
-        self.runtime_config.insert("tcp-backlog".to_string(), "511".to_string());
-        self.runtime_config.insert("tcp-keepalive".to_string(), "300".to_string());
-        self.runtime_config.insert("bind".to_string(), "0.0.0.0".to_string());
-        self.runtime_config.insert("port".to_string(), "6379".to_string());
-        self.runtime_config.insert("requirepass".to_string(), String::new());
-        self.runtime_config.insert("appendonly".to_string(), "no".to_string());
-        self.runtime_config.insert("appendfsync".to_string(), "everysec".to_string());
-        self.runtime_config.insert("save".to_string(), "3600 1 300 100 60 10000".to_string());
+        self.runtime_config
+            .insert("maxmemory-policy".to_string(), policy_str.to_string());
+        self.runtime_config
+            .insert("databases".to_string(), NUM_DATABASES.to_string());
+        self.runtime_config
+            .insert("timeout".to_string(), "0".to_string());
+        self.runtime_config
+            .insert("hz".to_string(), "10".to_string());
+        self.runtime_config
+            .insert("tcp-backlog".to_string(), "511".to_string());
+        self.runtime_config
+            .insert("tcp-keepalive".to_string(), "300".to_string());
+        self.runtime_config
+            .insert("bind".to_string(), "0.0.0.0".to_string());
+        self.runtime_config
+            .insert("port".to_string(), "6379".to_string());
+        self.runtime_config
+            .insert("requirepass".to_string(), String::new());
+        self.runtime_config
+            .insert("appendonly".to_string(), "no".to_string());
+        self.runtime_config
+            .insert("appendfsync".to_string(), "everysec".to_string());
+        self.runtime_config
+            .insert("save".to_string(), "3600 1 300 100 60 10000".to_string());
     }
 
     /// Seed additional runtime config values from the application settings (called from main after engine creation).
-    pub fn seed_from_settings(&self, port: u16, bind: &str, requirepass: &str, appendonly: bool, appendfsync: &str, save: &str) {
-        self.runtime_config.insert("port".to_string(), port.to_string());
-        self.runtime_config.insert("bind".to_string(), bind.to_string());
+    pub fn seed_from_settings(
+        &self,
+        port: u16,
+        bind: &str,
+        requirepass: &str,
+        appendonly: bool,
+        appendfsync: &str,
+        save: &str,
+    ) {
+        self.runtime_config
+            .insert("port".to_string(), port.to_string());
+        self.runtime_config
+            .insert("bind".to_string(), bind.to_string());
         if !requirepass.is_empty() {
-            self.runtime_config.insert("requirepass".to_string(), requirepass.to_string());
+            self.runtime_config
+                .insert("requirepass".to_string(), requirepass.to_string());
         }
         if appendonly {
-            self.runtime_config.insert("appendonly".to_string(), "yes".to_string());
+            self.runtime_config
+                .insert("appendonly".to_string(), "yes".to_string());
         }
         if !appendfsync.is_empty() {
-            self.runtime_config.insert("appendfsync".to_string(), appendfsync.to_string());
+            self.runtime_config
+                .insert("appendfsync".to_string(), appendfsync.to_string());
         }
         if !save.is_empty() {
-            self.runtime_config.insert("save".to_string(), save.to_string());
+            self.runtime_config
+                .insert("save".to_string(), save.to_string());
         }
     }
 
@@ -308,7 +334,12 @@ impl StorageEngine {
                     "allkeys-lfu" | "volatile-lfu" => EvictionPolicy::LFU,
                     "allkeys-random" | "volatile-random" => EvictionPolicy::Random,
                     "noeviction" => EvictionPolicy::NoEviction,
-                    _ => return Err(format!("ERR Invalid argument '{}' for CONFIG SET 'maxmemory-policy'", value)),
+                    _ => {
+                        return Err(format!(
+                            "ERR Invalid argument '{}' for CONFIG SET 'maxmemory-policy'",
+                            value
+                        ));
+                    }
                 };
                 // NOTE: StorageConfig is not behind a lock, but eviction_policy is only read
                 // during eviction attempts. For a full implementation we'd need interior
@@ -413,18 +444,17 @@ impl StorageEngine {
                     Some(item) => item.is_expired(),
                     None => false, // Key already deleted
                 };
-                if should_remove
-                    && let Some((k, item)) = db.remove(&expired_entry.key) {
-                        if !item.is_expired() {
-                            // Key was refreshed concurrently — put it back
-                            db.insert(k, item);
-                        } else {
-                            let size = Self::calculate_size(&k, &item.value) as u64;
-                            self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                            self.key_count.fetch_sub(1, Ordering::AcqRel);
-                            removed_count += 1;
-                        }
+                if should_remove && let Some((k, item)) = db.remove(&expired_entry.key) {
+                    if !item.is_expired() {
+                        // Key was refreshed concurrently — put it back
+                        db.insert(k, item);
+                    } else {
+                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        removed_count += 1;
                     }
+                }
 
                 // Limit removals per cycle to avoid blocking
                 if removed_count >= MAX_REMOVALS_PER_CYCLE {
@@ -453,8 +483,14 @@ impl StorageEngine {
             let mut keys_to_remove = Vec::new();
 
             let len = db.len();
-            if len == 0 { continue; }
-            let skip = if len > SAMPLE_SIZE { fastrand::usize(0..len) } else { 0 };
+            if len == 0 {
+                continue;
+            }
+            let skip = if len > SAMPLE_SIZE {
+                fastrand::usize(0..len)
+            } else {
+                0
+            };
             let mut sampled_count = 0;
             for entry in db.iter().skip(skip) {
                 if sampled_count >= SAMPLE_SIZE {
@@ -494,7 +530,9 @@ impl StorageEngine {
     fn cleanup_stale_metadata(&self) {
         // Phase 1: Clean up key_versions
         // Collect stale keys first to avoid holding DashMap shard locks while checking data stores
-        let stale_versions: Vec<Vec<u8>> = self.key_versions.iter()
+        let stale_versions: Vec<Vec<u8>> = self
+            .key_versions
+            .iter()
             .filter(|entry| {
                 let scoped_key = entry.key();
                 // Extract db_index and original key from the scoped key
@@ -536,7 +574,9 @@ impl StorageEngine {
         // Phase 2: Clean up key_locks
         // Only remove lock entries where no one is holding the mutex
         // (Arc strong_count == 1 means only the DashMap holds a reference)
-        let stale_locks: Vec<Vec<u8>> = self.key_locks.iter()
+        let stale_locks: Vec<Vec<u8>> = self
+            .key_locks
+            .iter()
             .filter(|entry| {
                 let scoped_key = entry.key();
                 let arc = entry.value();
@@ -568,15 +608,16 @@ impl StorageEngine {
         for key in stale_locks {
             // Use remove_if pattern: only remove if the Arc is still unshared
             // This prevents removing a lock that was just acquired by another task
-            self.key_locks.remove_if(&key, |_, arc| Arc::strong_count(arc) == 1);
+            self.key_locks
+                .remove_if(&key, |_, arc| Arc::strong_count(arc) == 1);
         }
     }
-    
+
     /// Get the size of a key-value pair in bytes
     fn calculate_size(key: &[u8], value: &[u8]) -> usize {
         key.len() + value.len()
     }
-    
+
     /// Helper method to remove expired key and update memory/counters
     async fn remove_expired_key(&self, key: &[u8]) {
         let db = self.active_db();
@@ -592,21 +633,31 @@ impl StorageEngine {
             self.key_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
-    
+
     /// Add a key to the expiration queue (with current database index)
     async fn add_to_expiration_queue(&self, key: Vec<u8>, expires_at: Instant) {
         let db_index = Self::current_db_idx();
-        self.add_to_expiration_queue_for_db(key, expires_at, db_index).await;
+        self.add_to_expiration_queue_for_db(key, expires_at, db_index)
+            .await;
     }
 
     /// Add a key to the expiration queue for a specific database.
     /// Used by cross-DB operations (e.g. MOVE) that need to enqueue TTL
     /// in a database other than the current task-local one.
-    async fn add_to_expiration_queue_for_db(&self, key: Vec<u8>, expires_at: Instant, db_index: usize) {
+    async fn add_to_expiration_queue_for_db(
+        &self,
+        key: Vec<u8>,
+        expires_at: Instant,
+        db_index: usize,
+    ) {
         let mut queue = self.expiration_queue.write().await;
-        queue.push(ExpirationEntry { expires_at, key, db_index });
+        queue.push(ExpirationEntry {
+            expires_at,
+            key,
+            db_index,
+        });
     }
-    
+
     /// Remove a key from expiration queue for the current database (used when TTL is removed).
     /// Only removes entries matching both the key AND the current database index,
     /// so removing TTL from `foo` in DB 0 won't affect `foo` in DB 1.
@@ -625,17 +676,18 @@ impl StorageEngine {
             }
         }
     }
-    
+
     /// Common prefixes to index for faster KEYS operations
     const INDEXED_PREFIXES: &'static [&'static str] = &[
-        "user:", "session:", "cache:", "temp:", "auth:", "token:", 
-        "data:", "config:", "stats:", "log:", "queue:", "job:"
+        "user:", "session:", "cache:", "temp:", "auth:", "token:", "data:", "config:", "stats:",
+        "log:", "queue:", "job:",
     ];
-    
+
     /// Update prefix indices when a key is added or removed (DB-scoped)
     async fn update_prefix_indices(&self, key: &[u8], is_insert: bool) {
         let db_idx = Self::current_db_idx();
-        self.update_prefix_indices_for_db(key, is_insert, db_idx).await;
+        self.update_prefix_indices_for_db(key, is_insert, db_idx)
+            .await;
     }
 
     /// Update prefix indices for a specific database index.
@@ -662,12 +714,12 @@ impl StorageEngine {
             }
         }
     }
-    
+
     /// Extract prefix from a pattern for index lookup (returns DB-scoped key)
     fn extract_prefix_from_pattern(&self, pattern: &str) -> Option<(usize, String)> {
         // Check if pattern is a simple prefix pattern like "user:*"
-        if pattern.ends_with('*') && !pattern[..pattern.len()-1].contains('*') {
-            let prefix = &pattern[..pattern.len()-1];
+        if pattern.ends_with('*') && !pattern[..pattern.len() - 1].contains('*') {
+            let prefix = &pattern[..pattern.len() - 1];
             // Only return if it's one of our indexed prefixes
             if Self::INDEXED_PREFIXES.contains(&prefix) {
                 let db_idx = Self::current_db_idx();
@@ -676,7 +728,7 @@ impl StorageEngine {
         }
         None
     }
-    
+
     /// Check if we need to evict items to make room
     async fn maybe_evict(&self, required_size: usize) -> StorageResult<()> {
         // Check if adding this item would exceed our memory limit
@@ -688,10 +740,12 @@ impl StorageEngine {
             }
 
             // Evict items until we have enough space (search across all databases)
-            while self.current_memory.load(Ordering::Acquire) as usize + required_size > self.config.max_memory {
+            while self.current_memory.load(Ordering::Acquire) as usize + required_size
+                > self.config.max_memory
+            {
                 // Check if there are any items to evict across all DBs
-                let total_keys: usize = self.data.len()
-                    + self.extra_dbs.iter().map(|db| db.len()).sum::<usize>();
+                let total_keys: usize =
+                    self.data.len() + self.extra_dbs.iter().map(|db| db.len()).sum::<usize>();
                 if total_keys == 0 {
                     return Err(StorageError::MemoryLimitExceeded);
                 }
@@ -699,19 +753,19 @@ impl StorageEngine {
                 // Helper: find victim in a single DB
                 let find_victim_in_db = |db: &DashMap<Vec<u8>, StorageItem>| -> Option<Vec<u8>> {
                     match self.config.eviction_policy {
-                        EvictionPolicy::LRU | EvictionPolicy::LFU => {
-                            db.iter()
-                                .min_by_key(|item| item.value().last_accessed)
-                                .map(|item| item.key().clone())
-                        },
+                        EvictionPolicy::LRU | EvictionPolicy::LFU => db
+                            .iter()
+                            .min_by_key(|item| item.value().last_accessed)
+                            .map(|item| item.key().clone()),
                         EvictionPolicy::Random => {
                             let len = db.len();
-                            if len == 0 { None }
-                            else {
+                            if len == 0 {
+                                None
+                            } else {
                                 let skip = fastrand::usize(0..len);
                                 db.iter().nth(skip).map(|item| item.key().clone())
                             }
-                        },
+                        }
                         _ => None,
                     }
                 };
@@ -721,21 +775,25 @@ impl StorageEngine {
                 for db_idx in 0..NUM_DATABASES {
                     let db = self.get_db_by_index(db_idx);
                     if let Some(victim_key) = find_victim_in_db(db) {
-                        let should_replace = if self.config.eviction_policy == EvictionPolicy::Random {
-                            best_victim.is_none() // For random, just pick the first one found
-                        } else {
-                            // For LRU/LFU, compare last_accessed times
-                            if let Some(entry) = db.get(&victim_key) {
-                                match &best_victim {
-                                    None => true,
-                                    Some((_, _, best_time)) => entry.value().last_accessed < *best_time,
-                                }
+                        let should_replace =
+                            if self.config.eviction_policy == EvictionPolicy::Random {
+                                best_victim.is_none() // For random, just pick the first one found
                             } else {
-                                false
-                            }
-                        };
+                                // For LRU/LFU, compare last_accessed times
+                                if let Some(entry) = db.get(&victim_key) {
+                                    match &best_victim {
+                                        None => true,
+                                        Some((_, _, best_time)) => {
+                                            entry.value().last_accessed < *best_time
+                                        }
+                                    }
+                                } else {
+                                    false
+                                }
+                            };
                         if should_replace {
-                            let la = db.get(&victim_key)
+                            let la = db
+                                .get(&victim_key)
                                 .map(|e| e.value().last_accessed)
                                 .unwrap_or(Instant::now());
                             best_victim = Some((victim_key, db_idx, la));
@@ -759,14 +817,26 @@ impl StorageEngine {
 
         Ok(())
     }
-    
+
     /// Set a key-value pair in the storage engine (defaults to String type)
-    pub async fn set(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<()> {
-        self.set_with_type(key, value, RedisDataType::String, ttl).await
+    pub async fn set(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    ) -> StorageResult<()> {
+        self.set_with_type(key, value, RedisDataType::String, ttl)
+            .await
     }
 
     /// Set a key-value pair with explicit data type
-    pub async fn set_with_type(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType, ttl: Option<Duration>) -> StorageResult<()> {
+    pub async fn set_with_type(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        data_type: RedisDataType,
+        ttl: Option<Duration>,
+    ) -> StorageResult<()> {
         // Check size limits
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -777,10 +847,15 @@ impl StorageEngine {
         }
 
         // For large values (likely JSON), do deeper validation
-        if value.len() > 10240 { // 10KB
+        if value.len() > 10240 {
+            // 10KB
             // Log large SET operations for debugging
-            tracing::debug!("Large value SET operation: key={:?}, value_len={}, type={}",
-                String::from_utf8_lossy(&key), value.len(), data_type.as_str());
+            tracing::debug!(
+                "Large value SET operation: key={:?}, value_len={}, type={}",
+                String::from_utf8_lossy(&key),
+                value.len(),
+                data_type.as_str()
+            );
         }
 
         let required_size = Self::calculate_size(&key, &value);
@@ -802,9 +877,11 @@ impl StorageEngine {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
-                    self.current_memory.fetch_sub(old_size as u64, Ordering::AcqRel);
+                    self.current_memory
+                        .fetch_sub(old_size as u64, Ordering::AcqRel);
                 }
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
                 // Bump version while OccupiedEntry still holds the shard lock,
                 // preventing a TOCTOU race with del_if_version_matches (MSETNX rollback).
@@ -812,7 +889,8 @@ impl StorageEngine {
                 false
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 // Bind RefMut to keep shard lock held during version bump
                 let _ref = entry.insert(item);
                 self.bump_key_version(&key);
@@ -842,7 +920,12 @@ impl StorageEngine {
     ///
     /// This implementation uses a single DashMap entry operation to atomically
     /// read the existing TTL and write the new value, avoiding TOCTOU races.
-    pub async fn set_with_type_preserve_ttl(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType) -> StorageResult<()> {
+    pub async fn set_with_type_preserve_ttl(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        data_type: RedisDataType,
+    ) -> StorageResult<()> {
         // Check size limits
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -874,15 +957,18 @@ impl StorageEngine {
 
                 let old_size = Self::calculate_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
-                    self.current_memory.fetch_sub(old_size as u64, Ordering::AcqRel);
+                    self.current_memory
+                        .fetch_sub(old_size as u64, Ordering::AcqRel);
                 }
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
                 self.bump_key_version(&key);
                 (false, existing_expires_at)
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 let _ref = entry.insert(item);
                 self.bump_key_version(&key);
                 (true, None)
@@ -931,7 +1017,7 @@ impl StorageEngine {
 
         Ok(result)
     }
-    
+
     /// Delete a key from the storage engine
     pub async fn del(&self, key: &[u8]) -> StorageResult<bool> {
         if let Some((k, item)) = self.active_db().remove(key) {
@@ -948,7 +1034,7 @@ impl StorageEngine {
             Ok(false)
         }
     }
-    
+
     /// Atomically delete a key only if its version matches the expected value.
     /// This prevents a TOCTOU race where a concurrent SET between a version check
     /// and a del could have its value incorrectly deleted.
@@ -996,7 +1082,7 @@ impl StorageEngine {
             Ok(false)
         }
     }
-    
+
     /// Set the TTL (time-to-live) for a key
     pub async fn expire(&self, key: &[u8], ttl: Option<Duration>) -> StorageResult<bool> {
         // Mutate the entry under the DashMap lock, then drop the guard before any .await
@@ -1032,7 +1118,7 @@ impl StorageEngine {
             Ok(false)
         }
     }
-    
+
     /// Get the TTL (time-to-live) for a key
     pub async fn ttl(&self, key: &[u8]) -> StorageResult<Option<Duration>> {
         if let Some(entry) = self.active_db().get(key) {
@@ -1048,7 +1134,7 @@ impl StorageEngine {
             Ok(None)
         }
     }
-    
+
     /// Get all keys matching a pattern
     pub async fn keys(&self, pattern: &str) -> StorageResult<Vec<Vec<u8>>> {
         let db = self.active_db();
@@ -1062,10 +1148,11 @@ impl StorageEngine {
                     // Check if key still exists and is not expired
                     if let Some(entry) = db.get(key)
                         && !entry.value().is_expired()
-                            && let Ok(key_str) = std::str::from_utf8(key)
-                                && crate::utils::glob::glob_match(pattern, key_str) {
-                                    keys.push(key.clone());
-                                }
+                        && let Ok(key_str) = std::str::from_utf8(key)
+                        && crate::utils::glob::glob_match(pattern, key_str)
+                    {
+                        keys.push(key.clone());
+                    }
                 }
                 return Ok(keys);
             }
@@ -1078,17 +1165,18 @@ impl StorageEngine {
             if item.value().is_expired() {
                 continue;
             }
-            
+
             // Convert key to string for pattern matching
             if let Ok(key_str) = std::str::from_utf8(item.key())
-                && crate::utils::glob::glob_match(pattern, key_str) {
-                    keys.push(item.key().clone());
-                }
+                && crate::utils::glob::glob_match(pattern, key_str)
+            {
+                keys.push(item.key().clone());
+            }
         }
-        
+
         Ok(keys)
     }
-    
+
     /// Flush all data (remove all keys from all databases)
     pub async fn flush_all(&self) -> StorageResult<()> {
         self.data.clear();
@@ -1121,13 +1209,18 @@ impl StorageEngine {
     pub async fn flush_db(&self) -> StorageResult<()> {
         let db = self.active_db();
         let db_idx = Self::current_db_idx();
-        let size: u64 = db.iter()
+        let size: u64 = db
+            .iter()
             .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
             .sum();
         db.clear();
-        self.current_memory.fetch_sub(size.min(self.current_memory.load(Ordering::Acquire)), Ordering::AcqRel);
+        self.current_memory.fetch_sub(
+            size.min(self.current_memory.load(Ordering::Acquire)),
+            Ordering::AcqRel,
+        );
         // Recalculate total key count across all databases
-        let total: u64 = self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();
+        let total: u64 =
+            self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();
         self.key_count.store(total, Ordering::Release);
 
         // Clear prefix index entries for this DB
@@ -1139,14 +1232,17 @@ impl StorageEngine {
 
         Ok(())
     }
-    
+
     /// Get a snapshot of database 0 (for backward compatibility).
     pub async fn snapshot(&self) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
         self.snapshot_db(0).await
     }
 
     /// Get a snapshot of a specific database by index.
-    pub async fn snapshot_db(&self, db_index: usize) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
+    pub async fn snapshot_db(
+        &self,
+        db_index: usize,
+    ) -> StorageResult<HashMap<Vec<u8>, StorageItem>> {
         let db = self.get_db_by_index(db_index);
         let mut snapshot = HashMap::with_capacity(db.len());
 
@@ -1171,13 +1267,13 @@ impl StorageEngine {
         }
         Ok(snapshots)
     }
-    
+
     /// Register a write counter to be incremented on data modifications
     pub async fn register_write_counter(&self, counter: Arc<AtomicU64>) {
         let mut write_counters = self.write_counters.write().await;
         write_counters.push(counter);
     }
-    
+
     /// Increment all registered write counters
     async fn increment_write_counters(&self) {
         let counters = self.write_counters.read().await;
@@ -1266,11 +1362,14 @@ impl StorageEngine {
         // If we're already inside a MULTI/EXEC execution, EXEC already holds the locks.
         // Acquiring them again would deadlock (tokio::sync::Mutex is not re-entrant).
         if Self::in_transaction() {
-            return KeyLockGuard { _guards: Vec::new() };
+            return KeyLockGuard {
+                _guards: Vec::new(),
+            };
         }
 
         let db_idx = Self::current_db_idx();
-        let mut sorted_keys: Vec<Vec<u8>> = keys.iter()
+        let mut sorted_keys: Vec<Vec<u8>> = keys
+            .iter()
             .map(|k| Self::db_scoped_key(db_idx, k))
             .collect();
         sorted_keys.sort();
@@ -1296,7 +1395,11 @@ impl StorageEngine {
     /// lightweight fallback that doesn't require a full CommandHandler instance.
     #[allow(dead_code)]
     pub async fn process_command(&self, command: &RespCommand) -> StorageResult<()> {
-        let upper_name: Vec<u8> = command.name.iter().map(|b| b.to_ascii_uppercase()).collect();
+        let upper_name: Vec<u8> = command
+            .name
+            .iter()
+            .map(|b| b.to_ascii_uppercase())
+            .collect();
 
         match upper_name.as_slice() {
             b"SET" => {
@@ -1307,97 +1410,128 @@ impl StorageEngine {
                     let mut ttl = None;
                     let mut i = 2;
                     while i < command.args.len() {
-                        let flag: Vec<u8> = command.args[i].iter().map(|b| b.to_ascii_uppercase()).collect();
+                        let flag: Vec<u8> = command.args[i]
+                            .iter()
+                            .map(|b| b.to_ascii_uppercase())
+                            .collect();
                         match flag.as_slice() {
                             b"EX" if i + 1 < command.args.len() => {
-                                if let Ok(s) = std::str::from_utf8(&command.args[i+1])
-                                    && let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_secs(v)); }
+                                if let Ok(s) = std::str::from_utf8(&command.args[i + 1])
+                                    && let Ok(v) = s.parse::<u64>()
+                                {
+                                    ttl = Some(Duration::from_secs(v));
+                                }
                                 i += 2;
                             }
                             b"PX" if i + 1 < command.args.len() => {
-                                if let Ok(s) = std::str::from_utf8(&command.args[i+1])
-                                    && let Ok(v) = s.parse::<u64>() { ttl = Some(Duration::from_millis(v)); }
+                                if let Ok(s) = std::str::from_utf8(&command.args[i + 1])
+                                    && let Ok(v) = s.parse::<u64>()
+                                {
+                                    ttl = Some(Duration::from_millis(v));
+                                }
                                 i += 2;
                             }
-                            _ => { i += 1; }
+                            _ => {
+                                i += 1;
+                            }
                         }
                     }
 
                     self.set(key.clone(), value.clone(), ttl).await?;
                 }
-            },
+            }
             b"DEL" => {
                 for arg in &command.args {
                     let _ = self.del(arg).await?;
                 }
-            },
+            }
             b"EXPIRE" => {
                 if command.args.len() >= 2
                     && let Ok(secs) = std::str::from_utf8(&command.args[1])
-                        && let Ok(v) = secs.parse::<u64>() {
-                            self.expire(&command.args[0], Some(Duration::from_secs(v))).await?;
-                        }
-            },
+                    && let Ok(v) = secs.parse::<u64>()
+                {
+                    self.expire(&command.args[0], Some(Duration::from_secs(v)))
+                        .await?;
+                }
+            }
             b"PEXPIRE" => {
                 if command.args.len() >= 2
                     && let Ok(millis) = std::str::from_utf8(&command.args[1])
-                        && let Ok(v) = millis.parse::<u64>() {
-                            self.expire(&command.args[0], Some(Duration::from_millis(v))).await?;
-                        }
-            },
+                    && let Ok(v) = millis.parse::<u64>()
+                {
+                    self.expire(&command.args[0], Some(Duration::from_millis(v)))
+                        .await?;
+                }
+            }
             b"RPUSH" => {
                 if command.args.len() >= 2 {
                     let key = &command.args[0];
                     let elements = &command.args[1..];
-                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::List, |existing| {
-                        let mut list: Vec<Vec<u8>> = existing
-                            .as_deref()
-                            .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_default();
-                        for elem in elements {
-                            list.push(elem.clone());
-                        }
-                        Ok((Some(bincode::serialize(&list).unwrap()), ()))
-                    })?;
+                    let _: () = self.atomic_modify(
+                        key,
+                        crate::storage::item::RedisDataType::List,
+                        |existing| {
+                            let mut list: Vec<Vec<u8>> = existing
+                                .as_deref()
+                                .and_then(|v| bincode::deserialize(v).ok())
+                                .unwrap_or_default();
+                            for elem in elements {
+                                list.push(elem.clone());
+                            }
+                            Ok((Some(bincode::serialize(&list).unwrap()), ()))
+                        },
+                    )?;
                 }
-            },
+            }
             b"SADD" => {
                 if command.args.len() >= 2 {
                     let key = &command.args[0];
                     let members = &command.args[1..];
-                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::Set, |existing| {
-                        let mut set: std::collections::HashSet<Vec<u8>> = existing
-                            .as_deref()
-                            .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_default();
-                        for m in members {
-                            set.insert(m.clone());
-                        }
-                        Ok((Some(bincode::serialize(&set).unwrap()), ()))
-                    })?;
+                    let _: () = self.atomic_modify(
+                        key,
+                        crate::storage::item::RedisDataType::Set,
+                        |existing| {
+                            let mut set: std::collections::HashSet<Vec<u8>> = existing
+                                .as_deref()
+                                .and_then(|v| bincode::deserialize(v).ok())
+                                .unwrap_or_default();
+                            for m in members {
+                                set.insert(m.clone());
+                            }
+                            Ok((Some(bincode::serialize(&set).unwrap()), ()))
+                        },
+                    )?;
                 }
-            },
+            }
             b"ZADD" => {
                 if command.args.len() >= 3 {
                     let key = &command.args[0];
                     let pairs = &command.args[1..];
-                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::ZSet, |existing| {
-                        let mut zset: crate::command::types::sorted_set::SortedSetData = existing
-                            .as_deref()
-                            .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_else(crate::command::types::sorted_set::SortedSetData::new);
-                        let mut i = 0;
-                        while i + 1 < pairs.len() {
-                            if let Ok(score_str) = std::str::from_utf8(&pairs[i])
-                                && let Ok(score) = score_str.parse::<f64>() {
-                                    zset.insert(score, pairs[i+1].clone());
+                    let _: () = self.atomic_modify(
+                        key,
+                        crate::storage::item::RedisDataType::ZSet,
+                        |existing| {
+                            let mut zset: crate::command::types::sorted_set::SortedSetData =
+                                existing
+                                    .as_deref()
+                                    .and_then(|v| bincode::deserialize(v).ok())
+                                    .unwrap_or_else(
+                                        crate::command::types::sorted_set::SortedSetData::new,
+                                    );
+                            let mut i = 0;
+                            while i + 1 < pairs.len() {
+                                if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                    && let Ok(score) = score_str.parse::<f64>()
+                                {
+                                    zset.insert(score, pairs[i + 1].clone());
                                 }
-                            i += 2;
-                        }
-                        Ok((Some(bincode::serialize(&zset).unwrap()), ()))
-                    })?;
+                                i += 2;
+                            }
+                            Ok((Some(bincode::serialize(&zset).unwrap()), ()))
+                        },
+                    )?;
                 }
-            },
+            }
             b"HSET" => {
                 if command.args.len() >= 3 {
                     let key = &command.args[0];
@@ -1405,31 +1539,39 @@ impl StorageEngine {
                     let mut fields = Vec::new();
                     let mut i = 0;
                     while i + 1 < pairs.len() {
-                        fields.push((pairs[i].as_slice(), pairs[i+1].as_slice()));
+                        fields.push((pairs[i].as_slice(), pairs[i + 1].as_slice()));
                         i += 2;
                     }
                     let _ = self.hash_set(key, &fields);
                 }
-            },
+            }
             b"XADD" => {
                 if command.args.len() >= 4 {
                     let key = &command.args[0];
                     let id_bytes = &command.args[1];
                     let field_args = &command.args[2..];
-                    let _: () = self.atomic_modify(key, crate::storage::item::RedisDataType::Stream, |existing| {
-                        let mut stream: crate::storage::stream::StreamData = existing
-                            .as_deref()
-                            .and_then(|v| bincode::deserialize(v).ok())
-                            .unwrap_or_else(crate::storage::stream::StreamData::new);
-                        if let Ok(id_str) = std::str::from_utf8(id_bytes)
-                            && let Some(id) = crate::storage::stream::StreamEntryId::parse(id_str) {
+                    let _: () = self.atomic_modify(
+                        key,
+                        crate::storage::item::RedisDataType::Stream,
+                        |existing| {
+                            let mut stream: crate::storage::stream::StreamData = existing
+                                .as_deref()
+                                .and_then(|v| bincode::deserialize(v).ok())
+                                .unwrap_or_else(crate::storage::stream::StreamData::new);
+                            if let Ok(id_str) = std::str::from_utf8(id_bytes)
+                                && let Some(id) =
+                                    crate::storage::stream::StreamEntryId::parse(id_str)
+                            {
                                 let mut fields = Vec::new();
                                 let mut j = 0;
                                 while j + 1 < field_args.len() {
-                                    fields.push((field_args[j].clone(), field_args[j+1].clone()));
+                                    fields.push((field_args[j].clone(), field_args[j + 1].clone()));
                                     j += 2;
                                 }
-                                let entry = crate::storage::stream::StreamEntry { id: id.clone(), fields };
+                                let entry = crate::storage::stream::StreamEntry {
+                                    id: id.clone(),
+                                    fields,
+                                };
                                 stream.entries.insert(id.clone(), entry);
                                 if id > stream.last_id {
                                     stream.last_id = id.clone();
@@ -1439,21 +1581,25 @@ impl StorageEngine {
                                     stream.first_entry_id = Some(id);
                                 }
                             }
-                        Ok((Some(bincode::serialize(&stream).unwrap()), ()))
-                    })?;
+                            Ok((Some(bincode::serialize(&stream).unwrap()), ()))
+                        },
+                    )?;
                 }
-            },
+            }
             // Transaction markers are no-ops during replay - the commands within
             // the transaction have already been executed individually
-            b"MULTI" | b"EXEC" | b"DISCARD" => {},
+            b"MULTI" | b"EXEC" | b"DISCARD" => {}
             _ => {
-                tracing::warn!("Unknown command during AOF replay: {:?}", String::from_utf8_lossy(&command.name));
+                tracing::warn!(
+                    "Unknown command during AOF replay: {:?}",
+                    String::from_utf8_lossy(&command.name)
+                );
             }
         }
 
         Ok(())
     }
-    
+
     /// Get the type of a key
     pub async fn get_type(&self, key: &[u8]) -> StorageResult<String> {
         // Check if key exists and is not expired
@@ -1470,7 +1616,7 @@ impl StorageEngine {
             Ok("none".to_string())
         }
     }
-    
+
     /// Get the stored data type for a key without legacy heuristic detection.
     /// Returns the raw data_type field from StorageItem, which is authoritative
     /// for keys created with the current storage format.
@@ -1506,7 +1652,7 @@ impl StorageEngine {
     pub fn get_used_memory(&self) -> u64 {
         self.current_memory.load(Ordering::Acquire)
     }
-    
+
     /// Get a random key from the storage engine (O(1) operation for RANDOMKEY)
     pub async fn get_random_key(&self) -> StorageResult<Option<Vec<u8>>> {
         let db = self.active_db();
@@ -1574,7 +1720,10 @@ impl StorageEngine {
     /// Set expiration using an absolute Unix timestamp (seconds since epoch)
     pub async fn expire_at(&self, key: &[u8], unix_timestamp: i64) -> StorageResult<bool> {
         let now_system = SystemTime::now();
-        let now_unix = now_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now_unix = now_system
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
 
         if unix_timestamp <= now_unix {
             // Timestamp is in the past - delete the key
@@ -1588,7 +1737,10 @@ impl StorageEngine {
     /// Set expiration using an absolute Unix timestamp in milliseconds
     pub async fn pexpire_at(&self, key: &[u8], unix_timestamp_ms: i64) -> StorageResult<bool> {
         let now_system = SystemTime::now();
-        let now_unix_ms = now_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let now_unix_ms = now_system
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
 
         if unix_timestamp_ms <= now_unix_ms {
             // Timestamp is in the past - delete the key
@@ -1615,7 +1767,10 @@ impl StorageEngine {
                 let remaining = expires_at - now;
                 let now_system = SystemTime::now();
                 let expire_system = now_system + remaining;
-                let unix_ts = expire_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                let unix_ts = expire_system
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
                 Ok(Some(unix_ts))
             } else {
                 // Key exists but has no expiration: return -1 (handled by caller)
@@ -1642,7 +1797,10 @@ impl StorageEngine {
                 let remaining = expires_at - now;
                 let now_system = SystemTime::now();
                 let expire_system = now_system + remaining;
-                let unix_ms = expire_system.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                let unix_ms = expire_system
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
                 Ok(Some(unix_ms))
             } else {
                 Ok(None)
@@ -1668,13 +1826,15 @@ impl StorageEngine {
         };
 
         // Clone with fresh timestamps but same TTL
-        let mut new_item = StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
+        let mut new_item =
+            StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
         if let Some(expires_at) = src_item.expires_at {
             let now = Instant::now();
             if expires_at > now {
                 let remaining = expires_at - now;
                 new_item.expire(remaining);
-                self.add_to_expiration_queue(dst.clone(), Instant::now() + remaining).await;
+                self.add_to_expiration_queue(dst.clone(), Instant::now() + remaining)
+                    .await;
             }
         }
 
@@ -1705,14 +1865,16 @@ impl StorageEngine {
                 }
                 let old_size = Self::calculate_size(&dst, &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 occ.insert(new_item);
                 // Bump version while OccupiedEntry still holds the shard lock
                 self.bump_key_version(&dst);
                 false
             }
             Entry::Vacant(vac) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 // Bind RefMut to keep shard lock held during version bump
                 let _ref = vac.insert(new_item);
                 self.bump_key_version(&dst);
@@ -1739,7 +1901,7 @@ impl StorageEngine {
         let _cross_db_guard = self.cross_db_lock.read().await;
         let src_db_idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
         if dst_db == src_db_idx {
-            return Ok(false);  // Cannot move to the same database
+            return Ok(false); // Cannot move to the same database
         }
         if dst_db >= NUM_DATABASES {
             return Ok(false);
@@ -1795,9 +1957,11 @@ impl StorageEngine {
         self.bump_key_version_for_db(key, dst_db);
 
         if let Some(expires_at) = src_expires_at
-            && expires_at > Instant::now() {
-                self.add_to_expiration_queue_for_db(key.to_vec(), expires_at, dst_db).await;
-            }
+            && expires_at > Instant::now()
+        {
+            self.add_to_expiration_queue_for_db(key.to_vec(), expires_at, dst_db)
+                .await;
+        }
 
         Ok(true)
     }
@@ -1858,11 +2022,13 @@ impl StorageEngine {
         {
             let mut prefix_index = self.prefix_index.write().await;
             // Collect entries for both databases
-            let db1_entries: Vec<_> = prefix_index.iter()
+            let db1_entries: Vec<_> = prefix_index
+                .iter()
                 .filter(|((idx, _), _)| *idx == db1)
                 .map(|((_, prefix), keys)| (prefix.clone(), keys.clone()))
                 .collect();
-            let db2_entries: Vec<_> = prefix_index.iter()
+            let db2_entries: Vec<_> = prefix_index
+                .iter()
                 .filter(|((idx, _), _)| *idx == db2)
                 .map(|((_, prefix), keys)| (prefix.clone(), keys.clone()))
                 .collect();
@@ -1968,7 +2134,8 @@ impl StorageEngine {
                     }
                 }
                 RedisDataType::Set => {
-                    if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value) {
+                    if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value)
+                    {
                         if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
                             "listpack"
                         } else {
@@ -1979,8 +2146,12 @@ impl StorageEngine {
                     }
                 }
                 RedisDataType::Hash => {
-                    if let Ok(map) = bincode::deserialize::<HashMap<Vec<u8>, Vec<u8>>>(&entry.value().value) {
-                        if map.len() <= 128 && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64) {
+                    if let Ok(map) =
+                        bincode::deserialize::<HashMap<Vec<u8>, Vec<u8>>>(&entry.value().value)
+                    {
+                        if map.len() <= 128
+                            && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
+                        {
                             "listpack"
                         } else {
                             "hashtable"
@@ -2010,7 +2181,14 @@ impl StorageEngine {
     }
 
     /// Restore a key from a serialized value (for RESTORE command)
-    pub async fn restore_key(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType, ttl: Option<Duration>, replace: bool) -> StorageResult<bool> {
+    pub async fn restore_key(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        data_type: RedisDataType,
+        ttl: Option<Duration>,
+        replace: bool,
+    ) -> StorageResult<bool> {
         // Check if key exists
         if self.active_db().contains_key(&key) {
             if !replace {
@@ -2069,7 +2247,12 @@ impl StorageEngine {
     /// Returning the version allows callers (e.g. MSETNX rollback) to detect concurrent overwrites
     /// without a gap between insert and version capture.
     #[allow(dead_code)]
-    pub async fn set_nx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<(bool, u64)> {
+    pub async fn set_nx(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    ) -> StorageResult<(bool, u64)> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
@@ -2100,7 +2283,8 @@ impl StorageEngine {
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                     let mut occ = occ;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                    self.current_memory
+                        .fetch_add(required_size as u64, Ordering::AcqRel);
                     occ.insert(item);
                     // Bump version while OccupiedEntry still holds the shard lock
                     let v = self.bump_and_get_key_version(&key);
@@ -2111,7 +2295,8 @@ impl StorageEngine {
                 }
             }
             Entry::Vacant(vac) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 // insert() returns a RefMut that holds the shard lock
                 let _ref = vac.insert(item);
                 // Bump version while RefMut still holds the shard lock
@@ -2137,7 +2322,12 @@ impl StorageEngine {
     /// Atomically set a key only if it DOES exist (SET XX).
     /// Returns true if the key was set, false if it did not exist.
     #[allow(dead_code)]
-    pub async fn set_xx(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<Duration>) -> StorageResult<bool> {
+    pub async fn set_xx(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    ) -> StorageResult<bool> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
@@ -2169,7 +2359,8 @@ impl StorageEngine {
                 } else {
                     let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                    self.current_memory
+                        .fetch_add(required_size as u64, Ordering::AcqRel);
                     occ.insert(item);
                     // Bump version while OccupiedEntry still holds the shard lock
                     self.bump_key_version(&key);
@@ -2221,71 +2412,78 @@ impl StorageEngine {
         };
 
         use dashmap::mapref::entry::Entry;
-        let (did_set, old_value, is_new_key, final_expires_at) = match self.active_db().entry(key.clone()) {
-            Entry::Occupied(mut occ) => {
-                let expired = occ.get().is_expired();
-                let effectively_exists = !expired;
+        let (did_set, old_value, is_new_key, final_expires_at) =
+            match self.active_db().entry(key.clone()) {
+                Entry::Occupied(mut occ) => {
+                    let expired = occ.get().is_expired();
+                    let effectively_exists = !expired;
 
-                if nx && effectively_exists {
-                    // NX: don't set if key exists
-                    let old = if get_old { Some(occ.get().value.clone()) } else { None };
-                    (false, old, false, None)
-                } else if xx && !effectively_exists {
-                    // XX: don't set if key doesn't exist
-                    if expired {
+                    if nx && effectively_exists {
+                        // NX: don't set if key exists
+                        let old = if get_old {
+                            Some(occ.get().value.clone())
+                        } else {
+                            None
+                        };
+                        (false, old, false, None)
+                    } else if xx && !effectively_exists {
+                        // XX: don't set if key doesn't exist
+                        if expired {
+                            let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                            self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                            occ.remove();
+                            self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        (false, None, false, None)
+                    } else {
+                        // Set the value
+                        let old = if get_old && effectively_exists {
+                            Some(occ.get().value.clone())
+                        } else {
+                            None
+                        };
+                        // KEEPTTL: preserve old expiration if key exists and keepttl is set
+                        let preserved_expires = if keepttl && effectively_exists {
+                            occ.get().expires_at
+                        } else {
+                            None
+                        };
                         let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                         self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                        occ.remove();
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.current_memory
+                            .fetch_add(required_size as u64, Ordering::AcqRel);
+                        if keepttl && effectively_exists {
+                            // Preserve the old TTL by copying expires_at
+                            item.expires_at = preserved_expires;
+                        }
+                        occ.insert(item);
+                        // Bump version while OccupiedEntry still holds the shard lock,
+                        // preventing TOCTOU race with del_if_version_matches (MSETNX rollback).
+                        self.bump_key_version(&key);
+                        let effective_expires = if keepttl && effectively_exists {
+                            preserved_expires
+                        } else {
+                            new_expires_at
+                        };
+                        // is_new_key is false for Occupied entries: the DashMap entry already
+                        // exists (even if expired), so key_count must not be incremented.
+                        (true, old, false, effective_expires)
                     }
-                    (false, None, false, None)
-                } else {
-                    // Set the value
-                    let old = if get_old && effectively_exists {
-                        Some(occ.get().value.clone())
+                }
+                Entry::Vacant(vac) => {
+                    if xx {
+                        // XX: key must exist
+                        (false, None, false, None)
                     } else {
-                        None
-                    };
-                    // KEEPTTL: preserve old expiration if key exists and keepttl is set
-                    let preserved_expires = if keepttl && effectively_exists {
-                        occ.get().expires_at
-                    } else {
-                        None
-                    };
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                    if keepttl && effectively_exists {
-                        // Preserve the old TTL by copying expires_at
-                        item.expires_at = preserved_expires;
+                        self.current_memory
+                            .fetch_add(required_size as u64, Ordering::AcqRel);
+                        // Bind RefMut to keep shard lock held during version bump
+                        let _ref = vac.insert(item);
+                        self.bump_key_version(&key);
+                        (true, None, true, new_expires_at)
                     }
-                    occ.insert(item);
-                    // Bump version while OccupiedEntry still holds the shard lock,
-                    // preventing TOCTOU race with del_if_version_matches (MSETNX rollback).
-                    self.bump_key_version(&key);
-                    let effective_expires = if keepttl && effectively_exists {
-                        preserved_expires
-                    } else {
-                        new_expires_at
-                    };
-                    // is_new_key is false for Occupied entries: the DashMap entry already
-                    // exists (even if expired), so key_count must not be incremented.
-                    (true, old, false, effective_expires)
                 }
-            }
-            Entry::Vacant(vac) => {
-                if xx {
-                    // XX: key must exist
-                    (false, None, false, None)
-                } else {
-                    self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
-                    // Bind RefMut to keep shard lock held during version bump
-                    let _ref = vac.insert(item);
-                    self.bump_key_version(&key);
-                    (true, None, true, new_expires_at)
-                }
-            }
-        };
+            };
 
         if did_set {
             if let Some(expires_at) = final_expires_at {
@@ -2333,12 +2531,10 @@ impl StorageEngine {
                     return Err(StorageError::WrongType);
                 }
                 // Parse current value
-                let current_str = std::str::from_utf8(&occ.get().value)
-                    .map_err(|_| StorageError::NotANumber)?;
-                let current: i64 = current_str.parse()
-                    .map_err(|_| StorageError::NotANumber)?;
-                let new_val = current.checked_add(delta)
-                    .ok_or(StorageError::NotANumber)?;
+                let current_str =
+                    std::str::from_utf8(&occ.get().value).map_err(|_| StorageError::NotANumber)?;
+                let current: i64 = current_str.parse().map_err(|_| StorageError::NotANumber)?;
+                let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
                 let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                 let new_val_str = new_val.to_string();
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
@@ -2386,10 +2582,9 @@ impl StorageEngine {
                 if occ.get().data_type != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                let current_str = std::str::from_utf8(&occ.get().value)
-                    .map_err(|_| StorageError::NotAFloat)?;
-                let current: f64 = current_str.parse()
-                    .map_err(|_| StorageError::NotAFloat)?;
+                let current_str =
+                    std::str::from_utf8(&occ.get().value).map_err(|_| StorageError::NotAFloat)?;
+                let current: f64 = current_str.parse().map_err(|_| StorageError::NotAFloat)?;
                 if current.is_nan() || current.is_infinite() {
                     return Err(StorageError::NotAFloat);
                 }
@@ -2473,7 +2668,12 @@ impl StorageEngine {
     /// and returns `Option<Vec<u8>>` (None to delete the key, Some to set the new value).
     /// The closure runs while holding the DashMap entry lock, ensuring atomicity.
     /// Returns the closure's return value.
-    pub fn atomic_modify<F, R>(&self, key: &[u8], data_type: RedisDataType, f: F) -> StorageResult<R>
+    pub fn atomic_modify<F, R>(
+        &self,
+        key: &[u8],
+        data_type: RedisDataType,
+        f: F,
+    ) -> StorageResult<R>
     where
         F: FnOnce(Option<&mut Vec<u8>>) -> Result<(Option<Vec<u8>>, R), StorageError>,
     {
@@ -2639,7 +2839,11 @@ impl StorageEngine {
     }
 
     /// Atomically get the old value and set a new value.
-    pub async fn atomic_getset(&self, key: Vec<u8>, value: Vec<u8>) -> StorageResult<Option<Vec<u8>>> {
+    pub async fn atomic_getset(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageResult<Option<Vec<u8>>> {
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
@@ -2657,10 +2861,15 @@ impl StorageEngine {
                 if !expired && occ.get().data_type != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                let old = if expired { None } else { Some(occ.get().value.clone()) };
+                let old = if expired {
+                    None
+                } else {
+                    Some(occ.get().value.clone())
+                };
                 let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 let item = StorageItem::new(value);
                 occ.insert(item);
                 // Bump version while OccupiedEntry still holds the shard lock
@@ -2668,7 +2877,8 @@ impl StorageEngine {
                 old
             }
             Entry::Vacant(vac) => {
-                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                self.current_memory
+                    .fetch_add(required_size as u64, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
                 // Bind RefMut to keep shard lock held during version bump
                 let _ref = vac.insert(StorageItem::new(value));
@@ -2688,9 +2898,7 @@ impl StorageEngine {
     /// Deserialize hash data from bytes. Returns empty HashMap if bytes is None.
     fn hash_deserialize(data: Option<&Vec<u8>>) -> HashMap<Vec<u8>, Vec<u8>> {
         match data {
-            Some(bytes) if !bytes.is_empty() => {
-                bincode::deserialize(bytes).unwrap_or_default()
-            }
+            Some(bytes) if !bytes.is_empty() => bincode::deserialize(bytes).unwrap_or_default(),
             _ => HashMap::new(),
         }
     }
@@ -2739,9 +2947,8 @@ impl StorageEngine {
     pub fn hash_mget(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<Vec<Option<Vec<u8>>>> {
         self.atomic_read(key, RedisDataType::Hash, |existing| {
             let map = Self::hash_deserialize(existing);
-            let results: Vec<Option<Vec<u8>>> = fields.iter()
-                .map(|f| map.get(*f).cloned())
-                .collect();
+            let results: Vec<Option<Vec<u8>>> =
+                fields.iter().map(|f| map.get(*f).cloned()).collect();
             Ok(results)
         })
     }
@@ -2821,15 +3028,19 @@ impl StorageEngine {
                 }
                 None => 0,
             };
-            let new_val = current.checked_add(delta)
-                .ok_or(StorageError::NotANumber)?;
+            let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
             map.insert(field.to_vec(), new_val.to_string().into_bytes());
             Ok((Some(Self::hash_serialize(&map)), new_val))
         })
     }
 
     /// Increment a hash field's float value by delta. Returns the new value as string.
-    pub fn hash_incr_by_float(&self, key: &[u8], field: &[u8], delta: f64) -> StorageResult<String> {
+    pub fn hash_incr_by_float(
+        &self,
+        key: &[u8],
+        field: &[u8],
+        delta: f64,
+    ) -> StorageResult<String> {
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
             let mut map = Self::hash_deserialize(existing.as_deref());
             let current = match map.get(field) {
@@ -2900,143 +3111,170 @@ mod tests {
     async fn test_set_get() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set a value
-        storage.set(b"key1".to_vec(), b"value1".to_vec(), None).await.unwrap();
-        
+        storage
+            .set(b"key1".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
+
         // Get the value
         let value = storage.get(b"key1").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
-        
+
         // Get a non-existent key
         let value = storage.get(b"nonexistent").await.unwrap();
         assert_eq!(value, None);
     }
-    
+
     #[tokio::test]
     async fn test_expire() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set a value
-        storage.set(b"expire_key".to_vec(), b"value".to_vec(), None).await.unwrap();
-        
+        storage
+            .set(b"expire_key".to_vec(), b"value".to_vec(), None)
+            .await
+            .unwrap();
+
         // Set expiration
         let ttl = Duration::from_millis(100);
         storage.expire(b"expire_key", Some(ttl)).await.unwrap();
-        
+
         // Check TTL
         let remaining = storage.ttl(b"expire_key").await.unwrap();
         assert!(remaining.is_some());
         assert!(remaining.unwrap() <= ttl);
-        
+
         // Wait for expiration
         sleep(Duration::from_millis(150)).await;
-        
+
         // Key should be gone
         let value = storage.get(b"expire_key").await.unwrap();
         assert_eq!(value, None);
     }
-    
+
     #[tokio::test]
     async fn test_set_with_expiry() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set with expiry
         let ttl = Duration::from_millis(100);
-        storage.set(
-            b"expiring_key".to_vec(), 
-            b"expiring_value".to_vec(), 
-            Some(ttl)
-        ).await.unwrap();
-        
+        storage
+            .set(
+                b"expiring_key".to_vec(),
+                b"expiring_value".to_vec(),
+                Some(ttl),
+            )
+            .await
+            .unwrap();
+
         // Check value exists
         let value = storage.get(b"expiring_key").await.unwrap();
         assert_eq!(value, Some(b"expiring_value".to_vec()));
-        
+
         // Wait for expiration
         sleep(Duration::from_millis(150)).await;
-        
+
         // Key should be gone
         let value = storage.get(b"expiring_key").await.unwrap();
         assert_eq!(value, None);
     }
-    
+
     #[tokio::test]
     async fn test_del() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set multiple keys
-        storage.set(b"del_key1".to_vec(), b"value1".to_vec(), None).await.unwrap();
-        storage.set(b"del_key2".to_vec(), b"value2".to_vec(), None).await.unwrap();
-        storage.set(b"keep_key".to_vec(), b"keep_value".to_vec(), None).await.unwrap();
-        
+        storage
+            .set(b"del_key1".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
+        storage
+            .set(b"del_key2".to_vec(), b"value2".to_vec(), None)
+            .await
+            .unwrap();
+        storage
+            .set(b"keep_key".to_vec(), b"keep_value".to_vec(), None)
+            .await
+            .unwrap();
+
         // Delete keys one by one
         let deleted1 = storage.del(b"del_key1").await.unwrap();
         let deleted2 = storage.del(b"del_key2").await.unwrap();
         let deleted3 = storage.del(b"nonexistent").await.unwrap();
-        
+
         assert!(deleted1);
         assert!(deleted2);
         assert!(!deleted3);
-        
+
         // Check deleted keys
         let val1 = storage.get(b"del_key1").await.unwrap();
         let val2 = storage.get(b"del_key2").await.unwrap();
         let val3 = storage.get(b"keep_key").await.unwrap();
-        
+
         assert_eq!(val1, None);
         assert_eq!(val2, None);
         assert_eq!(val3, Some(b"keep_value".to_vec()));
     }
-    
+
     #[tokio::test]
     async fn test_exists() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set a key
-        storage.set(b"exists_key".to_vec(), b"value".to_vec(), None).await.unwrap();
-        
+        storage
+            .set(b"exists_key".to_vec(), b"value".to_vec(), None)
+            .await
+            .unwrap();
+
         // Check existence
         let exists = storage.exists(b"exists_key").await.unwrap();
         assert!(exists);
-        
+
         // Check non-existent key
         let exists = storage.exists(b"nonexistent").await.unwrap();
         assert!(!exists);
     }
-    
+
     #[tokio::test]
     async fn test_expiry_cleanup() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
-        
+
         // Set keys with short TTL
         for i in 0..5 {
             let key = format!("cleanup_key{}", i).into_bytes();
-            storage.set(key, b"value".to_vec(), Some(Duration::from_millis(30))).await.unwrap();
+            storage
+                .set(key, b"value".to_vec(), Some(Duration::from_millis(30)))
+                .await
+                .unwrap();
         }
-        
+
         // Set one key with longer TTL
-        storage.set(
-            b"cleanup_survivor".to_vec(),
-            b"survivor".to_vec(),
-            Some(Duration::from_millis(200))
-        ).await.unwrap();
-        
+        storage
+            .set(
+                b"cleanup_survivor".to_vec(),
+                b"survivor".to_vec(),
+                Some(Duration::from_millis(200)),
+            )
+            .await
+            .unwrap();
+
         // Wait for cleanup to run
         sleep(Duration::from_millis(100)).await;
-        
+
         // Check that short TTL keys are gone
         for i in 0..5 {
             let key = format!("cleanup_key{}", i);
             let exists = storage.exists(key.as_bytes()).await.unwrap();
             assert!(!exists, "Key '{}' should have been cleaned up", key);
         }
-        
+
         // Check that longer TTL key still exists
         let exists = storage.exists(b"cleanup_survivor").await.unwrap();
         assert!(exists, "Survivor key should still exist");
@@ -3049,12 +3287,21 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // First set_nx should succeed
-        let (result, version) = storage.set_nx(b"nx_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+        let (result, version) = storage
+            .set_nx(b"nx_key".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
         assert!(result);
-        assert!(version > 0, "version should be non-zero on successful insert");
+        assert!(
+            version > 0,
+            "version should be non-zero on successful insert"
+        );
 
         // Second set_nx on same key should fail
-        let (result, _) = storage.set_nx(b"nx_key".to_vec(), b"value2".to_vec(), None).await.unwrap();
+        let (result, _) = storage
+            .set_nx(b"nx_key".to_vec(), b"value2".to_vec(), None)
+            .await
+            .unwrap();
         assert!(!result);
 
         // Value should still be the first one
@@ -3067,11 +3314,21 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set key with short TTL
-        storage.set(b"nx_exp".to_vec(), b"old".to_vec(), Some(Duration::from_millis(30))).await.unwrap();
+        storage
+            .set(
+                b"nx_exp".to_vec(),
+                b"old".to_vec(),
+                Some(Duration::from_millis(30)),
+            )
+            .await
+            .unwrap();
         sleep(Duration::from_millis(50)).await;
 
         // set_nx should succeed since key is expired
-        let (result, _) = storage.set_nx(b"nx_exp".to_vec(), b"new".to_vec(), None).await.unwrap();
+        let (result, _) = storage
+            .set_nx(b"nx_exp".to_vec(), b"new".to_vec(), None)
+            .await
+            .unwrap();
         assert!(result);
 
         let val = storage.get(b"nx_exp").await.unwrap();
@@ -3083,14 +3340,23 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // set_xx on non-existent key should fail
-        let result = storage.set_xx(b"xx_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+        let result = storage
+            .set_xx(b"xx_key".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
         assert!(!result);
 
         // Set the key first
-        storage.set(b"xx_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+        storage
+            .set(b"xx_key".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
 
         // set_xx should now succeed
-        let result = storage.set_xx(b"xx_key".to_vec(), b"value2".to_vec(), None).await.unwrap();
+        let result = storage
+            .set_xx(b"xx_key".to_vec(), b"value2".to_vec(), None)
+            .await
+            .unwrap();
         assert!(result);
 
         let val = storage.get(b"xx_key").await.unwrap();
@@ -3101,15 +3367,33 @@ mod tests {
     async fn test_set_with_options_nx() {
         let storage = StorageEngine::new(StorageConfig::default());
 
-        let result = storage.set_with_options(
-            b"opt_key".to_vec(), b"v1".to_vec(), None, true, false, false, false
-        ).await.unwrap();
+        let result = storage
+            .set_with_options(
+                b"opt_key".to_vec(),
+                b"v1".to_vec(),
+                None,
+                true,
+                false,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, SetResult::Ok);
 
         // NX should fail on existing key
-        let result = storage.set_with_options(
-            b"opt_key".to_vec(), b"v2".to_vec(), None, true, false, false, false
-        ).await.unwrap();
+        let result = storage
+            .set_with_options(
+                b"opt_key".to_vec(),
+                b"v2".to_vec(),
+                None,
+                true,
+                false,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, SetResult::NotSet);
     }
 
@@ -3118,15 +3402,33 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // GET on non-existent key
-        let result = storage.set_with_options(
-            b"get_key".to_vec(), b"v1".to_vec(), None, false, false, true, false
-        ).await.unwrap();
+        let result = storage
+            .set_with_options(
+                b"get_key".to_vec(),
+                b"v1".to_vec(),
+                None,
+                false,
+                false,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, SetResult::OldValue(None));
 
         // GET on existing key
-        let result = storage.set_with_options(
-            b"get_key".to_vec(), b"v2".to_vec(), None, false, false, true, false
-        ).await.unwrap();
+        let result = storage
+            .set_with_options(
+                b"get_key".to_vec(),
+                b"v2".to_vec(),
+                None,
+                false,
+                false,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, SetResult::OldValue(Some(b"v1".to_vec())));
     }
 
@@ -3156,7 +3458,10 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set a non-numeric value
-        storage.set(b"not_num".to_vec(), b"hello".to_vec(), None).await.unwrap();
+        storage
+            .set(b"not_num".to_vec(), b"hello".to_vec(), None)
+            .await
+            .unwrap();
 
         let result = storage.atomic_incr(b"not_num", 1);
         assert!(matches!(result, Err(StorageError::NotANumber)));
@@ -3167,7 +3472,15 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set a list type value
-        storage.set_with_type(b"list_key".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+        storage
+            .set_with_type(
+                b"list_key".to_vec(),
+                b"data".to_vec(),
+                RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         let result = storage.atomic_incr(b"list_key", 1);
         assert!(matches!(result, Err(StorageError::WrongType)));
@@ -3205,21 +3518,23 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Use atomic_modify to create a list-like structure
-        let result: usize = storage.atomic_modify(b"my_list", RedisDataType::List, |existing| {
-            match existing {
-                None => {
-                    // Create new list with one element
-                    let data = bincode::serialize(&vec![b"item1".to_vec()]).unwrap();
-                    Ok((Some(data), 1))
+        let result: usize = storage
+            .atomic_modify(b"my_list", RedisDataType::List, |existing| {
+                match existing {
+                    None => {
+                        // Create new list with one element
+                        let data = bincode::serialize(&vec![b"item1".to_vec()]).unwrap();
+                        Ok((Some(data), 1))
+                    }
+                    Some(_) => unreachable!(),
                 }
-                Some(_) => unreachable!(),
-            }
-        }).unwrap();
+            })
+            .unwrap();
         assert_eq!(result, 1);
 
         // Modify the list to add another element
-        let result: usize = storage.atomic_modify(b"my_list", RedisDataType::List, |existing| {
-            match existing {
+        let result: usize = storage
+            .atomic_modify(b"my_list", RedisDataType::List, |existing| match existing {
                 Some(data) => {
                     let mut list: Vec<Vec<u8>> = bincode::deserialize(data).unwrap();
                     list.push(b"item2".to_vec());
@@ -3228,8 +3543,8 @@ mod tests {
                     Ok((Some(new_data), new_len))
                 }
                 None => unreachable!(),
-            }
-        }).unwrap();
+            })
+            .unwrap();
         assert_eq!(result, 2);
     }
 
@@ -3238,7 +3553,10 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set a string key
-        storage.set(b"str_key".to_vec(), b"value".to_vec(), None).await.unwrap();
+        storage
+            .set(b"str_key".to_vec(), b"value".to_vec(), None)
+            .await
+            .unwrap();
 
         // Try to modify as a list - should fail with WrongType
         let result = storage.atomic_modify(b"str_key", RedisDataType::List, |_| {
@@ -3252,7 +3570,10 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set a key
-        storage.set(b"gd_key".to_vec(), b"value".to_vec(), None).await.unwrap();
+        storage
+            .set(b"gd_key".to_vec(), b"value".to_vec(), None)
+            .await
+            .unwrap();
 
         // GETDEL should return the value and delete
         let val = storage.atomic_getdel(b"gd_key").unwrap();
@@ -3272,11 +3593,17 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // GETSET on non-existent key
-        let old = storage.atomic_getset(b"gs_key".to_vec(), b"v1".to_vec()).await.unwrap();
+        let old = storage
+            .atomic_getset(b"gs_key".to_vec(), b"v1".to_vec())
+            .await
+            .unwrap();
         assert_eq!(old, None);
 
         // GETSET on existing key
-        let old = storage.atomic_getset(b"gs_key".to_vec(), b"v2".to_vec()).await.unwrap();
+        let old = storage
+            .atomic_getset(b"gs_key".to_vec(), b"v2".to_vec())
+            .await
+            .unwrap();
         assert_eq!(old, Some(b"v1".to_vec()));
 
         // Verify new value
@@ -3315,7 +3642,10 @@ mod tests {
         let storage = StorageEngine::new(StorageConfig::default());
 
         // Set initial value
-        storage.set(b"race_counter".to_vec(), b"0".to_vec(), None).await.unwrap();
+        storage
+            .set(b"race_counter".to_vec(), b"0".to_vec(), None)
+            .await
+            .unwrap();
 
         let mut handles = vec![];
         for _ in 0..100 {
@@ -3356,7 +3686,10 @@ mod tests {
 
         // Memory should be back to 0 (or very close due to racing)
         let mem = storage.get_used_memory();
-        assert_eq!(mem, 0, "Memory should be 0 after setting and deleting all keys");
+        assert_eq!(
+            mem, 0,
+            "Memory should be 0 after setting and deleting all keys"
+        );
     }
 
     #[tokio::test]
@@ -3379,7 +3712,10 @@ mod tests {
         // Verify TTL exists
         let remaining = storage.ttl(b"ttl_key").await.unwrap();
         assert!(remaining.is_some(), "Key should have a TTL");
-        assert!(remaining.unwrap().as_secs() > 200, "TTL should be close to 300s");
+        assert!(
+            remaining.unwrap().as_secs() > 200,
+            "TTL should be close to 300s"
+        );
 
         // Now overwrite value with set_with_type_preserve_ttl
         storage
@@ -3398,7 +3734,10 @@ mod tests {
         // TTL should be preserved
         let remaining = storage.ttl(b"ttl_key").await.unwrap();
         assert!(remaining.is_some(), "TTL should be preserved after update");
-        assert!(remaining.unwrap().as_secs() > 200, "TTL should still be close to 300s");
+        assert!(
+            remaining.unwrap().as_secs() > 200,
+            "TTL should still be close to 300s"
+        );
     }
 
     #[tokio::test]
@@ -3499,8 +3838,14 @@ mod tests {
 
         // TTL should still be preserved
         let remaining = storage.ttl(b"concurrent_ttl").await.unwrap();
-        assert!(remaining.is_some(), "TTL should be preserved after concurrent updates");
-        assert!(remaining.unwrap().as_secs() > 200, "TTL should still be close to 300s");
+        assert!(
+            remaining.is_some(),
+            "TTL should be preserved after concurrent updates"
+        );
+        assert!(
+            remaining.unwrap().as_secs() > 200,
+            "TTL should still be close to 300s"
+        );
     }
 
     #[tokio::test]
@@ -3512,7 +3857,10 @@ mod tests {
         let num_keys = 10_000;
         for i in 0..num_keys {
             let key = format!("watched_key_{}", i).into_bytes();
-            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage
+                .set(key.clone(), b"value".to_vec(), None)
+                .await
+                .unwrap();
             // Bump key version to simulate WATCH
             storage.bump_key_version(&key);
         }
@@ -3520,17 +3868,27 @@ mod tests {
         // Also create some key_locks entries by using lock_keys
         for i in 0..100 {
             let key = format!("locked_key_{}", i).into_bytes();
-            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage
+                .set(key.clone(), b"value".to_vec(), None)
+                .await
+                .unwrap();
             // Lock and immediately release to populate key_locks map
             let _guard = storage.lock_keys(&[key]).await;
             // guard drops here, releasing the lock
         }
 
         // Verify maps have entries
-        assert!(storage.key_versions_len() >= num_keys,
-            "key_versions should have at least {} entries, got {}", num_keys, storage.key_versions_len());
-        assert!(storage.key_locks_len() >= 100,
-            "key_locks should have at least 100 entries, got {}", storage.key_locks_len());
+        assert!(
+            storage.key_versions_len() >= num_keys,
+            "key_versions should have at least {} entries, got {}",
+            num_keys,
+            storage.key_versions_len()
+        );
+        assert!(
+            storage.key_locks_len() >= 100,
+            "key_locks should have at least 100 entries, got {}",
+            storage.key_locks_len()
+        );
 
         // Delete all keys from data store
         for i in 0..num_keys {
@@ -3543,19 +3901,29 @@ mod tests {
         }
 
         // Before cleanup, maps should still have entries
-        assert!(storage.key_versions_len() >= num_keys,
-            "key_versions should still have entries before cleanup");
-        assert!(storage.key_locks_len() >= 100,
-            "key_locks should still have entries before cleanup");
+        assert!(
+            storage.key_versions_len() >= num_keys,
+            "key_versions should still have entries before cleanup"
+        );
+        assert!(
+            storage.key_locks_len() >= 100,
+            "key_locks should still have entries before cleanup"
+        );
 
         // Run cleanup
         storage.trigger_metadata_cleanup();
 
         // After cleanup, maps should be much smaller (ideally empty for these keys)
-        assert!(storage.key_versions_len() < num_keys / 2,
-            "key_versions should have shrunk significantly, got {}", storage.key_versions_len());
-        assert!(storage.key_locks_len() < 50,
-            "key_locks should have shrunk significantly, got {}", storage.key_locks_len());
+        assert!(
+            storage.key_versions_len() < num_keys / 2,
+            "key_versions should have shrunk significantly, got {}",
+            storage.key_versions_len()
+        );
+        assert!(
+            storage.key_locks_len() < 50,
+            "key_locks should have shrunk significantly, got {}",
+            storage.key_locks_len()
+        );
     }
 
     #[tokio::test]
@@ -3566,14 +3934,20 @@ mod tests {
         // Create keys that will remain
         for i in 0..100 {
             let key = format!("active_key_{}", i).into_bytes();
-            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage
+                .set(key.clone(), b"value".to_vec(), None)
+                .await
+                .unwrap();
             storage.bump_key_version(&key);
         }
 
         // Create keys that will be deleted
         for i in 0..100 {
             let key = format!("stale_key_{}", i).into_bytes();
-            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage
+                .set(key.clone(), b"value".to_vec(), None)
+                .await
+                .unwrap();
             storage.bump_key_version(&key);
         }
 
@@ -3584,17 +3958,27 @@ mod tests {
         }
 
         let versions_before = storage.key_versions_len();
-        assert!(versions_before >= 200, "Should have at least 200 version entries");
+        assert!(
+            versions_before >= 200,
+            "Should have at least 200 version entries"
+        );
 
         // Run cleanup
         storage.trigger_metadata_cleanup();
 
         // Active keys should still have their versions
         let versions_after = storage.key_versions_len();
-        assert!(versions_after >= 100,
-            "Should still have at least 100 active version entries, got {}", versions_after);
-        assert!(versions_after < versions_before,
-            "Should have fewer entries after cleanup ({} should be < {})", versions_after, versions_before);
+        assert!(
+            versions_after >= 100,
+            "Should still have at least 100 active version entries, got {}",
+            versions_after
+        );
+        assert!(
+            versions_after < versions_before,
+            "Should have fewer entries after cleanup ({} should be < {})",
+            versions_after,
+            versions_before
+        );
 
         // Verify active keys still have valid versions (non-zero since we bumped them)
         for i in 0..100 {
@@ -3611,7 +3995,10 @@ mod tests {
 
         // Create a key and acquire its lock
         let key = b"held_key".to_vec();
-        storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+        storage
+            .set(key.clone(), b"value".to_vec(), None)
+            .await
+            .unwrap();
 
         // Acquire lock (don't drop the guard)
         let guard = storage.lock_keys(&[key.clone()]).await;
@@ -3626,8 +4013,11 @@ mod tests {
         storage.trigger_metadata_cleanup();
 
         let locks_after = storage.key_locks_len();
-        assert!(locks_after >= 1,
-            "Held lock should not be removed by cleanup, got {} locks", locks_after);
+        assert!(
+            locks_after >= 1,
+            "Held lock should not be removed by cleanup, got {} locks",
+            locks_after
+        );
 
         // Now drop the guard
         drop(guard);

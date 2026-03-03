@@ -1,7 +1,7 @@
-use serde_json::Value;
 use crate::command::error::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
+use serde_json::Value;
 use tracing::{debug, warn};
 // use crate::command::types::json_integration::{
 //     enhanced_json_get, enhanced_json_set, enhanced_json_type,
@@ -26,7 +26,8 @@ fn extract_json_at_path<'a>(value: &'a Value, path: &str) -> Result<&'a Value, C
     let json_pointer = convert_redis_path_to_pointer(path)?;
 
     // Use serde_json's efficient pointer lookup
-    value.pointer(&json_pointer)
+    value
+        .pointer(&json_pointer)
         .ok_or_else(|| CommandError::InvalidArgument(format!("Path not found: {}", path)))
 }
 
@@ -75,7 +76,7 @@ fn convert_redis_path_to_pointer(path: &str) -> Result<String, CommandError> {
                     pointer.push('/');
                 }
                 need_separator = false; // The '/' is already there
-            },
+            }
             '[' => {
                 // Array index: field[0] -> /field/0
                 if !pointer.ends_with('/') {
@@ -89,13 +90,14 @@ fn convert_redis_path_to_pointer(path: &str) -> Result<String, CommandError> {
                         chars.next(); // consume ']'
                         break;
                     } else {
-                        return Err(CommandError::InvalidArgument(
-                            format!("Invalid array index in path: {}", path)
-                        ));
+                        return Err(CommandError::InvalidArgument(format!(
+                            "Invalid array index in path: {}",
+                            path
+                        )));
                     }
                 }
                 need_separator = true; // After array index, we need separator for next field
-            },
+            }
             _ => {
                 // Regular character - add leading '/' if needed
                 if need_separator && !pointer.ends_with('/') {
@@ -124,7 +126,11 @@ pub async fn json_get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.GET command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.GET command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the raw data from storage
     match engine.get(key).await? {
@@ -136,27 +142,32 @@ pub async fn json_get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     match serde_json::from_str::<Value>(&json_str) {
                         Ok(mut json_value) => {
                             // Apply datetime transformation
-                            json_value = crate::utils::datetime::process_json_for_serialization(json_value);
+                            json_value =
+                                crate::utils::datetime::process_json_for_serialization(json_value);
 
                             // Extract value at path - return nil if path not found
                             match extract_json_at_path(&json_value, &path) {
                                 Ok(result_value) => {
                                     // Serialize result
                                     match serde_json::to_string(&result_value) {
-                                        Ok(result_str) => Ok(RespValue::BulkString(Some(result_str.into_bytes()))),
-                                        Err(_) => Err(CommandError::InvalidArgument("JSON serialization failed".to_string()))
+                                        Ok(result_str) => {
+                                            Ok(RespValue::BulkString(Some(result_str.into_bytes())))
+                                        }
+                                        Err(_) => Err(CommandError::InvalidArgument(
+                                            "JSON serialization failed".to_string(),
+                                        )),
                                     }
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None)) // Path not found returns nil
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)), // Path not found returns nil
                             }
-                        },
-                        Err(_) => Err(CommandError::WrongType)
+                        }
+                        Err(_) => Err(CommandError::WrongType),
                     }
-                },
-                Err(_) => Err(CommandError::WrongType)
+                }
+                Err(_) => Err(CommandError::WrongType),
             }
-        },
-        None => Ok(RespValue::BulkString(None))
+        }
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -189,13 +200,14 @@ fn set_json_at_path(doc: &mut Value, path: &str, new_value: Value) -> Result<(),
                         arr[index] = new_value;
                         return Ok(());
                     } else {
-                        return Err(CommandError::InvalidArgument(
-                            format!("Array index out of bounds: {}", index)
-                        ));
+                        return Err(CommandError::InvalidArgument(format!(
+                            "Array index out of bounds: {}",
+                            index
+                        )));
                     }
                 } else {
                     return Err(CommandError::InvalidArgument(
-                        "Cannot use array index on non-array".to_string()
+                        "Cannot use array index on non-array".to_string(),
                     ));
                 }
             } else {
@@ -205,7 +217,7 @@ fn set_json_at_path(doc: &mut Value, path: &str, new_value: Value) -> Result<(),
                     return Ok(());
                 } else {
                     return Err(CommandError::InvalidArgument(
-                        "Cannot set property on non-object".to_string()
+                        "Cannot set property on non-object".to_string(),
                     ));
                 }
             }
@@ -217,13 +229,14 @@ fn set_json_at_path(doc: &mut Value, path: &str, new_value: Value) -> Result<(),
                     if index < arr.len() {
                         current = &mut arr[index];
                     } else {
-                        return Err(CommandError::InvalidArgument(
-                            format!("Array index out of bounds: {}", index)
-                        ));
+                        return Err(CommandError::InvalidArgument(format!(
+                            "Array index out of bounds: {}",
+                            index
+                        )));
                     }
                 } else {
                     return Err(CommandError::InvalidArgument(
-                        "Cannot use array index on non-array".to_string()
+                        "Cannot use array index on non-array".to_string(),
                     ));
                 }
             } else {
@@ -235,7 +248,7 @@ fn set_json_at_path(doc: &mut Value, path: &str, new_value: Value) -> Result<(),
                     current = obj.get_mut(*segment).unwrap();
                 } else {
                     return Err(CommandError::InvalidArgument(
-                        "Cannot navigate through non-object".to_string()
+                        "Cannot navigate through non-object".to_string(),
                     ));
                 }
             }
@@ -256,13 +269,17 @@ pub async fn json_set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let path = String::from_utf8_lossy(&args[1]).to_string();
     let value_data = &args[2];
 
-    debug!("JSON.SET command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.SET command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Parse the new JSON value
     let json_str = String::from_utf8_lossy(value_data);
     let new_value: Value = match serde_json::from_str(&json_str) {
         Ok(v) => v,
-        Err(_) => return Err(CommandError::InvalidArgument("Invalid JSON".to_string()))
+        Err(_) => return Err(CommandError::InvalidArgument("Invalid JSON".to_string())),
     };
 
     // Check if it's a root path
@@ -272,7 +289,9 @@ pub async fn json_set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         // For root path, just store the value directly
         let serialized = serde_json::to_string(&new_value)
             .map_err(|e| CommandError::InternalError(format!("JSON serialization error: {}", e)))?;
-        engine.set(key.clone(), serialized.into_bytes(), None).await?;
+        engine
+            .set(key.clone(), serialized.into_bytes(), None)
+            .await?;
         return Ok(RespValue::SimpleString("OK".to_string()));
     }
 
@@ -281,14 +300,11 @@ pub async fn json_set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     // Get existing document or create new object
     let mut doc = match engine.get(key).await? {
-        Some(data) => {
-            match String::from_utf8(data) {
-                Ok(existing_json) => {
-                    serde_json::from_str(&existing_json)
-                        .map_err(|_| CommandError::WrongType)?
-                },
-                Err(_) => return Err(CommandError::WrongType)
+        Some(data) => match String::from_utf8(data) {
+            Ok(existing_json) => {
+                serde_json::from_str(&existing_json).map_err(|_| CommandError::WrongType)?
             }
+            Err(_) => return Err(CommandError::WrongType),
         },
         None => {
             // If key doesn't exist and path is nested, create root object
@@ -302,7 +318,9 @@ pub async fn json_set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     // Serialize and store
     let serialized = serde_json::to_string(&doc)
         .map_err(|e| CommandError::InternalError(format!("JSON serialization error: {}", e)))?;
-    engine.set(key.clone(), serialized.into_bytes(), None).await?;
+    engine
+        .set(key.clone(), serialized.into_bytes(), None)
+        .await?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
 }
@@ -320,7 +338,11 @@ pub async fn json_type(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         "$".to_string()
     };
 
-    debug!("JSON.TYPE command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.TYPE command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the raw data from storage
     match engine.get(key).await? {
@@ -335,17 +357,17 @@ pub async fn json_type(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                                 Ok(value_at_path) => {
                                     let type_name = json_type_name(value_at_path);
                                     Ok(RespValue::SimpleString(type_name))
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None)) // Path not found
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)), // Path not found
                             }
-                        },
-                        Err(_) => Err(CommandError::WrongType)
+                        }
+                        Err(_) => Err(CommandError::WrongType),
                     }
-                },
-                Err(_) => Err(CommandError::WrongType)
+                }
+                Err(_) => Err(CommandError::WrongType),
             }
-        },
-        None => Ok(RespValue::BulkString(None))
+        }
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -362,13 +384,18 @@ fn json_type_name(value: &Value) -> String {
 }
 
 /// Helper to get a mutable reference to the array at a JSON Pointer path
-fn get_array_at_path_mut<'a>(doc: &'a mut Value, path: &str) -> Result<&'a mut Vec<Value>, CommandError> {
+fn get_array_at_path_mut<'a>(
+    doc: &'a mut Value,
+    path: &str,
+) -> Result<&'a mut Vec<Value>, CommandError> {
     // Handle root path
     if path.is_empty() {
         if let Value::Array(arr) = doc {
             return Ok(arr);
         } else {
-            return Err(CommandError::InvalidArgument("Value at path is not an array".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "Value at path is not an array".to_string(),
+            ));
         }
     }
 
@@ -378,7 +405,9 @@ fn get_array_at_path_mut<'a>(doc: &'a mut Value, path: &str) -> Result<&'a mut V
         if let Value::Array(arr) = doc {
             return Ok(arr);
         } else {
-            return Err(CommandError::InvalidArgument("Value at path is not an array".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "Value at path is not an array".to_string(),
+            ));
         }
     }
 
@@ -390,10 +419,14 @@ fn get_array_at_path_mut<'a>(doc: &'a mut Value, path: &str) -> Result<&'a mut V
                 if index < arr.len() {
                     current = &mut arr[index];
                 } else {
-                    return Err(CommandError::InvalidArgument("Array index out of bounds".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "Array index out of bounds".to_string(),
+                    ));
                 }
             } else {
-                return Err(CommandError::InvalidArgument("Cannot use array index on non-array".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "Cannot use array index on non-array".to_string(),
+                ));
             }
         } else if let Value::Object(obj) = current {
             if let Some(val) = obj.get_mut(*segment) {
@@ -402,14 +435,18 @@ fn get_array_at_path_mut<'a>(doc: &'a mut Value, path: &str) -> Result<&'a mut V
                 return Err(CommandError::InvalidArgument("Path not found".to_string()));
             }
         } else {
-            return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "Cannot navigate through non-object".to_string(),
+            ));
         }
     }
 
     if let Value::Array(arr) = current {
         Ok(arr)
     } else {
-        Err(CommandError::InvalidArgument("Value at path is not an array".to_string()))
+        Err(CommandError::InvalidArgument(
+            "Value at path is not an array".to_string(),
+        ))
     }
 }
 
@@ -423,7 +460,11 @@ pub async fn json_arrappend(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     let path = String::from_utf8_lossy(&args[1]).to_string();
     let values_to_append = &args[2..];
 
-    debug!("JSON.ARRAPPEND command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.ARRAPPEND command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the current JSON data
     match engine.get(key).await? {
@@ -444,7 +485,7 @@ pub async fn json_arrappend(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
                                 match serde_json::from_str::<Value>(&value_str) {
                                     Ok(parsed_value) => {
                                         arr.push(parsed_value);
-                                    },
+                                    }
                                     Err(_) => {
                                         // If it's not valid JSON, treat as string
                                         arr.push(Value::String(value_str.to_string()));
@@ -455,20 +496,33 @@ pub async fn json_arrappend(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
                             let array_len = arr.len() as i64;
 
                             // Store the updated JSON
-                            let updated_json = serde_json::to_string(&json_value)
-                                .map_err(|e| CommandError::InternalError(format!("JSON serialization error: {}", e)))?;
+                            let updated_json = serde_json::to_string(&json_value).map_err(|e| {
+                                CommandError::InternalError(format!(
+                                    "JSON serialization error: {}",
+                                    e
+                                ))
+                            })?;
 
-                            engine.set(key.clone(), updated_json.into_bytes(), None).await?;
+                            engine
+                                .set(key.clone(), updated_json.into_bytes(), None)
+                                .await?;
 
                             Ok(RespValue::Integer(array_len))
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Err(CommandError::InvalidArgument("Key does not exist".to_string()))
+        }
+        None => Err(CommandError::InvalidArgument(
+            "Key does not exist".to_string(),
+        )),
     }
 }
 
@@ -480,13 +534,24 @@ pub async fn json_arrtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
 
     let key = &args[0];
     let path = String::from_utf8_lossy(&args[1]).to_string();
-    let start = String::from_utf8_lossy(&args[2]).parse::<i64>()
-        .map_err(|_| CommandError::InvalidArgument("Start index is not a valid integer".to_string()))?;
-    let stop = String::from_utf8_lossy(&args[3]).parse::<i64>()
-        .map_err(|_| CommandError::InvalidArgument("Stop index is not a valid integer".to_string()))?;
+    let start = String::from_utf8_lossy(&args[2])
+        .parse::<i64>()
+        .map_err(|_| {
+            CommandError::InvalidArgument("Start index is not a valid integer".to_string())
+        })?;
+    let stop = String::from_utf8_lossy(&args[3])
+        .parse::<i64>()
+        .map_err(|_| {
+            CommandError::InvalidArgument("Stop index is not a valid integer".to_string())
+        })?;
 
-    debug!("JSON.ARRTRIM command for key: {}, path: {}, start: {}, stop: {}",
-           String::from_utf8_lossy(key), path, start, stop);
+    debug!(
+        "JSON.ARRTRIM command for key: {}, path: {}, start: {}, stop: {}",
+        String::from_utf8_lossy(key),
+        path,
+        start,
+        stop
+    );
 
     // Get the current JSON data
     match engine.get(key).await? {
@@ -513,7 +578,9 @@ pub async fn json_arrtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
 
                             if start_idx < arr.len() && start_idx <= stop_idx {
                                 // Extract the trimmed portion
-                                let trimmed: Vec<Value> = arr.drain(start_idx..=std::cmp::min(stop_idx, arr.len() - 1)).collect();
+                                let trimmed: Vec<Value> = arr
+                                    .drain(start_idx..=std::cmp::min(stop_idx, arr.len() - 1))
+                                    .collect();
                                 *arr = trimmed;
                             } else {
                                 // Invalid range, clear the array
@@ -523,20 +590,33 @@ pub async fn json_arrtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
                             let array_len = arr.len() as i64;
 
                             // Store the updated JSON
-                            let updated_json = serde_json::to_string(&json_value)
-                                .map_err(|e| CommandError::InternalError(format!("JSON serialization error: {}", e)))?;
+                            let updated_json = serde_json::to_string(&json_value).map_err(|e| {
+                                CommandError::InternalError(format!(
+                                    "JSON serialization error: {}",
+                                    e
+                                ))
+                            })?;
 
-                            engine.set(key.clone(), updated_json.into_bytes(), None).await?;
+                            engine
+                                .set(key.clone(), updated_json.into_bytes(), None)
+                                .await?;
 
                             Ok(RespValue::Integer(array_len))
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Err(CommandError::InvalidArgument("Key does not exist".to_string()))
+        }
+        None => Err(CommandError::InvalidArgument(
+            "Key does not exist".to_string(),
+        )),
     }
 }
 
@@ -554,7 +634,11 @@ pub async fn json_resp(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.RESP command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.RESP command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the raw data from storage
     match engine.get(key).await? {
@@ -572,23 +656,31 @@ pub async fn json_resp(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                                 // TODO: Implement proper JSONPath support
                                 json_value
                             };
-                            
+
                             // Convert JSON to RESP according to Redis JSON specs
                             Ok(json_to_resp(&selected_value))
-                        },
+                        }
                         Err(e) => {
-                            warn!("JSON parse error for key {}: {}", String::from_utf8_lossy(key), e);
+                            warn!(
+                                "JSON parse error for key {}: {}",
+                                String::from_utf8_lossy(key),
+                                e
+                            );
                             Err(CommandError::WrongType)
                         }
                     }
-                },
+                }
                 Err(e) => {
-                    warn!("UTF-8 decode error for key {}: {}", String::from_utf8_lossy(key), e);
+                    warn!(
+                        "UTF-8 decode error for key {}: {}",
+                        String::from_utf8_lossy(key),
+                        e
+                    );
                     Err(CommandError::WrongType)
                 }
             }
-        },
-        None => Ok(RespValue::BulkString(None))
+        }
+        None => Ok(RespValue::BulkString(None)),
     }
 }
 
@@ -596,7 +688,11 @@ pub async fn json_resp(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 fn json_to_resp(value: &Value) -> RespValue {
     match value {
         Value::Null => RespValue::BulkString(None),
-        Value::Bool(b) => RespValue::SimpleString(if *b { "true".to_string() } else { "false".to_string() }),
+        Value::Bool(b) => RespValue::SimpleString(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
         Value::Number(n) => {
             if n.is_i64() || n.is_u64() {
                 RespValue::Integer(n.as_i64().unwrap_or(0))
@@ -604,7 +700,7 @@ fn json_to_resp(value: &Value) -> RespValue {
                 // Floating point numbers are returned as bulk strings
                 RespValue::BulkString(Some(n.to_string().into_bytes()))
             }
-        },
+        }
         Value::String(s) => RespValue::BulkString(Some(s.as_bytes().to_vec())),
         Value::Array(arr) => {
             let mut resp_array = vec![RespValue::SimpleString("[".to_string())];
@@ -612,7 +708,7 @@ fn json_to_resp(value: &Value) -> RespValue {
                 resp_array.push(json_to_resp(item));
             }
             RespValue::Array(Some(resp_array))
-        },
+        }
         Value::Object(obj) => {
             let mut resp_array = vec![RespValue::SimpleString("{".to_string())];
             for (key, val) in obj {
@@ -637,7 +733,11 @@ pub async fn json_del(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.DEL command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.DEL command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // If path is root, delete the entire key
     if path == "$" || path == "." {
@@ -648,7 +748,9 @@ pub async fn json_del(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     } else {
         // For non-root paths, we'd need proper JSONPath implementation
         // For now, return not implemented for complex paths
-        Err(CommandError::InternalError("JSON.DEL for non-root paths not yet implemented".to_string()))
+        Err(CommandError::InternalError(
+            "JSON.DEL for non-root paths not yet implemented".to_string(),
+        ))
     }
 }
 
@@ -665,7 +767,11 @@ pub async fn json_objkeys(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.OBJKEYS command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.OBJKEYS command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the JSON data
     match engine.get(key).await? {
@@ -678,24 +784,32 @@ pub async fn json_objkeys(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
                             match extract_json_at_path(&json_value, &path) {
                                 Ok(value_at_path) => {
                                     if let Value::Object(obj) = value_at_path {
-                                        let keys: Vec<RespValue> = obj.keys()
-                                            .map(|k| RespValue::BulkString(Some(k.as_bytes().to_vec())))
+                                        let keys: Vec<RespValue> = obj
+                                            .keys()
+                                            .map(|k| {
+                                                RespValue::BulkString(Some(k.as_bytes().to_vec()))
+                                            })
                                             .collect();
                                         Ok(RespValue::Array(Some(keys)))
                                     } else {
                                         Ok(RespValue::BulkString(None)) // Not an object
                                     }
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None)) // Path not found
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)), // Path not found
                             }
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Ok(RespValue::BulkString(None)) // Key doesn't exist
+        }
+        None => Ok(RespValue::BulkString(None)), // Key doesn't exist
     }
 }
 
@@ -712,7 +826,11 @@ pub async fn json_objlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.OBJLEN command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.OBJLEN command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the JSON data
     match engine.get(key).await? {
@@ -729,17 +847,22 @@ pub async fn json_objlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
                                     } else {
                                         Ok(RespValue::BulkString(None)) // Not an object
                                     }
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None)) // Path not found
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)), // Path not found
                             }
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Ok(RespValue::BulkString(None)) // Key doesn't exist
+        }
+        None => Ok(RespValue::BulkString(None)), // Key doesn't exist
     }
 }
 
@@ -756,7 +879,11 @@ pub async fn json_arrlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         "$".to_string() // Default to root
     };
 
-    debug!("JSON.ARRLEN command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.ARRLEN command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the JSON data
     match engine.get(key).await? {
@@ -774,22 +901,31 @@ pub async fn json_arrlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
                                         // Not an array - return error per Redis JSON spec
                                         Err(CommandError::WrongType)
                                     }
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None)) // Path not found
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)), // Path not found
                             }
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Ok(RespValue::BulkString(None)) // Key doesn't exist
+        }
+        None => Ok(RespValue::BulkString(None)), // Key doesn't exist
     }
 }
 
 /// Helper to increment a number at a JSON Pointer path
-fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result<f64, CommandError> {
+fn increment_json_at_path(
+    doc: &mut Value,
+    path: &str,
+    increment: f64,
+) -> Result<f64, CommandError> {
     // Handle root path
     if path.is_empty() {
         if let Value::Number(num) = doc {
@@ -797,18 +933,23 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
             let new_value = current_value + increment;
 
             if !new_value.is_finite() {
-                return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "Result is not a valid number".to_string(),
+                ));
             }
 
             *doc = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
                 Value::Number(serde_json::Number::from(new_value as i64))
             } else {
-                Value::Number(serde_json::Number::from_f64(new_value)
-                    .ok_or_else(|| CommandError::InvalidArgument("Invalid number result".to_string()))?)
+                Value::Number(serde_json::Number::from_f64(new_value).ok_or_else(|| {
+                    CommandError::InvalidArgument("Invalid number result".to_string())
+                })?)
             };
             return Ok(new_value);
         } else {
-            return Err(CommandError::InvalidArgument("Value at path is not a number".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "Value at path is not a number".to_string(),
+            ));
         }
     }
 
@@ -827,47 +968,65 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
             // Get mutable reference to the number
             if let Ok(index) = segment.parse::<usize>() {
                 if let Value::Array(arr) = current
-                    && index < arr.len() {
-                        if let Value::Number(num) = &arr[index] {
-                            let current_value = num.as_f64().unwrap_or(0.0);
-                            let new_value = current_value + increment;
-
-                            if !new_value.is_finite() {
-                                return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
-                            }
-
-                            arr[index] = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
-                                Value::Number(serde_json::Number::from(new_value as i64))
-                            } else {
-                                Value::Number(serde_json::Number::from_f64(new_value)
-                                    .ok_or_else(|| CommandError::InvalidArgument("Invalid number result".to_string()))?)
-                            };
-                            return Ok(new_value);
-                        } else {
-                            return Err(CommandError::InvalidArgument("Value at path is not a number".to_string()));
-                        }
-                    }
-                return Err(CommandError::InvalidArgument("Array index out of bounds".to_string()));
-            } else {
-                if let Value::Object(obj) = current
-                    && let Some(Value::Number(num)) = obj.get(*segment) {
+                    && index < arr.len()
+                {
+                    if let Value::Number(num) = &arr[index] {
                         let current_value = num.as_f64().unwrap_or(0.0);
                         let new_value = current_value + increment;
 
                         if !new_value.is_finite() {
-                            return Err(CommandError::InvalidArgument("Result is not a valid number".to_string()));
+                            return Err(CommandError::InvalidArgument(
+                                "Result is not a valid number".to_string(),
+                            ));
                         }
 
-                        let new_val = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
+                        arr[index] = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
                             Value::Number(serde_json::Number::from(new_value as i64))
                         } else {
-                            Value::Number(serde_json::Number::from_f64(new_value)
-                                .ok_or_else(|| CommandError::InvalidArgument("Invalid number result".to_string()))?)
+                            Value::Number(serde_json::Number::from_f64(new_value).ok_or_else(
+                                || {
+                                    CommandError::InvalidArgument(
+                                        "Invalid number result".to_string(),
+                                    )
+                                },
+                            )?)
                         };
-                        obj.insert(segment.to_string(), new_val);
                         return Ok(new_value);
+                    } else {
+                        return Err(CommandError::InvalidArgument(
+                            "Value at path is not a number".to_string(),
+                        ));
                     }
-                return Err(CommandError::InvalidArgument("Value at path is not a number".to_string()));
+                }
+                return Err(CommandError::InvalidArgument(
+                    "Array index out of bounds".to_string(),
+                ));
+            } else {
+                if let Value::Object(obj) = current
+                    && let Some(Value::Number(num)) = obj.get(*segment)
+                {
+                    let current_value = num.as_f64().unwrap_or(0.0);
+                    let new_value = current_value + increment;
+
+                    if !new_value.is_finite() {
+                        return Err(CommandError::InvalidArgument(
+                            "Result is not a valid number".to_string(),
+                        ));
+                    }
+
+                    let new_val = if new_value.fract() == 0.0 && new_value.abs() < 1e15 {
+                        Value::Number(serde_json::Number::from(new_value as i64))
+                    } else {
+                        Value::Number(serde_json::Number::from_f64(new_value).ok_or_else(|| {
+                            CommandError::InvalidArgument("Invalid number result".to_string())
+                        })?)
+                    };
+                    obj.insert(segment.to_string(), new_val);
+                    return Ok(new_value);
+                }
+                return Err(CommandError::InvalidArgument(
+                    "Value at path is not a number".to_string(),
+                ));
             }
         } else {
             // Navigate deeper
@@ -876,10 +1035,14 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
                     if index < arr.len() {
                         current = &mut arr[index];
                     } else {
-                        return Err(CommandError::InvalidArgument("Array index out of bounds".to_string()));
+                        return Err(CommandError::InvalidArgument(
+                            "Array index out of bounds".to_string(),
+                        ));
                     }
                 } else {
-                    return Err(CommandError::InvalidArgument("Cannot use array index on non-array".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "Cannot use array index on non-array".to_string(),
+                    ));
                 }
             } else if let Value::Object(obj) = current {
                 if let Some(val) = obj.get_mut(*segment) {
@@ -888,7 +1051,9 @@ fn increment_json_at_path(doc: &mut Value, path: &str, increment: f64) -> Result
                     return Err(CommandError::InvalidArgument("Path not found".to_string()));
                 }
             } else {
-                return Err(CommandError::InvalidArgument("Cannot navigate through non-object".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "Cannot navigate through non-object".to_string(),
+                ));
             }
         }
     }
@@ -904,11 +1069,18 @@ pub async fn json_numincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
 
     let key = &args[0];
     let path = String::from_utf8_lossy(&args[1]).to_string();
-    let increment = String::from_utf8_lossy(&args[2]).parse::<f64>()
-        .map_err(|_| CommandError::InvalidArgument("Increment value is not a valid number".to_string()))?;
+    let increment = String::from_utf8_lossy(&args[2])
+        .parse::<f64>()
+        .map_err(|_| {
+            CommandError::InvalidArgument("Increment value is not a valid number".to_string())
+        })?;
 
-    debug!("JSON.NUMINCRBY command for key: {}, path: {}, increment: {}",
-           String::from_utf8_lossy(key), path, increment);
+    debug!(
+        "JSON.NUMINCRBY command for key: {}, path: {}, increment: {}",
+        String::from_utf8_lossy(key),
+        path,
+        increment
+    );
 
     // Get the current JSON data
     match engine.get(key).await? {
@@ -921,23 +1093,39 @@ pub async fn json_numincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
                             let json_pointer = convert_redis_path_to_pointer(&path)?;
 
                             // Increment the value at path
-                            let new_value = increment_json_at_path(&mut json_value, &json_pointer, increment)?;
+                            let new_value =
+                                increment_json_at_path(&mut json_value, &json_pointer, increment)?;
 
                             // Store the updated JSON
-                            let updated_json = serde_json::to_string(&json_value)
-                                .map_err(|e| CommandError::InternalError(format!("JSON serialization error: {}", e)))?;
+                            let updated_json = serde_json::to_string(&json_value).map_err(|e| {
+                                CommandError::InternalError(format!(
+                                    "JSON serialization error: {}",
+                                    e
+                                ))
+                            })?;
 
-                            engine.set(key.clone(), updated_json.into_bytes(), None).await?;
+                            engine
+                                .set(key.clone(), updated_json.into_bytes(), None)
+                                .await?;
 
-                            Ok(RespValue::BulkString(Some(new_value.to_string().into_bytes())))
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                            Ok(RespValue::BulkString(Some(
+                                new_value.to_string().into_bytes(),
+                            )))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Err(CommandError::InvalidArgument("Key does not exist".to_string()))
+        }
+        None => Err(CommandError::InvalidArgument(
+            "Key does not exist".to_string(),
+        )),
     }
 }
 
@@ -958,35 +1146,27 @@ pub async fn json_mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     for key in keys {
         match engine.get(key).await? {
-            Some(data) => {
-                match String::from_utf8(data) {
-                    Ok(json_str) => {
-                        match serde_json::from_str::<Value>(&json_str) {
-                            Ok(json_value) => {
-                                match extract_json_at_path(&json_value, &path) {
-                                    Ok(value_at_path) => {
-                                        match serde_json::to_string(value_at_path) {
-                                            Ok(result_str) => {
-                                                results.push(RespValue::BulkString(Some(result_str.into_bytes())));
-                                            },
-                                            Err(_) => {
-                                                results.push(RespValue::BulkString(None));
-                                            }
-                                        }
-                                    },
-                                    Err(_) => {
-                                        results.push(RespValue::BulkString(None));
-                                    }
-                                }
-                            },
+            Some(data) => match String::from_utf8(data) {
+                Ok(json_str) => match serde_json::from_str::<Value>(&json_str) {
+                    Ok(json_value) => match extract_json_at_path(&json_value, &path) {
+                        Ok(value_at_path) => match serde_json::to_string(value_at_path) {
+                            Ok(result_str) => {
+                                results.push(RespValue::BulkString(Some(result_str.into_bytes())));
+                            }
                             Err(_) => {
                                 results.push(RespValue::BulkString(None));
                             }
+                        },
+                        Err(_) => {
+                            results.push(RespValue::BulkString(None));
                         }
                     },
                     Err(_) => {
                         results.push(RespValue::BulkString(None));
                     }
+                },
+                Err(_) => {
+                    results.push(RespValue::BulkString(None));
                 }
             },
             None => {
@@ -1011,10 +1191,14 @@ pub async fn json_arrindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
     // Parse the search value as JSON
     let search_value: Value = match serde_json::from_str(&search_value_str) {
         Ok(v) => v,
-        Err(_) => Value::String(search_value_str.to_string()) // Treat as string if not valid JSON
+        Err(_) => Value::String(search_value_str.to_string()), // Treat as string if not valid JSON
     };
 
-    debug!("JSON.ARRINDEX command for key: {}, path: {}", String::from_utf8_lossy(key), path);
+    debug!(
+        "JSON.ARRINDEX command for key: {}, path: {}",
+        String::from_utf8_lossy(key),
+        path
+    );
 
     // Get the JSON data
     match engine.get(key).await? {
@@ -1037,16 +1221,21 @@ pub async fn json_arrindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
                                     } else {
                                         Err(CommandError::WrongType)
                                     }
-                                },
-                                Err(_) => Ok(RespValue::BulkString(None))
+                                }
+                                Err(_) => Ok(RespValue::BulkString(None)),
                             }
-                        },
-                        Err(e) => Err(CommandError::InvalidArgument(format!("Invalid JSON: {}", e)))
+                        }
+                        Err(e) => Err(CommandError::InvalidArgument(format!(
+                            "Invalid JSON: {}",
+                            e
+                        ))),
                     }
-                },
-                Err(_) => Err(CommandError::InvalidArgument("Value is not valid UTF-8".to_string()))
+                }
+                Err(_) => Err(CommandError::InvalidArgument(
+                    "Value is not valid UTF-8".to_string(),
+                )),
             }
-        },
-        None => Ok(RespValue::BulkString(None))
+        }
+        None => Ok(RespValue::BulkString(None)),
     }
 }

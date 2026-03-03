@@ -235,8 +235,7 @@ impl ClusterMessage {
             pos += 2;
             let ping_sent = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
             pos += 8;
-            let pong_received =
-                u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
+            let pong_received = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
             pos += 8;
 
             gossip.push(GossipEntry {

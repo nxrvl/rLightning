@@ -7,15 +7,16 @@ use bytes::BytesMut;
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{Semaphore, broadcast};
 use tracing::{debug, error, info, warn};
 
+use crate::cluster::ClusterManager;
 use crate::command::Command;
 use crate::command::handler::CommandHandler;
 use crate::command::parser;
 use crate::command::transaction::{self, TransactionState};
 use crate::command::types::pubsub::{
-    self as pubsub_commands, subscription_message_to_resp, ClientId,
+    self as pubsub_commands, ClientId, subscription_message_to_resp,
 };
 use crate::networking::error::NetworkError;
 use crate::networking::resp::{ProtocolVersion, RespCommand, RespValue};
@@ -24,9 +25,8 @@ use crate::persistence::config::AofSyncPolicy;
 use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
-use crate::cluster::ClusterManager;
 use crate::sentinel::SentinelManager;
-use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
+use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
 use crate::utils::logging;
 
 /// Information about a connected client, tracked for CLIENT LIST/INFO/ID
@@ -72,8 +72,18 @@ impl ClientInfo {
         let age = self.created_at.elapsed().as_secs();
         format!(
             "id={} addr={} fd=0 name={} db={} sub={} psub={} multi={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd={} age={}\r\n",
-            self.id, self.addr, self.name, self.db, self.sub, self.psub, self.multi,
-            if self.last_cmd.is_empty() { "NULL" } else { &self.last_cmd },
+            self.id,
+            self.addr,
+            self.name,
+            self.db,
+            self.sub,
+            self.psub,
+            self.multi,
+            if self.last_cmd.is_empty() {
+                "NULL"
+            } else {
+                &self.last_cmd
+            },
             age,
         )
     }
@@ -124,7 +134,7 @@ impl Server {
             cluster: None,
             aof_sync_policy: AofSyncPolicy::EverySecond,
             connection_limit: Arc::new(Semaphore::new(10000)), // Default to 10K connections max
-            buffer_size: 64 * 1024,                              // 64KB initial buffer (grows on demand)
+            buffer_size: 64 * 1024, // 64KB initial buffer (grows on demand)
             connections: Arc::new(DashMap::new()),
         }
     }
@@ -414,12 +424,28 @@ impl Server {
                             debug!(client_addr = %client_addr_str, command = ?cmd.name, "Fast path command");
 
                             match Self::dispatch_command(
-                                &cmd, &mut socket_writer, &mut response_buffer,
-                                &mut db_index, &mut protocol_version, &mut in_subscription_mode,
-                                &mut tx_state, &pubsub, client_id, &security, &sentinel,
-                                &cluster, &replication, &command_handler, &persistence, aof_sync_policy,
-                                &client_addr_str, &connections, conn_id,
-                            ).await? {
+                                &cmd,
+                                &mut socket_writer,
+                                &mut response_buffer,
+                                &mut db_index,
+                                &mut protocol_version,
+                                &mut in_subscription_mode,
+                                &mut tx_state,
+                                &pubsub,
+                                client_id,
+                                &security,
+                                &sentinel,
+                                &cluster,
+                                &replication,
+                                &command_handler,
+                                &persistence,
+                                aof_sync_policy,
+                                &client_addr_str,
+                                &connections,
+                                conn_id,
+                            )
+                            .await?
+                            {
                                 DispatchAction::CloseConnection => {
                                     pubsub.unregister_client(client_id).await;
                                     if let Some(security_mgr) = security {
@@ -444,16 +470,33 @@ impl Server {
                                             debug!(client_addr = %client_addr_str, command = ?cmd.name, "Processing command");
 
                                             match Self::dispatch_command(
-                                                &cmd, &mut socket_writer, &mut response_buffer,
-                                                &mut db_index, &mut protocol_version, &mut in_subscription_mode,
-                                                &mut tx_state, &pubsub, client_id, &security, &sentinel,
-                                                &cluster, &replication, &command_handler, &persistence, aof_sync_policy,
-                                                &client_addr_str, &connections, conn_id,
-                                            ).await? {
+                                                &cmd,
+                                                &mut socket_writer,
+                                                &mut response_buffer,
+                                                &mut db_index,
+                                                &mut protocol_version,
+                                                &mut in_subscription_mode,
+                                                &mut tx_state,
+                                                &pubsub,
+                                                client_id,
+                                                &security,
+                                                &sentinel,
+                                                &cluster,
+                                                &replication,
+                                                &command_handler,
+                                                &persistence,
+                                                aof_sync_policy,
+                                                &client_addr_str,
+                                                &connections,
+                                                conn_id,
+                                            )
+                                            .await?
+                                            {
                                                 DispatchAction::CloseConnection => {
                                                     pubsub.unregister_client(client_id).await;
                                                     if let Some(security_mgr) = security {
-                                                        security_mgr.remove_client(&client_addr_str);
+                                                        security_mgr
+                                                            .remove_client(&client_addr_str);
                                                     }
                                                     return Ok(());
                                                 }
@@ -475,9 +518,16 @@ impl Server {
                                 }
                                 Ok(None) => {
                                     debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message, waiting for more data");
-                                    if partial_command_buffer.len() + buffer.len() > MAX_PARTIAL_BUFFER_SIZE {
+                                    if partial_command_buffer.len() + buffer.len()
+                                        > MAX_PARTIAL_BUFFER_SIZE
+                                    {
                                         error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
-                                        Self::send_error_to_writer(&mut socket_writer, "ERR Protocol error: command too large".to_string(), &client_addr_str).await?;
+                                        Self::send_error_to_writer(
+                                            &mut socket_writer,
+                                            "ERR Protocol error: command too large".to_string(),
+                                            &client_addr_str,
+                                        )
+                                        .await?;
                                         return Ok(());
                                     }
                                     partial_command_buffer.extend_from_slice(&buffer);
@@ -507,13 +557,19 @@ impl Server {
                                         debug!(client_addr = %client_addr_str, buffer_len = buffer.len(),
                                                "Large buffer in error state, checking for JSON");
 
-                                        if buffer.len() > 5 && (buffer[0] == b'{' || buffer[0] == b'[')
+                                        if buffer.len() > 5
+                                            && (buffer[0] == b'{' || buffer[0] == b'[')
                                         {
                                             debug!(client_addr = %client_addr_str, "JSON-like data detected in error state");
                                         }
                                     }
 
-                                    Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                    Self::send_error_to_writer(
+                                        &mut socket_writer,
+                                        error_msg,
+                                        &client_addr_str,
+                                    )
+                                    .await?;
 
                                     buffer.clear();
                                     partial_command_buffer.clear();
@@ -526,9 +582,16 @@ impl Server {
                             error!(client_addr = %client_addr_str, error = ?e, "Fast path error");
                             if let RespError::Incomplete = e {
                                 debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message in fast path, waiting for more data");
-                                if partial_command_buffer.len() + buffer.len() > MAX_PARTIAL_BUFFER_SIZE {
+                                if partial_command_buffer.len() + buffer.len()
+                                    > MAX_PARTIAL_BUFFER_SIZE
+                                {
                                     error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
-                                    Self::send_error_to_writer(&mut socket_writer, "ERR Protocol error: command too large".to_string(), &client_addr_str).await?;
+                                    Self::send_error_to_writer(
+                                        &mut socket_writer,
+                                        "ERR Protocol error: command too large".to_string(),
+                                        &client_addr_str,
+                                    )
+                                    .await?;
                                     return Ok(());
                                 }
                                 partial_command_buffer.extend_from_slice(&buffer);
@@ -555,7 +618,12 @@ impl Server {
                                            "Large buffer in fast path error, possible JSON data");
                                 }
 
-                                Self::send_error_to_writer(&mut socket_writer, error_msg, &client_addr_str).await?;
+                                Self::send_error_to_writer(
+                                    &mut socket_writer,
+                                    error_msg,
+                                    &client_addr_str,
+                                )
+                                .await?;
                                 buffer.clear();
                                 partial_command_buffer.clear();
                                 debug!(client_addr = %client_addr_str, "Cleared buffers after fast path protocol error");
@@ -633,7 +701,14 @@ impl Server {
 
         // HELLO - protocol negotiation
         if cmd_lower == "hello" {
-            let (response, new_version) = Self::handle_hello_command(&cmd.args, *protocol_version, security, client_addr_str, connections, conn_id);
+            let (response, new_version) = Self::handle_hello_command(
+                &cmd.args,
+                *protocol_version,
+                security,
+                client_addr_str,
+                connections,
+                conn_id,
+            );
             *protocol_version = new_version;
             if let Ok(bytes) = response.serialize() {
                 response_buffer.extend_from_slice(&bytes);
@@ -655,55 +730,81 @@ impl Server {
         let is_auth_command = cmd_lower == "auth";
         if !is_auth_command
             && let Some(security_mgr) = security
-                && security_mgr.require_auth()
-                    && !security_mgr.is_authenticated(client_addr_str)
-                {
-                    Self::send_error_to_writer(
-                        socket_writer,
-                        "NOAUTH Authentication required.".to_string(),
-                        client_addr_str,
-                    ).await?;
-                    return Ok(DispatchAction::Continue);
-                }
+            && security_mgr.require_auth()
+            && !security_mgr.is_authenticated(client_addr_str)
+        {
+            Self::send_error_to_writer(
+                socket_writer,
+                "NOAUTH Authentication required.".to_string(),
+                client_addr_str,
+            )
+            .await?;
+            return Ok(DispatchAction::Continue);
+        }
 
         // ACL permission checks for authenticated clients
         if let Some(security_mgr) = security
-            && !is_auth_command && security_mgr.is_authenticated(client_addr_str) {
-                // Check command permission
-                if !security_mgr.check_command_permission(client_addr_str, &cmd_lower) {
-                    let username = security_mgr.acl().get_username(client_addr_str).unwrap_or_else(|| "default".to_string());
-                    security_mgr.acl().log_denial(client_addr_str, &username, &cmd_lower, "command");
-                    let error_msg = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
-                    return Ok(DispatchAction::Continue);
-                }
+            && !is_auth_command
+            && security_mgr.is_authenticated(client_addr_str)
+        {
+            // Check command permission
+            if !security_mgr.check_command_permission(client_addr_str, &cmd_lower) {
+                let username = security_mgr
+                    .acl()
+                    .get_username(client_addr_str)
+                    .unwrap_or_else(|| "default".to_string());
+                security_mgr
+                    .acl()
+                    .log_denial(client_addr_str, &username, &cmd_lower, "command");
+                let error_msg = format!(
+                    "NOPERM this user has no permissions to run the '{}' command",
+                    cmd_lower
+                );
+                Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                return Ok(DispatchAction::Continue);
+            }
 
-                // Check key permission
-                let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
-                for &idx in &key_indices {
-                    if idx < cmd.args.len() && !security_mgr.check_key_permission(client_addr_str, &cmd.args[idx]) {
-                        let username = security_mgr.acl().get_username(client_addr_str).unwrap_or_else(|| "default".to_string());
-                        let key_str = String::from_utf8_lossy(&cmd.args[idx]);
-                        security_mgr.acl().log_denial(client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                        Self::send_error_to_writer(
+            // Check key permission
+            let key_indices = crate::security::acl::get_key_indices(&cmd_lower, &cmd.args);
+            for &idx in &key_indices {
+                if idx < cmd.args.len()
+                    && !security_mgr.check_key_permission(client_addr_str, &cmd.args[idx])
+                {
+                    let username = security_mgr
+                        .acl()
+                        .get_username(client_addr_str)
+                        .unwrap_or_else(|| "default".to_string());
+                    let key_str = String::from_utf8_lossy(&cmd.args[idx]);
+                    security_mgr.acl().log_denial(
+                        client_addr_str,
+                        &username,
+                        &cmd_lower,
+                        &format!("key '{}'", key_str),
+                    );
+                    Self::send_error_to_writer(
                             socket_writer,
                             "NOPERM this user has no permissions to access one of the keys used as arguments".to_string(),
                             client_addr_str,
                         ).await?;
-                        return Ok(DispatchAction::Continue);
-                    }
+                    return Ok(DispatchAction::Continue);
                 }
             }
+        }
 
         // SELECT - database switching
         if cmd_lower == "select" {
             if cmd.args.len() != 1 {
-                let response = RespValue::Error("ERR wrong number of arguments for 'select' command".to_string());
+                let response = RespValue::Error(
+                    "ERR wrong number of arguments for 'select' command".to_string(),
+                );
                 if let Ok(bytes) = response.serialize() {
                     response_buffer.extend_from_slice(&bytes);
                 }
             } else {
-                match std::str::from_utf8(&cmd.args[0]).ok().and_then(|s| s.parse::<usize>().ok()) {
+                match std::str::from_utf8(&cmd.args[0])
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
                     Some(idx) if idx < 16 => {
                         *db_index = idx;
                         let response = RespValue::SimpleString("OK".to_string());
@@ -726,7 +827,11 @@ impl Server {
         if let Some(mut info) = connections.get_mut(&conn_id) {
             info.last_cmd = cmd_lower.clone();
             info.db = *db_index;
-            info.multi = if tx_state.in_multi { tx_state.queue.len() as i64 } else { -1 };
+            info.multi = if tx_state.in_multi {
+                tx_state.queue.len() as i64
+            } else {
+                -1
+            };
         }
 
         // CLIENT - connection management commands handled here with access to per-connection state
@@ -745,10 +850,17 @@ impl Server {
         match cmd_lower.as_str() {
             "subscribe" => {
                 if let Some(security_mgr) = security {
-                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    let denied = cmd
+                        .args
+                        .iter()
+                        .find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
                     if let Some(channel) = denied {
-                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        let error_msg = format!(
+                            "NOPERM this user has no permissions to access the '{}' channel",
+                            String::from_utf8_lossy(channel)
+                        );
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
+                            .await?;
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -756,7 +868,11 @@ impl Server {
                 match responses {
                     Ok(resp_list) => {
                         for resp in resp_list {
-                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 {
+                                resp.convert_to_push()
+                            } else {
+                                resp
+                            };
                             if let Ok(bytes) = resp.serialize() {
                                 response_buffer.extend_from_slice(&bytes);
                             }
@@ -765,17 +881,25 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
             }
             "psubscribe" => {
                 if let Some(security_mgr) = security {
-                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    let denied = cmd
+                        .args
+                        .iter()
+                        .find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
                     if let Some(channel) = denied {
-                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        let error_msg = format!(
+                            "NOPERM this user has no permissions to access the '{}' channel",
+                            String::from_utf8_lossy(channel)
+                        );
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
+                            .await?;
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -783,7 +907,11 @@ impl Server {
                 match responses {
                     Ok(resp_list) => {
                         for resp in resp_list {
-                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 {
+                                resp.convert_to_push()
+                            } else {
+                                resp
+                            };
                             if let Ok(bytes) = resp.serialize() {
                                 response_buffer.extend_from_slice(&bytes);
                             }
@@ -792,18 +920,24 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
             }
             "publish" => {
                 if let Some(security_mgr) = security
-                    && !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
-                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
-                        return Ok(DispatchAction::Continue);
-                    }
+                    && !cmd.args.is_empty()
+                    && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0])
+                {
+                    let error_msg = format!(
+                        "NOPERM this user has no permissions to access the '{}' channel",
+                        String::from_utf8_lossy(&cmd.args[0])
+                    );
+                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                    return Ok(DispatchAction::Continue);
+                }
                 let response = pubsub_commands::publish(pubsub, &cmd.args).await;
                 match response {
                     Ok(resp) => {
@@ -812,17 +946,25 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
             }
             "ssubscribe" => {
                 if let Some(security_mgr) = security {
-                    let denied = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
+                    let denied = cmd
+                        .args
+                        .iter()
+                        .find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch));
                     if let Some(channel) = denied {
-                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(channel));
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                        let error_msg = format!(
+                            "NOPERM this user has no permissions to access the '{}' channel",
+                            String::from_utf8_lossy(channel)
+                        );
+                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
+                            .await?;
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -830,7 +972,11 @@ impl Server {
                 match responses {
                     Ok(resp_list) => {
                         for resp in resp_list {
-                            let resp = if *protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                            let resp = if *protocol_version == ProtocolVersion::RESP3 {
+                                resp.convert_to_push()
+                            } else {
+                                resp
+                            };
                             if let Ok(bytes) = resp.serialize() {
                                 response_buffer.extend_from_slice(&bytes);
                             }
@@ -839,18 +985,24 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
             }
             "spublish" => {
                 if let Some(security_mgr) = security
-                    && !cmd.args.is_empty() && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0]) {
-                        let error_msg = format!("NOPERM this user has no permissions to access the '{}' channel", String::from_utf8_lossy(&cmd.args[0]));
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
-                        return Ok(DispatchAction::Continue);
-                    }
+                    && !cmd.args.is_empty()
+                    && !security_mgr.check_channel_permission(client_addr_str, &cmd.args[0])
+                {
+                    let error_msg = format!(
+                        "NOPERM this user has no permissions to access the '{}' channel",
+                        String::from_utf8_lossy(&cmd.args[0])
+                    );
+                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                    return Ok(DispatchAction::Continue);
+                }
                 let response = pubsub_commands::spublish(pubsub, &cmd.args).await;
                 match response {
                     Ok(resp) => {
@@ -859,7 +1011,8 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -873,7 +1026,8 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
+                            .await?;
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -881,7 +1035,9 @@ impl Server {
             // ACL commands
             "acl" => {
                 if let Some(security_mgr) = security {
-                    let response = security_mgr.acl().handle_acl_command(&cmd.args, client_addr_str);
+                    let response = security_mgr
+                        .acl()
+                        .handle_acl_command(&cmd.args, client_addr_str);
                     match response {
                         Ok(resp) => {
                             if let Ok(bytes) = resp.serialize() {
@@ -889,13 +1045,21 @@ impl Server {
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                            Self::send_error_to_writer(
+                                socket_writer,
+                                e.to_string(),
+                                client_addr_str,
+                            )
+                            .await?;
                         }
                     }
                 } else {
                     // No security manager: provide Redis-compatible defaults for read-only
                     // subcommands, error for write subcommands that would give a false sense of security
-                    let subcmd = cmd.args.first().map(|a| String::from_utf8_lossy(a).to_lowercase());
+                    let subcmd = cmd
+                        .args
+                        .first()
+                        .map(|a| String::from_utf8_lossy(a).to_lowercase());
                     let response = match subcmd.as_deref() {
                         Some("whoami") => RespValue::BulkString(Some(b"default".to_vec())),
                         Some("users") => RespValue::Array(Some(vec![
@@ -939,7 +1103,9 @@ impl Server {
                         }
                     }
                 } else {
-                    let response = RespValue::Error("ERR This instance has sentinel support disabled".to_string());
+                    let response = RespValue::Error(
+                        "ERR This instance has sentinel support disabled".to_string(),
+                    );
                     if let Ok(bytes) = response.serialize() {
                         response_buffer.extend_from_slice(&bytes);
                     }
@@ -973,7 +1139,8 @@ impl Server {
                     socket_writer,
                     response_buffer,
                     client_addr_str,
-                ).await;
+                )
+                .await;
                 match result {
                     Ok(true) => return Ok(DispatchAction::CloseConnection),
                     Ok(false) => return Ok(DispatchAction::Continue),
@@ -988,126 +1155,156 @@ impl Server {
 
         // Read-only mode check
         if let Some(repl) = replication
-            && repl.is_read_only() && ReplicationManager::is_write_command(&cmd_lower) {
-                Self::send_error_to_writer(
-                    socket_writer,
-                    "READONLY You can't write against a read only replica.".to_string(),
-                    client_addr_str,
-                ).await?;
-                return Ok(DispatchAction::Continue);
-            }
+            && repl.is_read_only()
+            && ReplicationManager::is_write_command(&cmd_lower)
+        {
+            Self::send_error_to_writer(
+                socket_writer,
+                "READONLY You can't write against a read only replica.".to_string(),
+                client_addr_str,
+            )
+            .await?;
+            return Ok(DispatchAction::Continue);
+        }
 
         // Cluster mode: validate cross-slot access for multi-key commands
         if let Some(cluster_mgr) = cluster
-            && cluster_mgr.is_enabled() {
-                // Extract only actual key arguments per command's syntax
-                let key_refs: Vec<&[u8]> = match cmd_lower.as_str() {
-                    // All args are keys
-                    "mget" | "del" | "unlink" | "exists" | "touch"
-                    | "sinter" | "sinterstore" | "sunion" | "sunionstore" | "sdiff" | "sdiffstore"
-                    | "pfcount" | "pfmerge"
-                    | "rename" | "renamenx" | "rpoplpush" => {
-                        cmd.args.iter().map(|a| a.as_slice()).collect()
-                    }
-                    // Alternating key-value pairs: keys at even indices
-                    "mset" | "msetnx" => {
-                        cmd.args.iter().step_by(2).map(|a| a.as_slice()).collect()
-                    }
-                    // First 2 args are keys
-                    "smove" | "copy" | "lmove" | "blmove" => {
-                        cmd.args.iter().take(2).map(|a| a.as_slice()).collect()
-                    }
-                    // Skip first arg (operation/dest), rest are keys: BITOP op dest key [key ...]
-                    "bitop" => {
-                        cmd.args.iter().skip(1).map(|a| a.as_slice()).collect()
-                    }
-                    // All args except last (timeout): BLPOP key [key ...] timeout
-                    "blpop" | "brpop" => {
-                        if cmd.args.len() > 1 {
-                            cmd.args[..cmd.args.len() - 1].iter().map(|a| a.as_slice()).collect()
-                        } else {
-                            vec![]
-                        }
-                    }
-                    // dest numkeys key [key ...] [options]: ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE
-                    "zunionstore" | "zinterstore" | "zdiffstore" => {
-                        if cmd.args.len() >= 2 {
-                            let numkeys = std::str::from_utf8(&cmd.args[1]).ok()
-                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                            let mut keys = vec![cmd.args[0].as_slice()]; // dest key
-                            for arg in cmd.args.iter().skip(2).take(numkeys) {
-                                keys.push(arg.as_slice());
-                            }
-                            keys
-                        } else {
-                            vec![]
-                        }
-                    }
-                    // numkeys key [key ...] [options]: ZUNION/ZINTER/ZDIFF/LMPOP/SINTERCARD
-                    "zunion" | "zinter" | "zdiff" | "lmpop" | "sintercard" => {
-                        if !cmd.args.is_empty() {
-                            let numkeys = std::str::from_utf8(&cmd.args[0]).ok()
-                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                            cmd.args.iter().skip(1).take(numkeys).map(|a| a.as_slice()).collect()
-                        } else {
-                            vec![]
-                        }
-                    }
-                    // timeout numkeys key [key ...] direction: BLMPOP
-                    "blmpop" => {
-                        if cmd.args.len() >= 2 {
-                            let numkeys = std::str::from_utf8(&cmd.args[1]).ok()
-                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                            cmd.args.iter().skip(2).take(numkeys).map(|a| a.as_slice()).collect()
-                        } else {
-                            vec![]
-                        }
-                    }
-                    // XREAD/XREADGROUP: keys follow STREAMS keyword, count = remaining/2
-                    "xread" | "xreadgroup" => {
-                        let streams_pos = cmd.args.iter().position(|a| {
-                            a.eq_ignore_ascii_case(b"streams")
-                        });
-                        if let Some(pos) = streams_pos {
-                            let after_streams = &cmd.args[pos + 1..];
-                            let num_keys = after_streams.len() / 2;
-                            after_streams.iter().take(num_keys).map(|a| a.as_slice()).collect()
-                        } else {
-                            vec![]
-                        }
-                    }
-                    // GEOSEARCHSTORE: args[0] dest, args[1] source
-                    "geosearchstore" => {
-                        let mut keys: Vec<&[u8]> = Vec::new();
-                        if !cmd.args.is_empty() { keys.push(cmd.args[0].as_slice()); }
-                        if cmd.args.len() > 1 { keys.push(cmd.args[1].as_slice()); }
-                        keys
-                    }
-                    // GEORADIUS/GEORADIUSBYMEMBER: args[0] source, may have STORE/STOREDIST dest
-                    "georadius" | "georadius_ro" | "georadiusbymember" | "georadiusbymember_ro" => {
-                        let mut keys: Vec<&[u8]> = Vec::new();
-                        if !cmd.args.is_empty() { keys.push(cmd.args[0].as_slice()); }
-                        for i in 1..cmd.args.len() {
-                            if (cmd.args[i].eq_ignore_ascii_case(b"STORE")
-                                || cmd.args[i].eq_ignore_ascii_case(b"STOREDIST"))
-                                && let Some(dest) = cmd.args.get(i + 1)
-                            {
-                                keys.push(dest.as_slice());
-                            }
-                        }
-                        keys
-                    }
-                    _ => vec![],
-                };
-                if cluster_mgr.check_cross_slot(&key_refs) {
-                    Self::send_error_to_writer(
-                        socket_writer,
-                        "CROSSSLOT Keys in request don't hash to the same slot".to_string(),
-                        client_addr_str,
-                    ).await?;
-                    return Ok(DispatchAction::Continue);
+            && cluster_mgr.is_enabled()
+        {
+            // Extract only actual key arguments per command's syntax
+            let key_refs: Vec<&[u8]> = match cmd_lower.as_str() {
+                // All args are keys
+                "mget" | "del" | "unlink" | "exists" | "touch" | "sinter" | "sinterstore"
+                | "sunion" | "sunionstore" | "sdiff" | "sdiffstore" | "pfcount" | "pfmerge"
+                | "rename" | "renamenx" | "rpoplpush" => {
+                    cmd.args.iter().map(|a| a.as_slice()).collect()
                 }
+                // Alternating key-value pairs: keys at even indices
+                "mset" | "msetnx" => cmd.args.iter().step_by(2).map(|a| a.as_slice()).collect(),
+                // First 2 args are keys
+                "smove" | "copy" | "lmove" | "blmove" => {
+                    cmd.args.iter().take(2).map(|a| a.as_slice()).collect()
+                }
+                // Skip first arg (operation/dest), rest are keys: BITOP op dest key [key ...]
+                "bitop" => cmd.args.iter().skip(1).map(|a| a.as_slice()).collect(),
+                // All args except last (timeout): BLPOP key [key ...] timeout
+                "blpop" | "brpop" => {
+                    if cmd.args.len() > 1 {
+                        cmd.args[..cmd.args.len() - 1]
+                            .iter()
+                            .map(|a| a.as_slice())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                // dest numkeys key [key ...] [options]: ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE
+                "zunionstore" | "zinterstore" | "zdiffstore" => {
+                    if cmd.args.len() >= 2 {
+                        let numkeys = std::str::from_utf8(&cmd.args[1])
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let mut keys = vec![cmd.args[0].as_slice()]; // dest key
+                        for arg in cmd.args.iter().skip(2).take(numkeys) {
+                            keys.push(arg.as_slice());
+                        }
+                        keys
+                    } else {
+                        vec![]
+                    }
+                }
+                // numkeys key [key ...] [options]: ZUNION/ZINTER/ZDIFF/LMPOP/SINTERCARD
+                "zunion" | "zinter" | "zdiff" | "lmpop" | "sintercard" => {
+                    if !cmd.args.is_empty() {
+                        let numkeys = std::str::from_utf8(&cmd.args[0])
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        cmd.args
+                            .iter()
+                            .skip(1)
+                            .take(numkeys)
+                            .map(|a| a.as_slice())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                // timeout numkeys key [key ...] direction: BLMPOP
+                "blmpop" => {
+                    if cmd.args.len() >= 2 {
+                        let numkeys = std::str::from_utf8(&cmd.args[1])
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        cmd.args
+                            .iter()
+                            .skip(2)
+                            .take(numkeys)
+                            .map(|a| a.as_slice())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                // XREAD/XREADGROUP: keys follow STREAMS keyword, count = remaining/2
+                "xread" | "xreadgroup" => {
+                    let streams_pos = cmd
+                        .args
+                        .iter()
+                        .position(|a| a.eq_ignore_ascii_case(b"streams"));
+                    if let Some(pos) = streams_pos {
+                        let after_streams = &cmd.args[pos + 1..];
+                        let num_keys = after_streams.len() / 2;
+                        after_streams
+                            .iter()
+                            .take(num_keys)
+                            .map(|a| a.as_slice())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                // GEOSEARCHSTORE: args[0] dest, args[1] source
+                "geosearchstore" => {
+                    let mut keys: Vec<&[u8]> = Vec::new();
+                    if !cmd.args.is_empty() {
+                        keys.push(cmd.args[0].as_slice());
+                    }
+                    if cmd.args.len() > 1 {
+                        keys.push(cmd.args[1].as_slice());
+                    }
+                    keys
+                }
+                // GEORADIUS/GEORADIUSBYMEMBER: args[0] source, may have STORE/STOREDIST dest
+                "georadius" | "georadius_ro" | "georadiusbymember" | "georadiusbymember_ro" => {
+                    let mut keys: Vec<&[u8]> = Vec::new();
+                    if !cmd.args.is_empty() {
+                        keys.push(cmd.args[0].as_slice());
+                    }
+                    for i in 1..cmd.args.len() {
+                        if (cmd.args[i].eq_ignore_ascii_case(b"STORE")
+                            || cmd.args[i].eq_ignore_ascii_case(b"STOREDIST"))
+                            && let Some(dest) = cmd.args.get(i + 1)
+                        {
+                            keys.push(dest.as_slice());
+                        }
+                    }
+                    keys
+                }
+                _ => vec![],
+            };
+            if cluster_mgr.check_cross_slot(&key_refs) {
+                Self::send_error_to_writer(
+                    socket_writer,
+                    "CROSSSLOT Keys in request don't hash to the same slot".to_string(),
+                    client_addr_str,
+                )
+                .await?;
+                return Ok(DispatchAction::Continue);
             }
+        }
 
         // Capture queued commands before EXEC drains them (for replication)
         let queued_for_repl: Vec<Command> = if cmd_lower == "exec" {
@@ -1128,7 +1325,8 @@ impl Server {
             security,
             client_addr_str,
             *db_index,
-        ).await;
+        )
+        .await;
 
         match tx_result {
             Ok(response) => {
@@ -1161,11 +1359,13 @@ impl Server {
                         // Convert each inner sub-result using its original command name
                         if let RespValue::Array(Some(items)) = response {
                             if items.len() == queued_for_repl.len() {
-                                let converted: Vec<RespValue> = items.into_iter()
+                                let converted: Vec<RespValue> = items
+                                    .into_iter()
                                     .zip(queued_for_repl.iter())
                                     .map(|(item, cmd)| {
                                         let base = cmd.name.to_lowercase();
-                                        let sub_cmd = Self::build_resp3_command_name(&base, &cmd.args);
+                                        let sub_cmd =
+                                            Self::build_resp3_command_name(&base, &cmd.args);
                                         item.convert_for_resp3(&sub_cmd)
                                     })
                                     .collect();
@@ -1197,7 +1397,8 @@ impl Server {
                 if let Ok(bytes) = error_resp.serialize() {
                     response_buffer.extend_from_slice(&bytes);
                 } else {
-                    Self::send_error_to_writer(socket_writer, err.to_string(), client_addr_str).await?;
+                    Self::send_error_to_writer(socket_writer, err.to_string(), client_addr_str)
+                        .await?;
                 }
             }
         }
@@ -1228,11 +1429,15 @@ impl Server {
         use crate::command::utils::bytes_to_string;
 
         if args.is_empty() {
-            return Ok(RespValue::Error("ERR wrong number of arguments for 'client' command".to_string()));
+            return Ok(RespValue::Error(
+                "ERR wrong number of arguments for 'client' command".to_string(),
+            ));
         }
 
         let subcmd = bytes_to_string(&args[0])
-            .map_err(|_| NetworkError::Serialization("Invalid UTF-8 in CLIENT subcommand".to_string()))?
+            .map_err(|_| {
+                NetworkError::Serialization("Invalid UTF-8 in CLIENT subcommand".to_string())
+            })?
             .to_uppercase();
 
         match subcmd.as_str() {
@@ -1245,23 +1450,29 @@ impl Server {
             }
             "INFO" => {
                 if let Some(info) = connections.get(&conn_id) {
-                    Ok(RespValue::BulkString(Some(info.to_info_line().into_bytes())))
+                    Ok(RespValue::BulkString(Some(
+                        info.to_info_line().into_bytes(),
+                    )))
                 } else {
                     Ok(RespValue::BulkString(Some(b"".to_vec())))
                 }
             }
-            "ID" => {
-                Ok(RespValue::Integer(conn_id as i64))
-            }
+            "ID" => Ok(RespValue::Integer(conn_id as i64)),
             "SETNAME" => {
                 if args.len() != 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|setname' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|setname' command".to_string(),
+                    ));
                 }
-                let name = bytes_to_string(&args[1])
-                    .map_err(|_| NetworkError::Serialization("Invalid UTF-8 in client name".to_string()))?;
+                let name = bytes_to_string(&args[1]).map_err(|_| {
+                    NetworkError::Serialization("Invalid UTF-8 in client name".to_string())
+                })?;
                 // Redis disallows spaces in client names
                 if name.contains(' ') {
-                    return Ok(RespValue::Error("ERR Client names cannot contain spaces, newlines or special characters.".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR Client names cannot contain spaces, newlines or special characters."
+                            .to_string(),
+                    ));
                 }
                 if let Some(mut info) = connections.get_mut(&conn_id) {
                     info.name = name;
@@ -1281,77 +1492,99 @@ impl Server {
             }
             "KILL" => {
                 if args.len() < 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|kill' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|kill' command".to_string(),
+                    ));
                 }
                 Ok(RespValue::SimpleString("OK".to_string()))
             }
             "PAUSE" => {
                 if args.len() < 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|pause' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|pause' command".to_string(),
+                    ));
                 }
                 Ok(RespValue::SimpleString("OK".to_string()))
             }
-            "UNPAUSE" => {
-                Ok(RespValue::SimpleString("OK".to_string()))
-            }
+            "UNPAUSE" => Ok(RespValue::SimpleString("OK".to_string())),
             "REPLY" => {
                 if args.len() != 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|reply' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|reply' command".to_string(),
+                    ));
                 }
                 let mode = bytes_to_string(&args[1])
                     .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
                     .to_uppercase();
                 match mode.as_str() {
                     "ON" | "OFF" | "SKIP" => Ok(RespValue::SimpleString("OK".to_string())),
-                    _ => Ok(RespValue::Error("ERR CLIENT REPLY mode must be ON, OFF, or SKIP".to_string())),
+                    _ => Ok(RespValue::Error(
+                        "ERR CLIENT REPLY mode must be ON, OFF, or SKIP".to_string(),
+                    )),
                 }
             }
             "NO-EVICT" => {
                 if args.len() != 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|no-evict' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|no-evict' command".to_string(),
+                    ));
                 }
                 let mode = bytes_to_string(&args[1])
                     .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
                     .to_uppercase();
                 match mode.as_str() {
                     "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
-                    _ => Ok(RespValue::Error("ERR CLIENT NO-EVICT must be ON or OFF".to_string())),
+                    _ => Ok(RespValue::Error(
+                        "ERR CLIENT NO-EVICT must be ON or OFF".to_string(),
+                    )),
                 }
             }
             "NO-TOUCH" => {
                 if args.len() != 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|no-touch' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|no-touch' command".to_string(),
+                    ));
                 }
                 let mode = bytes_to_string(&args[1])
                     .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
                     .to_uppercase();
                 match mode.as_str() {
                     "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
-                    _ => Ok(RespValue::Error("ERR CLIENT NO-TOUCH must be ON or OFF".to_string())),
+                    _ => Ok(RespValue::Error(
+                        "ERR CLIENT NO-TOUCH must be ON or OFF".to_string(),
+                    )),
                 }
             }
             "TRACKING" => {
                 if args.len() < 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|tracking' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|tracking' command".to_string(),
+                    ));
                 }
                 let mode = bytes_to_string(&args[1])
                     .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
                     .to_uppercase();
                 match mode.as_str() {
                     "ON" | "OFF" => Ok(RespValue::SimpleString("OK".to_string())),
-                    _ => Ok(RespValue::Error("ERR CLIENT TRACKING must be ON or OFF".to_string())),
+                    _ => Ok(RespValue::Error(
+                        "ERR CLIENT TRACKING must be ON or OFF".to_string(),
+                    )),
                 }
             }
             "CACHING" => {
                 if args.len() != 2 {
-                    return Ok(RespValue::Error("ERR wrong number of arguments for 'client|caching' command".to_string()));
+                    return Ok(RespValue::Error(
+                        "ERR wrong number of arguments for 'client|caching' command".to_string(),
+                    ));
                 }
                 let mode = bytes_to_string(&args[1])
                     .map_err(|_| NetworkError::Serialization("Invalid UTF-8".to_string()))?
                     .to_uppercase();
                 match mode.as_str() {
                     "YES" | "NO" => Ok(RespValue::SimpleString("OK".to_string())),
-                    _ => Ok(RespValue::Error("ERR CLIENT CACHING must be YES or NO".to_string())),
+                    _ => Ok(RespValue::Error(
+                        "ERR CLIENT CACHING must be YES or NO".to_string(),
+                    )),
                 }
             }
             "HELP" => {
@@ -1404,31 +1637,42 @@ impl Server {
             "exec" => {
                 // Capture queued commands before EXEC drains them (for AOF logging)
                 let queued_commands: Vec<Command> = tx_state.queue.clone();
-                let result = CURRENT_DB_INDEX.scope(db_index, async {
-                    transaction::handle_exec(tx_state, command_handler, engine, db_index).await
-                }).await?;
+                let result = CURRENT_DB_INDEX
+                    .scope(db_index, async {
+                        transaction::handle_exec(tx_state, command_handler, engine, db_index).await
+                    })
+                    .await?;
                 // Log transaction commands to AOF wrapped in MULTI/EXEC as a single
                 // atomic batch to prevent interleaving with concurrent clients
                 if let Some(persistence_mgr) = persistence
-                    && let RespValue::Array(Some(_)) = &result {
-                        // Transaction succeeded (not aborted by WATCH)
-                        // Build the entire transaction as a single batch
-                        let mut batch = Vec::with_capacity(queued_commands.len() + 2);
-                        batch.push(RespCommand { name: b"MULTI".to_vec(), args: vec![] });
-                        for queued_cmd in &queued_commands {
-                            let qcmd_lower = queued_cmd.name.to_lowercase();
-                            if ReplicationManager::is_write_command(&qcmd_lower) {
-                                batch.push(RespCommand {
-                                    name: queued_cmd.name.as_bytes().to_vec(),
-                                    args: queued_cmd.args.clone(),
-                                });
-                            }
+                    && let RespValue::Array(Some(_)) = &result
+                {
+                    // Transaction succeeded (not aborted by WATCH)
+                    // Build the entire transaction as a single batch
+                    let mut batch = Vec::with_capacity(queued_commands.len() + 2);
+                    batch.push(RespCommand {
+                        name: b"MULTI".to_vec(),
+                        args: vec![],
+                    });
+                    for queued_cmd in &queued_commands {
+                        let qcmd_lower = queued_cmd.name.to_lowercase();
+                        if ReplicationManager::is_write_command(&qcmd_lower) {
+                            batch.push(RespCommand {
+                                name: queued_cmd.name.as_bytes().to_vec(),
+                                args: queued_cmd.args.clone(),
+                            });
                         }
-                        batch.push(RespCommand { name: b"EXEC".to_vec(), args: vec![] });
-                        let _ = persistence_mgr.log_commands_batch_for_db(batch, aof_sync_policy, db_index).await;
                     }
+                    batch.push(RespCommand {
+                        name: b"EXEC".to_vec(),
+                        args: vec![],
+                    });
+                    let _ = persistence_mgr
+                        .log_commands_batch_for_db(batch, aof_sync_policy, db_index)
+                        .await;
+                }
                 return Ok(result);
-            },
+            }
             "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args, db_index),
             "unwatch" => return transaction::handle_unwatch(tx_state),
             _ => {}
@@ -1450,43 +1694,57 @@ impl Server {
         // Log to AOF if persistence is enabled, command succeeded, and it's a write command
         // Skip AUTH commands to avoid persisting passwords in the AOF file
         if let Some(persistence_mgr) = persistence
-            && !is_auth_command && ReplicationManager::is_write_command(cmd_lower) {
-                let resp_cmd = RespCommand {
-                    name: cmd.name.as_bytes().to_vec(),
-                    args: cmd.args.clone(),
-                };
-                if let Err(e) = persistence_mgr.log_command_for_db(resp_cmd, aof_sync_policy, db_index).await {
-                    error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
-                    // Command already executed; log the error but don't fail the response
-                }
+            && !is_auth_command
+            && ReplicationManager::is_write_command(cmd_lower)
+        {
+            let resp_cmd = RespCommand {
+                name: cmd.name.as_bytes().to_vec(),
+                args: cmd.args.clone(),
+            };
+            if let Err(e) = persistence_mgr
+                .log_command_for_db(resp_cmd, aof_sync_policy, db_index)
+                .await
+            {
+                error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
+                // Command already executed; log the error but don't fail the response
             }
+        }
 
         // For AUTH command, update authentication status
         if is_auth_command
             && let Some(security_mgr) = security
-                && let RespValue::SimpleString(ref s) = result
-                    && s == "OK" {
-                        if cmd.args.len() == 1 {
-                            // AUTH password (default user)
-                            let password_str = String::from_utf8_lossy(&cmd.args[0]).to_string();
-                            match security_mgr.authenticate_with_username(client_addr_str, "default", &password_str) {
-                                Ok(_) => {},
-                                Err(e) => {
-                                    return Ok(RespValue::Error(format!("ERR {}", e)));
-                                }
-                            }
-                        } else if cmd.args.len() == 2 {
-                            // AUTH username password
-                            let username = String::from_utf8_lossy(&cmd.args[0]).to_string();
-                            let password_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
-                            match security_mgr.authenticate_with_username(client_addr_str, &username, &password_str) {
-                                Ok(_) => {},
-                                Err(e) => {
-                                    return Ok(RespValue::Error(format!("ERR {}", e)));
-                                }
-                            }
-                        }
+            && let RespValue::SimpleString(ref s) = result
+            && s == "OK"
+        {
+            if cmd.args.len() == 1 {
+                // AUTH password (default user)
+                let password_str = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                match security_mgr.authenticate_with_username(
+                    client_addr_str,
+                    "default",
+                    &password_str,
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Ok(RespValue::Error(format!("ERR {}", e)));
                     }
+                }
+            } else if cmd.args.len() == 2 {
+                // AUTH username password
+                let username = String::from_utf8_lossy(&cmd.args[0]).to_string();
+                let password_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
+                match security_mgr.authenticate_with_username(
+                    client_addr_str,
+                    &username,
+                    &password_str,
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Ok(RespValue::Error(format!("ERR {}", e)));
+                    }
+                }
+            }
+        }
 
         Ok(result)
     }
@@ -1527,33 +1785,68 @@ impl Server {
                                 "subscribe" => {
                                     // ACL channel check in subscription mode
                                     if let Some(security_mgr) = security
-                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
-                                            let ch_str = String::from_utf8_lossy(denied);
-                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
-                                            if let Ok(bytes) = err.serialize() {
-                                                socket_writer.write_all(&bytes).await?;
-                                            }
-                                            continue;
+                                        && let Some(denied) = cmd.args.iter().find(|ch| {
+                                            !security_mgr
+                                                .check_channel_permission(client_addr_str, ch)
+                                        })
+                                    {
+                                        let ch_str = String::from_utf8_lossy(denied);
+                                        let err = RespValue::Error(format!(
+                                            "NOPERM No permissions to access channel '{}'",
+                                            ch_str
+                                        ));
+                                        if let Ok(bytes) = err.serialize() {
+                                            socket_writer.write_all(&bytes).await?;
                                         }
-                                    if let Ok(responses) = pubsub_commands::subscribe(pubsub, client_id, &cmd.args).await {
+                                        continue;
+                                    }
+                                    if let Ok(responses) =
+                                        pubsub_commands::subscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                     }
                                 }
                                 "unsubscribe" => {
-                                    if let Ok(responses) = pubsub_commands::unsubscribe(pubsub, client_id, &cmd.args).await {
+                                    if let Ok(responses) =
+                                        pubsub_commands::unsubscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
@@ -1565,33 +1858,68 @@ impl Server {
                                 "psubscribe" => {
                                     // ACL channel check in subscription mode
                                     if let Some(security_mgr) = security
-                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
-                                            let ch_str = String::from_utf8_lossy(denied);
-                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
-                                            if let Ok(bytes) = err.serialize() {
-                                                socket_writer.write_all(&bytes).await?;
-                                            }
-                                            continue;
+                                        && let Some(denied) = cmd.args.iter().find(|ch| {
+                                            !security_mgr
+                                                .check_channel_permission(client_addr_str, ch)
+                                        })
+                                    {
+                                        let ch_str = String::from_utf8_lossy(denied);
+                                        let err = RespValue::Error(format!(
+                                            "NOPERM No permissions to access channel '{}'",
+                                            ch_str
+                                        ));
+                                        if let Ok(bytes) = err.serialize() {
+                                            socket_writer.write_all(&bytes).await?;
                                         }
-                                    if let Ok(responses) = pubsub_commands::psubscribe(pubsub, client_id, &cmd.args).await {
+                                        continue;
+                                    }
+                                    if let Ok(responses) =
+                                        pubsub_commands::psubscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                     }
                                 }
                                 "punsubscribe" => {
-                                    if let Ok(responses) = pubsub_commands::punsubscribe(pubsub, client_id, &cmd.args).await {
+                                    if let Ok(responses) =
+                                        pubsub_commands::punsubscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
@@ -1603,33 +1931,68 @@ impl Server {
                                 "ssubscribe" => {
                                     // ACL channel check in subscription mode
                                     if let Some(security_mgr) = security
-                                        && let Some(denied) = cmd.args.iter().find(|ch| !security_mgr.check_channel_permission(client_addr_str, ch)) {
-                                            let ch_str = String::from_utf8_lossy(denied);
-                                            let err = RespValue::Error(format!("NOPERM No permissions to access channel '{}'", ch_str));
-                                            if let Ok(bytes) = err.serialize() {
-                                                socket_writer.write_all(&bytes).await?;
-                                            }
-                                            continue;
+                                        && let Some(denied) = cmd.args.iter().find(|ch| {
+                                            !security_mgr
+                                                .check_channel_permission(client_addr_str, ch)
+                                        })
+                                    {
+                                        let ch_str = String::from_utf8_lossy(denied);
+                                        let err = RespValue::Error(format!(
+                                            "NOPERM No permissions to access channel '{}'",
+                                            ch_str
+                                        ));
+                                        if let Ok(bytes) = err.serialize() {
+                                            socket_writer.write_all(&bytes).await?;
                                         }
-                                    if let Ok(responses) = pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args).await {
+                                        continue;
+                                    }
+                                    if let Ok(responses) =
+                                        pubsub_commands::ssubscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                     }
                                 }
                                 "sunsubscribe" => {
-                                    if let Ok(responses) = pubsub_commands::sunsubscribe(pubsub, client_id, &cmd.args).await {
+                                    if let Ok(responses) =
+                                        pubsub_commands::sunsubscribe(pubsub, client_id, &cmd.args)
+                                            .await
+                                    {
                                         for resp in responses {
-                                            let resp = if protocol_version == ProtocolVersion::RESP3 { resp.convert_to_push() } else { resp };
+                                            let resp = if protocol_version == ProtocolVersion::RESP3
+                                            {
+                                                resp.convert_to_push()
+                                            } else {
+                                                resp
+                                            };
                                             if let Ok(bytes) = resp.serialize() {
                                                 socket_writer.write_all(&bytes).await?;
                                             }
                                         }
-                                        Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
+                                        Self::update_sub_counts(
+                                            pubsub,
+                                            client_id,
+                                            connections,
+                                            conn_id,
+                                        )
+                                        .await;
                                         // Check if we should exit subscription mode
                                         let count = pubsub.get_subscription_count(client_id).await;
                                         if count == 0 {
@@ -1657,12 +2020,22 @@ impl Server {
                                 }
                                 _ => {
                                     let error_msg = "ERR only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT allowed in this context";
-                                    Self::send_error_to_writer(socket_writer, error_msg.to_string(), client_addr_str).await?;
+                                    Self::send_error_to_writer(
+                                        socket_writer,
+                                        error_msg.to_string(),
+                                        client_addr_str,
+                                    )
+                                    .await?;
                                 }
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str).await?;
+                            Self::send_error_to_writer(
+                                socket_writer,
+                                e.to_string(),
+                                client_addr_str,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1719,8 +2092,8 @@ impl Server {
     /// returns "base subcmd"; otherwise returns just the base command name.
     fn build_resp3_command_name(cmd_lower: &str, args: &[Vec<u8>]) -> String {
         match cmd_lower {
-            "xinfo" | "command" | "object" | "memory" | "client" | "cluster"
-            | "slowlog" | "latency" | "debug" => {
+            "xinfo" | "command" | "object" | "memory" | "client" | "cluster" | "slowlog"
+            | "latency" | "debug" => {
                 if let Some(sub) = args.first() {
                     format!(
                         "{} {}",
@@ -1770,7 +2143,8 @@ impl Server {
         use tokio::io::AsyncWriteExt;
 
         if args.len() < 2 {
-            let err = RespValue::Error("ERR wrong number of arguments for 'psync' command".to_string());
+            let err =
+                RespValue::Error("ERR wrong number of arguments for 'psync' command".to_string());
             if let Ok(bytes) = err.serialize() {
                 writer.write_all(&bytes).await?;
             }
@@ -1785,12 +2159,15 @@ impl Server {
         let master_offset = replication.get_master_repl_offset();
 
         // Check if partial resync is possible
-        let partial_possible = offset >= 0 && replication.can_partial_resync(&replid, offset as u64).await;
+        let partial_possible =
+            offset >= 0 && replication.can_partial_resync(&replid, offset as u64).await;
 
         if partial_possible {
             // Partial resync - send CONTINUE and the missing data
             let response = RespValue::SimpleString(format!("CONTINUE {}", master_replid));
-            let bytes = response.serialize().map_err(|e| NetworkError::Serialization(e.to_string()))?;
+            let bytes = response
+                .serialize()
+                .map_err(|e| NetworkError::Serialization(e.to_string()))?;
             writer.write_all(&bytes).await?;
 
             // Send backlog data from the replica's offset
@@ -1800,15 +2177,19 @@ impl Server {
             }
         } else {
             // Full resync - send FULLRESYNC, then RDB, then stream
-            let response = RespValue::SimpleString(format!("FULLRESYNC {} {}", master_replid, master_offset));
-            let bytes = response.serialize().map_err(|e| NetworkError::Serialization(e.to_string()))?;
+            let response =
+                RespValue::SimpleString(format!("FULLRESYNC {} {}", master_replid, master_offset));
+            let bytes = response
+                .serialize()
+                .map_err(|e| NetworkError::Serialization(e.to_string()))?;
             writer.write_all(&bytes).await?;
 
             // Generate and send RDB snapshot
             let engine = replication.engine();
-            let snapshot = engine.snapshot().await.map_err(|e| {
-                NetworkError::Internal(format!("Failed to get snapshot: {}", e))
-            })?;
+            let snapshot = engine
+                .snapshot()
+                .await
+                .map_err(|e| NetworkError::Internal(format!("Failed to get snapshot: {}", e)))?;
 
             // Serialize snapshot using serde_json (our internal format)
             let rdb_data = serde_json::to_vec(&snapshot).unwrap_or_default();
@@ -1821,11 +2202,14 @@ impl Server {
 
         // Register this replica for command propagation
         let replica_id = client_addr.to_string();
-        let (host, port) = client_addr.split_once(':').map(|(h, p)| {
-            (h.to_string(), p.parse::<u16>().unwrap_or(0))
-        }).unwrap_or((client_addr.to_string(), 0));
+        let (host, port) = client_addr
+            .split_once(':')
+            .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0)))
+            .unwrap_or((client_addr.to_string(), 0));
 
-        let mut rx = replication.register_replica(replica_id.clone(), host, port).await;
+        let mut rx = replication
+            .register_replica(replica_id.clone(), host, port)
+            .await;
 
         info!(client_addr = %client_addr, "Replica entered replication stream mode");
 
@@ -1884,7 +2268,12 @@ impl Server {
             }
             "replicaof" | "slaveof" => {
                 if cmd.args.len() != 2 {
-                    Self::send_error_to_writer(socket_writer, "ERR wrong number of arguments for 'replicaof' command".to_string(), client_addr_str).await?;
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        "ERR wrong number of arguments for 'replicaof' command".to_string(),
+                        client_addr_str,
+                    )
+                    .await?;
                 } else if let Some(repl) = replication {
                     let host = String::from_utf8_lossy(&cmd.args[0]).to_string();
                     let port_str = String::from_utf8_lossy(&cmd.args[1]).to_string();
@@ -1895,7 +2284,12 @@ impl Server {
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(socket_writer, format!("ERR {}", e), client_addr_str).await?;
+                            Self::send_error_to_writer(
+                                socket_writer,
+                                format!("ERR {}", e),
+                                client_addr_str,
+                            )
+                            .await?;
                         }
                     }
                 } else {
@@ -1907,15 +2301,16 @@ impl Server {
             }
             "replconf" => {
                 if let Some(repl) = replication
-                    && cmd.args.len() >= 2 {
-                        let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
-                        if subcmd == "ACK" {
-                            if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
-                                repl.update_replica_offset(client_addr_str, offset).await;
-                            }
-                            return Ok(false);
+                    && cmd.args.len() >= 2
+                {
+                    let subcmd = String::from_utf8_lossy(&cmd.args[0]).to_uppercase();
+                    if subcmd == "ACK" {
+                        if let Ok(offset) = String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
+                            repl.update_replica_offset(client_addr_str, offset).await;
                         }
+                        return Ok(false);
                     }
+                }
                 let response = RespValue::SimpleString("OK".to_string());
                 if let Ok(bytes) = response.serialize() {
                     response_buffer.extend_from_slice(&bytes);
@@ -1927,10 +2322,16 @@ impl Server {
                         socket_writer.write_all(response_buffer).await?;
                         response_buffer.clear();
                     }
-                    Self::handle_psync_command(socket_writer, &cmd.args, repl, client_addr_str).await?;
+                    Self::handle_psync_command(socket_writer, &cmd.args, repl, client_addr_str)
+                        .await?;
                     return Ok(true); // Connection taken over
                 } else {
-                    Self::send_error_to_writer(socket_writer, "ERR PSYNC not supported".to_string(), client_addr_str).await?;
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        "ERR PSYNC not supported".to_string(),
+                        client_addr_str,
+                    )
+                    .await?;
                 }
             }
             "failover" => {
@@ -1942,16 +2343,28 @@ impl Server {
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(socket_writer, format!("ERR {}", e), client_addr_str).await?;
+                            Self::send_error_to_writer(
+                                socket_writer,
+                                format!("ERR {}", e),
+                                client_addr_str,
+                            )
+                            .await?;
                         }
                     }
                 } else {
-                    Self::send_error_to_writer(socket_writer, "ERR FAILOVER not supported".to_string(), client_addr_str).await?;
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        "ERR FAILOVER not supported".to_string(),
+                        client_addr_str,
+                    )
+                    .await?;
                 }
             }
             "wait" => {
                 if cmd.args.len() != 2 {
-                    let error_resp = RespValue::Error("ERR wrong number of arguments for 'wait' command".to_string());
+                    let error_resp = RespValue::Error(
+                        "ERR wrong number of arguments for 'wait' command".to_string(),
+                    );
                     if let Ok(bytes) = error_resp.serialize() {
                         response_buffer.extend_from_slice(&bytes);
                     }
@@ -1959,7 +2372,9 @@ impl Server {
                     let numreplicas = match String::from_utf8_lossy(&cmd.args[0]).parse::<usize>() {
                         Ok(n) => n,
                         Err(_) => {
-                            let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                            let error_resp = RespValue::Error(
+                                "ERR value is not an integer or out of range".to_string(),
+                            );
                             if let Ok(bytes) = error_resp.serialize() {
                                 response_buffer.extend_from_slice(&bytes);
                             }
@@ -1969,7 +2384,9 @@ impl Server {
                     let timeout_ms = match String::from_utf8_lossy(&cmd.args[1]).parse::<u64>() {
                         Ok(n) => n,
                         Err(_) => {
-                            let error_resp = RespValue::Error("ERR value is not an integer or out of range".to_string());
+                            let error_resp = RespValue::Error(
+                                "ERR value is not an integer or out of range".to_string(),
+                            );
                             if let Ok(bytes) = error_resp.serialize() {
                                 response_buffer.extend_from_slice(&bytes);
                             }
@@ -2024,7 +2441,10 @@ impl Server {
                 "3" => new_version = ProtocolVersion::RESP3,
                 _ => {
                     return (
-                        RespValue::Error(format!("NOPROTO unsupported protocol version: {}", proto_str)),
+                        RespValue::Error(format!(
+                            "NOPROTO unsupported protocol version: {}",
+                            proto_str
+                        )),
                         current_version,
                     );
                 }
@@ -2047,9 +2467,14 @@ impl Server {
                     let username = String::from_utf8_lossy(&args[i + 1]).to_string();
                     let password = String::from_utf8_lossy(&args[i + 2]).to_string();
                     if let Some(security_mgr) = security
-                        && let Err(e) = security_mgr.authenticate_with_username(client_addr, &username, &password) {
-                            return (RespValue::Error(e), current_version);
-                        }
+                        && let Err(e) = security_mgr.authenticate_with_username(
+                            client_addr,
+                            &username,
+                            &password,
+                        )
+                    {
+                        return (RespValue::Error(e), current_version);
+                    }
                     // When no security manager is configured (no auth required),
                     // silently ignore the AUTH option (matching Redis behavior)
                     i += 3;
@@ -2057,7 +2482,9 @@ impl Server {
                 "SETNAME" => {
                     if i + 1 >= args.len() {
                         return (
-                            RespValue::Error("ERR Syntax error in HELLO option 'setname'".to_string()),
+                            RespValue::Error(
+                                "ERR Syntax error in HELLO option 'setname'".to_string(),
+                            ),
                             current_version,
                         );
                     }
@@ -2157,7 +2584,10 @@ mod tests {
     fn test_client_id_returns_correct_id() {
         let connections = make_connections();
         let conn_id = 42;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         let result = Server::handle_client_command(&args(&["ID"]), &connections, conn_id).unwrap();
         assert_eq!(result, RespValue::Integer(42));
@@ -2167,18 +2597,25 @@ mod tests {
     fn test_client_setname_and_getname() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         // GETNAME before setting returns nil
-        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // SETNAME
-        let result = Server::handle_client_command(&args(&["SETNAME", "myconn"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["SETNAME", "myconn"]), &connections, conn_id)
+                .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // GETNAME after setting returns the name
-        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myconn".to_vec())));
     }
 
@@ -2186,9 +2623,14 @@ mod tests {
     fn test_client_setname_rejects_spaces() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
-        let result = Server::handle_client_command(&args(&["SETNAME", "my conn"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["SETNAME", "my conn"]), &connections, conn_id)
+                .unwrap();
         match result {
             RespValue::Error(msg) => assert!(msg.contains("cannot contain spaces")),
             _ => panic!("Expected error for name with spaces"),
@@ -2229,7 +2671,8 @@ mod tests {
         info.db = 3;
         connections.insert(conn_id, info);
 
-        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
         match result {
             RespValue::BulkString(Some(data)) => {
                 let output = String::from_utf8(data).unwrap();
@@ -2246,7 +2689,10 @@ mod tests {
     fn test_client_list_reflects_state_updates() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()),
+        );
 
         // Update state as dispatch_command would
         if let Some(mut info) = connections.get_mut(&conn_id) {
@@ -2255,7 +2701,8 @@ mod tests {
             info.multi = 2;
         }
 
-        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
         match result {
             RespValue::BulkString(Some(data)) => {
                 let output = String::from_utf8(data).unwrap();
@@ -2311,7 +2758,10 @@ mod tests {
     fn test_hello_setname_updates_connection_tracker() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         // HELLO 3 SETNAME "myconn" should store the client name
         let (response, version) = Server::handle_hello_command(
@@ -2333,7 +2783,8 @@ mod tests {
         }
 
         // CLIENT GETNAME should now return "myconn"
-        let result = Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["GETNAME"]), &connections, conn_id).unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myconn".to_vec())));
     }
 
@@ -2341,7 +2792,10 @@ mod tests {
     fn test_hello_setname_rejects_spaces() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         let (response, _version) = Server::handle_hello_command(
             &args(&["3", "SETNAME", "my conn"]),
@@ -2353,7 +2807,11 @@ mod tests {
         );
 
         match response {
-            RespValue::Error(msg) => assert!(msg.contains("cannot contain spaces"), "Expected space rejection error, got: {}", msg),
+            RespValue::Error(msg) => assert!(
+                msg.contains("cannot contain spaces"),
+                "Expected space rejection error, got: {}",
+                msg
+            ),
             _ => panic!("Expected error for name with spaces"),
         }
     }
@@ -2362,7 +2820,10 @@ mod tests {
     fn test_hello_setname_without_protover() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         // HELLO with no args (just negotiate, keep current protocol)
         let (response, version) = Server::handle_hello_command(
@@ -2385,7 +2846,10 @@ mod tests {
     fn test_hello_setname_missing_value() {
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:12345".to_string()),
+        );
 
         // HELLO 3 SETNAME (missing client name value)
         let (response, _version) = Server::handle_hello_command(
@@ -2398,7 +2862,11 @@ mod tests {
         );
 
         match response {
-            RespValue::Error(msg) => assert!(msg.contains("Syntax error"), "Expected syntax error, got: {}", msg),
+            RespValue::Error(msg) => assert!(
+                msg.contains("Syntax error"),
+                "Expected syntax error, got: {}",
+                msg
+            ),
             _ => panic!("Expected error for missing SETNAME value"),
         }
     }

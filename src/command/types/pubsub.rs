@@ -59,27 +59,25 @@ pub fn subscription_message_to_resp(msg: &SubscriptionMessage) -> RespValue {
         SubscriptionMessage::Unsubscribe { channel, count } => {
             build_subscribe_response("unsubscribe", channel, *count)
         }
-        SubscriptionMessage::Message { channel, data } => {
-            build_message_response(channel, data)
-        }
+        SubscriptionMessage::Message { channel, data } => build_message_response(channel, data),
         SubscriptionMessage::PSubscribe { pattern, count } => {
             build_subscribe_response("psubscribe", pattern, *count)
         }
         SubscriptionMessage::PUnsubscribe { pattern, count } => {
             build_subscribe_response("punsubscribe", pattern, *count)
         }
-        SubscriptionMessage::PMessage { pattern, channel, data } => {
-            build_pmessage_response(pattern, channel, data)
-        }
+        SubscriptionMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        } => build_pmessage_response(pattern, channel, data),
         SubscriptionMessage::SSubscribe { channel, count } => {
             build_subscribe_response("ssubscribe", channel, *count)
         }
         SubscriptionMessage::SUnsubscribe { channel, count } => {
             build_subscribe_response("sunsubscribe", channel, *count)
         }
-        SubscriptionMessage::SMessage { channel, data } => {
-            build_smessage_response(channel, data)
-        }
+        SubscriptionMessage::SMessage { channel, data } => build_smessage_response(channel, data),
     }
 }
 
@@ -196,10 +194,7 @@ pub async fn punsubscribe(
 /// Publish a message to a channel.
 ///
 /// Returns the number of clients that received the message.
-pub async fn publish(
-    pubsub: &Arc<PubSubManager>,
-    args: &[Vec<u8>],
-) -> CommandResult {
+pub async fn publish(pubsub: &Arc<PubSubManager>, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -271,10 +266,7 @@ pub async fn sunsubscribe(
 /// Unlike PUBLISH, only delivers to SSUBSCRIBE subscribers (no pattern matching).
 ///
 /// Returns the number of clients that received the message.
-pub async fn spublish(
-    pubsub: &Arc<PubSubManager>,
-    args: &[Vec<u8>],
-) -> CommandResult {
+pub async fn spublish(pubsub: &Arc<PubSubManager>, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -295,10 +287,7 @@ pub async fn spublish(
 /// - PUBSUB NUMPAT - Get the number of pattern subscriptions
 /// - PUBSUB SHARDCHANNELS [pattern] - List active shard channels
 /// - PUBSUB SHARDNUMSUB [channel ...] - Get shard channel subscriber counts
-pub async fn pubsub_command(
-    pubsub: &Arc<PubSubManager>,
-    args: &[Vec<u8>],
-) -> CommandResult {
+pub async fn pubsub_command(pubsub: &Arc<PubSubManager>, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -420,7 +409,10 @@ mod tests {
 
         let (client_id, _rx) = pubsub.register_client().await;
         pubsub
-            .subscribe(client_id, vec![b"news:sports".to_vec(), b"news:tech".to_vec()])
+            .subscribe(
+                client_id,
+                vec![b"news:sports".to_vec(), b"news:tech".to_vec()],
+            )
             .await;
 
         // Get all channels
@@ -435,12 +427,9 @@ mod tests {
         }
 
         // Get channels matching pattern
-        let result = pubsub_command(
-            &pubsub,
-            &[b"CHANNELS".to_vec(), b"news:*".to_vec()],
-        )
-        .await
-        .unwrap();
+        let result = pubsub_command(&pubsub, &[b"CHANNELS".to_vec(), b"news:*".to_vec()])
+            .await
+            .unwrap();
 
         if let RespValue::Array(Some(channels)) = result {
             assert_eq!(channels.len(), 2);
@@ -508,10 +497,7 @@ mod tests {
         // Check first response
         if let RespValue::Array(Some(arr)) = &responses[0] {
             assert_eq!(arr[0], RespValue::BulkString(Some(b"ssubscribe".to_vec())));
-            assert_eq!(
-                arr[1],
-                RespValue::BulkString(Some(b"shard:news".to_vec()))
-            );
+            assert_eq!(arr[1], RespValue::BulkString(Some(b"shard:news".to_vec())));
             assert_eq!(arr[2], RespValue::Integer(1));
         } else {
             panic!("Expected Array response");
@@ -546,7 +532,10 @@ mod tests {
 
         // Subscribe first
         pubsub
-            .ssubscribe(client_id, vec![b"shard:news".to_vec(), b"shard:sports".to_vec()])
+            .ssubscribe(
+                client_id,
+                vec![b"shard:news".to_vec(), b"shard:sports".to_vec()],
+            )
             .await;
 
         // Unsubscribe from one
@@ -560,10 +549,7 @@ mod tests {
                 arr[0],
                 RespValue::BulkString(Some(b"sunsubscribe".to_vec()))
             );
-            assert_eq!(
-                arr[1],
-                RespValue::BulkString(Some(b"shard:news".to_vec()))
-            );
+            assert_eq!(arr[1], RespValue::BulkString(Some(b"shard:news".to_vec())));
             assert_eq!(arr[2], RespValue::Integer(1)); // 1 remaining
         } else {
             panic!("Expected Array response");
@@ -619,12 +605,9 @@ mod tests {
             .ssubscribe(client_id, vec![b"shard:news".to_vec()])
             .await;
 
-        let result = spublish(
-            &pubsub,
-            &[b"shard:news".to_vec(), b"Shard Hello!".to_vec()],
-        )
-        .await
-        .unwrap();
+        let result = spublish(&pubsub, &[b"shard:news".to_vec(), b"Shard Hello!".to_vec()])
+            .await
+            .unwrap();
 
         assert_eq!(result, RespValue::Integer(1));
     }
@@ -638,11 +621,7 @@ mod tests {
         assert!(result.is_err());
 
         // Too many args
-        let result = spublish(
-            &pubsub,
-            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
-        )
-        .await;
+        let result = spublish(&pubsub, &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await;
         assert!(result.is_err());
     }
 
@@ -670,12 +649,9 @@ mod tests {
         }
 
         // Get shard channels matching pattern
-        let result = pubsub_command(
-            &pubsub,
-            &[b"SHARDCHANNELS".to_vec(), b"shard:n*".to_vec()],
-        )
-        .await
-        .unwrap();
+        let result = pubsub_command(&pubsub, &[b"SHARDCHANNELS".to_vec(), b"shard:n*".to_vec()])
+            .await
+            .unwrap();
 
         if let RespValue::Array(Some(channels)) = result {
             assert_eq!(channels.len(), 1);
@@ -698,19 +674,13 @@ mod tests {
             .ssubscribe(client2, vec![b"shard:news".to_vec()])
             .await;
 
-        let result = pubsub_command(
-            &pubsub,
-            &[b"SHARDNUMSUB".to_vec(), b"shard:news".to_vec()],
-        )
-        .await
-        .unwrap();
+        let result = pubsub_command(&pubsub, &[b"SHARDNUMSUB".to_vec(), b"shard:news".to_vec()])
+            .await
+            .unwrap();
 
         if let RespValue::Array(Some(arr)) = result {
             assert_eq!(arr.len(), 2);
-            assert_eq!(
-                arr[0],
-                RespValue::BulkString(Some(b"shard:news".to_vec()))
-            );
+            assert_eq!(arr[0], RespValue::BulkString(Some(b"shard:news".to_vec())));
             assert_eq!(arr[1], RespValue::Integer(2));
         } else {
             panic!("Expected Array response");

@@ -1,5 +1,5 @@
-use thiserror::Error;
 use std::io;
+use thiserror::Error;
 
 use crate::command::CommandError;
 use crate::networking::resp::RespError;
@@ -13,10 +13,10 @@ pub enum NetworkError {
 
     #[error("RESP protocol error: {0}")]
     Resp(#[from] RespError),
-    
+
     #[error("Command processing error: {0}")]
     Command(#[from] CommandError),
-    
+
     #[error("Persistence error: {0}")]
     Persistence(#[from] crate::persistence::error::PersistenceError),
 
@@ -28,10 +28,10 @@ pub enum NetworkError {
 
     #[error("Connection closed by request")]
     ConnectionClosed,
-    
+
     #[error("Could not resolve address: {0}")]
     AddressResolution(String),
 
     #[error("Internal network error: {0}")]
     Internal(String),
-} 
+}

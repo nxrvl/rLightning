@@ -48,7 +48,8 @@ async fn read_n_responses(
 /// LPUSH should return WRONGTYPE error, SET and GET should succeed.
 /// This verifies error isolation - one command's error doesn't kill the pipeline.
 #[tokio::test]
-async fn test_pipeline_error_isolation_wrongtype() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn test_pipeline_error_isolation_wrongtype()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = "127.0.0.1:17200".parse()?;
     let config = StorageConfig::default();
     let storage = Arc::new(StorageEngine::new(config));
@@ -83,7 +84,11 @@ async fn test_pipeline_error_isolation_wrongtype() -> Result<(), Box<dyn std::er
     )
     .await??;
 
-    assert_eq!(responses.len(), 3, "Expected exactly 3 responses from pipeline");
+    assert_eq!(
+        responses.len(),
+        3,
+        "Expected exactly 3 responses from pipeline"
+    );
 
     // Response 1: SET should succeed with OK
     assert_eq!(
@@ -101,7 +106,10 @@ async fn test_pipeline_error_isolation_wrongtype() -> Result<(), Box<dyn std::er
                 msg
             );
         }
-        other => panic!("Expected Error response for LPUSH on string key, got: {:?}", other),
+        other => panic!(
+            "Expected Error response for LPUSH on string key, got: {:?}",
+            other
+        ),
     }
 
     // Response 3: GET should still return "hello" (not affected by LPUSH error)
@@ -123,7 +131,8 @@ async fn test_pipeline_error_isolation_wrongtype() -> Result<(), Box<dyn std::er
 /// [SET a "1", INCR a, LPUSH a "x", INCR a, GET a]
 /// Expected: OK, 2, WRONGTYPE, 3, "3"
 #[tokio::test]
-async fn test_pipeline_multiple_errors_interspersed() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn test_pipeline_multiple_errors_interspersed()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = "127.0.0.1:17201".parse()?;
     let config = StorageConfig::default();
     let storage = Arc::new(StorageEngine::new(config));
@@ -190,7 +199,8 @@ async fn test_pipeline_multiple_errors_interspersed() -> Result<(), Box<dyn std:
 /// [SET k "val", UNKNOWNCMD, GET k]
 /// Expected: OK, ERR unknown command, "val"
 #[tokio::test]
-async fn test_pipeline_unknown_command_isolation() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn test_pipeline_unknown_command_isolation()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = "127.0.0.1:17202".parse()?;
     let config = StorageConfig::default();
     let storage = Arc::new(StorageEngine::new(config));
@@ -230,8 +240,11 @@ async fn test_pipeline_unknown_command_isolation() -> Result<(), Box<dyn std::er
     // UNKNOWNCMD -> ERR
     match &responses[1] {
         RespValue::Error(msg) => {
-            assert!(msg.contains("unknown command") || msg.contains("ERR"),
-                "Expected unknown command error, got: {}", msg);
+            assert!(
+                msg.contains("unknown command") || msg.contains("ERR"),
+                "Expected unknown command error, got: {}",
+                msg
+            );
         }
         other => panic!("Expected Error for unknown command, got: {:?}", other),
     }
@@ -251,7 +264,8 @@ async fn test_pipeline_unknown_command_isolation() -> Result<(), Box<dyn std::er
 /// [SET k, GET k "extra_arg", SET k "val", GET k]
 /// Expected: ERR wrong args, ERR wrong args, OK, "val"
 #[tokio::test]
-async fn test_pipeline_wrong_args_isolation() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn test_pipeline_wrong_args_isolation() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+{
     let addr: SocketAddr = "127.0.0.1:17203".parse()?;
     let config = StorageConfig::default();
     let storage = Arc::new(StorageEngine::new(config));
@@ -288,8 +302,11 @@ async fn test_pipeline_wrong_args_isolation() -> Result<(), Box<dyn std::error::
     // SET with missing value -> ERR
     match &responses[0] {
         RespValue::Error(msg) => {
-            assert!(msg.contains("ERR") || msg.contains("wrong number"),
-                "Expected error for wrong args, got: {}", msg);
+            assert!(
+                msg.contains("ERR") || msg.contains("wrong number"),
+                "Expected error for wrong args, got: {}",
+                msg
+            );
         }
         other => panic!("Expected Error for SET with missing arg, got: {:?}", other),
     }

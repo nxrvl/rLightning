@@ -36,16 +36,16 @@ pub enum PersistenceError {
     /// AOF rewriting failed
     #[error("AOF rewriting failed: {0}")]
     AofRewriteFailed(String),
-    
+
     /// RDB snapshot creation failed
     #[error("RDB snapshot creation failed: {0}")]
     RdbSnapshotFailed(String),
-    
+
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
-    
+
     /// Other error
     #[error("Persistence error: {0}")]
     Other(String),
-} 
+}

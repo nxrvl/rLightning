@@ -14,8 +14,16 @@ async fn test_hello_default() {
     // RESP2 response is a flat array of alternating key/value pairs
     if let RespValue::Array(Some(items)) = &response {
         // Should have key-value pairs (even number of elements)
-        assert!(items.len() % 2 == 0, "Expected even number of elements, got {}", items.len());
-        assert!(items.len() >= 14, "Expected at least 14 elements (7 pairs), got {}", items.len());
+        assert!(
+            items.len() % 2 == 0,
+            "Expected even number of elements, got {}",
+            items.len()
+        );
+        assert!(
+            items.len() >= 14,
+            "Expected at least 14 elements (7 pairs), got {}",
+            items.len()
+        );
 
         // Find the "server" key and verify value
         let mut found_server = false;
@@ -43,7 +51,10 @@ async fn test_hello_default() {
         assert!(found_server, "Response should contain 'server' key");
         assert!(found_proto, "Response should contain 'proto' key");
     } else {
-        panic!("Expected Array response for HELLO in RESP2 mode, got {:?}", response);
+        panic!(
+            "Expected Array response for HELLO in RESP2 mode, got {:?}",
+            response
+        );
     }
 }
 
@@ -107,7 +118,10 @@ async fn test_hello_resp3() {
             }
         }
         assert!(found_server, "RESP3 response should contain 'server' key");
-        assert!(found_proto, "RESP3 response should contain 'proto' key with value 3");
+        assert!(
+            found_proto,
+            "RESP3 response should contain 'proto' key with value 3"
+        );
     } else {
         panic!("Expected Map response for HELLO 3, got {:?}", response);
     }
@@ -123,9 +137,16 @@ async fn test_hello_invalid_version() {
 
     // Should get an error response
     if let RespValue::Error(msg) = &response {
-        assert!(msg.contains("NOPROTO"), "Error should contain NOPROTO, got: {}", msg);
+        assert!(
+            msg.contains("NOPROTO"),
+            "Error should contain NOPROTO, got: {}",
+            msg
+        );
     } else {
-        panic!("Expected Error response for invalid version, got {:?}", response);
+        panic!(
+            "Expected Error response for invalid version, got {:?}",
+            response
+        );
     }
 }
 
@@ -137,11 +158,18 @@ async fn test_hello_version_switching() {
 
     // Switch to RESP3
     let response = client.send_command_str("HELLO", &["3"]).await.unwrap();
-    assert!(matches!(response, RespValue::Map(_)), "HELLO 3 should return Map");
+    assert!(
+        matches!(response, RespValue::Map(_)),
+        "HELLO 3 should return Map"
+    );
 
     // Switch back to RESP2
     let response = client.send_command_str("HELLO", &["2"]).await.unwrap();
-    assert!(matches!(response, RespValue::Array(Some(_))), "HELLO 2 should return Array, got {:?}", response);
+    assert!(
+        matches!(response, RespValue::Array(Some(_))),
+        "HELLO 2 should return Array, got {:?}",
+        response
+    );
 }
 
 /// Test that regular commands work after HELLO
@@ -157,11 +185,20 @@ async fn test_commands_after_hello() {
     let response = client.send_command_str("PING", &[]).await.unwrap();
     assert_eq!(response, RespValue::SimpleString("PONG".to_string()));
 
-    let response = client.send_command_str("SET", &["hello_key", "hello_value"]).await.unwrap();
+    let response = client
+        .send_command_str("SET", &["hello_key", "hello_value"])
+        .await
+        .unwrap();
     assert_eq!(response, RespValue::SimpleString("OK".to_string()));
 
-    let response = client.send_command_str("GET", &["hello_key"]).await.unwrap();
-    assert_eq!(response, RespValue::BulkString(Some(b"hello_value".to_vec())));
+    let response = client
+        .send_command_str("GET", &["hello_key"])
+        .await
+        .unwrap();
+    assert_eq!(
+        response,
+        RespValue::BulkString(Some(b"hello_value".to_vec()))
+    );
 }
 
 /// Test HELLO response contains all expected fields
@@ -180,9 +217,15 @@ async fn test_hello_response_fields() {
             }
         }
 
-        let expected_keys = ["server", "version", "proto", "id", "mode", "role", "modules"];
+        let expected_keys = [
+            "server", "version", "proto", "id", "mode", "role", "modules",
+        ];
         for key in &expected_keys {
-            assert!(keys_found.contains(*key), "Missing expected key '{}' in HELLO response", key);
+            assert!(
+                keys_found.contains(*key),
+                "Missing expected key '{}' in HELLO response",
+                key
+            );
         }
     } else {
         panic!("Expected Array response, got {:?}", response);

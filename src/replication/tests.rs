@@ -1,8 +1,10 @@
 use std::time::Duration;
 
-use crate::storage::engine::{StorageEngine, StorageConfig};
-use crate::replication::{ReplicationManager, ReplicationRole, MasterLinkStatus, ReplicationBacklog};
 use crate::replication::config::ReplicationConfig;
+use crate::replication::{
+    MasterLinkStatus, ReplicationBacklog, ReplicationManager, ReplicationRole,
+};
+use crate::storage::engine::{StorageConfig, StorageEngine};
 
 #[tokio::test]
 async fn test_replication_manager_creation() {
@@ -31,7 +33,10 @@ async fn test_replication_manager_disconnect_from_master() {
     let replication_manager = ReplicationManager::new(engine.clone(), replication_config);
 
     // Simulate being a replica by connecting (will spawn background task that fails silently)
-    replication_manager.connect_to_master("localhost".to_string(), 6379).await.unwrap();
+    replication_manager
+        .connect_to_master("localhost".to_string(), 6379)
+        .await
+        .unwrap();
 
     // Verify we're in replica role
     let state = replication_manager.get_state().await;
@@ -119,7 +124,9 @@ async fn test_register_unregister_replica() {
     let replication_config = ReplicationConfig::default();
     let mgr = ReplicationManager::new(engine.clone(), replication_config);
 
-    let _rx = mgr.register_replica("replica-1".to_string(), "127.0.0.1".to_string(), 6380).await;
+    let _rx = mgr
+        .register_replica("replica-1".to_string(), "127.0.0.1".to_string(), 6380)
+        .await;
 
     let state = mgr.get_state().await;
     assert_eq!(state.connected_replicas.len(), 1);
@@ -188,7 +195,9 @@ async fn test_replicaof_no_one() {
     let mgr = ReplicationManager::new(engine.clone(), replication_config);
 
     // First become a replica
-    mgr.connect_to_master("localhost".to_string(), 6379).await.unwrap();
+    mgr.connect_to_master("localhost".to_string(), 6379)
+        .await
+        .unwrap();
     let state = mgr.get_state().await;
     assert_eq!(state.role, ReplicationRole::Replica);
 

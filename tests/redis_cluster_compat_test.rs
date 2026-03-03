@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 /// Redis Cluster Compatibility Test Suite
 ///
 /// Tests cluster redirect behavior, slot assignment, and multi-node operations.
@@ -7,12 +8,10 @@
 ///   docker compose -f .devcontainer/docker-compose.test.yml --profile cluster up -d
 ///   CLUSTER_COMPAT_TEST=1 cargo test --test redis_cluster_compat_test
 ///   docker compose -f .devcontainer/docker-compose.test.yml --profile cluster down
-
 use std::sync::Arc;
-use std::net::SocketAddr;
 
-use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole, RedirectType};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, key_hash_slot};
+use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole, RedirectType};
 use rlightning::networking::resp::RespValue;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
@@ -55,12 +54,18 @@ async fn test_cluster_moved_redirect_format() {
     mgr.set_slot(12182, "NODE", Some(&other_id)).await.unwrap();
 
     let redirect = mgr.get_redirect(b"foo").await;
-    assert!(redirect.is_some(), "Should get redirect for key on remote node");
+    assert!(
+        redirect.is_some(),
+        "Should get redirect for key on remote node"
+    );
 
     let r = redirect.unwrap();
     assert_eq!(r.redirect_type, RedirectType::Moved);
     assert_eq!(r.slot, 12182);
-    assert!(r.addr.to_string().contains("127.0.0.1:6380"), "Redirect address should be node's address");
+    assert!(
+        r.addr.to_string().contains("127.0.0.1:6380"),
+        "Redirect address should be node's address"
+    );
 }
 
 #[tokio::test]
@@ -80,7 +85,9 @@ async fn test_cluster_ask_redirect_during_migration() {
     mgr.add_slots(&[100]).await.unwrap();
 
     // Start migrating slot 100 to other node
-    mgr.set_slot(100, "MIGRATING", Some(&other_id)).await.unwrap();
+    mgr.set_slot(100, "MIGRATING", Some(&other_id))
+        .await
+        .unwrap();
 
     // Find a key that maps to slot 100 by trying candidates
     let mut test_key = None;
@@ -206,7 +213,10 @@ async fn test_cluster_slots_output_format() {
     // Each entry should have (start, end, nodes)
     for (start, end, nodes) in &slots {
         assert!(start <= end, "Start should be <= end");
-        assert!(!nodes.is_empty(), "Each range should have at least one node");
+        assert!(
+            !nodes.is_empty(),
+            "Each range should have at least one node"
+        );
     }
 }
 
@@ -274,7 +284,10 @@ async fn test_cluster_countkeysinslot_via_manager() {
     mgr.init(addr).await;
 
     // Store a key - "foo" hashes to slot 12182
-    storage.set(b"foo".to_vec(), b"bar".to_vec(), None).await.unwrap();
+    storage
+        .set(b"foo".to_vec(), b"bar".to_vec(), None)
+        .await
+        .unwrap();
 
     let count = mgr.count_keys_in_slot(12182).await.unwrap();
     assert_eq!(count, 1);
@@ -289,7 +302,10 @@ async fn test_cluster_getkeysinslot_via_manager() {
     let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
     mgr.init(addr).await;
 
-    storage.set(b"foo".to_vec(), b"bar".to_vec(), None).await.unwrap();
+    storage
+        .set(b"foo".to_vec(), b"bar".to_vec(), None)
+        .await
+        .unwrap();
 
     let keys = mgr.get_keys_in_slot(12182, 10).await.unwrap();
     assert_eq!(keys.len(), 1);
@@ -347,7 +363,11 @@ async fn test_cluster_slot_distribution() {
     let slots_per_node = CLUSTER_SLOTS / 3;
     for (i, node_id) in node_ids.iter().enumerate() {
         let start = (i as u16) * slots_per_node;
-        let end = if i == 2 { CLUSTER_SLOTS } else { start + slots_per_node };
+        let end = if i == 2 {
+            CLUSTER_SLOTS
+        } else {
+            start + slots_per_node
+        };
         for slot in start..end {
             mgr.set_slot(slot, "NODE", Some(node_id)).await.unwrap();
         }
@@ -439,7 +459,10 @@ async fn test_cluster_docker_redirect_behavior() {
     }
 
     // Test basic cluster operations on first node
-    let r = clients[0].send_command_str("CLUSTER", &["INFO"]).await.unwrap();
+    let r = clients[0]
+        .send_command_str("CLUSTER", &["INFO"])
+        .await
+        .unwrap();
     match &r {
         RespValue::BulkString(Some(data)) => {
             let info = String::from_utf8_lossy(data);
@@ -449,7 +472,10 @@ async fn test_cluster_docker_redirect_behavior() {
     }
 
     // Test CLUSTER KEYSLOT
-    let r = clients[0].send_command_str("CLUSTER", &["KEYSLOT", "foo"]).await.unwrap();
+    let r = clients[0]
+        .send_command_str("CLUSTER", &["KEYSLOT", "foo"])
+        .await
+        .unwrap();
     match &r {
         RespValue::Integer(slot) => {
             assert_eq!(*slot, 12182);

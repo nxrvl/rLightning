@@ -11,15 +11,25 @@ use crate::storage::stream::{ConsumerGroup, PendingEntry, StreamData, StreamEntr
 
 /// Helper: get stream data for multi-key read operations (XREAD, XREADGROUP).
 /// Uses engine.get() since atomic_modify is per-key and we need cross-key reads.
-async fn get_stream_data(engine: &StorageEngine, key: &[u8]) -> Result<Option<StreamData>, CommandError> {
-    match engine.get(key).await.map_err(|e| CommandError::StorageError(e.to_string()))? {
+async fn get_stream_data(
+    engine: &StorageEngine,
+    key: &[u8],
+) -> Result<Option<StreamData>, CommandError> {
+    match engine
+        .get(key)
+        .await
+        .map_err(|e| CommandError::StorageError(e.to_string()))?
+    {
         Some(data) => {
-            let key_type = engine.get_type(key).await.map_err(|e| CommandError::StorageError(e.to_string()))?;
+            let key_type = engine
+                .get_type(key)
+                .await
+                .map_err(|e| CommandError::StorageError(e.to_string()))?;
             if key_type != "stream" {
                 return Err(CommandError::WrongType);
             }
-            let stream: StreamData = bincode::deserialize(&data)
-                .map_err(|_| CommandError::WrongType)?;
+            let stream: StreamData =
+                bincode::deserialize(&data).map_err(|_| CommandError::WrongType)?;
             Ok(Some(stream))
         }
         None => Ok(None),
@@ -90,7 +100,9 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     (false, next)
                 };
                 let threshold = threshold_str.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 maxlen = Some((threshold, approximate));
                 idx += 1;
@@ -111,8 +123,9 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 } else {
                     (false, next)
                 };
-                let min_entry_id = StreamEntryId::parse_range_start(&id_str)
-                    .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID for MINID".to_string()))?;
+                let min_entry_id = StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+                    CommandError::InvalidArgument("Invalid stream ID for MINID".to_string())
+                })?;
                 minid = Some((min_entry_id, approximate));
                 idx += 1;
             }
@@ -143,14 +156,18 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         let parts: Vec<&str> = id_str.splitn(2, '-').collect();
         let ms = parts[0].parse::<u64>().map_err(|_| {
-            CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string())
+            CommandError::InvalidArgument(
+                "Invalid stream ID specified as stream command argument".to_string(),
+            )
         })?;
         if parts.len() > 1 && parts[1] == "*" {
             (Some(ms), None) // explicit ms, auto seq
         } else {
             let seq = if parts.len() > 1 {
                 parts[1].parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string())
+                    CommandError::InvalidArgument(
+                        "Invalid stream ID specified as stream command argument".to_string(),
+                    )
                 })?
             } else {
                 0
@@ -172,7 +189,8 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         };
 
         // Generate/resolve the entry ID using stream state
-        let entry_id = stream.generate_id(parsed_id.0, parsed_id.1)
+        let entry_id = stream
+            .generate_id(parsed_id.0, parsed_id.1)
             .map_err(|e| StorageError::InternalError(e.to_string()))?;
 
         // Add the entry
@@ -186,9 +204,12 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             stream.trim_minid(min_entry_id, approximate);
         }
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::BulkString(Some(added_id.to_string().into_bytes()))))
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
+        Ok((
+            Some(serialized),
+            RespValue::BulkString(Some(added_id.to_string().into_bytes())),
+        ))
     })?;
 
     Ok(result)
@@ -232,10 +253,16 @@ pub async fn xrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let start_str = bytes_to_string(&args[1])?;
     let end_str = bytes_to_string(&args[2])?;
 
-    let start = StreamEntryId::parse_range_start(&start_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
-    let end = StreamEntryId::parse_range_end(&end_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+    let start = StreamEntryId::parse_range_start(&start_str).ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "Invalid stream ID specified as stream command argument".to_string(),
+        )
+    })?;
+    let end = StreamEntryId::parse_range_end(&end_str).ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "Invalid stream ID specified as stream command argument".to_string(),
+        )
+    })?;
 
     let mut count = None;
     if args.len() >= 5 {
@@ -273,10 +300,16 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     let end_str = bytes_to_string(&args[1])?;
     let start_str = bytes_to_string(&args[2])?;
 
-    let end = StreamEntryId::parse_range_end(&end_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
-    let start = StreamEntryId::parse_range_start(&start_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+    let end = StreamEntryId::parse_range_end(&end_str).ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "Invalid stream ID specified as stream command argument".to_string(),
+        )
+    })?;
+    let start = StreamEntryId::parse_range_start(&start_str).ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "Invalid stream ID specified as stream command argument".to_string(),
+        )
+    })?;
 
     let mut count = None;
     if args.len() >= 5 {
@@ -309,7 +342,11 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
 /// Redis XREAD command - Read entries from one or more streams
 /// XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
-pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn xread(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() < 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -331,7 +368,9 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 count = Some(bytes_to_string(&args[idx])?.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
                 idx += 1;
             }
@@ -341,7 +380,9 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let ms = bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("timeout is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "timeout is not an integer or out of range".to_string(),
+                    )
                 })?;
                 block = Some(ms as f64 / 1000.0);
                 idx += 1;
@@ -352,7 +393,8 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
             }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unrecognized XREAD option '{}'", arg
+                    "Unrecognized XREAD option '{}'",
+                    arg
                 )));
             }
         }
@@ -374,11 +416,16 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
         if id_str == "$" {
             // $ means "only new entries from now"
             let stream = get_stream_data(engine, &keys[i]).await?;
-            let last_id = stream.map(|s| s.last_id.clone()).unwrap_or_else(|| StreamEntryId::new(0, 0));
+            let last_id = stream
+                .map(|s| s.last_id.clone())
+                .unwrap_or_else(|| StreamEntryId::new(0, 0));
             parsed_ids.push(last_id);
         } else {
-            let id = StreamEntryId::parse_range_start(&id_str)
-                .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+            let id = StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+                CommandError::InvalidArgument(
+                    "Invalid stream ID specified as stream command argument".to_string(),
+                )
+            })?;
             parsed_ids.push(id);
         }
     }
@@ -398,9 +445,7 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
     };
 
     loop {
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
 
         // Try again
         let result = do_xread(engine, keys, &parsed_ids, count).await?;
@@ -409,8 +454,13 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
         }
 
         // Wait for notification or timeout
-        let futs: Vec<_> = receivers.into_iter()
-            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+        let futs: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                Box::pin(async move {
+                    let _ = rx.changed().await;
+                })
+            })
             .collect();
 
         if let Some(deadline) = deadline {
@@ -418,7 +468,10 @@ pub async fn xread(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
             if remaining.is_zero() {
                 return Ok(RespValue::BulkString(None));
             }
-            if tokio::time::timeout(remaining, futures::future::select_all(futs)).await.is_err() {
+            if tokio::time::timeout(remaining, futures::future::select_all(futs))
+                .await
+                .is_err()
+            {
                 return Ok(RespValue::BulkString(None));
             }
         } else {
@@ -507,8 +560,11 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             TrimStrategy::MaxLen(maxlen, approximate)
         }
         "MINID" => {
-            let min_id = StreamEntryId::parse_range_start(&threshold_str)
-                .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+            let min_id = StreamEntryId::parse_range_start(&threshold_str).ok_or_else(|| {
+                CommandError::InvalidArgument(
+                    "Invalid stream ID specified as stream command argument".to_string(),
+                )
+            })?;
             TrimStrategy::MinId(min_id, approximate)
         }
         _ => {
@@ -561,8 +617,11 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut ids = Vec::new();
     for id_bytes in &args[1..] {
         let id_str = bytes_to_string(id_bytes)?;
-        let id = StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+        let id = StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+            CommandError::InvalidArgument(
+                "Invalid stream ID specified as stream command argument".to_string(),
+            )
+        })?;
         ids.push(id);
     }
 
@@ -607,15 +666,14 @@ pub async fn xinfo(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         "STREAM" => xinfo_stream(engine, &args[1..]).await,
         "GROUPS" => xinfo_groups(engine, &args[1..]).await,
         "CONSUMERS" => xinfo_consumers(engine, &args[1..]).await,
-        "HELP" => {
-            Ok(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(b"XINFO STREAM <key> [FULL [COUNT <count>]]".to_vec())),
-                RespValue::BulkString(Some(b"XINFO GROUPS <key>".to_vec())),
-                RespValue::BulkString(Some(b"XINFO CONSUMERS <key> <groupname>".to_vec())),
-            ])))
-        }
+        "HELP" => Ok(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"XINFO STREAM <key> [FULL [COUNT <count>]]".to_vec())),
+            RespValue::BulkString(Some(b"XINFO GROUPS <key>".to_vec())),
+            RespValue::BulkString(Some(b"XINFO CONSUMERS <key> <groupname>".to_vec())),
+        ]))),
         _ => Err(CommandError::InvalidArgument(format!(
-            "Unknown XINFO subcommand '{}'", subcommand
+            "Unknown XINFO subcommand '{}'",
+            subcommand
         ))),
     }
 }
@@ -633,9 +691,17 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let first_entry = stream.entries.values().next().map(entry_to_resp)
+        let first_entry = stream
+            .entries
+            .values()
+            .next()
+            .map(entry_to_resp)
             .unwrap_or(RespValue::BulkString(None));
-        let last_entry = stream.entries.values().next_back().map(entry_to_resp)
+        let last_entry = stream
+            .entries
+            .values()
+            .next_back()
+            .map(entry_to_resp)
             .unwrap_or(RespValue::BulkString(None));
 
         let resp = RespValue::Array(Some(vec![
@@ -649,19 +715,23 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             RespValue::BulkString(Some(stream.last_id.to_string().into_bytes())),
             RespValue::BulkString(Some(b"max-deleted-entry-id".to_vec())),
             RespValue::BulkString(Some(
-                stream.max_deleted_entry_id.as_ref()
+                stream
+                    .max_deleted_entry_id
+                    .as_ref()
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "0-0".to_string())
-                    .into_bytes()
+                    .into_bytes(),
             )),
             RespValue::BulkString(Some(b"entries-added".to_vec())),
             RespValue::Integer(stream.entries_added as i64),
             RespValue::BulkString(Some(b"recorded-first-entry-id".to_vec())),
             RespValue::BulkString(Some(
-                stream.first_entry_id.as_ref()
+                stream
+                    .first_entry_id
+                    .as_ref()
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "0-0".to_string())
-                    .into_bytes()
+                    .into_bytes(),
             )),
             RespValue::BulkString(Some(b"groups".to_vec())),
             RespValue::Integer(stream.groups.len() as i64),
@@ -708,13 +778,17 @@ async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                 RespValue::BulkString(Some(b"last-delivered-id".to_vec())),
                 RespValue::BulkString(Some(group.last_delivered_id.to_string().into_bytes())),
                 RespValue::BulkString(Some(b"entries-read".to_vec())),
-                group.entries_read.map(|n| RespValue::Integer(n as i64)).unwrap_or(RespValue::BulkString(None)),
+                group
+                    .entries_read
+                    .map(|n| RespValue::Integer(n as i64))
+                    .unwrap_or(RespValue::BulkString(None)),
                 RespValue::BulkString(Some(b"lag".to_vec())),
                 {
-                    let lag = group.entries_read.map(|er| {
-                        (stream.entries_added as i64 - er as i64).max(0)
-                    });
-                    lag.map(RespValue::Integer).unwrap_or(RespValue::BulkString(None))
+                    let lag = group
+                        .entries_read
+                        .map(|er| (stream.entries_added as i64 - er as i64).max(0));
+                    lag.map(RespValue::Integer)
+                        .unwrap_or(RespValue::BulkString(None))
                 },
             ])));
         }
@@ -746,11 +820,12 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         let mut consumers = Vec::new();
         for consumer in group.consumers.values() {
@@ -773,7 +848,9 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -803,17 +880,24 @@ pub async fn xgroup(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         "DESTROY" => xgroup_destroy(engine, &args[1..]).await,
         "DELCONSUMER" => xgroup_delconsumer(engine, &args[1..]).await,
         "CREATECONSUMER" => xgroup_createconsumer(engine, &args[1..]).await,
-        "HELP" => {
-            Ok(RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(b"XGROUP CREATE <key> <groupname> <id|$> [MKSTREAM] [ENTRIESREAD <n>]".to_vec())),
-                RespValue::BulkString(Some(b"XGROUP SETID <key> <groupname> <id|$> [ENTRIESREAD <n>]".to_vec())),
-                RespValue::BulkString(Some(b"XGROUP DESTROY <key> <groupname>".to_vec())),
-                RespValue::BulkString(Some(b"XGROUP DELCONSUMER <key> <groupname> <consumername>".to_vec())),
-                RespValue::BulkString(Some(b"XGROUP CREATECONSUMER <key> <groupname> <consumername>".to_vec())),
-            ])))
-        }
+        "HELP" => Ok(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(
+                b"XGROUP CREATE <key> <groupname> <id|$> [MKSTREAM] [ENTRIESREAD <n>]".to_vec(),
+            )),
+            RespValue::BulkString(Some(
+                b"XGROUP SETID <key> <groupname> <id|$> [ENTRIESREAD <n>]".to_vec(),
+            )),
+            RespValue::BulkString(Some(b"XGROUP DESTROY <key> <groupname>".to_vec())),
+            RespValue::BulkString(Some(
+                b"XGROUP DELCONSUMER <key> <groupname> <consumername>".to_vec(),
+            )),
+            RespValue::BulkString(Some(
+                b"XGROUP CREATECONSUMER <key> <groupname> <consumername>".to_vec(),
+            )),
+        ]))),
         _ => Err(CommandError::InvalidArgument(format!(
-            "Unknown XGROUP subcommand '{}'. Try XGROUP HELP.", subcommand
+            "Unknown XGROUP subcommand '{}'. Try XGROUP HELP.",
+            subcommand
         ))),
     }
 }
@@ -843,13 +927,16 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 entries_read = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
                 idx += 1;
             }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unknown option '{}'", opt
+                    "Unknown option '{}'",
+                    opt
                 )));
             }
         }
@@ -861,8 +948,11 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     } else if id_str == "0" || id_str == "0-0" {
         Some(StreamEntryId::new(0, 0))
     } else {
-        Some(StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?)
+        Some(StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+            CommandError::InvalidArgument(
+                "Invalid stream ID specified as stream command argument".to_string(),
+            )
+        })?)
     };
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
@@ -902,10 +992,14 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     match result {
         Ok(resp) => Ok(resp),
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("The XGROUP subcommand") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("The XGROUP subcommand") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("BUSYGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("BUSYGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -942,8 +1036,11 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let parsed_id = if id_str == "$" {
         None
     } else {
-        Some(StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?)
+        Some(StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+            CommandError::InvalidArgument(
+                "Invalid stream ID specified as stream command argument".to_string(),
+            )
+        })?)
     };
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
@@ -953,11 +1050,12 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get_mut(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get_mut(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         group.last_delivered_id = match &parsed_id {
             Some(id) => id.clone(),
@@ -967,8 +1065,8 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             group.entries_read = Some(er);
         }
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((Some(serialized), RespValue::SimpleString("OK".to_string())))
     });
 
@@ -977,7 +1075,9 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1031,11 +1131,12 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get_mut(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get_mut(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         let pending_count = match group.consumers.remove(&consumer_name) {
             Some(consumer) => {
@@ -1048,8 +1149,8 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             None => 0,
         };
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((Some(serialized), RespValue::Integer(pending_count)))
     });
 
@@ -1058,7 +1159,9 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1082,11 +1185,12 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get_mut(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get_mut(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         let created = if group.consumers.contains_key(&consumer_name) {
             0
@@ -1095,8 +1199,8 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
             1
         };
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((Some(serialized), RespValue::Integer(created)))
     });
 
@@ -1105,7 +1209,9 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1118,7 +1224,11 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
 
 /// Redis XREADGROUP command - Read entries from a stream via a consumer group
 /// XREADGROUP GROUP group consumer [COUNT count] [BLOCK milliseconds] [NOACK] STREAMS key [key ...] id [id ...]
-pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn xreadgroup(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() < 6 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -1154,7 +1264,9 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 count = Some(bytes_to_string(&args[idx])?.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
                 idx += 1;
             }
@@ -1164,7 +1276,9 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let ms = bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("timeout is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "timeout is not an integer or out of range".to_string(),
+                    )
                 })?;
                 block = Some(ms as f64 / 1000.0);
                 idx += 1;
@@ -1179,7 +1293,8 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
             }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unrecognized XREADGROUP option '{}'", arg
+                    "Unrecognized XREADGROUP option '{}'",
+                    arg
                 )));
             }
         }
@@ -1195,7 +1310,8 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
     let ids = &remaining[half..];
 
     // Try reading
-    let result = do_xreadgroup(engine, keys, ids, &group_name, &consumer_name, count, noack).await?;
+    let result =
+        do_xreadgroup(engine, keys, ids, &group_name, &consumer_name, count, noack).await?;
     if result.is_some() || block.is_none() {
         return Ok(result.unwrap_or(RespValue::BulkString(None)));
     }
@@ -1209,17 +1325,21 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
     };
 
     loop {
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
 
-        let result = do_xreadgroup(engine, keys, ids, &group_name, &consumer_name, count, noack).await?;
+        let result =
+            do_xreadgroup(engine, keys, ids, &group_name, &consumer_name, count, noack).await?;
         if let Some(val) = result {
             return Ok(val);
         }
 
-        let futs: Vec<_> = receivers.into_iter()
-            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+        let futs: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                Box::pin(async move {
+                    let _ = rx.changed().await;
+                })
+            })
             .collect();
 
         if let Some(deadline) = deadline {
@@ -1227,7 +1347,10 @@ pub async fn xreadgroup(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: 
             if remaining.is_zero() {
                 return Ok(RespValue::BulkString(None));
             }
-            if tokio::time::timeout(remaining, futures::future::select_all(futs)).await.is_err() {
+            if tokio::time::timeout(remaining, futures::future::select_all(futs))
+                .await
+                .is_err()
+            {
                 return Ok(RespValue::BulkString(None));
             }
         } else {
@@ -1261,33 +1384,41 @@ async fn do_xreadgroup(
                 Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
                     .map_err(|_| StorageError::WrongType)?,
                 None => {
-                    return Ok((None, (false, RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(key.clone())),
-                        RespValue::Array(Some(vec![])),
-                    ])))));
+                    return Ok((
+                        None,
+                        (
+                            false,
+                            RespValue::Array(Some(vec![
+                                RespValue::BulkString(Some(key.clone())),
+                                RespValue::Array(Some(vec![])),
+                            ])),
+                        ),
+                    ));
                 }
             };
 
             let (stream_has_data, entry_resp) = if id_str == ">" {
                 // Read new entries not yet delivered to this group
-                let group = stream.groups.get_mut(&group_name_owned)
-                    .ok_or_else(|| StorageError::InternalError(format!(
+                let group = stream.groups.get_mut(&group_name_owned).ok_or_else(|| {
+                    StorageError::InternalError(format!(
                         "NOGROUP No such consumer group '{}' for key name '{}'",
                         group_name_owned, key_str
-                    )))?;
+                    ))
+                })?;
 
                 let entries: Vec<_> = {
-                    let iter = stream.entries.range(
-                        (std::ops::Bound::Excluded(group.last_delivered_id.clone()),
-                         std::ops::Bound::Unbounded)
-                    );
+                    let iter = stream.entries.range((
+                        std::ops::Bound::Excluded(group.last_delivered_id.clone()),
+                        std::ops::Bound::Unbounded,
+                    ));
                     let mut collected = Vec::new();
                     for (_, entry) in iter {
                         collected.push(entry.clone());
                         if let Some(max) = count
-                            && collected.len() >= max {
-                                break;
-                            }
+                            && collected.len() >= max
+                        {
+                            break;
+                        }
                     }
                     collected
                 };
@@ -1300,12 +1431,15 @@ async fn do_xreadgroup(
                     if !noack {
                         for entry in &entries {
                             pending_ids.push(entry.id.clone());
-                            group.pel.insert(entry.id.clone(), PendingEntry {
-                                id: entry.id.clone(),
-                                consumer: consumer_name_owned.clone(),
-                                delivery_time: now,
-                                delivery_count: 1,
-                            });
+                            group.pel.insert(
+                                entry.id.clone(),
+                                PendingEntry {
+                                    id: entry.id.clone(),
+                                    consumer: consumer_name_owned.clone(),
+                                    delivery_time: now,
+                                    delivery_count: 1,
+                                },
+                            );
                         }
                     }
 
@@ -1325,30 +1459,38 @@ async fn do_xreadgroup(
                     }
 
                     let entry_list: Vec<RespValue> = entries.iter().map(entry_to_resp).collect();
-                    (true, RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(key.clone())),
-                        RespValue::Array(Some(entry_list)),
-                    ])))
+                    (
+                        true,
+                        RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(key.clone())),
+                            RespValue::Array(Some(entry_list)),
+                        ])),
+                    )
                 } else {
                     let entry_list: Vec<RespValue> = Vec::new();
-                    (false, RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(key.clone())),
-                        RespValue::Array(Some(entry_list)),
-                    ])))
+                    (
+                        false,
+                        RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(key.clone())),
+                            RespValue::Array(Some(entry_list)),
+                        ])),
+                    )
                 }
             } else {
                 // Read pending entries for this consumer
-                let group = stream.groups.get_mut(&group_name_owned)
-                    .ok_or_else(|| StorageError::InternalError(format!(
+                let group = stream.groups.get_mut(&group_name_owned).ok_or_else(|| {
+                    StorageError::InternalError(format!(
                         "NOGROUP No such consumer group '{}' for key name '{}'",
                         group_name_owned, key_str
-                    )))?;
+                    ))
+                })?;
 
                 let start = if id_str == "0" || id_str == "0-0" {
                     StreamEntryId::min()
                 } else {
-                    StreamEntryId::parse_range_start(&id_str)
-                        .ok_or_else(|| StorageError::InternalError("Invalid stream ID".to_string()))?
+                    StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+                        StorageError::InternalError("Invalid stream ID".to_string())
+                    })?
                 };
 
                 let consumer = group.get_or_create_consumer(&consumer_name_owned);
@@ -1361,18 +1503,23 @@ async fn do_xreadgroup(
                             pending_entries.push(entry.clone());
                         }
                         if let Some(max) = count
-                            && pending_entries.len() >= max {
-                                break;
-                            }
+                            && pending_entries.len() >= max
+                        {
+                            break;
+                        }
                     }
                 }
 
                 let has = !pending_entries.is_empty();
-                let entry_list: Vec<RespValue> = pending_entries.iter().map(entry_to_resp).collect();
-                (has, RespValue::Array(Some(vec![
-                    RespValue::BulkString(Some(key.clone())),
-                    RespValue::Array(Some(entry_list)),
-                ])))
+                let entry_list: Vec<RespValue> =
+                    pending_entries.iter().map(entry_to_resp).collect();
+                (
+                    has,
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(key.clone())),
+                        RespValue::Array(Some(entry_list)),
+                    ])),
+                )
             };
 
             let serialized = bincode::serialize(&stream)
@@ -1387,10 +1534,14 @@ async fn do_xreadgroup(
                 }
                 results.push(entry_resp);
             }
-            Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+            Err(crate::storage::error::StorageError::InternalError(msg))
+                if msg.starts_with("NOGROUP") =>
+            {
                 return Err(CommandError::InvalidArgument(msg));
             }
-            Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "Invalid stream ID" => {
+            Err(crate::storage::error::StorageError::InternalError(msg))
+                if msg == "Invalid stream ID" =>
+            {
                 return Err(CommandError::InvalidArgument(msg));
             }
             Err(e) => return Err(e.into()),
@@ -1422,8 +1573,11 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut ids = Vec::new();
     for id_bytes in &args[2..] {
         let id_str = bytes_to_string(id_bytes)?;
-        let id = StreamEntryId::parse_range_start(&id_str)
-            .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+        let id = StreamEntryId::parse_range_start(&id_str).ok_or_else(|| {
+            CommandError::InvalidArgument(
+                "Invalid stream ID specified as stream command argument".to_string(),
+            )
+        })?;
         ids.push(id);
     }
 
@@ -1495,7 +1649,9 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 min_idle = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
                 idx += 1;
             }
@@ -1536,21 +1692,25 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
-        let resp = if let Some((min_idle, ref start, ref end, count, ref consumer_filter)) = extended_args {
+        let resp = if let Some((min_idle, ref start, ref end, count, ref consumer_filter)) =
+            extended_args
+        {
             // Extended form
             let now = now_ms();
             let mut result = Vec::new();
             for (id, pe) in group.pel.range(start.clone()..=end.clone()) {
                 if let Some(cf) = consumer_filter
-                    && pe.consumer != *cf {
-                        continue;
-                    }
+                    && pe.consumer != *cf
+                {
+                    continue;
+                }
                 if let Some(mi) = min_idle {
                     let idle = now.saturating_sub(pe.delivery_time);
                     if idle < mi {
@@ -1582,16 +1742,20 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                 let min_id = group.pel.keys().next().unwrap();
                 let max_id = group.pel.keys().next_back().unwrap();
 
-                let mut consumer_counts: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+                let mut consumer_counts: std::collections::HashMap<&str, i64> =
+                    std::collections::HashMap::new();
                 for pe in group.pel.values() {
                     *consumer_counts.entry(&pe.consumer).or_insert(0) += 1;
                 }
-                let consumer_list: Vec<RespValue> = consumer_counts.iter().map(|(name, count)| {
-                    RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(name.as_bytes().to_vec())),
-                        RespValue::BulkString(Some(count.to_string().into_bytes())),
-                    ]))
-                }).collect();
+                let consumer_list: Vec<RespValue> = consumer_counts
+                    .iter()
+                    .map(|(name, count)| {
+                        RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(name.as_bytes().to_vec())),
+                            RespValue::BulkString(Some(count.to_string().into_bytes())),
+                        ]))
+                    })
+                    .collect();
 
                 RespValue::Array(Some(vec![
                     RespValue::Integer(pel_count),
@@ -1610,7 +1774,9 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1650,23 +1816,35 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         match arg_upper.as_str() {
             "IDLE" => {
                 idx += 1;
-                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+                if idx >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
                 idle_ms = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
             }
             "TIME" => {
                 idx += 1;
-                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+                if idx >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
                 time_ms = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
             }
             "RETRYCOUNT" => {
                 idx += 1;
-                if idx >= args.len() { return Err(CommandError::WrongNumberOfArguments); }
+                if idx >= args.len() {
+                    return Err(CommandError::WrongNumberOfArguments);
+                }
                 retry_count = Some(bytes_to_string(&args[idx])?.parse::<u64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
             }
             "FORCE" => {
@@ -1677,8 +1855,11 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
             _ => {
                 // Try to parse as an entry ID
-                let id = StreamEntryId::parse_range_start(&arg_str)
-                    .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+                let id = StreamEntryId::parse_range_start(&arg_str).ok_or_else(|| {
+                    CommandError::InvalidArgument(
+                        "Invalid stream ID specified as stream command argument".to_string(),
+                    )
+                })?;
                 entry_ids.push(id);
             }
         }
@@ -1698,11 +1879,12 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get_mut(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get_mut(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         let now = now_ms();
         let mut claimed = Vec::new();
@@ -1735,16 +1917,23 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 let new_count = if let Some(rc) = retry_count {
                     rc
                 } else {
-                    group.pel.get(id).map(|pe| pe.delivery_count + 1).unwrap_or(1)
+                    group
+                        .pel
+                        .get(id)
+                        .map(|pe| pe.delivery_count + 1)
+                        .unwrap_or(1)
                 };
 
                 // Update or insert PEL entry
-                group.pel.insert(id.clone(), PendingEntry {
-                    id: id.clone(),
-                    consumer: new_consumer.clone(),
-                    delivery_time,
-                    delivery_count: new_count,
-                });
+                group.pel.insert(
+                    id.clone(),
+                    PendingEntry {
+                        id: id.clone(),
+                        consumer: new_consumer.clone(),
+                        delivery_time,
+                        delivery_count: new_count,
+                    },
+                );
 
                 // Add to new consumer's pending list
                 let consumer = group.get_or_create_consumer(&new_consumer);
@@ -1760,17 +1949,18 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
 
         let resp = if justid {
-            let result: Vec<RespValue> = claimed.iter().map(|e| {
-                RespValue::BulkString(Some(e.id.to_string().into_bytes()))
-            }).collect();
+            let result: Vec<RespValue> = claimed
+                .iter()
+                .map(|e| RespValue::BulkString(Some(e.id.to_string().into_bytes())))
+                .collect();
             RespValue::Array(Some(result))
         } else {
             let result: Vec<RespValue> = claimed.iter().map(entry_to_resp).collect();
             RespValue::Array(Some(result))
         };
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((Some(serialized), resp))
     });
 
@@ -1779,7 +1969,9 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1804,8 +1996,11 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
     let start_str = bytes_to_string(&args[4])?;
-    let start_id = StreamEntryId::parse_range_start(&start_str)
-        .ok_or_else(|| CommandError::InvalidArgument("Invalid stream ID specified as stream command argument".to_string()))?;
+    let start_id = StreamEntryId::parse_range_start(&start_str).ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "Invalid stream ID specified as stream command argument".to_string(),
+        )
+    })?;
 
     let mut count: usize = 100; // default
     let mut justid = false;
@@ -1819,7 +2014,9 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 count = bytes_to_string(&args[idx])?.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
             }
             "JUSTID" => {
@@ -1827,7 +2024,8 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unknown option '{}'", opt
+                    "Unknown option '{}'",
+                    opt
                 )));
             }
         }
@@ -1843,11 +2041,12 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
-        let group = stream.groups.get_mut(&group_name)
-            .ok_or_else(|| StorageError::InternalError(format!(
+        let group = stream.groups.get_mut(&group_name).ok_or_else(|| {
+            StorageError::InternalError(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
                 group_name, key_str
-            )))?;
+            ))
+        })?;
 
         let now = now_ms();
         let mut claimed = Vec::new();
@@ -1855,7 +2054,9 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         let mut next_start = StreamEntryId::new(0, 0);
         let mut found = 0;
 
-        let pel_entries: Vec<(StreamEntryId, PendingEntry)> = group.pel.range(start_id..)
+        let pel_entries: Vec<(StreamEntryId, PendingEntry)> = group
+            .pel
+            .range(start_id..)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
@@ -1877,12 +2078,15 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
                     }
 
                     // Claim for new consumer
-                    group.pel.insert(id.clone(), PendingEntry {
-                        id: id.clone(),
-                        consumer: new_consumer.clone(),
-                        delivery_time: now,
-                        delivery_count: pe.delivery_count + 1,
-                    });
+                    group.pel.insert(
+                        id.clone(),
+                        PendingEntry {
+                            id: id.clone(),
+                            consumer: new_consumer.clone(),
+                            delivery_time: now,
+                            delivery_count: pe.delivery_count + 1,
+                        },
+                    );
 
                     let consumer = group.get_or_create_consumer(&new_consumer);
                     consumer.seen_time = now;
@@ -1915,16 +2119,18 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         };
 
         let claimed_resp = if justid {
-            claimed.iter().map(|e| {
-                RespValue::BulkString(Some(e.id.to_string().into_bytes()))
-            }).collect::<Vec<_>>()
+            claimed
+                .iter()
+                .map(|e| RespValue::BulkString(Some(e.id.to_string().into_bytes())))
+                .collect::<Vec<_>>()
         } else {
             claimed.iter().map(entry_to_resp).collect::<Vec<_>>()
         };
 
-        let deleted_resp: Vec<RespValue> = deleted_ids.iter().map(|id| {
-            RespValue::BulkString(Some(id.to_string().into_bytes()))
-        }).collect();
+        let deleted_resp: Vec<RespValue> = deleted_ids
+            .iter()
+            .map(|id| RespValue::BulkString(Some(id.to_string().into_bytes())))
+            .collect();
 
         let resp = RespValue::Array(Some(vec![
             RespValue::BulkString(Some(next_start_str.into_bytes())),
@@ -1932,8 +2138,8 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             RespValue::Array(Some(deleted_resp)),
         ]));
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((Some(serialized), resp))
     });
 
@@ -1942,7 +2148,9 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         Err(crate::storage::error::StorageError::InternalError(msg)) if msg == "no such key" => {
             Err(CommandError::InvalidArgument("no such key".to_string()))
         }
-        Err(crate::storage::error::StorageError::InternalError(msg)) if msg.starts_with("NOGROUP") => {
+        Err(crate::storage::error::StorageError::InternalError(msg))
+            if msg.starts_with("NOGROUP") =>
+        {
             Err(CommandError::InvalidArgument(msg))
         }
         Err(e) => Err(e.into()),
@@ -1966,7 +2174,9 @@ mod tests {
     async fn test_xadd_and_xlen() {
         let engine = make_engine();
         // XADD mystream * field1 value1
-        let result = xadd(&engine, &[b("mystream"), b("*"), b("field1"), b("value1")]).await.unwrap();
+        let result = xadd(&engine, &[b("mystream"), b("*"), b("field1"), b("value1")])
+            .await
+            .unwrap();
         if let RespValue::BulkString(Some(id_bytes)) = &result {
             let id_str = String::from_utf8(id_bytes.clone()).unwrap();
             assert!(id_str.contains('-'), "ID should contain '-': {}", id_str);
@@ -1979,8 +2189,12 @@ mod tests {
         assert_eq!(result, RespValue::Integer(1));
 
         // Add more entries
-        xadd(&engine, &[b("mystream"), b("*"), b("field2"), b("value2")]).await.unwrap();
-        xadd(&engine, &[b("mystream"), b("*"), b("field3"), b("value3")]).await.unwrap();
+        xadd(&engine, &[b("mystream"), b("*"), b("field2"), b("value2")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("mystream"), b("*"), b("field3"), b("value3")])
+            .await
+            .unwrap();
 
         let result = xlen(&engine, &[b("mystream")]).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
@@ -1989,10 +2203,14 @@ mod tests {
     #[tokio::test]
     async fn test_xadd_with_explicit_id() {
         let engine = make_engine();
-        let result = xadd(&engine, &[b("s"), b("1-1"), b("k"), b("v")]).await.unwrap();
+        let result = xadd(&engine, &[b("s"), b("1-1"), b("k"), b("v")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"1-1".to_vec())));
 
-        let result = xadd(&engine, &[b("s"), b("2-0"), b("k"), b("v")]).await.unwrap();
+        let result = xadd(&engine, &[b("s"), b("2-0"), b("k"), b("v")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"2-0".to_vec())));
 
         // Should fail - ID too small
@@ -2004,7 +2222,12 @@ mod tests {
     async fn test_xadd_nomkstream() {
         let engine = make_engine();
         // NOMKSTREAM on nonexistent key should return nil
-        let result = xadd(&engine, &[b("nonexistent"), b("NOMKSTREAM"), b("*"), b("k"), b("v")]).await.unwrap();
+        let result = xadd(
+            &engine,
+            &[b("nonexistent"), b("NOMKSTREAM"), b("*"), b("k"), b("v")],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // XLEN should be 0
@@ -2016,7 +2239,19 @@ mod tests {
     async fn test_xadd_with_maxlen() {
         let engine = make_engine();
         for i in 1..=10 {
-            xadd(&engine, &[b("s"), b("MAXLEN"), b("5"), b(&format!("{}-0", i)), b("k"), b("v")]).await.unwrap();
+            xadd(
+                &engine,
+                &[
+                    b("s"),
+                    b("MAXLEN"),
+                    b("5"),
+                    b(&format!("{}-0", i)),
+                    b("k"),
+                    b("v"),
+                ],
+            )
+            .await
+            .unwrap();
         }
         let result = xlen(&engine, &[b("s")]).await.unwrap();
         assert_eq!(result, RespValue::Integer(5));
@@ -2025,9 +2260,15 @@ mod tests {
     #[tokio::test]
     async fn test_xrange() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")])
+            .await
+            .unwrap();
 
         // Full range
         let result = xrange(&engine, &[b("s"), b("-"), b("+")]).await.unwrap();
@@ -2038,7 +2279,9 @@ mod tests {
         }
 
         // Partial range
-        let result = xrange(&engine, &[b("s"), b("2-0"), b("3-0")]).await.unwrap();
+        let result = xrange(&engine, &[b("s"), b("2-0"), b("3-0")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 2);
         } else {
@@ -2046,7 +2289,9 @@ mod tests {
         }
 
         // With count
-        let result = xrange(&engine, &[b("s"), b("-"), b("+"), b("COUNT"), b("2")]).await.unwrap();
+        let result = xrange(&engine, &[b("s"), b("-"), b("+"), b("COUNT"), b("2")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 2);
         } else {
@@ -2057,9 +2302,15 @@ mod tests {
     #[tokio::test]
     async fn test_xrevrange() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")])
+            .await
+            .unwrap();
 
         let result = xrevrange(&engine, &[b("s"), b("+"), b("-")]).await.unwrap();
         if let RespValue::Array(Some(entries)) = result {
@@ -2079,10 +2330,14 @@ mod tests {
     async fn test_xtrim_maxlen() {
         let engine = make_engine();
         for i in 1..=10 {
-            xadd(&engine, &[b("s"), b(&format!("{}-0", i)), b("k"), b("v")]).await.unwrap();
+            xadd(&engine, &[b("s"), b(&format!("{}-0", i)), b("k"), b("v")])
+                .await
+                .unwrap();
         }
 
-        let result = xtrim(&engine, &[b("s"), b("MAXLEN"), b("5")]).await.unwrap();
+        let result = xtrim(&engine, &[b("s"), b("MAXLEN"), b("5")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(5));
 
         let result = xlen(&engine, &[b("s")]).await.unwrap();
@@ -2093,10 +2348,17 @@ mod tests {
     async fn test_xtrim_minid() {
         let engine = make_engine();
         for i in 1..=10 {
-            xadd(&engine, &[b("s"), b(&format!("{}-0", i * 1000)), b("k"), b("v")]).await.unwrap();
+            xadd(
+                &engine,
+                &[b("s"), b(&format!("{}-0", i * 1000)), b("k"), b("v")],
+            )
+            .await
+            .unwrap();
         }
 
-        let result = xtrim(&engine, &[b("s"), b("MINID"), b("5000")]).await.unwrap();
+        let result = xtrim(&engine, &[b("s"), b("MINID"), b("5000")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(4)); // IDs 1000-4000 removed
 
         let result = xlen(&engine, &[b("s")]).await.unwrap();
@@ -2106,9 +2368,15 @@ mod tests {
     #[tokio::test]
     async fn test_xdel() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("k"), b("v")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("k"), b("v")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("3-0"), b("k"), b("v")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("k"), b("v")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("k"), b("v")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("3-0"), b("k"), b("v")])
+            .await
+            .unwrap();
 
         let result = xdel(&engine, &[b("s"), b("2-0")]).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
@@ -2126,12 +2394,24 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s1"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s1"), b("2-0"), b("b"), b("2")]).await.unwrap();
-        xadd(&engine, &[b("s2"), b("1-0"), b("c"), b("3")]).await.unwrap();
+        xadd(&engine, &[b("s1"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s1"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s2"), b("1-0"), b("c"), b("3")])
+            .await
+            .unwrap();
 
         // XREAD STREAMS s1 s2 0 0
-        let result = xread(&engine, &[b("STREAMS"), b("s1"), b("s2"), b("0-0"), b("0-0")], &blocking_mgr).await.unwrap();
+        let result = xread(
+            &engine,
+            &[b("STREAMS"), b("s1"), b("s2"), b("0-0"), b("0-0")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(streams)) = result {
             assert_eq!(streams.len(), 2);
         } else {
@@ -2139,7 +2419,13 @@ mod tests {
         }
 
         // XREAD COUNT 1 STREAMS s1 0
-        let result = xread(&engine, &[b("COUNT"), b("1"), b("STREAMS"), b("s1"), b("0-0")], &blocking_mgr).await.unwrap();
+        let result = xread(
+            &engine,
+            &[b("COUNT"), b("1"), b("STREAMS"), b("s1"), b("0-0")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(streams)) = result {
             assert_eq!(streams.len(), 1);
             if let RespValue::Array(Some(ref stream_data)) = streams[0] {
@@ -2156,7 +2442,13 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         // XREAD BLOCK 100 STREAMS s1 $ (should timeout and return nil)
-        let result = xread(&engine, &[b("BLOCK"), b("100"), b("STREAMS"), b("s1"), b("$")], &blocking_mgr).await.unwrap();
+        let result = xread(
+            &engine,
+            &[b("BLOCK"), b("100"), b("STREAMS"), b("s1"), b("$")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -2166,20 +2458,39 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         // Create stream with entries
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("3-0"), b("c"), b("3")])
+            .await
+            .unwrap();
 
         // Create consumer group starting from 0
-        let result = xgroup(&engine, &[b("CREATE"), b("s"), b("mygroup"), b("0")]).await.unwrap();
+        let result = xgroup(&engine, &[b("CREATE"), b("s"), b("mygroup"), b("0")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // XREADGROUP GROUP mygroup consumer1 COUNT 2 STREAMS s >
-        let result = xreadgroup(&engine, &[
-            b("GROUP"), b("mygroup"), b("consumer1"),
-            b("COUNT"), b("2"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        let result = xreadgroup(
+            &engine,
+            &[
+                b("GROUP"),
+                b("mygroup"),
+                b("consumer1"),
+                b("COUNT"),
+                b("2"),
+                b("STREAMS"),
+                b("s"),
+                b(">"),
+            ],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         if let RespValue::Array(Some(streams)) = &result {
             assert_eq!(streams.len(), 1);
@@ -2198,16 +2509,25 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
 
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
 
         // Read entries
-        xreadgroup(&engine, &[
-            b("GROUP"), b("g"), b("c1"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        xreadgroup(
+            &engine,
+            &[b("GROUP"), b("g"), b("c1"), b("STREAMS"), b("s"), b(">")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         // Check pending
         let result = xpending(&engine, &[b("s"), b("g")]).await.unwrap();
@@ -2231,18 +2551,29 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
 
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
 
-        xreadgroup(&engine, &[
-            b("GROUP"), b("g"), b("c1"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        xreadgroup(
+            &engine,
+            &[b("GROUP"), b("g"), b("c1"), b("STREAMS"), b("s"), b(">")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         // Extended form
-        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10")]).await.unwrap();
+        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 2);
         } else {
@@ -2250,13 +2581,17 @@ mod tests {
         }
 
         // Filter by consumer
-        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10"), b("c1")]).await.unwrap();
+        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10"), b("c1")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 2);
         }
 
         // Filter by non-existent consumer
-        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10"), b("c2")]).await.unwrap();
+        let result = xpending(&engine, &[b("s"), b("g"), b("-"), b("+"), b("10"), b("c2")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 0);
         }
@@ -2267,17 +2602,28 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
 
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
-        xreadgroup(&engine, &[
-            b("GROUP"), b("g"), b("c1"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
+        xreadgroup(
+            &engine,
+            &[b("GROUP"), b("g"), b("c1"), b("STREAMS"), b("s"), b(">")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         // Claim with 0 min-idle-time (claim immediately)
-        let result = xclaim(&engine, &[b("s"), b("g"), b("c2"), b("0"), b("1-0")]).await.unwrap();
+        let result = xclaim(&engine, &[b("s"), b("g"), b("c2"), b("0"), b("1-0")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 1);
         } else {
@@ -2290,17 +2636,28 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
 
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
-        xreadgroup(&engine, &[
-            b("GROUP"), b("g"), b("c1"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
+        xreadgroup(
+            &engine,
+            &[b("GROUP"), b("g"), b("c1"), b("STREAMS"), b("s"), b(">")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         // Auto-claim with 0 min-idle-time
-        let result = xautoclaim(&engine, &[b("s"), b("g"), b("c2"), b("0"), b("0-0")]).await.unwrap();
+        let result = xautoclaim(&engine, &[b("s"), b("g"), b("c2"), b("0"), b("0-0")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(parts)) = result {
             assert_eq!(parts.len(), 3); // [next-start, claimed-entries, deleted-entries]
             if let RespValue::Array(Some(ref claimed)) = parts[1] {
@@ -2314,8 +2671,12 @@ mod tests {
     #[tokio::test]
     async fn test_xinfo_stream() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xadd(&engine, &[b("s"), b("2-0"), b("b"), b("2")])
+            .await
+            .unwrap();
 
         let result = xinfo(&engine, &[b("STREAM"), b("s")]).await.unwrap();
         if let RespValue::Array(Some(parts)) = result {
@@ -2329,9 +2690,15 @@ mod tests {
     #[tokio::test]
     async fn test_xinfo_groups() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g1"), b("0")]).await.unwrap();
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g2"), b("0")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g1"), b("0")])
+            .await
+            .unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g2"), b("0")])
+            .await
+            .unwrap();
 
         let result = xinfo(&engine, &[b("GROUPS"), b("s")]).await.unwrap();
         if let RespValue::Array(Some(groups)) = result {
@@ -2344,28 +2711,50 @@ mod tests {
     #[tokio::test]
     async fn test_xgroup_destroy() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g1"), b("0")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g1"), b("0")])
+            .await
+            .unwrap();
 
-        let result = xgroup(&engine, &[b("DESTROY"), b("s"), b("g1")]).await.unwrap();
+        let result = xgroup(&engine, &[b("DESTROY"), b("s"), b("g1")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // Destroy non-existent
-        let result = xgroup(&engine, &[b("DESTROY"), b("s"), b("g1")]).await.unwrap();
+        let result = xgroup(&engine, &[b("DESTROY"), b("s"), b("g1")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
     #[tokio::test]
     async fn test_xgroup_createconsumer() {
         let engine = make_engine();
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
 
-        let result = xgroup(&engine, &[b("CREATECONSUMER"), b("s"), b("g"), b("consumer1")]).await.unwrap();
+        let result = xgroup(
+            &engine,
+            &[b("CREATECONSUMER"), b("s"), b("g"), b("consumer1")],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // Creating again returns 0
-        let result = xgroup(&engine, &[b("CREATECONSUMER"), b("s"), b("g"), b("consumer1")]).await.unwrap();
+        let result = xgroup(
+            &engine,
+            &[b("CREATECONSUMER"), b("s"), b("g"), b("consumer1")],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -2374,17 +2763,26 @@ mod tests {
         let engine = make_engine();
         let blocking_mgr = BlockingManager::new();
 
-        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")]).await.unwrap();
-        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")]).await.unwrap();
+        xadd(&engine, &[b("s"), b("1-0"), b("a"), b("1")])
+            .await
+            .unwrap();
+        xgroup(&engine, &[b("CREATE"), b("s"), b("g"), b("0")])
+            .await
+            .unwrap();
 
         // Read with a consumer to create it with pending entries
-        xreadgroup(&engine, &[
-            b("GROUP"), b("g"), b("c1"),
-            b("STREAMS"), b("s"), b(">")
-        ], &blocking_mgr).await.unwrap();
+        xreadgroup(
+            &engine,
+            &[b("GROUP"), b("g"), b("c1"), b("STREAMS"), b("s"), b(">")],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
 
         // Delete consumer
-        let result = xgroup(&engine, &[b("DELCONSUMER"), b("s"), b("g"), b("c1")]).await.unwrap();
+        let result = xgroup(&engine, &[b("DELCONSUMER"), b("s"), b("g"), b("c1")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // had 1 pending entry
     }
 
@@ -2397,7 +2795,12 @@ mod tests {
         assert!(result.is_err());
 
         // With MKSTREAM, should succeed
-        let result = xgroup(&engine, &[b("CREATE"), b("newstream"), b("g"), b("0"), b("MKSTREAM")]).await.unwrap();
+        let result = xgroup(
+            &engine,
+            &[b("CREATE"), b("newstream"), b("g"), b("0"), b("MKSTREAM")],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // Stream should exist but be empty
@@ -2408,12 +2811,21 @@ mod tests {
     #[tokio::test]
     async fn test_xadd_multiple_fields() {
         let engine = make_engine();
-        let result = xadd(&engine, &[
-            b("s"), b("1-0"),
-            b("name"), b("John"),
-            b("age"), b("30"),
-            b("city"), b("NYC"),
-        ]).await.unwrap();
+        let result = xadd(
+            &engine,
+            &[
+                b("s"),
+                b("1-0"),
+                b("name"),
+                b("John"),
+                b("age"),
+                b("30"),
+                b("city"),
+                b("NYC"),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"1-0".to_vec())));
 
         let result = xrange(&engine, &[b("s"), b("-"), b("+")]).await.unwrap();
@@ -2438,15 +2850,24 @@ mod tests {
     async fn test_xrange_empty_stream() {
         let engine = make_engine();
         // Use MKSTREAM to create empty stream
-        xgroup(&engine, &[b("CREATE"), b("empty"), b("g"), b("0"), b("MKSTREAM")]).await.unwrap();
-        let result = xrange(&engine, &[b("empty"), b("-"), b("+")]).await.unwrap();
+        xgroup(
+            &engine,
+            &[b("CREATE"), b("empty"), b("g"), b("0"), b("MKSTREAM")],
+        )
+        .await
+        .unwrap();
+        let result = xrange(&engine, &[b("empty"), b("-"), b("+")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
 
     #[tokio::test]
     async fn test_xrange_nonexistent() {
         let engine = make_engine();
-        let result = xrange(&engine, &[b("nonexistent"), b("-"), b("+")]).await.unwrap();
+        let result = xrange(&engine, &[b("nonexistent"), b("-"), b("+")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
 }

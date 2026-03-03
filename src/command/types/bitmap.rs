@@ -1,5 +1,5 @@
-use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
@@ -138,7 +138,7 @@ pub async fn bitcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                 _ => {
                     return Err(CommandError::InvalidArgument(
                         "ERR syntax error".to_string(),
-                    ))
+                    ));
                 }
             }
         } else {
@@ -234,7 +234,7 @@ pub async fn bitpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             _ => {
                 return Err(CommandError::InvalidArgument(
                     "ERR syntax error".to_string(),
-                ))
+                ));
             }
         }
     } else if args.len() == 4 {
@@ -438,7 +438,7 @@ pub async fn bitop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         _ => {
             return Err(CommandError::InvalidArgument(
                 "ERR syntax error".to_string(),
-            ))
+            ));
         }
     };
 
@@ -594,7 +594,7 @@ fn parse_encoding(s: &str) -> Result<BitfieldEncoding, CommandError> {
         _ => {
             return Err(CommandError::InvalidArgument(
                 "ERR Invalid bitfield type. Use something like i8 u8 u16 i32".to_string(),
-            ))
+            ));
         }
     };
 
@@ -631,10 +631,7 @@ fn parse_offset(s: &str, encoding: &BitfieldEncoding) -> Result<u64, CommandErro
     }
 }
 
-fn parse_bitfield_ops(
-    args: &[Vec<u8>],
-    read_only: bool,
-) -> Result<Vec<BitfieldOp>, CommandError> {
+fn parse_bitfield_ops(args: &[Vec<u8>], read_only: bool) -> Result<Vec<BitfieldOp>, CommandError> {
     let mut ops = Vec::new();
     let mut i = 0;
     let mut current_overflow = OverflowBehavior::Wrap;
@@ -685,12 +682,11 @@ fn parse_bitfield_ops(
                 }
                 let encoding = parse_encoding(&bytes_to_string(&args[i + 1])?)?;
                 let offset = parse_offset(&bytes_to_string(&args[i + 2])?, &encoding)?;
-                let increment: i64 =
-                    bytes_to_string(&args[i + 3])?.parse().map_err(|_| {
-                        CommandError::InvalidArgument(
-                            "ERR value is not an integer or out of range".to_string(),
-                        )
-                    })?;
+                let increment: i64 = bytes_to_string(&args[i + 3])?.parse().map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "ERR value is not an integer or out of range".to_string(),
+                    )
+                })?;
                 ops.push(BitfieldOp::IncrBy {
                     encoding,
                     offset,
@@ -712,7 +708,7 @@ fn parse_bitfield_ops(
                         return Err(CommandError::InvalidArgument(
                             "ERR Invalid OVERFLOW type (should be one of WRAP, SAT, FAIL)"
                                 .to_string(),
-                        ))
+                        ));
                     }
                 };
                 i += 2;
@@ -903,9 +899,9 @@ fn normalize_index(index: i64, len: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::storage::engine::StorageConfig;
     use crate::command::types::list::lpush;
+    use crate::storage::engine::StorageConfig;
+    use std::sync::Arc;
 
     fn make_engine() -> Arc<StorageEngine> {
         StorageEngine::new(StorageConfig::default())
@@ -941,7 +937,9 @@ mod tests {
     async fn test_setbit_expands_bitmap() {
         let engine = make_engine();
         // Set bit at offset 100 (requires 13 bytes)
-        let result = setbit(&engine, &args(&["mykey", "100", "1"])).await.unwrap();
+        let result = setbit(&engine, &args(&["mykey", "100", "1"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
 
         let result = getbit(&engine, &args(&["mykey", "100"])).await.unwrap();
@@ -962,7 +960,10 @@ mod tests {
     #[tokio::test]
     async fn test_getbit_out_of_range() {
         let engine = make_engine();
-        engine.set(b"mykey".to_vec(), vec![0xFF], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0xFF], None)
+            .await
+            .unwrap();
         // Bit 8 is beyond the 1-byte bitmap
         let result = getbit(&engine, &args(&["mykey", "8"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
@@ -988,7 +989,14 @@ mod tests {
     async fn test_setbit_preserves_ttl() {
         let engine = make_engine();
         use std::time::Duration;
-        engine.set(b"mykey".to_vec(), vec![0x00], Some(Duration::from_secs(300))).await.unwrap();
+        engine
+            .set(
+                b"mykey".to_vec(),
+                vec![0x00],
+                Some(Duration::from_secs(300)),
+            )
+            .await
+            .unwrap();
         setbit(&engine, &args(&["mykey", "0", "1"])).await.unwrap();
         let ttl = engine.ttl(b"mykey").await.unwrap();
         assert!(ttl.is_some());
@@ -1000,7 +1008,10 @@ mod tests {
     async fn test_bitcount_full() {
         let engine = make_engine();
         // "foobar" = 0x66 0x6f 0x6f 0x62 0x61 0x72
-        engine.set(b"mykey".to_vec(), b"foobar".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"foobar".to_vec(), None)
+            .await
+            .unwrap();
         let result = bitcount(&engine, &args(&["mykey"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(26));
     }
@@ -1008,13 +1019,20 @@ mod tests {
     #[tokio::test]
     async fn test_bitcount_byte_range() {
         let engine = make_engine();
-        engine.set(b"mykey".to_vec(), b"foobar".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"foobar".to_vec(), None)
+            .await
+            .unwrap();
         // Count bits in bytes 0 and 1
-        let result = bitcount(&engine, &args(&["mykey", "0", "0"])).await.unwrap();
+        let result = bitcount(&engine, &args(&["mykey", "0", "0"]))
+            .await
+            .unwrap();
         // 'f' = 0x66 = 01100110 = 4 bits
         assert_eq!(result, RespValue::Integer(4));
 
-        let result = bitcount(&engine, &args(&["mykey", "1", "1"])).await.unwrap();
+        let result = bitcount(&engine, &args(&["mykey", "1", "1"]))
+            .await
+            .unwrap();
         // 'o' = 0x6f = 01101111 = 6 bits
         assert_eq!(result, RespValue::Integer(6));
     }
@@ -1022,9 +1040,14 @@ mod tests {
     #[tokio::test]
     async fn test_bitcount_negative_indices() {
         let engine = make_engine();
-        engine.set(b"mykey".to_vec(), b"foobar".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"foobar".to_vec(), None)
+            .await
+            .unwrap();
         // Last byte: 'r' = 0x72 = 01110010 = 4 bits
-        let result = bitcount(&engine, &args(&["mykey", "-1", "-1"])).await.unwrap();
+        let result = bitcount(&engine, &args(&["mykey", "-1", "-1"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(4));
     }
 
@@ -1032,12 +1055,19 @@ mod tests {
     async fn test_bitcount_bit_mode() {
         let engine = make_engine();
         // 0xFF = 11111111
-        engine.set(b"mykey".to_vec(), vec![0xFF, 0x00], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0xFF, 0x00], None)
+            .await
+            .unwrap();
         // Count bits 0-7 (first byte)
-        let result = bitcount(&engine, &args(&["mykey", "0", "7", "BIT"])).await.unwrap();
+        let result = bitcount(&engine, &args(&["mykey", "0", "7", "BIT"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(8));
         // Count bits 8-15 (second byte, all zeros)
-        let result = bitcount(&engine, &args(&["mykey", "8", "15", "BIT"])).await.unwrap();
+        let result = bitcount(&engine, &args(&["mykey", "8", "15", "BIT"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -1054,7 +1084,10 @@ mod tests {
     async fn test_bitpos_find_first_set() {
         let engine = make_engine();
         // 0x00 0xFF = first set bit at position 8
-        engine.set(b"mykey".to_vec(), vec![0x00, 0xFF], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0x00, 0xFF], None)
+            .await
+            .unwrap();
         let result = bitpos(&engine, &args(&["mykey", "1"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(8));
     }
@@ -1063,7 +1096,10 @@ mod tests {
     async fn test_bitpos_find_first_clear() {
         let engine = make_engine();
         // 0xFF = all set, first clear bit is at position 8 (beyond string)
-        engine.set(b"mykey".to_vec(), vec![0xFF], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0xFF], None)
+            .await
+            .unwrap();
         let result = bitpos(&engine, &args(&["mykey", "0"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(8));
     }
@@ -1072,7 +1108,10 @@ mod tests {
     async fn test_bitpos_with_range() {
         let engine = make_engine();
         // 0xFF 0x00 0xFF
-        engine.set(b"mykey".to_vec(), vec![0xFF, 0x00, 0xFF], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0xFF, 0x00, 0xFF], None)
+            .await
+            .unwrap();
         // Find first 0 starting from byte 0
         let result = bitpos(&engine, &args(&["mykey", "0", "0"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(8)); // first 0 is in byte 1
@@ -1082,7 +1121,10 @@ mod tests {
     async fn test_bitpos_no_match() {
         let engine = make_engine();
         // All zeros, looking for 1
-        engine.set(b"mykey".to_vec(), vec![0x00, 0x00], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0x00, 0x00], None)
+            .await
+            .unwrap();
         let result = bitpos(&engine, &args(&["mykey", "1"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(-1));
     }
@@ -1099,9 +1141,17 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_and() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0xFF, 0x0F], None).await.unwrap();
-        engine.set(b"key2".to_vec(), vec![0x0F, 0xFF], None).await.unwrap();
-        let result = bitop(&engine, &args(&["AND", "dest", "key1", "key2"])).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0xFF, 0x0F], None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), vec![0x0F, 0xFF], None)
+            .await
+            .unwrap();
+        let result = bitop(&engine, &args(&["AND", "dest", "key1", "key2"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
         let val = engine.get(b"dest").await.unwrap().unwrap();
         assert_eq!(val, vec![0x0F, 0x0F]);
@@ -1110,9 +1160,17 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_or() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0xF0, 0x00], None).await.unwrap();
-        engine.set(b"key2".to_vec(), vec![0x0F, 0xFF], None).await.unwrap();
-        let result = bitop(&engine, &args(&["OR", "dest", "key1", "key2"])).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0xF0, 0x00], None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), vec![0x0F, 0xFF], None)
+            .await
+            .unwrap();
+        let result = bitop(&engine, &args(&["OR", "dest", "key1", "key2"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
         let val = engine.get(b"dest").await.unwrap().unwrap();
         assert_eq!(val, vec![0xFF, 0xFF]);
@@ -1121,9 +1179,17 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_xor() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0xFF, 0x00], None).await.unwrap();
-        engine.set(b"key2".to_vec(), vec![0xFF, 0xFF], None).await.unwrap();
-        let result = bitop(&engine, &args(&["XOR", "dest", "key1", "key2"])).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0xFF, 0x00], None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), vec![0xFF, 0xFF], None)
+            .await
+            .unwrap();
+        let result = bitop(&engine, &args(&["XOR", "dest", "key1", "key2"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
         let val = engine.get(b"dest").await.unwrap().unwrap();
         assert_eq!(val, vec![0x00, 0xFF]);
@@ -1132,8 +1198,13 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_not() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0x0F], None).await.unwrap();
-        let result = bitop(&engine, &args(&["NOT", "dest", "key1"])).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0x0F], None)
+            .await
+            .unwrap();
+        let result = bitop(&engine, &args(&["NOT", "dest", "key1"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
         let val = engine.get(b"dest").await.unwrap().unwrap();
         assert_eq!(val, vec![0xF0]);
@@ -1142,8 +1213,14 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_not_requires_single_key() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0x0F], None).await.unwrap();
-        engine.set(b"key2".to_vec(), vec![0xF0], None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0x0F], None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), vec![0xF0], None)
+            .await
+            .unwrap();
         let result = bitop(&engine, &args(&["NOT", "dest", "key1", "key2"])).await;
         assert!(result.is_err());
     }
@@ -1151,9 +1228,17 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_different_lengths() {
         let engine = make_engine();
-        engine.set(b"key1".to_vec(), vec![0xFF], None).await.unwrap();
-        engine.set(b"key2".to_vec(), vec![0xFF, 0xFF], None).await.unwrap();
-        let result = bitop(&engine, &args(&["AND", "dest", "key1", "key2"])).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), vec![0xFF], None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), vec![0xFF, 0xFF], None)
+            .await
+            .unwrap();
+        let result = bitop(&engine, &args(&["AND", "dest", "key1", "key2"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
         let val = engine.get(b"dest").await.unwrap().unwrap();
         // key1 padded with 0x00, so AND gives [0xFF, 0x00]
@@ -1163,7 +1248,9 @@ mod tests {
     #[tokio::test]
     async fn test_bitop_empty_keys() {
         let engine = make_engine();
-        let result = bitop(&engine, &args(&["AND", "dest", "nosuch1", "nosuch2"])).await.unwrap();
+        let result = bitop(&engine, &args(&["AND", "dest", "nosuch1", "nosuch2"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -1173,24 +1260,35 @@ mod tests {
     async fn test_bitfield_get_set() {
         let engine = make_engine();
         // SET an unsigned 8-bit value at offset 0
-        let result = bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"]))
+            .await
+            .unwrap();
         // Old value should be 0
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(0)])));
 
         // GET it back
-        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "0"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(200)])));
+        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "0"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(200)]))
+        );
     }
 
     #[tokio::test]
     async fn test_bitfield_signed() {
         let engine = make_engine();
         // SET a signed 8-bit value to -1 at offset 0
-        let result = bitfield(&engine, &args(&["mykey", "SET", "i8", "0", "-1"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "SET", "i8", "0", "-1"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(0)])));
 
         // GET it back
-        let result = bitfield(&engine, &args(&["mykey", "GET", "i8", "0"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "GET", "i8", "0"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(-1)])));
     }
 
@@ -1198,65 +1296,103 @@ mod tests {
     async fn test_bitfield_incrby_wrap() {
         let engine = make_engine();
         // Set u8 at offset 0 to 200
-        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"])).await.unwrap();
+        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"]))
+            .await
+            .unwrap();
 
         // Increment by 100 with WRAP (default) -> 200 + 100 = 300 -> wraps to 300 % 256 = 44
-        let result = bitfield(&engine, &args(&["mykey", "INCRBY", "u8", "0", "100"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "INCRBY", "u8", "0", "100"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(44)])));
     }
 
     #[tokio::test]
     async fn test_bitfield_incrby_sat() {
         let engine = make_engine();
-        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"])).await.unwrap();
+        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"]))
+            .await
+            .unwrap();
 
         // Increment with SAT -> 200 + 100 = 300, clamped to 255
-        let result = bitfield(&engine, &args(&["mykey", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "100"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(255)])));
+        let result = bitfield(
+            &engine,
+            &args(&["mykey", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "100"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(255)]))
+        );
     }
 
     #[tokio::test]
     async fn test_bitfield_incrby_fail() {
         let engine = make_engine();
-        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"])).await.unwrap();
+        bitfield(&engine, &args(&["mykey", "SET", "u8", "0", "200"]))
+            .await
+            .unwrap();
 
         // Increment with FAIL -> returns nil, value unchanged
-        let result = bitfield(&engine, &args(&["mykey", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "100"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::BulkString(None)])));
+        let result = bitfield(
+            &engine,
+            &args(&["mykey", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "100"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::BulkString(None)]))
+        );
 
         // Value should be unchanged
-        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "0"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(200)])));
+        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "0"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(200)]))
+        );
     }
 
     #[tokio::test]
     async fn test_bitfield_multiple_ops() {
         let engine = make_engine();
-        let result = bitfield(&engine, &args(&[
-            "mykey",
-            "SET", "u8", "0", "100",
-            "SET", "u8", "8", "200",
-            "GET", "u8", "0",
-            "GET", "u8", "8",
-        ])).await.unwrap();
+        let result = bitfield(
+            &engine,
+            &args(&[
+                "mykey", "SET", "u8", "0", "100", "SET", "u8", "8", "200", "GET", "u8", "0", "GET",
+                "u8", "8",
+            ]),
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(result, RespValue::Array(Some(vec![
-            RespValue::Integer(0),   // old val of first SET
-            RespValue::Integer(0),   // old val of second SET
-            RespValue::Integer(100), // GET #1
-            RespValue::Integer(200), // GET #2
-        ])));
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![
+                RespValue::Integer(0),   // old val of first SET
+                RespValue::Integer(0),   // old val of second SET
+                RespValue::Integer(100), // GET #1
+                RespValue::Integer(200), // GET #2
+            ]))
+        );
     }
 
     #[tokio::test]
     async fn test_bitfield_hash_offset() {
         let engine = make_engine();
         // #1 with u8 means offset = 1 * 8 = 8
-        let result = bitfield(&engine, &args(&["mykey", "SET", "u8", "#1", "42"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "SET", "u8", "#1", "42"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(0)])));
 
         // Read back at bit offset 8
-        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "8"])).await.unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "GET", "u8", "8"]))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(42)])));
     }
 
@@ -1265,9 +1401,17 @@ mod tests {
     #[tokio::test]
     async fn test_bitfield_ro_get() {
         let engine = make_engine();
-        engine.set(b"mykey".to_vec(), vec![0xAB], None).await.unwrap();
-        let result = bitfield_ro(&engine, &args(&["mykey", "GET", "u8", "0"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(0xAB)])));
+        engine
+            .set(b"mykey".to_vec(), vec![0xAB], None)
+            .await
+            .unwrap();
+        let result = bitfield_ro(&engine, &args(&["mykey", "GET", "u8", "0"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(0xAB)]))
+        );
     }
 
     #[tokio::test]
@@ -1298,7 +1442,10 @@ mod tests {
     #[tokio::test]
     async fn test_bitcount_all_ones() {
         let engine = make_engine();
-        engine.set(b"mykey".to_vec(), vec![0xFF, 0xFF], None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), vec![0xFF, 0xFF], None)
+            .await
+            .unwrap();
         let result = bitcount(&engine, &args(&["mykey"])).await.unwrap();
         assert_eq!(result, RespValue::Integer(16));
     }
@@ -1306,16 +1453,30 @@ mod tests {
     #[tokio::test]
     async fn test_bitfield_u16() {
         let engine = make_engine();
-        bitfield(&engine, &args(&["mykey", "SET", "u16", "0", "1000"])).await.unwrap();
-        let result = bitfield(&engine, &args(&["mykey", "GET", "u16", "0"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(1000)])));
+        bitfield(&engine, &args(&["mykey", "SET", "u16", "0", "1000"]))
+            .await
+            .unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "GET", "u16", "0"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(1000)]))
+        );
     }
 
     #[tokio::test]
     async fn test_bitfield_i16_negative() {
         let engine = make_engine();
-        bitfield(&engine, &args(&["mykey", "SET", "i16", "0", "-500"])).await.unwrap();
-        let result = bitfield(&engine, &args(&["mykey", "GET", "i16", "0"])).await.unwrap();
-        assert_eq!(result, RespValue::Array(Some(vec![RespValue::Integer(-500)])));
+        bitfield(&engine, &args(&["mykey", "SET", "i16", "0", "-500"]))
+            .await
+            .unwrap();
+        let result = bitfield(&engine, &args(&["mykey", "GET", "i16", "0"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            RespValue::Array(Some(vec![RespValue::Integer(-500)]))
+        );
     }
 }

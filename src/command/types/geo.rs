@@ -1,6 +1,6 @@
-use crate::command::{CommandError, CommandResult};
-use crate::command::utils::bytes_to_string;
 use crate::command::types::sorted_set::SortedSetData;
+use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
@@ -155,7 +155,9 @@ async fn load_sorted_set(
             let ss_data = bincode::deserialize::<SortedSetData>(&data)
                 .map_err(|_| CommandError::WrongType)?;
             // Convert from SortedSetData to Vec<(f64, Vec<u8>)> - already sorted by BTreeSet
-            let vec: Vec<(f64, Vec<u8>)> = ss_data.entries.into_iter()
+            let vec: Vec<(f64, Vec<u8>)> = ss_data
+                .entries
+                .into_iter()
                 .map(|(score, member)| (score.into_inner(), member))
                 .collect();
             Ok(Some(vec))
@@ -207,9 +209,8 @@ fn validate_latitude(lat: f64) -> Result<(), CommandError> {
 
 fn parse_float_arg(bytes: &[u8], name: &str) -> Result<f64, CommandError> {
     let s = bytes_to_string(bytes)?;
-    s.parse::<f64>().map_err(|_| {
-        CommandError::InvalidArgument(format!("{} is not a valid float", name))
-    })
+    s.parse::<f64>()
+        .map_err(|_| CommandError::InvalidArgument(format!("{} is not a valid float", name)))
 }
 
 // --- Geo search result item ---
@@ -263,9 +264,10 @@ fn search_members(
             // If ANY is specified with COUNT, we can stop early (no sorting needed)
             if any
                 && let Some(c) = count
-                    && results.len() >= c {
-                        break;
-                    }
+                && results.len() >= c
+            {
+                break;
+            }
         }
     }
 
@@ -285,17 +287,16 @@ fn search_members(
     }
 
     // Apply COUNT limit after sorting (unless ANY was used)
-    if !any
-        && let Some(c) = count {
-            results.truncate(c);
-        }
+    if !any && let Some(c) = count {
+        results.truncate(c);
+    }
 
     results
 }
 
 enum SearchShape {
-    Radius(f64),    // radius in meters
-    Box(f64, f64),  // width, height in meters
+    Radius(f64),   // radius in meters
+    Box(f64, f64), // width, height in meters
 }
 
 #[derive(Clone, Copy)]
@@ -409,7 +410,9 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             Some(data) => {
                 let ss_data = bincode::deserialize::<SortedSetData>(data)
                     .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                ss_data.entries.into_iter()
+                ss_data
+                    .entries
+                    .into_iter()
                     .map(|(score, member)| (score.into_inner(), member))
                     .collect()
             }
@@ -448,8 +451,12 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         for (score, member) in &ss {
             ss_data.insert(*score, member.clone());
         }
-        let serialized = bincode::serialize(&ss_data)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+        let serialized = bincode::serialize(&ss_data).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
 
         let result = if ch { added + changed } else { added };
         Ok((Some(serialized), result))
@@ -534,20 +541,18 @@ pub async fn geopos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let results: Vec<RespValue> = args[1..]
         .iter()
-        .map(|member| {
-            match ss.iter().find(|(_, m)| m == member) {
-                Some((score, _)) => {
-                    let hash = *score as u64;
-                    let (lon, lat) = geohash_decode(hash);
-                    let lon_str = format!("{:.6}", lon);
-                    let lat_str = format!("{:.6}", lat);
-                    RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(lon_str.into_bytes())),
-                        RespValue::BulkString(Some(lat_str.into_bytes())),
-                    ]))
-                }
-                None => RespValue::Array(None),
+        .map(|member| match ss.iter().find(|(_, m)| m == member) {
+            Some((score, _)) => {
+                let hash = *score as u64;
+                let (lon, lat) = geohash_decode(hash);
+                let lon_str = format!("{:.6}", lon);
+                let lat_str = format!("{:.6}", lat);
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(lon_str.into_bytes())),
+                    RespValue::BulkString(Some(lat_str.into_bytes())),
+                ]))
             }
+            None => RespValue::Array(None),
         })
         .collect();
 
@@ -571,9 +576,7 @@ pub async fn geosearch(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     let (center_lon, center_lat, shape, unit, sort, count, any, withcoord, withdist, withhash) =
         parse_geosearch_args(&args[1..], &ss)?;
 
-    let results = search_members(
-        &ss, center_lon, center_lat, &shape, &unit, count, any, sort,
-    );
+    let results = search_members(&ss, center_lon, center_lat, &shape, &unit, count, any, sort);
 
     Ok(format_geo_results(&results, withcoord, withdist, withhash))
 }
@@ -616,9 +619,7 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     let (center_lon, center_lat, shape, unit, sort, count, any, _, _, _) =
         parse_geosearch_args(&filtered_args, &ss)?;
 
-    let results = search_members(
-        &ss, center_lon, center_lat, &shape, &unit, count, any, sort,
-    );
+    let results = search_members(&ss, center_lon, center_lat, &shape, &unit, count, any, sort);
 
     // Build destination sorted set and write atomically
     let dest_entries: Vec<(f64, Vec<u8>)> = results
@@ -640,8 +641,12 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             for (score, member) in &dest_entries {
                 ss_data.insert(*score, member.clone());
             }
-            let serialized = bincode::serialize(&ss_data)
-                .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+            let serialized = bincode::serialize(&ss_data).map_err(|e| {
+                crate::storage::error::StorageError::InternalError(format!(
+                    "Serialization error: {}",
+                    e
+                ))
+            })?;
             Ok((Some(serialized), ()))
         }
     })?;
@@ -695,10 +700,7 @@ pub async fn georadius(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         return Ok(RespValue::Integer(count));
     }
     if let Some(sk) = &storedist_key {
-        let dest_ss: SortedSet = results
-            .iter()
-            .map(|r| (r.dist, r.member.clone()))
-            .collect();
+        let dest_ss: SortedSet = results.iter().map(|r| (r.dist, r.member.clone())).collect();
         let count = dest_ss.len() as i64;
         save_sorted_set(engine, sk, &dest_ss).await?;
         return Ok(RespValue::Integer(count));
@@ -730,10 +732,9 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
     };
 
     // Find member position
-    let member_entry = ss
-        .iter()
-        .find(|(_, m)| m == member)
-        .ok_or_else(|| CommandError::InvalidArgument("could not decode requested zset member".to_string()))?;
+    let member_entry = ss.iter().find(|(_, m)| m == member).ok_or_else(|| {
+        CommandError::InvalidArgument("could not decode requested zset member".to_string())
+    })?;
     let (lon, lat) = geohash_decode(member_entry.0 as u64);
 
     let (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key) =
@@ -755,10 +756,7 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
         return Ok(RespValue::Integer(count));
     }
     if let Some(sk) = &storedist_key {
-        let dest_ss: SortedSet = results
-            .iter()
-            .map(|r| (r.dist, r.member.clone()))
-            .collect();
+        let dest_ss: SortedSet = results.iter().map(|r| (r.dist, r.member.clone())).collect();
         let count = dest_ss.len() as i64;
         save_sorted_set(engine, sk, &dest_ss).await?;
         return Ok(RespValue::Integer(count));
@@ -775,7 +773,21 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
 fn parse_geosearch_args(
     args: &[Vec<u8>],
     ss: &SortedSet,
-) -> Result<(f64, f64, SearchShape, String, SortOrder, Option<usize>, bool, bool, bool, bool), CommandError> {
+) -> Result<
+    (
+        f64,
+        f64,
+        SearchShape,
+        String,
+        SortOrder,
+        Option<usize>,
+        bool,
+        bool,
+        bool,
+        bool,
+    ),
+    CommandError,
+> {
     let mut idx = 0;
     let mut center_lon: Option<f64> = None;
     let mut center_lat: Option<f64> = None;
@@ -797,10 +809,11 @@ fn parse_geosearch_args(
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let member = &args[idx];
-                let entry = ss
-                    .iter()
-                    .find(|(_, m)| m == member)
-                    .ok_or_else(|| CommandError::InvalidArgument("could not decode requested zset member".to_string()))?;
+                let entry = ss.iter().find(|(_, m)| m == member).ok_or_else(|| {
+                    CommandError::InvalidArgument(
+                        "could not decode requested zset member".to_string(),
+                    )
+                })?;
                 let (lon, lat) = geohash_decode(entry.0 as u64);
                 center_lon = Some(lon);
                 center_lat = Some(lat);
@@ -903,14 +916,22 @@ fn parse_geosearch_args(
         }
     }
 
-    let center_lon = center_lon
-        .ok_or_else(|| CommandError::InvalidArgument("exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string()))?;
+    let center_lon = center_lon.ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+        )
+    })?;
     let center_lat = center_lat.unwrap(); // always set with center_lon
 
-    let shape = shape
-        .ok_or_else(|| CommandError::InvalidArgument("exactly one of BYRADIUS or BYBOX must be provided".to_string()))?;
+    let shape = shape.ok_or_else(|| {
+        CommandError::InvalidArgument(
+            "exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+        )
+    })?;
 
-    Ok((center_lon, center_lat, shape, unit, sort, count, any, withcoord, withdist, withhash))
+    Ok((
+        center_lon, center_lat, shape, unit, sort, count, any, withcoord, withdist, withhash,
+    ))
 }
 
 /// Parse GEORADIUS optional arguments.
@@ -918,7 +939,19 @@ fn parse_geosearch_args(
 #[allow(clippy::type_complexity)]
 fn parse_georadius_options(
     args: &[Vec<u8>],
-) -> Result<(SortOrder, Option<usize>, bool, bool, bool, bool, Option<Vec<u8>>, Option<Vec<u8>>), CommandError> {
+) -> Result<
+    (
+        SortOrder,
+        Option<usize>,
+        bool,
+        bool,
+        bool,
+        bool,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    ),
+    CommandError,
+> {
     let mut sort = SortOrder::None;
     let mut count: Option<usize> = None;
     let mut any = false;
@@ -995,7 +1028,16 @@ fn parse_georadius_options(
         }
     }
 
-    Ok((sort, count, any, withcoord, withdist, withhash, store_key, storedist_key))
+    Ok((
+        sort,
+        count,
+        any,
+        withcoord,
+        withdist,
+        withhash,
+        store_key,
+        storedist_key,
+    ))
 }
 
 #[cfg(test)]
@@ -1026,12 +1068,12 @@ mod tests {
     fn test_geohash_encode_decode_roundtrip() {
         // Test several known coordinates
         let cases = vec![
-            (13.361389, 38.115556),   // Palermo
-            (15.087269, 37.502669),   // Catania
-            (-122.4194, 37.7749),     // San Francisco
-            (0.0, 0.0),              // Null Island
-            (-179.9, 0.0),           // Near extreme west
-            (179.9, 0.0),            // Near extreme east
+            (13.361389, 38.115556), // Palermo
+            (15.087269, 37.502669), // Catania
+            (-122.4194, 37.7749),   // San Francisco
+            (0.0, 0.0),             // Null Island
+            (-179.9, 0.0),          // Near extreme west
+            (179.9, 0.0),           // Near extreme east
         ];
 
         for (lon, lat) in cases {
@@ -1041,12 +1083,16 @@ mod tests {
             assert!(
                 (decoded_lon - lon).abs() < 0.001,
                 "Longitude mismatch for ({}, {}): got {}",
-                lon, lat, decoded_lon
+                lon,
+                lat,
+                decoded_lon
             );
             assert!(
                 (decoded_lat - lat).abs() < 0.001,
                 "Latitude mismatch for ({}, {}): got {}",
-                lon, lat, decoded_lat
+                lon,
+                lat,
+                decoded_lat
             );
         }
     }
@@ -1315,11 +1361,7 @@ mod tests {
         // No unit = meters
         let result = geodist(
             &engine,
-            &[
-                b"mygeo".to_vec(),
-                b"Palermo".to_vec(),
-                b"Catania".to_vec(),
-            ],
+            &[b"mygeo".to_vec(), b"Palermo".to_vec(), b"Catania".to_vec()],
         )
         .await
         .unwrap();
@@ -1356,16 +1398,9 @@ mod tests {
     async fn test_geodist_missing_key() {
         let engine = setup().await;
 
-        let result = geodist(
-            &engine,
-            &[
-                b"nokey".to_vec(),
-                b"A".to_vec(),
-                b"B".to_vec(),
-            ],
-        )
-        .await
-        .unwrap();
+        let result = geodist(&engine, &[b"nokey".to_vec(), b"A".to_vec(), b"B".to_vec()])
+            .await
+            .unwrap();
 
         assert_eq!(result, RespValue::BulkString(None));
     }
@@ -1388,11 +1423,7 @@ mod tests {
 
         let result = geohash(
             &engine,
-            &[
-                b"mygeo".to_vec(),
-                b"Palermo".to_vec(),
-                b"Catania".to_vec(),
-            ],
+            &[b"mygeo".to_vec(), b"Palermo".to_vec(), b"Catania".to_vec()],
         )
         .await
         .unwrap();
@@ -1444,30 +1475,28 @@ mod tests {
     async fn test_geopos_basic() {
         let engine = setup().await;
 
-        geoadd_helper(
-            &engine,
-            "mygeo",
-            &[(13.361389, 38.115556, "Palermo")],
-        )
-        .await;
+        geoadd_helper(&engine, "mygeo", &[(13.361389, 38.115556, "Palermo")]).await;
 
-        let result = geopos(
-            &engine,
-            &[b"mygeo".to_vec(), b"Palermo".to_vec()],
-        )
-        .await
-        .unwrap();
+        let result = geopos(&engine, &[b"mygeo".to_vec(), b"Palermo".to_vec()])
+            .await
+            .unwrap();
 
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 1);
             if let RespValue::Array(Some(coords)) = &items[0] {
                 assert_eq!(coords.len(), 2);
                 if let RespValue::BulkString(Some(lon_bytes)) = &coords[0] {
-                    let lon: f64 = String::from_utf8(lon_bytes.clone()).unwrap().parse().unwrap();
+                    let lon: f64 = String::from_utf8(lon_bytes.clone())
+                        .unwrap()
+                        .parse()
+                        .unwrap();
                     assert!((lon - 13.361389).abs() < 0.001);
                 }
                 if let RespValue::BulkString(Some(lat_bytes)) = &coords[1] {
-                    let lat: f64 = String::from_utf8(lat_bytes.clone()).unwrap().parse().unwrap();
+                    let lat: f64 = String::from_utf8(lat_bytes.clone())
+                        .unwrap()
+                        .parse()
+                        .unwrap();
                     assert!((lat - 38.115556).abs() < 0.001);
                 }
             } else {
@@ -1629,7 +1658,10 @@ mod tests {
         .unwrap();
 
         if let RespValue::Array(Some(items)) = result {
-            assert!(items.len() >= 1, "Should find at least Palermo or Catania within box");
+            assert!(
+                items.len() >= 1,
+                "Should find at least Palermo or Catania within box"
+            );
         } else {
             panic!("Expected Array");
         }
@@ -1833,7 +1865,11 @@ mod tests {
         let ss = load_sorted_set(&engine, b"dest").await.unwrap().unwrap();
         for (score, _) in &ss {
             // Distance in km should be small (< 200)
-            assert!(*score < 200.0, "Score should be distance in km, got {}", score);
+            assert!(
+                *score < 200.0,
+                "Score should be distance in km, got {}",
+                score
+            );
         }
     }
 
@@ -2219,7 +2255,11 @@ mod tests {
             // Paris should start with "u09t"
             if let RespValue::BulkString(Some(data)) = &items[0] {
                 let s = String::from_utf8_lossy(data);
-                assert!(s.starts_with("u09t"), "Paris: expected 'u09t...', got '{}'", s);
+                assert!(
+                    s.starts_with("u09t"),
+                    "Paris: expected 'u09t...', got '{}'",
+                    s
+                );
             } else {
                 panic!("Expected BulkString for Paris");
             }
@@ -2227,7 +2267,11 @@ mod tests {
             // Rome should start with "sr2y"
             if let RespValue::BulkString(Some(data)) = &items[1] {
                 let s = String::from_utf8_lossy(data);
-                assert!(s.starts_with("sr2y"), "Rome: expected 'sr2y...', got '{}'", s);
+                assert!(
+                    s.starts_with("sr2y"),
+                    "Rome: expected 'sr2y...', got '{}'",
+                    s
+                );
             } else {
                 panic!("Expected BulkString for Rome");
             }
@@ -2235,7 +2279,11 @@ mod tests {
             // New York should start with "dr5r"
             if let RespValue::BulkString(Some(data)) = &items[2] {
                 let s = String::from_utf8_lossy(data);
-                assert!(s.starts_with("dr5r"), "NewYork: expected 'dr5r...', got '{}'", s);
+                assert!(
+                    s.starts_with("dr5r"),
+                    "NewYork: expected 'dr5r...', got '{}'",
+                    s
+                );
             } else {
                 panic!("Expected BulkString for NewYork");
             }

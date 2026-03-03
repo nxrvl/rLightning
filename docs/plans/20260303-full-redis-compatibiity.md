@@ -601,14 +601,14 @@ New Docker-based comparison test category testing persistence behavior against r
 - Modify: `tests/docker-compat/shared/test-report.schema.json` (update if needed)
 - Modify: `tests/docker-compat/KNOWN-INCOMPATIBILITIES.txt` (clear resolved items)
 
-- [ ] Register all new test categories in each language's main entry point
-- [ ] Update `run-tests.sh` for new container configurations (replication, cluster, sentinel)
-- [ ] Update report generator to include new categories
-- [ ] Run full suite end-to-end: `cd tests/docker-compat && ./run-tests.sh --local`
-- [ ] Generate final comparison report: `python tests/docker-compat/report/generate-report.py --results-dir tests/docker-compat/results/`
-- [ ] Verify 0 compatibility gaps across all categories
-- [ ] Run `cargo test` — all Rust tests pass
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run `cargo fmt --check` — properly formatted
-- [ ] Run `cargo bench` — benchmarks execute without errors
-- [ ] Docker build: `./scripts/build-docker.sh` — image builds successfully
+- [x] Register all new test categories in each language's main entry point
+- [x] Update `run-tests.sh` for new container configurations (replication, cluster, sentinel)
+- [x] Update report generator to include new categories
+- [x] Run full suite end-to-end: `cd tests/docker-compat && ./run-tests.sh --local`
+- [x] Generate final comparison report: `python tests/docker-compat/report/generate-report.py --results-dir tests/docker-compat/results/`
+- [x] Verify 0 compatibility gaps across all categories
+- [x] Run `cargo test` — all Rust tests pass
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run `cargo fmt --check` — properly formatted
+- [x] Run `cargo bench` — benchmarks execute without errors
+- [x] Docker build: `./scripts/build-docker.sh` — image builds successfully

@@ -1,6 +1,6 @@
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
-use serde::Deserialize;
 
 /// Persistence mode options
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -18,7 +18,6 @@ pub enum PersistenceMode {
     /// Hybrid persistence (RDB + AOF)
     Hybrid,
 }
-
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for PersistenceMode {
@@ -64,7 +63,6 @@ pub enum AofSyncPolicy {
     /// Let OS handle syncing
     None,
 }
-
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for AofSyncPolicy {
@@ -127,7 +125,7 @@ impl Default for PersistenceConfig {
             rdb_snapshot_interval: Duration::from_secs(300), // 5 minutes
             rdb_snapshot_threshold: 10000,
             aof_rewrite_min_size: 64 * 1024 * 1024, // 64MB
-            aof_rewrite_percentage: 100, // 100% growth
+            aof_rewrite_percentage: 100,            // 100% growth
         }
     }
 }
@@ -165,11 +163,22 @@ impl TryFrom<PersistenceTomlConfig> for PersistenceConfig {
             _ => return Err(format!("Invalid persistence mode: {}", config.mode)),
         };
 
-        let aof_sync_policy = match config.aof_sync_policy.as_deref().unwrap_or("everysec").to_lowercase().as_str() {
+        let aof_sync_policy = match config
+            .aof_sync_policy
+            .as_deref()
+            .unwrap_or("everysec")
+            .to_lowercase()
+            .as_str()
+        {
             "always" => AofSyncPolicy::Always,
             "everysec" => AofSyncPolicy::EverySecond,
             "none" => AofSyncPolicy::None,
-            _ => return Err(format!("Invalid AOF sync policy: {:?}", config.aof_sync_policy)),
+            _ => {
+                return Err(format!(
+                    "Invalid AOF sync policy: {:?}",
+                    config.aof_sync_policy
+                ));
+            }
         };
 
         Ok(Self {
@@ -183,4 +192,4 @@ impl TryFrom<PersistenceTomlConfig> for PersistenceConfig {
             aof_rewrite_percentage: config.aof_rewrite_percentage.unwrap_or(100),
         })
     }
-} 
+}

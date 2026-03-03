@@ -36,11 +36,12 @@ pub fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
                 }
                 b'[' => {
                     if let Some((matched, new_pi)) = match_char_class(pattern, pi, text[ti])
-                        && matched {
-                            pi = new_pi;
-                            ti += 1;
-                            continue;
-                        }
+                        && matched
+                    {
+                        pi = new_pi;
+                        ti += 1;
+                        continue;
+                    }
                 }
                 b'\\' if pi + 1 < pattern.len() => {
                     if pattern[pi + 1] == text[ti] {

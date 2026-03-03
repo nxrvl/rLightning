@@ -47,11 +47,17 @@ impl From<crate::networking::error::NetworkError> for ReplicationError {
             crate::networking::error::NetworkError::Resp(e) => Self::Protocol(e.to_string()),
             crate::networking::error::NetworkError::Command(e) => Self::Protocol(e.to_string()),
             crate::networking::error::NetworkError::Serialization(msg) => Self::Protocol(msg),
-            crate::networking::error::NetworkError::ClientDisconnected => Self::Connection("Client disconnected unexpectedly".to_string()),
-            crate::networking::error::NetworkError::ConnectionClosed => Self::Connection("Connection closed".to_string()),
+            crate::networking::error::NetworkError::ClientDisconnected => {
+                Self::Connection("Client disconnected unexpectedly".to_string())
+            }
+            crate::networking::error::NetworkError::ConnectionClosed => {
+                Self::Connection("Connection closed".to_string())
+            }
             crate::networking::error::NetworkError::AddressResolution(msg) => Self::Connection(msg),
             crate::networking::error::NetworkError::Internal(msg) => Self::Internal(msg),
-            crate::networking::error::NetworkError::Persistence(e) => Self::Internal(format!("Persistence error: {}", e)),
+            crate::networking::error::NetworkError::Persistence(e) => {
+                Self::Internal(format!("Persistence error: {}", e))
+            }
         }
     }
 }

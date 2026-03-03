@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tokio::time::Duration;
 
 use rlightning::cluster::slot::{crc16, key_hash_slot};
@@ -139,8 +139,7 @@ fn bench_cluster_topology(c: &mut Criterion) {
             ..Default::default()
         };
         let storage = StorageEngine::new(config);
-        let handler =
-            rlightning::command::handler::CommandHandler::new(Arc::clone(&storage));
+        let handler = rlightning::command::handler::CommandHandler::new(Arc::clone(&storage));
         let cluster_config = ClusterConfig {
             enabled: true,
             ..Default::default()

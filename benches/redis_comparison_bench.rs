@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use redis::{Client, Connection};
 use std::process::Command as ProcessCommand;
 use std::sync::Once;
 use std::time::Duration;
-use redis::{Client, Connection};
 
 // Configure benchmark parameters
 const CONNECTION_TIMEOUT: u64 = 10;
@@ -27,20 +27,22 @@ static BUILD_RLIGHTNING_IMAGE: Once = Once::new();
 
 // Helper function to run a command and print its output
 fn run_command(cmd: &mut ProcessCommand) -> Result<(), String> {
-    let output = cmd.output().map_err(|e| format!("Failed to execute command: {}", e))?;
-    
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Command failed: {}", stderr));
     }
-    
+
     Ok(())
 }
 
 // Helper function to run a command with retries
 fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(), String> {
     let mut last_error = None;
-    
+
     for attempt in 1..=retries {
         match cmd.output() {
             Ok(output) => {
@@ -59,7 +61,7 @@ fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(),
                     }
                     last_error = Some(error_msg);
                 }
-            },
+            }
             Err(e) => {
                 let error_msg = format!("Failed to execute command: {}", e);
                 if attempt < retries {
@@ -71,7 +73,7 @@ fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(),
             }
         }
     }
-    
+
     Err(last_error.unwrap_or_else(|| "Command failed after multiple attempts".to_string()))
 }
 
@@ -79,14 +81,14 @@ fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(),
 fn build_rlightning_image() -> Result<(), String> {
     eprintln!("Building rLightning Docker image (this will only happen once)...");
     run_command_with_retries(
-        &mut ProcessCommand::new("docker")
-            .args([
-                "build",
-                "--quiet",
-                "-t", "rlightning:latest",
-                "."
-            ]),
-        DOCKER_BUILD_RETRIES
+        &mut ProcessCommand::new("docker").args([
+            "build",
+            "--quiet",
+            "-t",
+            "rlightning:latest",
+            ".",
+        ]),
+        DOCKER_BUILD_RETRIES,
     )
 }
 
@@ -96,32 +98,36 @@ fn start_redis() -> Result<(), String> {
     let _ = ProcessCommand::new("docker")
         .args(["stop", REDIS_CONTAINER_NAME])
         .output();
-    
+
     let _ = ProcessCommand::new("docker")
         .args(["rm", REDIS_CONTAINER_NAME])
         .output();
-    
+
     // Start Redis with memory and CPU limits, protected mode disabled
-    run_command(
-        ProcessCommand::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--name", REDIS_CONTAINER_NAME,
-                "-p", &format!("{}:6379", REDIS_PORT),
-                "--memory", DOCKER_MEMORY_LIMIT,
-                "--cpus", DOCKER_CPU_LIMIT,
-                REDIS_IMAGE,
-                "redis-server",
-                "--maxmemory", "100mb",
-                "--maxmemory-policy", "allkeys-lru",
-                "--protected-mode", "no"
-            ])
-    )?;
-    
+    run_command(ProcessCommand::new("docker").args([
+        "run",
+        "-d",
+        "--name",
+        REDIS_CONTAINER_NAME,
+        "-p",
+        &format!("{}:6379", REDIS_PORT),
+        "--memory",
+        DOCKER_MEMORY_LIMIT,
+        "--cpus",
+        DOCKER_CPU_LIMIT,
+        REDIS_IMAGE,
+        "redis-server",
+        "--maxmemory",
+        "100mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--protected-mode",
+        "no",
+    ]))?;
+
     // Wait for Redis to start
     std::thread::sleep(Duration::from_secs(STARTUP_WAIT_TIME));
-    
+
     Ok(())
 }
 
@@ -134,39 +140,46 @@ fn start_rlightning() -> Result<(), String> {
             eprintln!("rLightning benchmarks will be skipped.");
         }
     });
-    
+
     // Stop any existing container
     let _ = ProcessCommand::new("docker")
         .args(["stop", RLIGHTNING_CONTAINER_NAME])
         .output();
-    
+
     let _ = ProcessCommand::new("docker")
         .args(["rm", RLIGHTNING_CONTAINER_NAME])
         .output();
-    
+
     // Start rLightning with memory and CPU limits
     eprintln!("Starting rLightning container...");
-    run_command(
-        ProcessCommand::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--name", RLIGHTNING_CONTAINER_NAME,
-                "-p", &format!("{}:6379", RLIGHTNING_PORT),
-                "--memory", DOCKER_MEMORY_LIMIT,
-                "--cpus", DOCKER_CPU_LIMIT,
-                "-v", "./config/benchmark.toml:/etc/rlightning/config.toml",
-                "-e", "RUST_LOG=warn",
-                "rlightning:latest",
-                "rlightning",
-                "--config", "/etc/rlightning/config.toml"
-            ])
-    )?;
-    
+    run_command(ProcessCommand::new("docker").args([
+        "run",
+        "-d",
+        "--name",
+        RLIGHTNING_CONTAINER_NAME,
+        "-p",
+        &format!("{}:6379", RLIGHTNING_PORT),
+        "--memory",
+        DOCKER_MEMORY_LIMIT,
+        "--cpus",
+        DOCKER_CPU_LIMIT,
+        "-v",
+        "./config/benchmark.toml:/etc/rlightning/config.toml",
+        "-e",
+        "RUST_LOG=warn",
+        "rlightning:latest",
+        "rlightning",
+        "--config",
+        "/etc/rlightning/config.toml",
+    ]))?;
+
     // Wait for rLightning to start
-    eprintln!("Waiting for rLightning to start ({} seconds)...", STARTUP_WAIT_TIME);
+    eprintln!(
+        "Waiting for rLightning to start ({} seconds)...",
+        STARTUP_WAIT_TIME
+    );
     std::thread::sleep(Duration::from_secs(STARTUP_WAIT_TIME));
-    
+
     Ok(())
 }
 
@@ -184,7 +197,8 @@ fn connect_to_redis(port: u16) -> Result<Client, redis::RedisError> {
     eprintln!("Connecting to Redis on {}...", url);
     let client = Client::open(url)?;
     // Test the connection to ensure it works before proceeding
-    let conn = client.get_connection_with_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT))?;
+    let conn =
+        client.get_connection_with_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT))?;
     drop(conn);
     Ok(client)
 }
@@ -192,18 +206,28 @@ fn connect_to_redis(port: u16) -> Result<Client, redis::RedisError> {
 // Connect to rLightning with retries
 fn connect_to_rlightning() -> Result<Client, redis::RedisError> {
     let mut last_error = None;
-    
-    eprintln!("Attempting to connect to rLightning on port {}...", RLIGHTNING_PORT);
-    
+
+    eprintln!(
+        "Attempting to connect to rLightning on port {}...",
+        RLIGHTNING_PORT
+    );
+
     for attempt in 1..=RLIGHTNING_CONNECTION_RETRIES {
         match connect_to_redis(RLIGHTNING_PORT) {
             Ok(client) => {
-                eprintln!("Successfully connected to rLightning on attempt {}", attempt);
+                eprintln!(
+                    "Successfully connected to rLightning on attempt {}",
+                    attempt
+                );
                 return Ok(client);
-            },
+            }
             Err(e) => {
-                eprintln!("Failed to connect to rLightning on attempt {}: {} ({:?})", 
-                          attempt, e, e.kind());
+                eprintln!(
+                    "Failed to connect to rLightning on attempt {}: {} ({:?})",
+                    attempt,
+                    e,
+                    e.kind()
+                );
                 last_error = Some(e);
                 if attempt < RLIGHTNING_CONNECTION_RETRIES {
                     eprintln!("Retrying in {} ms...", CONNECTION_RETRY_SLEEP_MS);
@@ -212,30 +236,38 @@ fn connect_to_rlightning() -> Result<Client, redis::RedisError> {
             }
         }
     }
-    
+
     Err(last_error.unwrap_or_else(|| {
         redis::RedisError::from(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "Failed to connect to rLightning after multiple attempts"
+            "Failed to connect to rLightning after multiple attempts",
         ))
     }))
 }
 
 // Get a new connection from a client with retries
-fn get_connection_with_retry(client: &Client, retries: u8) -> Result<Connection, redis::RedisError> {
+fn get_connection_with_retry(
+    client: &Client,
+    retries: u8,
+) -> Result<Connection, redis::RedisError> {
     let mut last_error = None;
-    
+
     for attempt in 1..=retries {
-        match client.get_connection_with_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT)) {
+        match client.get_connection_with_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT))
+        {
             Ok(conn) => {
                 if attempt > 1 {
                     eprintln!("Successfully established connection on attempt {}", attempt);
                 }
                 return Ok(conn);
-            },
+            }
             Err(e) => {
-                eprintln!("Failed to get connection on attempt {}: {} ({:?})", 
-                          attempt, e, e.kind());
+                eprintln!(
+                    "Failed to get connection on attempt {}: {} ({:?})",
+                    attempt,
+                    e,
+                    e.kind()
+                );
                 last_error = Some(e);
                 if attempt < retries {
                     std::thread::sleep(Duration::from_millis(CONNECTION_RETRY_SLEEP_MS));
@@ -243,11 +275,11 @@ fn get_connection_with_retry(client: &Client, retries: u8) -> Result<Connection,
             }
         }
     }
-    
+
     Err(last_error.unwrap_or_else(|| {
         redis::RedisError::from(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "Failed to get connection after multiple attempts"
+            "Failed to get connection after multiple attempts",
         ))
     }))
 }
@@ -264,9 +296,11 @@ fn supports_json_commands(client: &Client) -> bool {
         {
             Ok(_) => {
                 // Clean up test key
-                let _ = redis::cmd("DEL").arg("test_json_support").query::<i32>(&mut conn);
+                let _ = redis::cmd("DEL")
+                    .arg("test_json_support")
+                    .query::<i32>(&mut conn);
                 true
-            },
+            }
             Err(_) => false,
         }
     } else {
@@ -281,25 +315,30 @@ fn setup_connections() -> (Option<Client>, Option<Client>) {
         eprintln!("Failed to start Redis: {}", e);
         return (None, None);
     }
-    
+
     // Attempt to start rLightning
     let start_rl_result = start_rlightning();
     let rlightning_available = start_rl_result.is_ok();
-    
+
     if let Err(e) = &start_rl_result {
         eprintln!("Warning: Failed to start rLightning: {}", e);
         eprintln!("Continuing with Redis-only benchmarks...");
     }
-    
+
     // Connect to Redis
     let redis_client = match connect_to_redis(REDIS_PORT) {
         Ok(client) => Some(client),
         Err(e) => {
-            eprintln!("Failed to connect to Redis on port {}: {} ({:?})", REDIS_PORT, e, e.kind());
+            eprintln!(
+                "Failed to connect to Redis on port {}: {} ({:?})",
+                REDIS_PORT,
+                e,
+                e.kind()
+            );
             None
         }
     };
-    
+
     // Connect to rLightning if available
     let rlightning_client = if rlightning_available {
         match connect_to_rlightning() {
@@ -307,13 +346,17 @@ fn setup_connections() -> (Option<Client>, Option<Client>) {
                 // Verify rLightning connection with a simple command
                 let conn_result = get_connection_with_retry(&client, 3);
                 if let Err(e) = conn_result {
-                    eprintln!("Connection to rLightning failed verification: {} ({:?})", e, e.kind());
+                    eprintln!(
+                        "Connection to rLightning failed verification: {} ({:?})",
+                        e,
+                        e.kind()
+                    );
                     eprintln!("Skipping rLightning benchmarks...");
                     None
                 } else {
                     Some(client)
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("Failed to connect to rLightning: {} ({:?})", e, e.kind());
                 eprintln!("Continuing with Redis-only benchmarks...");
@@ -323,7 +366,7 @@ fn setup_connections() -> (Option<Client>, Option<Client>) {
     } else {
         None
     };
-    
+
     (redis_client, rlightning_client)
 }
 
@@ -332,14 +375,14 @@ macro_rules! bench_command {
     ($name:ident, $test_name:expr, $setup:expr, $redis_cmd:expr, $rl_cmd:expr) => {
         fn $name(c: &mut Criterion) {
             let (redis_client, rlightning_client) = setup_connections();
-            
+
             if redis_client.is_none() && rlightning_client.is_none() {
                 cleanup();
                 return;
             }
-            
+
             let mut group = c.benchmark_group($test_name);
-            
+
             // Setup test data if needed
             if let Some(setup_fn) = $setup {
                 if let Some(client) = &redis_client {
@@ -349,18 +392,16 @@ macro_rules! bench_command {
                     setup_fn(client);
                 }
             }
-            
+
             // Benchmark Redis if available
             if let Some(client) = &redis_client {
                 group.bench_function("Redis", |b| {
                     b.iter_with_setup(
-                        || {
-                            match get_connection_with_retry(&client, 3) {
-                                Ok(conn) => conn,
-                                Err(e) => {
-                                    eprintln!("Failed to get Redis connection: {} ({:?})", e, e.kind());
-                                    panic!("Failed to connect to Redis");
-                                }
+                        || match get_connection_with_retry(&client, 3) {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                eprintln!("Failed to get Redis connection: {} ({:?})", e, e.kind());
+                                panic!("Failed to connect to Redis");
                             }
                         },
                         |mut conn| {
@@ -368,22 +409,24 @@ macro_rules! bench_command {
                                 eprintln!("Redis operation failed: {} ({:?})", e, e.kind());
                                 panic!("Redis operation failed");
                             }
-                        }
+                        },
                     );
                 });
             }
-            
+
             // Benchmark rLightning if available
             if let Some(client) = &rlightning_client {
                 group.bench_function("rLightning", |b| {
                     b.iter_with_setup(
-                        || {
-                            match get_connection_with_retry(&client, 3) {
-                                Ok(conn) => conn,
-                                Err(e) => {
-                                    eprintln!("Failed to get rLightning connection: {} ({:?})", e, e.kind());
-                                    panic!("Failed to connect to rLightning");
-                                }
+                        || match get_connection_with_retry(&client, 3) {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                eprintln!(
+                                    "Failed to get rLightning connection: {} ({:?})",
+                                    e,
+                                    e.kind()
+                                );
+                                panic!("Failed to connect to rLightning");
                             }
                         },
                         |mut conn| {
@@ -391,11 +434,11 @@ macro_rules! bench_command {
                                 eprintln!("rLightning operation failed: {} ({:?})", e, e.kind());
                                 panic!("rLightning operation failed");
                             }
-                        }
+                        },
                     );
                 });
             }
-            
+
             group.finish();
             cleanup();
         }
@@ -407,12 +450,12 @@ macro_rules! bench_json_command {
     ($name:ident, $test_name:expr, $setup:expr, $redis_cmd:expr, $rl_cmd:expr) => {
         fn $name(c: &mut Criterion) {
             let (redis_client, rlightning_client) = setup_connections();
-            
+
             if redis_client.is_none() && rlightning_client.is_none() {
                 cleanup();
                 return;
             }
-            
+
             // Check if Redis supports JSON commands
             let redis_supports_json = redis_client.as_ref()
                 .map(|client| {
@@ -421,13 +464,13 @@ macro_rules! bench_json_command {
                     supports
                 })
                 .unwrap_or(false);
-            
+
             if !redis_supports_json && redis_client.is_some() {
                 eprintln!("Warning: Redis instance does not support JSON commands. Skipping Redis benchmark for {}.", $test_name);
             }
-            
+
             let mut group = c.benchmark_group($test_name);
-            
+
             // Setup test data if needed
             if let Some(setup_fn) = $setup {
                 if let Some(client) = &redis_client {
@@ -439,7 +482,7 @@ macro_rules! bench_json_command {
                     setup_fn(client);
                 }
             }
-            
+
             // Benchmark Redis if available and supports JSON
             if let Some(client) = &redis_client {
                 if redis_supports_json {
@@ -464,7 +507,7 @@ macro_rules! bench_json_command {
                     });
                 }
             }
-            
+
             // Benchmark rLightning if available
             if let Some(client) = &rlightning_client {
                 group.bench_function("rLightning", |b| {
@@ -487,7 +530,7 @@ macro_rules! bench_json_command {
                     );
                 });
             }
-            
+
             group.finish();
             cleanup();
         }
@@ -499,31 +542,62 @@ fn populate_test_data(client: &Client) {
     if let Ok(mut conn) = get_connection_with_retry(client, 3) {
         // Populate string data
         for i in 0..100 {
-            let _ = redis::cmd("SET").arg(format!("key:{}", i)).arg(format!("value:{}", i)).query::<()>(&mut conn);
+            let _ = redis::cmd("SET")
+                .arg(format!("key:{}", i))
+                .arg(format!("value:{}", i))
+                .query::<()>(&mut conn);
         }
-        
+
         // Populate hash data
         for i in 0..50 {
-            let _ = redis::cmd("HSET").arg(format!("hash:{}", i)).arg("field1").arg(format!("value:{}", i)).query::<()>(&mut conn);
-            let _ = redis::cmd("HSET").arg(format!("hash:{}", i)).arg("field2").arg(format!("value2:{}", i)).query::<()>(&mut conn);
+            let _ = redis::cmd("HSET")
+                .arg(format!("hash:{}", i))
+                .arg("field1")
+                .arg(format!("value:{}", i))
+                .query::<()>(&mut conn);
+            let _ = redis::cmd("HSET")
+                .arg(format!("hash:{}", i))
+                .arg("field2")
+                .arg(format!("value2:{}", i))
+                .query::<()>(&mut conn);
         }
-        
+
         // Populate list data
         for i in 0..50 {
-            let _ = redis::cmd("LPUSH").arg(format!("list:{}", i)).arg(format!("item1:{}", i)).query::<()>(&mut conn);
-            let _ = redis::cmd("LPUSH").arg(format!("list:{}", i)).arg(format!("item2:{}", i)).query::<()>(&mut conn);
+            let _ = redis::cmd("LPUSH")
+                .arg(format!("list:{}", i))
+                .arg(format!("item1:{}", i))
+                .query::<()>(&mut conn);
+            let _ = redis::cmd("LPUSH")
+                .arg(format!("list:{}", i))
+                .arg(format!("item2:{}", i))
+                .query::<()>(&mut conn);
         }
-        
+
         // Populate set data
         for i in 0..50 {
-            let _ = redis::cmd("SADD").arg(format!("set:{}", i)).arg(format!("member1:{}", i)).query::<()>(&mut conn);
-            let _ = redis::cmd("SADD").arg(format!("set:{}", i)).arg(format!("member2:{}", i)).query::<()>(&mut conn);
+            let _ = redis::cmd("SADD")
+                .arg(format!("set:{}", i))
+                .arg(format!("member1:{}", i))
+                .query::<()>(&mut conn);
+            let _ = redis::cmd("SADD")
+                .arg(format!("set:{}", i))
+                .arg(format!("member2:{}", i))
+                .query::<()>(&mut conn);
         }
-        
+
         // Populate sorted set data
         for i in 0..50 {
-            let _ = redis::cmd("ZADD").arg(format!("zset:{}", i)).arg(i as f64).arg(format!("member:{}", i)).query::<()>(&mut conn);
-            let _ = redis::cmd("ZADD").arg(format!("zset:{}", i)).arg((i + 100) as f64).arg(format!("member2:{}", i)).query::<()>(&mut conn);
+            let _ = redis::cmd("ZADD")
+                .arg(format!("zset:{}", i))
+                .arg(i as f64)
+                .arg(format!("member:{}", i))
+                .query::<()>(&mut conn);
+            let _ = redis::cmd("ZADD")
+                .arg(format!("zset:{}", i))
+                .arg((i + 100) as f64)
+                .arg(format!("member2:{}", i))
+                .query::<()>(&mut conn);
         }
     }
 }
@@ -551,11 +625,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("GET").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("GET")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("GET").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("GET")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -566,12 +646,18 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let base = fastrand::u32(..90);
         let keys: Vec<String> = (0..10).map(|i| format!("key:{}", base + i)).collect();
-        redis::cmd("MGET").arg(&keys).query::<Vec<Option<String>>>(conn).map(|_| ())
+        redis::cmd("MGET")
+            .arg(&keys)
+            .query::<Vec<Option<String>>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let base = fastrand::u32(..90);
         let keys: Vec<String> = (0..10).map(|i| format!("key:{}", base + i)).collect();
-        redis::cmd("MGET").arg(&keys).query::<Vec<Option<String>>>(conn).map(|_| ())
+        redis::cmd("MGET")
+            .arg(&keys)
+            .query::<Vec<Option<String>>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -605,7 +691,10 @@ bench_command!(
     Some(|client: &Client| {
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
-                let _ = redis::cmd("SET").arg(format!("counter:{}", i)).arg("0").query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(format!("counter:{}", i))
+                    .arg("0")
+                    .query::<()>(&mut conn);
             }
         }
     }),
@@ -641,11 +730,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("EXISTS").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("EXISTS")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("EXISTS").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("EXISTS")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -655,11 +750,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("TYPE").arg(&key).query::<String>(conn).map(|_| ())
+        redis::cmd("TYPE")
+            .arg(&key)
+            .query::<String>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("TYPE").arg(&key).query::<String>(conn).map(|_| ())
+        redis::cmd("TYPE")
+            .arg(&key)
+            .query::<String>(conn)
+            .map(|_| ())
     }
 );
 
@@ -669,11 +770,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("APPEND").arg(&key).arg("_appended").query::<i32>(conn).map(|_| ())
+        redis::cmd("APPEND")
+            .arg(&key)
+            .arg("_appended")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("APPEND").arg(&key).arg("_appended").query::<i32>(conn).map(|_| ())
+        redis::cmd("APPEND")
+            .arg(&key)
+            .arg("_appended")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -683,11 +792,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("STRLEN").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("STRLEN")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("key:{}", fastrand::u32(..100));
-        redis::cmd("STRLEN").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("STRLEN")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -697,7 +812,10 @@ bench_command!(
     Some(|client: &Client| {
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
-                let _ = redis::cmd("SET").arg(format!("counter:{}", i)).arg("100").query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(format!("counter:{}", i))
+                    .arg("100")
+                    .query::<()>(&mut conn);
             }
         }
     }),
@@ -717,17 +835,28 @@ bench_command!(
     Some(|client: &Client| {
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
-                let _ = redis::cmd("SET").arg(format!("counter:{}", i)).arg("0").query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(format!("counter:{}", i))
+                    .arg("0")
+                    .query::<()>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("counter:{}", fastrand::u32(..100));
-        redis::cmd("INCRBY").arg(&key).arg(5).query::<i64>(conn).map(|_| ())
+        redis::cmd("INCRBY")
+            .arg(&key)
+            .arg(5)
+            .query::<i64>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("counter:{}", fastrand::u32(..100));
-        redis::cmd("INCRBY").arg(&key).arg(5).query::<i64>(conn).map(|_| ())
+        redis::cmd("INCRBY")
+            .arg(&key)
+            .arg(5)
+            .query::<i64>(conn)
+            .map(|_| ())
     }
 );
 
@@ -737,17 +866,28 @@ bench_command!(
     Some(|client: &Client| {
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
-                let _ = redis::cmd("SET").arg(format!("counter:{}", i)).arg("100").query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(format!("counter:{}", i))
+                    .arg("100")
+                    .query::<()>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("counter:{}", fastrand::u32(..100));
-        redis::cmd("DECRBY").arg(&key).arg(3).query::<i64>(conn).map(|_| ())
+        redis::cmd("DECRBY")
+            .arg(&key)
+            .arg(3)
+            .query::<i64>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("counter:{}", fastrand::u32(..100));
-        redis::cmd("DECRBY").arg(&key).arg(3).query::<i64>(conn).map(|_| ())
+        redis::cmd("DECRBY")
+            .arg(&key)
+            .arg(3)
+            .query::<i64>(conn)
+            .map(|_| ())
     }
 );
 
@@ -757,11 +897,19 @@ bench_command!(
     None::<fn(&Client)>,
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("setnx_key_{}", fastrand::u32(..10000));
-        redis::cmd("SETNX").arg(&key).arg("value").query::<i32>(conn).map(|_| ())
+        redis::cmd("SETNX")
+            .arg(&key)
+            .arg("value")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("setnx_key_{}", fastrand::u32(..10000));
-        redis::cmd("SETNX").arg(&key).arg("value").query::<i32>(conn).map(|_| ())
+        redis::cmd("SETNX")
+            .arg(&key)
+            .arg("value")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -771,11 +919,19 @@ bench_command!(
     None::<fn(&Client)>,
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("setex_key_{}", fastrand::u32(..10000));
-        redis::cmd("SETEX").arg(&key).arg(60).arg("value").query::<()>(conn)
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(60)
+            .arg("value")
+            .query::<()>(conn)
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("setex_key_{}", fastrand::u32(..10000));
-        redis::cmd("SETEX").arg(&key).arg(60).arg("value").query::<()>(conn)
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(60)
+            .arg("value")
+            .query::<()>(conn)
     }
 );
 
@@ -786,12 +942,20 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("expire_key_{}", fastrand::u32(..1000000));
         redis::cmd("SET").arg(&key).arg("value").query::<()>(conn)?;
-        redis::cmd("EXPIRE").arg(&key).arg(3600).query::<i32>(conn).map(|_| ())
+        redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(3600)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("expire_key_{}", fastrand::u32(..1000000));
         redis::cmd("SET").arg(&key).arg("value").query::<()>(conn)?;
-        redis::cmd("EXPIRE").arg(&key).arg(3600).query::<i32>(conn).map(|_| ())
+        redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(3600)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -802,8 +966,14 @@ bench_command!(
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
                 let key = format!("ttl_key:{}", i);
-                let _ = redis::cmd("SET").arg(&key).arg("value").query::<()>(&mut conn);
-                let _ = redis::cmd("EXPIRE").arg(&key).arg(3600).query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("value")
+                    .query::<()>(&mut conn);
+                let _ = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(3600)
+                    .query::<()>(&mut conn);
             }
         }
     }),
@@ -826,13 +996,23 @@ bench_command!(
         let key = format!("hash_{}", fastrand::u32(..10000));
         let field = format!("field_{}", fastrand::u32(..100));
         let value = format!("value_{}", fastrand::u32(..1000));
-        redis::cmd("HSET").arg(&key).arg(&field).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg(&field)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash_{}", fastrand::u32(..10000));
         let field = format!("field_{}", fastrand::u32(..100));
         let value = format!("value_{}", fastrand::u32(..1000));
-        redis::cmd("HSET").arg(&key).arg(&field).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg(&field)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -842,11 +1022,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HGET").arg(&key).arg("field1").query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("HGET")
+            .arg(&key)
+            .arg("field1")
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HGET").arg(&key).arg("field1").query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("HGET")
+            .arg(&key)
+            .arg("field1")
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -856,11 +1044,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HGETALL").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HGETALL")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HGETALL").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HGETALL")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -870,11 +1064,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HDEL").arg(&key).arg("field1").query::<i32>(conn).map(|_| ())
+        redis::cmd("HDEL")
+            .arg(&key)
+            .arg("field1")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HDEL").arg(&key).arg("field1").query::<i32>(conn).map(|_| ())
+        redis::cmd("HDEL")
+            .arg(&key)
+            .arg("field1")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -884,11 +1086,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HEXISTS").arg(&key).arg("field1").query::<i32>(conn).map(|_| ())
+        redis::cmd("HEXISTS")
+            .arg(&key)
+            .arg("field1")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HEXISTS").arg(&key).arg("field1").query::<i32>(conn).map(|_| ())
+        redis::cmd("HEXISTS")
+            .arg(&key)
+            .arg("field1")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -898,11 +1108,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HKEYS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HKEYS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HKEYS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HKEYS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -912,11 +1128,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HVALS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HVALS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HVALS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("HVALS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -940,17 +1162,31 @@ bench_command!(
     Some(|client: &Client| {
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..50 {
-                let _ = redis::cmd("HSET").arg(format!("hash:{}", i)).arg("counter").arg("0").query::<()>(&mut conn);
+                let _ = redis::cmd("HSET")
+                    .arg(format!("hash:{}", i))
+                    .arg("counter")
+                    .arg("0")
+                    .query::<()>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HINCRBY").arg(&key).arg("counter").arg(1).query::<i64>(conn).map(|_| ())
+        redis::cmd("HINCRBY")
+            .arg(&key)
+            .arg("counter")
+            .arg(1)
+            .query::<i64>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("hash:{}", fastrand::u32(..50));
-        redis::cmd("HINCRBY").arg(&key).arg("counter").arg(1).query::<i64>(conn).map(|_| ())
+        redis::cmd("HINCRBY")
+            .arg(&key)
+            .arg("counter")
+            .arg(1)
+            .query::<i64>(conn)
+            .map(|_| ())
     }
 );
 
@@ -962,12 +1198,20 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list_{}", fastrand::u32(..10000));
         let value = format!("item_{}", fastrand::u32(..1000));
-        redis::cmd("LPUSH").arg(&key).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("LPUSH")
+            .arg(&key)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list_{}", fastrand::u32(..10000));
         let value = format!("item_{}", fastrand::u32(..1000));
-        redis::cmd("LPUSH").arg(&key).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("LPUSH")
+            .arg(&key)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -978,12 +1222,20 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list_{}", fastrand::u32(..10000));
         let value = format!("item_{}", fastrand::u32(..1000));
-        redis::cmd("RPUSH").arg(&key).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("RPUSH")
+            .arg(&key)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list_{}", fastrand::u32(..10000));
         let value = format!("item_{}", fastrand::u32(..1000));
-        redis::cmd("RPUSH").arg(&key).arg(&value).query::<i32>(conn).map(|_| ())
+        redis::cmd("RPUSH")
+            .arg(&key)
+            .arg(&value)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -993,11 +1245,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("LPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("LPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1021,11 +1279,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("RPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("RPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("RPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("RPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1035,11 +1299,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LINDEX").arg(&key).arg(0).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("LINDEX")
+            .arg(&key)
+            .arg(0)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LINDEX").arg(&key).arg(0).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("LINDEX")
+            .arg(&key)
+            .arg(0)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1049,11 +1321,21 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("LRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("LRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1063,11 +1345,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LTRIM").arg(&key).arg(0).arg(1).query::<()>(conn)
+        redis::cmd("LTRIM")
+            .arg(&key)
+            .arg(0)
+            .arg(1)
+            .query::<()>(conn)
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("list:{}", fastrand::u32(..50));
-        redis::cmd("LTRIM").arg(&key).arg(0).arg(1).query::<()>(conn)
+        redis::cmd("LTRIM")
+            .arg(&key)
+            .arg(0)
+            .arg(1)
+            .query::<()>(conn)
     }
 );
 
@@ -1079,12 +1369,20 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set_{}", fastrand::u32(..10000));
         let member = format!("member_{}", fastrand::u32(..1000));
-        redis::cmd("SADD").arg(&key).arg(&member).query::<i32>(conn).map(|_| ())
+        redis::cmd("SADD")
+            .arg(&key)
+            .arg(&member)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set_{}", fastrand::u32(..10000));
         let member = format!("member_{}", fastrand::u32(..1000));
-        redis::cmd("SADD").arg(&key).arg(&member).query::<i32>(conn).map(|_| ())
+        redis::cmd("SADD")
+            .arg(&key)
+            .arg(&member)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1094,11 +1392,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SMEMBERS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("SMEMBERS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SMEMBERS").arg(&key).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("SMEMBERS")
+            .arg(&key)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1108,11 +1412,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SREM").arg(&key).arg("member1").query::<i32>(conn).map(|_| ())
+        redis::cmd("SREM")
+            .arg(&key)
+            .arg("member1")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SREM").arg(&key).arg("member1").query::<i32>(conn).map(|_| ())
+        redis::cmd("SREM")
+            .arg(&key)
+            .arg("member1")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1122,11 +1434,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SISMEMBER").arg(&key).arg("member1").query::<i32>(conn).map(|_| ())
+        redis::cmd("SISMEMBER")
+            .arg(&key)
+            .arg("member1")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SISMEMBER").arg(&key).arg("member1").query::<i32>(conn).map(|_| ())
+        redis::cmd("SISMEMBER")
+            .arg(&key)
+            .arg("member1")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1150,11 +1470,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("SPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SPOP").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("SPOP")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1164,11 +1490,17 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SRANDMEMBER").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("SRANDMEMBER")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("set:{}", fastrand::u32(..50));
-        redis::cmd("SRANDMEMBER").arg(&key).query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("SRANDMEMBER")
+            .arg(&key)
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1181,13 +1513,23 @@ bench_command!(
         let key = format!("zset_{}", fastrand::u32(..10000));
         let score = fastrand::f64() * 1000.0;
         let member = format!("member_{}", fastrand::u32(..1000));
-        redis::cmd("ZADD").arg(&key).arg(score).arg(&member).query::<i32>(conn).map(|_| ())
+        redis::cmd("ZADD")
+            .arg(&key)
+            .arg(score)
+            .arg(&member)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset_{}", fastrand::u32(..10000));
         let score = fastrand::f64() * 1000.0;
         let member = format!("member_{}", fastrand::u32(..1000));
-        redis::cmd("ZADD").arg(&key).arg(score).arg(&member).query::<i32>(conn).map(|_| ())
+        redis::cmd("ZADD")
+            .arg(&key)
+            .arg(score)
+            .arg(&member)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1197,11 +1539,21 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("ZRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("ZRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1211,11 +1563,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZREM").arg(&key).arg("member").query::<i32>(conn).map(|_| ())
+        redis::cmd("ZREM")
+            .arg(&key)
+            .arg("member")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZREM").arg(&key).arg("member").query::<i32>(conn).map(|_| ())
+        redis::cmd("ZREM")
+            .arg(&key)
+            .arg("member")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1225,11 +1585,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZSCORE").arg(&key).arg("member").query::<Option<f64>>(conn).map(|_| ())
+        redis::cmd("ZSCORE")
+            .arg(&key)
+            .arg("member")
+            .query::<Option<f64>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZSCORE").arg(&key).arg("member").query::<Option<f64>>(conn).map(|_| ())
+        redis::cmd("ZSCORE")
+            .arg(&key)
+            .arg("member")
+            .query::<Option<f64>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1253,11 +1621,21 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZCOUNT").arg(&key).arg("-inf").arg("+inf").query::<i32>(conn).map(|_| ())
+        redis::cmd("ZCOUNT")
+            .arg(&key)
+            .arg("-inf")
+            .arg("+inf")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZCOUNT").arg(&key).arg("-inf").arg("+inf").query::<i32>(conn).map(|_| ())
+        redis::cmd("ZCOUNT")
+            .arg(&key)
+            .arg("-inf")
+            .arg("+inf")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1267,11 +1645,19 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZRANK").arg(&key).arg("member").query::<Option<i32>>(conn).map(|_| ())
+        redis::cmd("ZRANK")
+            .arg(&key)
+            .arg("member")
+            .query::<Option<i32>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZRANK").arg(&key).arg("member").query::<Option<i32>>(conn).map(|_| ())
+        redis::cmd("ZRANK")
+            .arg(&key)
+            .arg("member")
+            .query::<Option<i32>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1281,11 +1667,21 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZREVRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("ZREVRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZREVRANGE").arg(&key).arg(0).arg(-1).query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("ZREVRANGE")
+            .arg(&key)
+            .arg(0)
+            .arg(-1)
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1295,11 +1691,21 @@ bench_command!(
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZINCRBY").arg(&key).arg(1.5).arg("member").query::<f64>(conn).map(|_| ())
+        redis::cmd("ZINCRBY")
+            .arg(&key)
+            .arg(1.5)
+            .arg("member")
+            .query::<f64>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("zset:{}", fastrand::u32(..50));
-        redis::cmd("ZINCRBY").arg(&key).arg(1.5).arg("member").query::<f64>(conn).map(|_| ())
+        redis::cmd("ZINCRBY")
+            .arg(&key)
+            .arg(1.5)
+            .arg("member")
+            .query::<f64>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1345,10 +1751,16 @@ bench_command!(
     "KEYS Operation",
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
-        redis::cmd("KEYS").arg("key:*").query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("KEYS")
+            .arg("key:*")
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
-        redis::cmd("KEYS").arg("key:*").query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("KEYS")
+            .arg("key:*")
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1357,10 +1769,14 @@ bench_command!(
     "RANDOMKEY Operation",
     Some(populate_test_data),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
-        redis::cmd("RANDOMKEY").query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("RANDOMKEY")
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
-        redis::cmd("RANDOMKEY").query::<Option<String>>(conn).map(|_| ())
+        redis::cmd("RANDOMKEY")
+            .query::<Option<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1371,14 +1787,26 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let old_key = format!("rename_old_{}", fastrand::u32(..1000000));
         let new_key = format!("rename_new_{}", fastrand::u32(..1000000));
-        redis::cmd("SET").arg(&old_key).arg("value").query::<()>(conn)?;
-        redis::cmd("RENAME").arg(&old_key).arg(&new_key).query::<()>(conn)
+        redis::cmd("SET")
+            .arg(&old_key)
+            .arg("value")
+            .query::<()>(conn)?;
+        redis::cmd("RENAME")
+            .arg(&old_key)
+            .arg(&new_key)
+            .query::<()>(conn)
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let old_key = format!("rename_old_{}", fastrand::u32(..1000000));
         let new_key = format!("rename_new_{}", fastrand::u32(..1000000));
-        redis::cmd("SET").arg(&old_key).arg("value").query::<()>(conn)?;
-        redis::cmd("RENAME").arg(&old_key).arg(&new_key).query::<()>(conn)
+        redis::cmd("SET")
+            .arg(&old_key)
+            .arg("value")
+            .query::<()>(conn)?;
+        redis::cmd("RENAME")
+            .arg(&old_key)
+            .arg(&new_key)
+            .query::<()>(conn)
     }
 );
 
@@ -1389,18 +1817,30 @@ bench_command!(
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
                 let key = format!("persist_key:{}", i);
-                let _ = redis::cmd("SET").arg(&key).arg("value").query::<()>(&mut conn);
-                let _ = redis::cmd("EXPIRE").arg(&key).arg(3600).query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("value")
+                    .query::<()>(&mut conn);
+                let _ = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(3600)
+                    .query::<()>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("persist_key:{}", fastrand::u32(..100));
-        redis::cmd("PERSIST").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("PERSIST")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("persist_key:{}", fastrand::u32(..100));
-        redis::cmd("PERSIST").arg(&key).query::<i32>(conn).map(|_| ())
+        redis::cmd("PERSIST")
+            .arg(&key)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1411,12 +1851,20 @@ bench_command!(
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("pexpire_key_{}", fastrand::u32(..1000000));
         redis::cmd("SET").arg(&key).arg("value").query::<()>(conn)?;
-        redis::cmd("PEXPIRE").arg(&key).arg(60000).query::<i32>(conn).map(|_| ())
+        redis::cmd("PEXPIRE")
+            .arg(&key)
+            .arg(60000)
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("pexpire_key_{}", fastrand::u32(..1000000));
         redis::cmd("SET").arg(&key).arg("value").query::<()>(conn)?;
-        redis::cmd("PEXPIRE").arg(&key).arg(60000).query::<i32>(conn).map(|_| ())
+        redis::cmd("PEXPIRE")
+            .arg(&key)
+            .arg(60000)
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1427,8 +1875,14 @@ bench_command!(
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
                 let key = format!("pttl_key:{}", i);
-                let _ = redis::cmd("SET").arg(&key).arg("value").query::<()>(&mut conn);
-                let _ = redis::cmd("PEXPIRE").arg(&key).arg(3600000).query::<()>(&mut conn);
+                let _ = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("value")
+                    .query::<()>(&mut conn);
+                let _ = redis::cmd("PEXPIRE")
+                    .arg(&key)
+                    .arg(3600000)
+                    .query::<()>(&mut conn);
             }
         }
     }),
@@ -1449,13 +1903,29 @@ bench_json_command!(
     None::<fn(&Client)>,
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_key_{}", fastrand::u32(..10000));
-        let json_value = format!(r#"{{"id": {}, "name": "test", "active": true}}"#, fastrand::u32(..1000));
-        redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(conn).map(|_| ())
+        let json_value = format!(
+            r#"{{"id": {}, "name": "test", "active": true}}"#,
+            fastrand::u32(..1000)
+        );
+        redis::cmd("JSON.SET")
+            .arg(&key)
+            .arg("$")
+            .arg(&json_value)
+            .query::<String>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_key_{}", fastrand::u32(..10000));
-        let json_value = format!(r#"{{"id": {}, "name": "test", "active": true}}"#, fastrand::u32(..1000));
-        redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(conn).map(|_| ())
+        let json_value = format!(
+            r#"{{"id": {}, "name": "test", "active": true}}"#,
+            fastrand::u32(..1000)
+        );
+        redis::cmd("JSON.SET")
+            .arg(&key)
+            .arg("$")
+            .arg(&json_value)
+            .query::<String>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1467,17 +1937,27 @@ bench_json_command!(
             for i in 0..100 {
                 let key = format!("json_data:{}", i);
                 let json_value = format!(r#"{{"id": {}, "name": "test{}", "active": true}}"#, i, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.GET").arg(&key).query::<String>(conn).map(|_| ())
+        redis::cmd("JSON.GET")
+            .arg(&key)
+            .query::<String>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.GET").arg(&key).query::<String>(conn).map(|_| ())
+        redis::cmd("JSON.GET")
+            .arg(&key)
+            .query::<String>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1489,17 +1969,29 @@ bench_json_command!(
             for i in 0..100 {
                 let key = format!("json_del_data:{}", i);
                 let json_value = format!(r#"{{"id": {}, "name": "test{}", "active": true}}"#, i, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_del_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.DEL").arg(&key).arg("$.name").query::<i32>(conn).map(|_| ())
+        redis::cmd("JSON.DEL")
+            .arg(&key)
+            .arg("$.name")
+            .query::<i32>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_del_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.DEL").arg(&key).arg("$.name").query::<i32>(conn).map(|_| ())
+        redis::cmd("JSON.DEL")
+            .arg(&key)
+            .arg("$.name")
+            .query::<i32>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1511,17 +2003,29 @@ bench_json_command!(
             for i in 0..100 {
                 let key = format!("json_type_data:{}", i);
                 let json_value = format!(r#"{{"id": {}, "name": "test{}", "active": true}}"#, i, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_type_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.TYPE").arg(&key).arg("$.id").query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("JSON.TYPE")
+            .arg(&key)
+            .arg("$.id")
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_type_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.TYPE").arg(&key).arg("$.id").query::<Vec<String>>(conn).map(|_| ())
+        redis::cmd("JSON.TYPE")
+            .arg(&key)
+            .arg("$.id")
+            .query::<Vec<String>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1533,17 +2037,29 @@ bench_json_command!(
             for i in 0..100 {
                 let key = format!("json_strlen_data:{}", i);
                 let json_value = format!(r#"{{"id": {}, "name": "test{}", "active": true}}"#, i, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_strlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.STRLEN").arg(&key).arg("$.name").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.STRLEN")
+            .arg(&key)
+            .arg("$.name")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_strlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.STRLEN").arg(&key).arg("$.name").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.STRLEN")
+            .arg(&key)
+            .arg("$.name")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1555,17 +2071,29 @@ bench_json_command!(
             for i in 0..100 {
                 let key = format!("json_arrlen_data:{}", i);
                 let json_value = format!(r#"{{"id": {}, "items": [1, 2, 3, 4]}}"#, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_arrlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.ARRLEN").arg(&key).arg("$.items").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.ARRLEN")
+            .arg(&key)
+            .arg("$.items")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_arrlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.ARRLEN").arg(&key).arg("$.items").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.ARRLEN")
+            .arg(&key)
+            .arg("$.items")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1576,18 +2104,33 @@ bench_json_command!(
         if let Ok(mut conn) = get_connection_with_retry(client, 3) {
             for i in 0..100 {
                 let key = format!("json_objlen_data:{}", i);
-                let json_value = format!(r#"{{"id": {}, "meta": {{"created": true, "updated": false}}}}"#, i);
-                let _ = redis::cmd("JSON.SET").arg(&key).arg("$").arg(&json_value).query::<String>(&mut conn);
+                let json_value = format!(
+                    r#"{{"id": {}, "meta": {{"created": true, "updated": false}}}}"#,
+                    i
+                );
+                let _ = redis::cmd("JSON.SET")
+                    .arg(&key)
+                    .arg("$")
+                    .arg(&json_value)
+                    .query::<String>(&mut conn);
             }
         }
     }),
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_objlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.OBJLEN").arg(&key).arg("$.meta").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.OBJLEN")
+            .arg(&key)
+            .arg("$.meta")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     },
     |conn: &mut Connection| -> Result<(), redis::RedisError> {
         let key = format!("json_objlen_data:{}", fastrand::u32(..100));
-        redis::cmd("JSON.OBJLEN").arg(&key).arg("$.meta").query::<Vec<Option<i64>>>(conn).map(|_| ())
+        redis::cmd("JSON.OBJLEN")
+            .arg(&key)
+            .arg("$.meta")
+            .query::<Vec<Option<i64>>>(conn)
+            .map(|_| ())
     }
 );
 
@@ -1691,6 +2234,5 @@ criterion_main!(
     list_operations,
     set_operations,
     sorted_set_operations,
-    server_operations
-    // json_operations  // Disabled for now due to Redis Stack setup issues
+    server_operations // json_operations  // Disabled for now due to Redis Stack setup issues
 );

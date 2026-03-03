@@ -33,7 +33,10 @@ impl std::fmt::Display for CommandError {
                 write!(f, "ERR wrong number of arguments")
             }
             CommandError::WrongType => {
-                write!(f, "WRONGTYPE Operation against a key holding the wrong kind of value")
+                write!(
+                    f,
+                    "WRONGTYPE Operation against a key holding the wrong kind of value"
+                )
             }
             CommandError::InvalidArgument(msg) => {
                 write!(f, "ERR {}", msg)
@@ -64,4 +67,4 @@ impl std::fmt::Display for CommandError {
 }
 
 /// Result type for command execution
-pub type CommandResult = Result<crate::networking::resp::RespValue, CommandError>; 
+pub type CommandResult = Result<crate::networking::resp::RespValue, CommandError>;

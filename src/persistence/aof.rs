@@ -2,14 +2,14 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use tracing::{debug, error, info, warn};
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncWriteExt, BufWriter as TokioBufWriter};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{self, Duration, MissedTickBehavior};
+use tracing::{debug, error, info, warn};
 
 use crate::command::Command;
 use crate::command::handler::CommandHandler;
@@ -50,7 +50,7 @@ impl AofPersistence {
     pub fn new(engine: Arc<StorageEngine>, path: PathBuf) -> Self {
         // Create a channel for the writer task
         let (writer_tx, writer_rx) = mpsc::channel::<AofEntry>(1000);
-        
+
         // Create the persistence instance
         let aof = Self {
             engine,
@@ -61,37 +61,39 @@ impl AofPersistence {
             in_progress: Arc::new(Mutex::new(false)),
             next_sync: AtomicBool::new(false),
         };
-        
+
         // Start the writer task
         aof.start_writer_task(writer_rx);
-        
+
         aof
     }
-    
+
     /// Start the background writer task
     fn start_writer_task(&self, mut writer_rx: mpsc::Receiver<AofEntry>) {
         let path = self.path.clone();
         let file_size = self.file_size.clone();
-        
+
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        
+
         // Spawn the writer task
         tokio::spawn(async move {
             // Open the AOF file in append mode
             let file = match TokioFile::options()
                 .create(true)
                 .append(true)
-                .open(&path).await {
-                    Ok(file) => file,
-                    Err(e) => {
-                        error!(path = ?path, "Failed to open AOF file: {:?}", e);
-                        return;
-                    }
-                };
-            
+                .open(&path)
+                .await
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    error!(path = ?path, "Failed to open AOF file: {:?}", e);
+                    return;
+                }
+            };
+
             // Get the current file size
             let metadata = match file.metadata().await {
                 Ok(metadata) => metadata,
@@ -100,17 +102,17 @@ impl AofPersistence {
                     return;
                 }
             };
-            
+
             // Update the file size
             *file_size.write().await = metadata.len();
-            
+
             // Create a buffered writer
             let mut writer = TokioBufWriter::with_capacity(BUFFER_SIZE, file);
-            
+
             // Periodically fsync for EverySecond policy
             let mut fsync_interval = time::interval(Duration::from_secs(1));
             fsync_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            
+
             // Track whether we need to fsync (for EverySecond policy)
             let mut need_fsync = false;
 
@@ -213,7 +215,7 @@ impl AofPersistence {
             }
         });
     }
-    
+
     /// Load data from AOF file on startup
     pub async fn load(&self) -> Result<(), PersistenceError> {
         if !self.path.exists() {
@@ -330,10 +332,14 @@ impl AofPersistence {
             Ok(())
         }).await.map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?
     }
-    
+
     /// Append a single command to the AOF
     #[allow(dead_code)]
-    pub async fn append_command(&self, command: RespCommand, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
+    pub async fn append_command(
+        &self,
+        command: RespCommand,
+        sync_policy: AofSyncPolicy,
+    ) -> Result<(), PersistenceError> {
         self.append_commands_batch(vec![command], sync_policy).await
     }
 
@@ -341,9 +347,14 @@ impl AofPersistence {
     /// All commands in the batch are written together by the writer task without yielding,
     /// ensuring that e.g. SELECT + write-command pairs cannot be interleaved with
     /// concurrent calls from other connections.
-    pub async fn append_commands_batch(&self, commands: Vec<RespCommand>, sync_policy: AofSyncPolicy) -> Result<(), PersistenceError> {
+    pub async fn append_commands_batch(
+        &self,
+        commands: Vec<RespCommand>,
+        sync_policy: AofSyncPolicy,
+    ) -> Result<(), PersistenceError> {
         // Filter out read-only commands
-        let commands: Vec<RespCommand> = commands.into_iter()
+        let commands: Vec<RespCommand> = commands
+            .into_iter()
             .filter(|cmd| !is_read_only_command(&cmd.name))
             .collect();
         if commands.is_empty() {
@@ -358,44 +369,53 @@ impl AofPersistence {
         };
 
         // Create an AOF entry with all commands
-        let entry = AofEntry {
-            commands,
-            sync,
-        };
+        let entry = AofEntry { commands, sync };
 
         // Send to the writer task
-        self.writer_tx.send(entry).await
-            .map_err(|_| PersistenceError::Other("Failed to send command to AOF writer".to_string()))?;
+        self.writer_tx.send(entry).await.map_err(|_| {
+            PersistenceError::Other("Failed to send command to AOF writer".to_string())
+        })?;
 
         Ok(())
     }
-    
+
     /// Start background AOF rewrite check
-    pub async fn start_background_rewrite_check(&self, config: &PersistenceConfig) -> Result<(), PersistenceError> {
+    pub async fn start_background_rewrite_check(
+        &self,
+        config: &PersistenceConfig,
+    ) -> Result<(), PersistenceError> {
         let aof = Arc::new(self.clone());
         let min_size = config.aof_rewrite_min_size;
         let percentage = config.aof_rewrite_percentage;
-        
+
         // Spawn a background task to check if we need to rewrite the AOF
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(60));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 // Check if we need to rewrite the AOF
                 let current_size = *aof.file_size.read().await;
-                
+
                 if current_size > min_size as u64 {
-                    debug!("AOF file size: {} bytes, checking if rewrite is needed", current_size);
-                    
+                    debug!(
+                        "AOF file size: {} bytes, checking if rewrite is needed",
+                        current_size
+                    );
+
                     // Check if the file has grown enough to warrant a rewrite
                     let last_rewrite = *aof.last_rewrite.read().await;
-                    let rewrite_threshold = min_size as u64 + (min_size as u64 * percentage as u64) / 100;
-                    
-                    if current_size > rewrite_threshold && last_rewrite.elapsed() > Duration::from_secs(3600) {
-                        info!("AOF file size ({} bytes) exceeds threshold ({} bytes), triggering rewrite",
-                              current_size, rewrite_threshold);
+                    let rewrite_threshold =
+                        min_size as u64 + (min_size as u64 * percentage as u64) / 100;
+
+                    if current_size > rewrite_threshold
+                        && last_rewrite.elapsed() > Duration::from_secs(3600)
+                    {
+                        info!(
+                            "AOF file size ({} bytes) exceeds threshold ({} bytes), triggering rewrite",
+                            current_size, rewrite_threshold
+                        );
                         if let Err(e) = aof.rewrite().await {
                             error!("AOF rewrite failed: {:?}", e);
                         }
@@ -403,18 +423,18 @@ impl AofPersistence {
                 }
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// Rewrite the AOF file with the current dataset
     pub async fn rewrite(&self) -> Result<(), PersistenceError> {
         // Create a temporary file path
         let temp_path = self.path.with_extension("tmp");
         let temp_path_cleanup = temp_path.clone();
-        
+
         debug!("Starting AOF rewrite to temporary file: {:?}", temp_path);
-        
+
         // Get a consistent snapshot of all databases
         let all_dbs = match self.engine.snapshot_all_dbs().await {
             Ok(data) => data,
@@ -439,8 +459,7 @@ impl AofPersistence {
             // Create parent directory if it doesn't exist
             ensure_dir_exists(&temp_path)?;
 
-            let file = File::create(&temp_path)
-                .map_err(PersistenceError::Io)?;
+            let file = File::create(&temp_path).map_err(PersistenceError::Io)?;
 
             let mut writer = BufWriter::new(file);
 
@@ -456,9 +475,11 @@ impl AofPersistence {
                     RespValue::BulkString(Some(b"SELECT".to_vec())),
                     RespValue::BulkString(Some(db_idx.to_string().into_bytes())),
                 ]));
-                let serialized = select_cmd.serialize()
+                let serialized = select_cmd
+                    .serialize()
                     .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                writer.write_all(&serialized)
+                writer
+                    .write_all(&serialized)
                     .map_err(PersistenceError::Io)?;
 
                 // Write each key using type-appropriate commands
@@ -466,34 +487,41 @@ impl AofPersistence {
                     let commands = aof_rewrite_commands_for_item(key, item);
                     for args in commands {
                         let resp_cmd = RespValue::Array(Some(
-                            args.into_iter().map(|arg: Vec<u8>| RespValue::BulkString(Some(arg))).collect()
+                            args.into_iter()
+                                .map(|arg: Vec<u8>| RespValue::BulkString(Some(arg)))
+                                .collect(),
                         ));
 
-                        let serialized = resp_cmd.serialize()
+                        let serialized = resp_cmd
+                            .serialize()
                             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
-                        writer.write_all(&serialized)
+                        writer
+                            .write_all(&serialized)
                             .map_err(PersistenceError::Io)?;
                     }
                 }
             }
 
             // Ensure all data is flushed to disk
-            writer.flush()
-                .map_err(PersistenceError::Io)?;
+            writer.flush().map_err(PersistenceError::Io)?;
 
             // Rename temp file to target file atomically
             let rename_result = fs::rename(&temp_path, &path);
 
             if rename_result.is_err() {
-                error!("Failed to rename temp file during AOF rewrite: {:?}", rename_result);
+                error!(
+                    "Failed to rename temp file during AOF rewrite: {:?}",
+                    rename_result
+                );
             }
 
             rename_result.map_err(|e| PersistenceError::AtomicRenameFailed(e.to_string()))?;
 
             Ok(())
-        }).await;
-        
+        })
+        .await;
+
         // Handle the result
         let rewrite_result = match result {
             Ok(Ok(())) => {
@@ -515,7 +543,10 @@ impl AofPersistence {
                 // Clean up temp file on join error
                 let _ = fs::remove_file(&temp_path_cleanup);
                 error!("AOF rewrite task panicked: {}", e);
-                Err(PersistenceError::CorruptedFile(format!("AOF rewrite task panicked: {}", e)))
+                Err(PersistenceError::CorruptedFile(format!(
+                    "AOF rewrite task panicked: {}",
+                    e
+                )))
             }
         };
 
@@ -552,56 +583,65 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
         RedisDataType::String => {
             let mut args = vec![b"SET".to_vec(), key.to_vec(), item.value.clone()];
             if let Some(ttl) = item.ttl()
-                && ttl.as_millis() > 0 {
-                    args.push(b"PX".to_vec());
-                    args.push(ttl.as_millis().to_string().into_bytes());
-                }
+                && ttl.as_millis() > 0
+            {
+                args.push(b"PX".to_vec());
+                args.push(ttl.as_millis().to_string().into_bytes());
+            }
             commands.push(args);
         }
         RedisDataType::List => {
             if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&item.value)
-                && !list.is_empty() {
-                    // Emit RPUSH key elem1 elem2 ...
-                    let mut args = vec![b"RPUSH".to_vec(), key.to_vec()];
-                    args.extend(list);
-                    commands.push(args);
-                }
+                && !list.is_empty()
+            {
+                // Emit RPUSH key elem1 elem2 ...
+                let mut args = vec![b"RPUSH".to_vec(), key.to_vec()];
+                args.extend(list);
+                commands.push(args);
+            }
         }
         RedisDataType::Set => {
             if let Ok(set) = bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(&item.value)
-                && !set.is_empty() {
-                    // Emit SADD key member1 member2 ...
-                    let mut args = vec![b"SADD".to_vec(), key.to_vec()];
-                    args.extend(set);
-                    commands.push(args);
-                }
+                && !set.is_empty()
+            {
+                // Emit SADD key member1 member2 ...
+                let mut args = vec![b"SADD".to_vec(), key.to_vec()];
+                args.extend(set);
+                commands.push(args);
+            }
         }
         RedisDataType::ZSet => {
             // SortedSetData: BTreeSet<(OrderedFloat<f64>, Vec<u8>)> + HashMap<Vec<u8>, f64>
-            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(&item.value)
-                && !ss.is_empty() {
-                    let mut args = vec![b"ZADD".to_vec(), key.to_vec()];
-                    for (member, score) in &ss.scores {
-                        args.push(score.to_string().into_bytes());
-                        args.push(member.clone());
-                    }
-                    commands.push(args);
+            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(
+                &item.value,
+            ) && !ss.is_empty()
+            {
+                let mut args = vec![b"ZADD".to_vec(), key.to_vec()];
+                for (member, score) in &ss.scores {
+                    args.push(score.to_string().into_bytes());
+                    args.push(member.clone());
                 }
+                commands.push(args);
+            }
         }
         RedisDataType::Hash => {
             // Hash stored as bincode-serialized HashMap<Vec<u8>, Vec<u8>>
-            if let Ok(hash) = bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value)
-                && !hash.is_empty() {
-                    let mut args = vec![b"HSET".to_vec(), key.to_vec()];
-                    for (field, value) in hash {
-                        args.push(field);
-                        args.push(value);
-                    }
-                    commands.push(args);
+            if let Ok(hash) =
+                bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value)
+                && !hash.is_empty()
+            {
+                let mut args = vec![b"HSET".to_vec(), key.to_vec()];
+                for (field, value) in hash {
+                    args.push(field);
+                    args.push(value);
                 }
+                commands.push(args);
+            }
         }
         RedisDataType::Stream => {
-            if let Ok(stream) = bincode::deserialize::<crate::storage::stream::StreamData>(&item.value) {
+            if let Ok(stream) =
+                bincode::deserialize::<crate::storage::stream::StreamData>(&item.value)
+            {
                 // Emit XADD for each entry in the stream
                 for entry in stream.entries.values() {
                     let mut args = vec![
@@ -648,13 +688,14 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
     // For non-string types, append a PEXPIRE command if TTL is set
     if item.data_type != RedisDataType::String
         && let Some(ttl) = item.ttl()
-            && ttl.as_millis() > 0 {
-                commands.push(vec![
-                    b"PEXPIRE".to_vec(),
-                    key.to_vec(),
-                    ttl.as_millis().to_string().into_bytes(),
-                ]);
-            }
+        && ttl.as_millis() > 0
+    {
+        commands.push(vec![
+            b"PEXPIRE".to_vec(),
+            key.to_vec(),
+            ttl.as_millis().to_string().into_bytes(),
+        ]);
+    }
 
     commands
 }
@@ -666,7 +707,8 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
 /// during replay), and server/connection/replication commands that don't
 /// contribute to data state reconstruction.
 fn is_replay_skip_command(upper_name: &str) -> bool {
-    matches!(upper_name,
+    matches!(
+        upper_name,
         // Transaction markers — commands within the transaction are logged individually
         "MULTI" | "EXEC" | "DISCARD" |
         // Blocking commands — would deadlock or alter state incorrectly during replay
@@ -694,48 +736,115 @@ fn is_replay_skip_command(upper_name: &str) -> bool {
 
 fn is_read_only_command(command: &[u8]) -> bool {
     let upper: Vec<u8> = command.iter().map(|b| b.to_ascii_uppercase()).collect();
-    matches!(upper.as_slice(),
-        b"GET" | b"EXISTS" | b"TTL" | b"PTTL" | b"PING" | b"KEYS" | b"INFO" | b"TYPE" |
-        b"MGET" | b"STRLEN" | b"LLEN" | b"HLEN" | b"SCARD" | b"ZCARD" |
-        b"HGET" | b"HGETALL" | b"HKEYS" | b"HVALS" | b"SMEMBERS" | b"SISMEMBER" |
-        b"LRANGE" | b"ZRANGE" | b"ZSCORE" |
-        b"DBSIZE" | b"RANDOMKEY" | b"SCAN" | b"HSCAN" | b"SSCAN" | b"ZSCAN" |
-        b"OBJECT" | b"TIME" | b"COMMAND" | b"CLIENT" |
-        b"LPOS" | b"SRANDMEMBER" | b"ZRANGEBYSCORE" | b"ZRANGEBYLEX" |
-        b"ZREVRANGE" | b"ZREVRANGEBYSCORE" | b"ZREVRANGEBYLEX" | b"ZRANK" | b"ZREVRANK" |
-        b"ZCOUNT" | b"ZLEXCOUNT" | b"GEODIST" | b"GEOPOS" | b"GEOHASH" | b"GEOSEARCH" |
-        b"XRANGE" | b"XREVRANGE" | b"XLEN" | b"XINFO" | b"XREAD" | b"XPENDING" |
-        b"BITCOUNT" | b"BITPOS" | b"GETBIT" | b"SUBSTR" | b"GETRANGE" |
-        b"LINDEX" | b"HEXISTS" | b"SMISMEMBER" |
-        b"PFCOUNT" | b"ECHO" | b"WAIT" | b"DEBUG" |
-        b"SLOWLOG" | b"MEMORY" | b"LATENCY" | b"MODULE" |
-        b"CLUSTER" | b"SENTINEL" | b"SUBSCRIBE" | b"UNSUBSCRIBE" |
-        b"PSUBSCRIBE" | b"PUNSUBSCRIBE" | b"PUBSUB" |
-        b"AUTH" | b"HELLO" | b"RESET" | b"QUIT")
+    matches!(
+        upper.as_slice(),
+        b"GET"
+            | b"EXISTS"
+            | b"TTL"
+            | b"PTTL"
+            | b"PING"
+            | b"KEYS"
+            | b"INFO"
+            | b"TYPE"
+            | b"MGET"
+            | b"STRLEN"
+            | b"LLEN"
+            | b"HLEN"
+            | b"SCARD"
+            | b"ZCARD"
+            | b"HGET"
+            | b"HGETALL"
+            | b"HKEYS"
+            | b"HVALS"
+            | b"SMEMBERS"
+            | b"SISMEMBER"
+            | b"LRANGE"
+            | b"ZRANGE"
+            | b"ZSCORE"
+            | b"DBSIZE"
+            | b"RANDOMKEY"
+            | b"SCAN"
+            | b"HSCAN"
+            | b"SSCAN"
+            | b"ZSCAN"
+            | b"OBJECT"
+            | b"TIME"
+            | b"COMMAND"
+            | b"CLIENT"
+            | b"LPOS"
+            | b"SRANDMEMBER"
+            | b"ZRANGEBYSCORE"
+            | b"ZRANGEBYLEX"
+            | b"ZREVRANGE"
+            | b"ZREVRANGEBYSCORE"
+            | b"ZREVRANGEBYLEX"
+            | b"ZRANK"
+            | b"ZREVRANK"
+            | b"ZCOUNT"
+            | b"ZLEXCOUNT"
+            | b"GEODIST"
+            | b"GEOPOS"
+            | b"GEOHASH"
+            | b"GEOSEARCH"
+            | b"XRANGE"
+            | b"XREVRANGE"
+            | b"XLEN"
+            | b"XINFO"
+            | b"XREAD"
+            | b"XPENDING"
+            | b"BITCOUNT"
+            | b"BITPOS"
+            | b"GETBIT"
+            | b"SUBSTR"
+            | b"GETRANGE"
+            | b"LINDEX"
+            | b"HEXISTS"
+            | b"SMISMEMBER"
+            | b"PFCOUNT"
+            | b"ECHO"
+            | b"WAIT"
+            | b"DEBUG"
+            | b"SLOWLOG"
+            | b"MEMORY"
+            | b"LATENCY"
+            | b"MODULE"
+            | b"CLUSTER"
+            | b"SENTINEL"
+            | b"SUBSCRIBE"
+            | b"UNSUBSCRIBE"
+            | b"PSUBSCRIBE"
+            | b"PUNSUBSCRIBE"
+            | b"PUBSUB"
+            | b"AUTH"
+            | b"HELLO"
+            | b"RESET"
+            | b"QUIT"
+    )
 }
 
 /// Helper function to ensure a directory exists
 fn ensure_dir_exists<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent()
-        && !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)?;
+    }
     Ok(())
 }
 
 /// Module for parsing RESP protocol data from a reader
 mod resp_parser {
     use std::io::{self, BufRead};
-    
+
     use crate::networking::resp::RespValue;
-    
+
     /// Parser for RESP protocol
     pub struct RespParser<R: BufRead> {
         reader: R,
         buffer: String,
     }
-    
+
     impl<R: BufRead> RespParser<R> {
         /// Create a new RESP parser
         pub fn new(reader: R) -> Self {
@@ -744,33 +853,39 @@ mod resp_parser {
                 buffer: String::with_capacity(4096),
             }
         }
-        
+
         /// Get the next value from the stream
         pub fn next(&mut self) -> io::Result<Option<RespValue>> {
             // Clear the buffer
             self.buffer.clear();
-            
+
             // Read a line
             if self.reader.read_line(&mut self.buffer)? == 0 {
                 return Ok(None);
             }
-            
+
             // Parse the value
             match self.buffer.chars().next() {
                 Some('+') => Ok(Some(RespValue::SimpleString(
-                    self.buffer[1..self.buffer.len() - 2].to_string()
+                    self.buffer[1..self.buffer.len() - 2].to_string(),
                 ))),
                 Some('-') => Ok(Some(RespValue::Error(
-                    self.buffer[1..self.buffer.len() - 2].to_string()
+                    self.buffer[1..self.buffer.len() - 2].to_string(),
                 ))),
                 Some(':') => {
-                    let num = self.buffer[1..self.buffer.len() - 2].parse::<i64>()
-                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid integer"))?;
+                    let num = self.buffer[1..self.buffer.len() - 2]
+                        .parse::<i64>()
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "Invalid integer")
+                        })?;
                     Ok(Some(RespValue::Integer(num)))
-                },
+                }
                 Some('$') => {
-                    let size = self.buffer[1..self.buffer.len() - 2].parse::<i64>()
-                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid bulk string size"))?;
+                    let size = self.buffer[1..self.buffer.len() - 2]
+                        .parse::<i64>()
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "Invalid bulk string size")
+                        })?;
 
                     if size < 0 {
                         return Ok(Some(RespValue::BulkString(None)));
@@ -778,31 +893,38 @@ mod resp_parser {
 
                     // Redis proto-max-bulk-len default is 512MB
                     if size > 512 * 1024 * 1024 {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                            format!("Bulk string size {} exceeds maximum allowed (512MB)", size)));
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Bulk string size {} exceeds maximum allowed (512MB)", size),
+                        ));
                     }
 
                     let mut bulk = vec![0; size as usize];
                     self.reader.read_exact(&mut bulk)?;
-                    
+
                     // Read and discard the CRLF
                     self.buffer.clear();
                     self.reader.read_line(&mut self.buffer)?;
-                    
+
                     Ok(Some(RespValue::BulkString(Some(bulk))))
-                },
+                }
                 Some('*') => {
-                    let count = self.buffer[1..self.buffer.len() - 2].parse::<i64>()
-                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid array size"))?;
-                    
+                    let count = self.buffer[1..self.buffer.len() - 2]
+                        .parse::<i64>()
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "Invalid array size")
+                        })?;
+
                     if count < 0 {
                         return Ok(Some(RespValue::Array(None)));
                     }
 
                     // Sanity limit: Redis commands rarely exceed a few thousand elements
                     if count > 1_048_576 {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                            format!("Array size {} exceeds maximum allowed (1048576)", count)));
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Array size {} exceeds maximum allowed (1048576)", count),
+                        ));
                     }
 
                     let mut array = Vec::with_capacity(count as usize);
@@ -810,13 +932,19 @@ mod resp_parser {
                         if let Some(value) = self.next()? {
                             array.push(value);
                         } else {
-                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "Unexpected EOF",
+                            ));
                         }
                     }
-                    
+
                     Ok(Some(RespValue::Array(Some(array))))
-                },
-                _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RESP data type")),
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid RESP data type",
+                )),
             }
         }
     }
@@ -825,10 +953,10 @@ mod resp_parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+    use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
     use crate::storage::item::RedisDataType;
-    use crate::command::types::sorted_set::SortedSetData;
+    use std::collections::{HashMap, HashSet};
 
     fn create_test_engine() -> Arc<StorageEngine> {
         StorageEngine::new(Default::default())
@@ -959,7 +1087,13 @@ mod tests {
         let engine = create_test_engine();
         let cmd = RespCommand {
             name: b"ZADD".to_vec(),
-            args: vec![b"myzset".to_vec(), b"1.5".to_vec(), b"alice".to_vec(), b"2.0".to_vec(), b"bob".to_vec()],
+            args: vec![
+                b"myzset".to_vec(),
+                b"1.5".to_vec(),
+                b"alice".to_vec(),
+                b"2.0".to_vec(),
+                b"bob".to_vec(),
+            ],
         };
         engine.process_command(&cmd).await.unwrap();
         let val = engine.get(b"myzset").await.unwrap().unwrap();
@@ -975,7 +1109,13 @@ mod tests {
         let engine = create_test_engine();
         let cmd = RespCommand {
             name: b"HSET".to_vec(),
-            args: vec![b"myhash".to_vec(), b"f1".to_vec(), b"v1".to_vec(), b"f2".to_vec(), b"v2".to_vec()],
+            args: vec![
+                b"myhash".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
         };
         engine.process_command(&cmd).await.unwrap();
         let fields = engine.hash_getall(b"myhash").unwrap();
@@ -987,7 +1127,12 @@ mod tests {
         let engine = create_test_engine();
         let cmd = RespCommand {
             name: b"XADD".to_vec(),
-            args: vec![b"mystream".to_vec(), b"1000-0".to_vec(), b"temp".to_vec(), b"25".to_vec()],
+            args: vec![
+                b"mystream".to_vec(),
+                b"1000-0".to_vec(),
+                b"temp".to_vec(),
+                b"25".to_vec(),
+            ],
         };
         engine.process_command(&cmd).await.unwrap();
         let val = engine.get(b"mystream").await.unwrap().unwrap();
@@ -1001,7 +1146,12 @@ mod tests {
         let engine = create_test_engine();
         let cmd = RespCommand {
             name: b"SET".to_vec(),
-            args: vec![b"k".to_vec(), b"v".to_vec(), b"PX".to_vec(), b"60000".to_vec()],
+            args: vec![
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"PX".to_vec(),
+                b"60000".to_vec(),
+            ],
         };
         engine.process_command(&cmd).await.unwrap();
         let val = engine.get(b"k").await.unwrap();
@@ -1015,14 +1165,26 @@ mod tests {
         // String
         let str_item = make_item(b"hello".to_vec(), RedisDataType::String);
         for args in aof_rewrite_commands_for_item(&b"str".to_vec(), &str_item) {
-            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+            engine
+                .process_command(&RespCommand {
+                    name: args[0].clone(),
+                    args: args[1..].to_vec(),
+                })
+                .await
+                .unwrap();
         }
 
         // List
         let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
         let list_item = make_item(bincode::serialize(&list).unwrap(), RedisDataType::List);
         for args in aof_rewrite_commands_for_item(&b"lst".to_vec(), &list_item) {
-            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+            engine
+                .process_command(&RespCommand {
+                    name: args[0].clone(),
+                    args: args[1..].to_vec(),
+                })
+                .await
+                .unwrap();
         }
 
         // Set
@@ -1031,7 +1193,13 @@ mod tests {
         set.insert(b"b".to_vec());
         let set_item = make_item(bincode::serialize(&set).unwrap(), RedisDataType::Set);
         for args in aof_rewrite_commands_for_item(&b"st".to_vec(), &set_item) {
-            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+            engine
+                .process_command(&RespCommand {
+                    name: args[0].clone(),
+                    args: args[1..].to_vec(),
+                })
+                .await
+                .unwrap();
         }
 
         // Hash
@@ -1039,7 +1207,13 @@ mod tests {
         hash.insert(b"f".to_vec(), b"v".to_vec());
         let hash_item = make_item(bincode::serialize(&hash).unwrap(), RedisDataType::Hash);
         for args in aof_rewrite_commands_for_item(&b"hs".to_vec(), &hash_item) {
-            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+            engine
+                .process_command(&RespCommand {
+                    name: args[0].clone(),
+                    args: args[1..].to_vec(),
+                })
+                .await
+                .unwrap();
         }
 
         // Sorted set
@@ -1048,7 +1222,13 @@ mod tests {
         zset.insert(2.0, b"m2".to_vec());
         let zset_item = make_item(bincode::serialize(&zset).unwrap(), RedisDataType::ZSet);
         for args in aof_rewrite_commands_for_item(&b"zs".to_vec(), &zset_item) {
-            engine.process_command(&RespCommand { name: args[0].clone(), args: args[1..].to_vec() }).await.unwrap();
+            engine
+                .process_command(&RespCommand {
+                    name: args[0].clone(),
+                    args: args[1..].to_vec(),
+                })
+                .await
+                .unwrap();
         }
 
         // Verify all restored correctly
@@ -1057,7 +1237,10 @@ mod tests {
 
         let list_val = engine.get(b"lst").await.unwrap().unwrap();
         let loaded_list: Vec<Vec<u8>> = bincode::deserialize(&list_val).unwrap();
-        assert_eq!(loaded_list, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+        assert_eq!(
+            loaded_list,
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
+        );
 
         let set_val = engine.get(b"st").await.unwrap().unwrap();
         let loaded_set: HashSet<Vec<u8>> = bincode::deserialize(&set_val).unwrap();
@@ -1081,11 +1264,22 @@ mod tests {
 
         // Write a batch of 3 SET commands
         let commands = vec![
-            RespCommand { name: b"SET".to_vec(), args: vec![b"key1".to_vec(), b"val1".to_vec()] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"key2".to_vec(), b"val2".to_vec()] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"key3".to_vec(), b"val3".to_vec()] },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"key1".to_vec(), b"val1".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"key2".to_vec(), b"val2".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"key3".to_vec(), b"val3".to_vec()],
+            },
         ];
-        aof.append_commands_batch(commands, AofSyncPolicy::Always).await.unwrap();
+        aof.append_commands_batch(commands, AofSyncPolicy::Always)
+            .await
+            .unwrap();
 
         // Give the writer task time to process and flush
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1103,7 +1297,10 @@ mod tests {
         while let Ok(Some(value)) = parser.next() {
             // Each entry should be an Array
             if let RespValue::Array(Some(parts)) = value {
-                assert!(parts.len() >= 2, "Each command should have name + at least 1 arg");
+                assert!(
+                    parts.len() >= 2,
+                    "Each command should have name + at least 1 arg"
+                );
                 cmd_count += 1;
             } else {
                 panic!("Expected RESP Array, got something else");
@@ -1122,14 +1319,25 @@ mod tests {
 
         // Write two separate batches
         let batch1 = vec![
-            RespCommand { name: b"SET".to_vec(), args: vec![b"a".to_vec(), b"1".to_vec()] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"b".to_vec(), b"2".to_vec()] },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"a".to_vec(), b"1".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"b".to_vec(), b"2".to_vec()],
+            },
         ];
-        let batch2 = vec![
-            RespCommand { name: b"SET".to_vec(), args: vec![b"c".to_vec(), b"3".to_vec()] },
-        ];
-        aof.append_commands_batch(batch1, AofSyncPolicy::Always).await.unwrap();
-        aof.append_commands_batch(batch2, AofSyncPolicy::Always).await.unwrap();
+        let batch2 = vec![RespCommand {
+            name: b"SET".to_vec(),
+            args: vec![b"c".to_vec(), b"3".to_vec()],
+        }];
+        aof.append_commands_batch(batch1, AofSyncPolicy::Always)
+            .await
+            .unwrap();
+        aof.append_commands_batch(batch2, AofSyncPolicy::Always)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1142,7 +1350,10 @@ mod tests {
         while let Ok(Some(_)) = parser.next() {
             cmd_count += 1;
         }
-        assert_eq!(cmd_count, 3, "All commands from both batches should be in the AOF");
+        assert_eq!(
+            cmd_count, 3,
+            "All commands from both batches should be in the AOF"
+        );
     }
 
     #[tokio::test]
@@ -1155,10 +1366,18 @@ mod tests {
 
         // Write a batch with various commands
         let commands = vec![
-            RespCommand { name: b"SET".to_vec(), args: vec![b"mykey".to_vec(), b"myvalue".to_vec()] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"counter".to_vec(), b"42".to_vec()] },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"mykey".to_vec(), b"myvalue".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"counter".to_vec(), b"42".to_vec()],
+            },
         ];
-        aof.append_commands_batch(commands, AofSyncPolicy::Always).await.unwrap();
+        aof.append_commands_batch(commands, AofSyncPolicy::Always)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1168,7 +1387,10 @@ mod tests {
         aof2.load().await.unwrap();
 
         // Verify the data was correctly restored
-        assert_eq!(engine2.get(b"mykey").await.unwrap(), Some(b"myvalue".to_vec()));
+        assert_eq!(
+            engine2.get(b"mykey").await.unwrap(),
+            Some(b"myvalue".to_vec())
+        );
         assert_eq!(engine2.get(b"counter").await.unwrap(), Some(b"42".to_vec()));
     }
 
@@ -1199,9 +1421,18 @@ mod tests {
     async fn test_aof_full_replay_lpush() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"LPUSH".to_vec(), args: vec![b"mylist".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[RespCommand {
+                name: b"LPUSH".to_vec(),
+                args: vec![
+                    b"mylist".to_vec(),
+                    b"c".to_vec(),
+                    b"b".to_vec(),
+                    b"a".to_vec(),
+                ],
+            }],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1215,10 +1446,24 @@ mod tests {
     async fn test_aof_full_replay_srem() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"SADD".to_vec(), args: vec![b"myset".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
-            RespCommand { name: b"SREM".to_vec(), args: vec![b"myset".to_vec(), b"b".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"SADD".to_vec(),
+                    args: vec![
+                        b"myset".to_vec(),
+                        b"a".to_vec(),
+                        b"b".to_vec(),
+                        b"c".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"SREM".to_vec(),
+                    args: vec![b"myset".to_vec(), b"b".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1233,10 +1478,27 @@ mod tests {
     async fn test_aof_full_replay_hdel() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"HSET".to_vec(), args: vec![b"myhash".to_vec(), b"f1".to_vec(), b"v1".to_vec(), b"f2".to_vec(), b"v2".to_vec(), b"f3".to_vec(), b"v3".to_vec()] },
-            RespCommand { name: b"HDEL".to_vec(), args: vec![b"myhash".to_vec(), b"f2".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"HSET".to_vec(),
+                    args: vec![
+                        b"myhash".to_vec(),
+                        b"f1".to_vec(),
+                        b"v1".to_vec(),
+                        b"f2".to_vec(),
+                        b"v2".to_vec(),
+                        b"f3".to_vec(),
+                        b"v3".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"HDEL".to_vec(),
+                    args: vec![b"myhash".to_vec(), b"f2".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1251,10 +1513,19 @@ mod tests {
     async fn test_aof_full_replay_zincrby() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"ZADD".to_vec(), args: vec![b"myzset".to_vec(), b"1.0".to_vec(), b"alice".to_vec()] },
-            RespCommand { name: b"ZINCRBY".to_vec(), args: vec![b"myzset".to_vec(), b"2.5".to_vec(), b"alice".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"ZADD".to_vec(),
+                    args: vec![b"myzset".to_vec(), b"1.0".to_vec(), b"alice".to_vec()],
+                },
+                RespCommand {
+                    name: b"ZINCRBY".to_vec(),
+                    args: vec![b"myzset".to_vec(), b"2.5".to_vec(), b"alice".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1267,13 +1538,21 @@ mod tests {
     async fn test_aof_full_replay_geoadd() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"GEOADD".to_vec(), args: vec![
-                b"mygeo".to_vec(),
-                b"13.361389".to_vec(), b"38.115556".to_vec(), b"Palermo".to_vec(),
-                b"15.087269".to_vec(), b"37.502669".to_vec(), b"Catania".to_vec(),
-            ] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[RespCommand {
+                name: b"GEOADD".to_vec(),
+                args: vec![
+                    b"mygeo".to_vec(),
+                    b"13.361389".to_vec(),
+                    b"38.115556".to_vec(),
+                    b"Palermo".to_vec(),
+                    b"15.087269".to_vec(),
+                    b"37.502669".to_vec(),
+                    b"Catania".to_vec(),
+                ],
+            }],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1287,9 +1566,18 @@ mod tests {
     async fn test_aof_full_replay_pfadd() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"PFADD".to_vec(), args: vec![b"myhll".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[RespCommand {
+                name: b"PFADD".to_vec(),
+                args: vec![
+                    b"myhll".to_vec(),
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                    b"c".to_vec(),
+                ],
+            }],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1301,10 +1589,19 @@ mod tests {
     async fn test_aof_full_replay_setbit() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"mybits".to_vec(), b"7".to_vec(), b"1".to_vec()] },
-            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"mybits".to_vec(), b"0".to_vec(), b"1".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"SETBIT".to_vec(),
+                    args: vec![b"mybits".to_vec(), b"7".to_vec(), b"1".to_vec()],
+                },
+                RespCommand {
+                    name: b"SETBIT".to_vec(),
+                    args: vec![b"mybits".to_vec(), b"0".to_vec(), b"1".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1316,48 +1613,94 @@ mod tests {
     async fn test_aof_full_replay_xgroup() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"XADD".to_vec(), args: vec![
-                b"mystream".to_vec(), b"1-0".to_vec(), b"field".to_vec(), b"value".to_vec()
-            ] },
-            RespCommand { name: b"XGROUP".to_vec(), args: vec![
-                b"CREATE".to_vec(), b"mystream".to_vec(), b"mygroup".to_vec(), b"0".to_vec()
-            ] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"mystream".to_vec(),
+                        b"1-0".to_vec(),
+                        b"field".to_vec(),
+                        b"value".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"XGROUP".to_vec(),
+                    args: vec![
+                        b"CREATE".to_vec(),
+                        b"mystream".to_vec(),
+                        b"mygroup".to_vec(),
+                        b"0".to_vec(),
+                    ],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
         // Verify the stream exists with the consumer group
         let val = engine.get(b"mystream").await.unwrap();
         assert!(val.is_some(), "XADD should have created the stream");
-        let stream: crate::storage::stream::StreamData = bincode::deserialize(&val.unwrap()).unwrap();
-        assert!(stream.groups.contains_key("mygroup"), "XGROUP CREATE should have created the consumer group");
+        let stream: crate::storage::stream::StreamData =
+            bincode::deserialize(&val.unwrap()).unwrap();
+        assert!(
+            stream.groups.contains_key("mygroup"),
+            "XGROUP CREATE should have created the consumer group"
+        );
     }
 
     #[tokio::test]
     async fn test_aof_full_replay_append() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"SET".to_vec(), args: vec![b"mykey".to_vec(), b"Hello".to_vec()] },
-            RespCommand { name: b"APPEND".to_vec(), args: vec![b"mykey".to_vec(), b" World".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"mykey".to_vec(), b"Hello".to_vec()],
+                },
+                RespCommand {
+                    name: b"APPEND".to_vec(),
+                    args: vec![b"mykey".to_vec(), b" World".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
-        assert_eq!(engine.get(b"mykey").await.unwrap(), Some(b"Hello World".to_vec()));
+        assert_eq!(
+            engine.get(b"mykey").await.unwrap(),
+            Some(b"Hello World".to_vec())
+        );
     }
 
     #[tokio::test]
     async fn test_aof_full_replay_incr() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"SET".to_vec(), args: vec![b"counter".to_vec(), b"10".to_vec()] },
-            RespCommand { name: b"INCR".to_vec(), args: vec![b"counter".to_vec()] },
-            RespCommand { name: b"INCRBY".to_vec(), args: vec![b"counter".to_vec(), b"5".to_vec()] },
-            RespCommand { name: b"DECR".to_vec(), args: vec![b"counter".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"counter".to_vec(), b"10".to_vec()],
+                },
+                RespCommand {
+                    name: b"INCR".to_vec(),
+                    args: vec![b"counter".to_vec()],
+                },
+                RespCommand {
+                    name: b"INCRBY".to_vec(),
+                    args: vec![b"counter".to_vec(), b"5".to_vec()],
+                },
+                RespCommand {
+                    name: b"DECR".to_vec(),
+                    args: vec![b"counter".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1369,15 +1712,27 @@ mod tests {
     async fn test_aof_full_replay_rename() {
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"SET".to_vec(), args: vec![b"oldkey".to_vec(), b"myvalue".to_vec()] },
-            RespCommand { name: b"RENAME".to_vec(), args: vec![b"oldkey".to_vec(), b"newkey".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"oldkey".to_vec(), b"myvalue".to_vec()],
+                },
+                RespCommand {
+                    name: b"RENAME".to_vec(),
+                    args: vec![b"oldkey".to_vec(), b"newkey".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
         assert_eq!(engine.get(b"oldkey").await.unwrap(), None);
-        assert_eq!(engine.get(b"newkey").await.unwrap(), Some(b"myvalue".to_vec()));
+        assert_eq!(
+            engine.get(b"newkey").await.unwrap(),
+            Some(b"myvalue".to_vec())
+        );
     }
 
     #[tokio::test]
@@ -1385,41 +1740,104 @@ mod tests {
         // Comprehensive test: replay a sequence of diverse commands through CommandHandler
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            // String operations
-            RespCommand { name: b"SET".to_vec(), args: vec![b"str".to_vec(), b"hello".to_vec()] },
-            RespCommand { name: b"APPEND".to_vec(), args: vec![b"str".to_vec(), b" world".to_vec()] },
-            // List operations
-            RespCommand { name: b"RPUSH".to_vec(), args: vec![b"list".to_vec(), b"1".to_vec(), b"2".to_vec()] },
-            RespCommand { name: b"LPUSH".to_vec(), args: vec![b"list".to_vec(), b"0".to_vec()] },
-            // Set operations
-            RespCommand { name: b"SADD".to_vec(), args: vec![b"set".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] },
-            RespCommand { name: b"SREM".to_vec(), args: vec![b"set".to_vec(), b"b".to_vec()] },
-            // Hash operations
-            RespCommand { name: b"HSET".to_vec(), args: vec![b"hash".to_vec(), b"f1".to_vec(), b"v1".to_vec()] },
-            RespCommand { name: b"HDEL".to_vec(), args: vec![b"hash".to_vec(), b"f1".to_vec()] },
-            RespCommand { name: b"HSET".to_vec(), args: vec![b"hash".to_vec(), b"f2".to_vec(), b"v2".to_vec()] },
-            // Sorted set operations
-            RespCommand { name: b"ZADD".to_vec(), args: vec![b"zset".to_vec(), b"1.0".to_vec(), b"x".to_vec(), b"2.0".to_vec(), b"y".to_vec()] },
-            RespCommand { name: b"ZINCRBY".to_vec(), args: vec![b"zset".to_vec(), b"3.0".to_vec(), b"x".to_vec()] },
-            // Counter
-            RespCommand { name: b"SET".to_vec(), args: vec![b"cnt".to_vec(), b"0".to_vec()] },
-            RespCommand { name: b"INCR".to_vec(), args: vec![b"cnt".to_vec()] },
-            RespCommand { name: b"INCR".to_vec(), args: vec![b"cnt".to_vec()] },
-            // Bitmap
-            RespCommand { name: b"SETBIT".to_vec(), args: vec![b"bits".to_vec(), b"7".to_vec(), b"1".to_vec()] },
-            // HyperLogLog
-            RespCommand { name: b"PFADD".to_vec(), args: vec![b"hll".to_vec(), b"x".to_vec(), b"y".to_vec()] },
-            // Key management
-            RespCommand { name: b"RENAME".to_vec(), args: vec![b"str".to_vec(), b"str2".to_vec()] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                // String operations
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"str".to_vec(), b"hello".to_vec()],
+                },
+                RespCommand {
+                    name: b"APPEND".to_vec(),
+                    args: vec![b"str".to_vec(), b" world".to_vec()],
+                },
+                // List operations
+                RespCommand {
+                    name: b"RPUSH".to_vec(),
+                    args: vec![b"list".to_vec(), b"1".to_vec(), b"2".to_vec()],
+                },
+                RespCommand {
+                    name: b"LPUSH".to_vec(),
+                    args: vec![b"list".to_vec(), b"0".to_vec()],
+                },
+                // Set operations
+                RespCommand {
+                    name: b"SADD".to_vec(),
+                    args: vec![b"set".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+                },
+                RespCommand {
+                    name: b"SREM".to_vec(),
+                    args: vec![b"set".to_vec(), b"b".to_vec()],
+                },
+                // Hash operations
+                RespCommand {
+                    name: b"HSET".to_vec(),
+                    args: vec![b"hash".to_vec(), b"f1".to_vec(), b"v1".to_vec()],
+                },
+                RespCommand {
+                    name: b"HDEL".to_vec(),
+                    args: vec![b"hash".to_vec(), b"f1".to_vec()],
+                },
+                RespCommand {
+                    name: b"HSET".to_vec(),
+                    args: vec![b"hash".to_vec(), b"f2".to_vec(), b"v2".to_vec()],
+                },
+                // Sorted set operations
+                RespCommand {
+                    name: b"ZADD".to_vec(),
+                    args: vec![
+                        b"zset".to_vec(),
+                        b"1.0".to_vec(),
+                        b"x".to_vec(),
+                        b"2.0".to_vec(),
+                        b"y".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"ZINCRBY".to_vec(),
+                    args: vec![b"zset".to_vec(), b"3.0".to_vec(), b"x".to_vec()],
+                },
+                // Counter
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"cnt".to_vec(), b"0".to_vec()],
+                },
+                RespCommand {
+                    name: b"INCR".to_vec(),
+                    args: vec![b"cnt".to_vec()],
+                },
+                RespCommand {
+                    name: b"INCR".to_vec(),
+                    args: vec![b"cnt".to_vec()],
+                },
+                // Bitmap
+                RespCommand {
+                    name: b"SETBIT".to_vec(),
+                    args: vec![b"bits".to_vec(), b"7".to_vec(), b"1".to_vec()],
+                },
+                // HyperLogLog
+                RespCommand {
+                    name: b"PFADD".to_vec(),
+                    args: vec![b"hll".to_vec(), b"x".to_vec(), b"y".to_vec()],
+                },
+                // Key management
+                RespCommand {
+                    name: b"RENAME".to_vec(),
+                    args: vec![b"str".to_vec(), b"str2".to_vec()],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
 
         // Verify string (renamed)
         assert_eq!(engine.get(b"str").await.unwrap(), None);
-        assert_eq!(engine.get(b"str2").await.unwrap(), Some(b"hello world".to_vec()));
+        assert_eq!(
+            engine.get(b"str2").await.unwrap(),
+            Some(b"hello world".to_vec())
+        );
 
         // Verify list: RPUSH [1,2] then LPUSH [0] -> [0,1,2]
         let list_val = engine.get(b"list").await.unwrap().unwrap();
@@ -1459,12 +1877,27 @@ mod tests {
         // MULTI/EXEC/DISCARD should be silently skipped
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
-        write_resp_commands_to_file(&aof_path, &[
-            RespCommand { name: b"MULTI".to_vec(), args: vec![] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"k1".to_vec(), b"v1".to_vec()] },
-            RespCommand { name: b"SET".to_vec(), args: vec![b"k2".to_vec(), b"v2".to_vec()] },
-            RespCommand { name: b"EXEC".to_vec(), args: vec![] },
-        ]);
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                RespCommand {
+                    name: b"MULTI".to_vec(),
+                    args: vec![],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"k1".to_vec(), b"v1".to_vec()],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"k2".to_vec(), b"v2".to_vec()],
+                },
+                RespCommand {
+                    name: b"EXEC".to_vec(),
+                    args: vec![],
+                },
+            ],
+        );
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
@@ -1651,12 +2084,22 @@ mod tests {
         aof.load().await.unwrap();
 
         // Verify initial state: stream with group and pending entries
-        let val = engine.get(b"mystream").await.unwrap().expect("stream should exist");
+        let val = engine
+            .get(b"mystream")
+            .await
+            .unwrap()
+            .expect("stream should exist");
         let stream: StreamData = bincode::deserialize(&val).unwrap();
         assert_eq!(stream.entries.len(), 3, "should have 3 entries");
-        assert!(stream.groups.contains_key("mygroup"), "should have consumer group");
+        assert!(
+            stream.groups.contains_key("mygroup"),
+            "should have consumer group"
+        );
         let group = &stream.groups["mygroup"];
-        assert!(!group.pel.is_empty(), "should have pending entries after XREADGROUP");
+        assert!(
+            !group.pel.is_empty(),
+            "should have pending entries after XREADGROUP"
+        );
         let pending_count = group.pel.len();
 
         // Now do AOF rewrite: engine → new AOF commands
@@ -1783,11 +2226,19 @@ mod tests {
         aof1.load().await.unwrap();
 
         // Verify consumer state after initial load
-        let val1 = engine1.get(b"events").await.unwrap().expect("stream should exist");
+        let val1 = engine1
+            .get(b"events")
+            .await
+            .unwrap()
+            .expect("stream should exist");
         let stream1: StreamData = bincode::deserialize(&val1).unwrap();
         assert_eq!(stream1.entries.len(), 3, "should have 3 stream entries");
         let group1 = &stream1.groups["processors"];
-        assert_eq!(group1.pel.len(), 2, "should have 2 pending entries from XREADGROUP");
+        assert_eq!(
+            group1.pel.len(),
+            2,
+            "should have 2 pending entries from XREADGROUP"
+        );
         assert!(
             group1.consumers.contains_key("worker1"),
             "worker1 consumer should exist"
@@ -1804,7 +2255,11 @@ mod tests {
         let aof2 = AofPersistence::new(engine2.clone(), aof_path);
         aof2.load().await.unwrap();
 
-        let val2 = engine2.get(b"events").await.unwrap().expect("stream should exist after reload");
+        let val2 = engine2
+            .get(b"events")
+            .await
+            .unwrap()
+            .expect("stream should exist after reload");
         let stream2: StreamData = bincode::deserialize(&val2).unwrap();
         assert_eq!(stream2.entries.len(), 3, "entries survive reload");
         assert!(
@@ -1812,11 +2267,7 @@ mod tests {
             "consumer group survives reload"
         );
         let group2 = &stream2.groups["processors"];
-        assert_eq!(
-            group2.pel.len(),
-            2,
-            "pending entries survive reload"
-        );
+        assert_eq!(group2.pel.len(), 2, "pending entries survive reload");
         assert!(
             group2.consumers.contains_key("worker1"),
             "consumer survives reload"
@@ -1885,20 +2336,20 @@ mod tests {
         assert_eq!(val, None, "DB 3 key should not be in DB 0");
 
         // Verify DB 3 keys
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine.get(b"db3_key").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine.get(b"db3_key").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"db3_value".to_vec()));
 
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine.get(b"db3_another").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine.get(b"db3_another").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"another_value".to_vec()));
 
         // Verify DB 3 does NOT have DB 0's keys
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine.get(b"db0_key").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine.get(b"db0_key").await.unwrap() })
+            .await;
         assert_eq!(val, None, "DB 0 key should not be in DB 3");
     }
 
@@ -1913,17 +2364,30 @@ mod tests {
         let engine = create_test_engine();
 
         // DB 0
-        engine.set(b"key0".to_vec(), b"val0".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key0".to_vec(), b"val0".to_vec(), None)
+            .await
+            .unwrap();
 
         // DB 3
-        CURRENT_DB_INDEX.scope(3, async {
-            engine.set(b"key3".to_vec(), b"val3".to_vec(), None).await.unwrap();
-        }).await;
+        CURRENT_DB_INDEX
+            .scope(3, async {
+                engine
+                    .set(b"key3".to_vec(), b"val3".to_vec(), None)
+                    .await
+                    .unwrap();
+            })
+            .await;
 
         // DB 7
-        CURRENT_DB_INDEX.scope(7, async {
-            engine.set(b"key7".to_vec(), b"val7".to_vec(), None).await.unwrap();
-        }).await;
+        CURRENT_DB_INDEX
+            .scope(7, async {
+                engine
+                    .set(b"key7".to_vec(), b"val7".to_vec(), None)
+                    .await
+                    .unwrap();
+            })
+            .await;
 
         // Rewrite AOF
         let aof = AofPersistence::new(engine.clone(), aof_path.clone());
@@ -1939,24 +2403,24 @@ mod tests {
         assert_eq!(val, Some(b"val0".to_vec()));
 
         // DB 3
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine2.get(b"key3").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine2.get(b"key3").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"val3".to_vec()));
 
         // DB 7
-        let val = CURRENT_DB_INDEX.scope(7, async {
-            engine2.get(b"key7").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(7, async { engine2.get(b"key7").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"val7".to_vec()));
 
         // Cross-DB isolation
         let val = engine2.get(b"key3").await.unwrap();
         assert_eq!(val, None, "DB 3 key should not be in DB 0");
 
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine2.get(b"key0").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine2.get(b"key0").await.unwrap() })
+            .await;
         assert_eq!(val, None, "DB 0 key should not be in DB 3");
     }
 }
