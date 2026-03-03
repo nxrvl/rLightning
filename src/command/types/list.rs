@@ -2,9 +2,9 @@ use std::time::{Duration, Instant};
 
 use futures::future::select_all;
 
-use crate::command::{CommandError, CommandResult};
-use crate::command::utils::bytes_to_string;
 use crate::command::types::blocking::BlockingManager;
+use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
@@ -22,25 +22,29 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
-    
+
     let length = engine.atomic_modify(key, RedisDataType::List, |current| {
         let mut list = match current {
             Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
                 .map_err(|_| crate::storage::error::StorageError::WrongType)?,
             None => Vec::new(),
         };
-        
+
         list.splice(0..0, elements.clone());
         let length = list.len() as i64;
-        
-        let serialized = bincode::serialize(&list)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+
+        let serialized = bincode::serialize(&list).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
         Ok((Some(serialized), length))
     })?;
-    
+
     Ok(RespValue::Integer(length))
 }
 
@@ -50,25 +54,29 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
-    
+
     let length = engine.atomic_modify(key, RedisDataType::List, |current| {
         let mut list = match current {
             Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
                 .map_err(|_| crate::storage::error::StorageError::WrongType)?,
             None => Vec::new(),
         };
-        
+
         list.extend(elements.clone());
         let length = list.len() as i64;
-        
-        let serialized = bincode::serialize(&list)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+
+        let serialized = bincode::serialize(&list).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
         Ok((Some(serialized), length))
     })?;
-    
+
     Ok(RespValue::Integer(length))
 }
 
@@ -88,48 +96,53 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
         if c < 0 {
-            return Err(CommandError::InvalidArgument("value is not an integer or out of range".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "value is not an integer or out of range".to_string(),
+            ));
         }
         Some(c as usize)
     } else {
         None
     };
 
-    let result = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                if list.is_empty() {
-                    return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
-                }
-
-                let pop_result = if let Some(count) = count {
-                    let actual_count = std::cmp::min(count, list.len());
-                    let elements: Vec<Vec<u8>> = list.drain(..actual_count).collect();
-                    PopResult::Multi(elements)
-                } else {
-                    let element = list.remove(0);
-                    PopResult::Single(element)
-                };
-
-                if list.is_empty() {
-                    Ok((None, pop_result))
-                } else {
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), pop_result))
-                }
+            if list.is_empty() {
+                return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
             }
-            None => Ok((None, PopResult::Nil(count.is_some()))),
+
+            let pop_result = if let Some(count) = count {
+                let actual_count = std::cmp::min(count, list.len());
+                let elements: Vec<Vec<u8>> = list.drain(..actual_count).collect();
+                PopResult::Multi(elements)
+            } else {
+                let element = list.remove(0);
+                PopResult::Single(element)
+            };
+
+            if list.is_empty() {
+                Ok((None, pop_result))
+            } else {
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), pop_result))
+            }
         }
+        None => Ok((None, PopResult::Nil(count.is_some()))),
     })?;
 
     match result {
         PopResult::Single(element) => Ok(RespValue::BulkString(Some(element))),
         PopResult::Multi(elements) => {
-            let arr: Vec<RespValue> = elements.into_iter()
+            let arr: Vec<RespValue> = elements
+                .into_iter()
                 .map(|e| RespValue::BulkString(Some(e)))
                 .collect();
             Ok(RespValue::Array(Some(arr)))
@@ -160,49 +173,54 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             CommandError::InvalidArgument("value is not an integer or out of range".to_string())
         })?;
         if c < 0 {
-            return Err(CommandError::InvalidArgument("value is not an integer or out of range".to_string()));
+            return Err(CommandError::InvalidArgument(
+                "value is not an integer or out of range".to_string(),
+            ));
         }
         Some(c as usize)
     } else {
         None
     };
 
-    let result = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                if list.is_empty() {
-                    return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
-                }
-
-                let pop_result = if let Some(count) = count {
-                    let actual_count = std::cmp::min(count, list.len());
-                    let start = list.len() - actual_count;
-                    let elements: Vec<Vec<u8>> = list.drain(start..).rev().collect();
-                    PopResult::Multi(elements)
-                } else {
-                    let element = list.pop().unwrap();
-                    PopResult::Single(element)
-                };
-
-                if list.is_empty() {
-                    Ok((None, pop_result))
-                } else {
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), pop_result))
-                }
+            if list.is_empty() {
+                return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
             }
-            None => Ok((None, PopResult::Nil(count.is_some()))),
+
+            let pop_result = if let Some(count) = count {
+                let actual_count = std::cmp::min(count, list.len());
+                let start = list.len() - actual_count;
+                let elements: Vec<Vec<u8>> = list.drain(start..).rev().collect();
+                PopResult::Multi(elements)
+            } else {
+                let element = list.pop().unwrap();
+                PopResult::Single(element)
+            };
+
+            if list.is_empty() {
+                Ok((None, pop_result))
+            } else {
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), pop_result))
+            }
         }
+        None => Ok((None, PopResult::Nil(count.is_some()))),
     })?;
 
     match result {
         PopResult::Single(element) => Ok(RespValue::BulkString(Some(element))),
         PopResult::Multi(elements) => {
-            let arr: Vec<RespValue> = elements.into_iter()
+            let arr: Vec<RespValue> = elements
+                .into_iter()
                 .map(|e| RespValue::BulkString(Some(e)))
                 .collect();
             Ok(RespValue::Array(Some(arr)))
@@ -222,41 +240,39 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
+
     // Parse start and stop indices
     let start_str = bytes_to_string(&args[1])?;
     let stop_str = bytes_to_string(&args[2])?;
-    
+
     let start = start_str.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
-    
+
     let stop = stop_str.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
-    
+
     // Get the current list
     let list = match engine.get(key).await? {
         Some(data) => {
             // Try to deserialize the list
             match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
                 Ok(list) => list,
-                Err(_) => {
-                    return Err(CommandError::WrongType)
-                }
+                Err(_) => return Err(CommandError::WrongType),
             }
-        },
+        }
         None => {
             // List doesn't exist, return empty array
             return Ok(RespValue::Array(Some(vec![])));
-        },
+        }
     };
-    
+
     // Handle negative indices (counting from the end)
     let len = list.len() as i64;
-    
+
     // Convert indices to zero-based array indices
     let start_idx = if start < 0 {
         // Negative index means count from the end
@@ -264,32 +280,32 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         start as usize
     };
-    
+
     let stop_idx = if stop < 0 {
         // Negative index means count from the end
         (len + stop).min(len - 1) as usize
     } else {
         stop.min(len - 1) as usize
     };
-    
+
     // Get the elements in the range
     let mut result = Vec::new();
-    
+
     // Check if we have a valid range before trying to iterate
     if start_idx <= stop_idx && start_idx < list.len() {
         let actual_stop_idx = stop_idx.min(list.len() - 1);
         let range_len = actual_stop_idx - start_idx + 1;
-        
+
         // Pre-allocate vector with exact capacity to avoid reallocations
         result = Vec::with_capacity(range_len);
-        
+
         // Process elements in chunks if the range is large
         // This helps avoid excessive memory usage and prevents buffer overflow
         const CHUNK_SIZE: usize = 100;
-        
+
         for i in (start_idx..=actual_stop_idx).step_by(CHUNK_SIZE) {
             let chunk_end = (i + CHUNK_SIZE - 1).min(actual_stop_idx);
-            
+
             for j in i..=chunk_end {
                 // Check if index is valid (just to be safe)
                 if j < list.len() {
@@ -298,7 +314,7 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
     }
-    
+
     // Return the result as a RESP array
     Ok(RespValue::Array(Some(result)))
 }
@@ -308,33 +324,29 @@ pub async fn llen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
+
     // Check if the key exists and is the right type
     if engine.exists(key).await? {
         let key_type = engine.get_type(key).await?;
         if key_type != "list" {
             return Err(CommandError::WrongType);
         }
-        
+
         // Get the current list
         match engine.get(key).await? {
             Some(data) => {
                 // Try to deserialize the list
                 match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
-                    Ok(list) => {
-                        Ok(RespValue::Integer(list.len() as i64))
-                    },
-                    Err(_) => {
-                        Err(CommandError::WrongType)
-                    }
+                    Ok(list) => Ok(RespValue::Integer(list.len() as i64)),
+                    Err(_) => Err(CommandError::WrongType),
                 }
-            },
+            }
             None => {
                 // This should not happen if exists returned true
                 Ok(RespValue::Integer(0))
-            },
+            }
         }
     } else {
         // Key doesn't exist, return 0
@@ -347,51 +359,47 @@ pub async fn lindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
+
     // Parse index
     let index_str = bytes_to_string(&args[1])?;
-    let index = index_str.parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument("Invalid index, not an integer".to_string())
-    })?;
-    
+    let index = index_str
+        .parse::<i64>()
+        .map_err(|_| CommandError::InvalidArgument("Invalid index, not an integer".to_string()))?;
+
     // Get the current list
     let list = match engine.get(key).await? {
         Some(data) => {
             // Try to deserialize the list
             match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
                 Ok(list) => list,
-                Err(_) => {
-                    return Err(CommandError::WrongType)
-                }
+                Err(_) => return Err(CommandError::WrongType),
             }
-        },
+        }
         None => {
             // List doesn't exist, return nil
-            return Ok(RespValue::BulkString(None))
-        },
+            return Ok(RespValue::BulkString(None));
+        }
     };
-    
+
     if list.is_empty() {
         return Ok(RespValue::BulkString(None));
     }
-    
+
     // Handle negative indices (counting from the end)
     let len = list.len() as i64;
-    let actual_index = if index < 0 {
-        len + index
-    } else {
-        index
-    };
-    
+    let actual_index = if index < 0 { len + index } else { index };
+
     // Check if index is within bounds
     if actual_index < 0 || actual_index >= len {
         return Ok(RespValue::BulkString(None));
     }
-    
+
     // Return the element at the specified index
-    Ok(RespValue::BulkString(Some(list[actual_index as usize].clone())))
+    Ok(RespValue::BulkString(Some(
+        list[actual_index as usize].clone(),
+    )))
 }
 
 /// Redis LTRIM command - Trim a list to the specified range
@@ -400,36 +408,36 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = &args[0];
-    
+
     // Parse start and stop indices
     let start_str = bytes_to_string(&args[1])?;
     let stop_str = bytes_to_string(&args[2])?;
-    
+
     let start = start_str.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
-    
+
     let stop = stop_str.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
-    
+
     engine.atomic_modify(key, RedisDataType::List, |current| {
         match current {
             Some(data) => {
                 let list = bincode::deserialize::<Vec<Vec<u8>>>(data)
                     .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                
+
                 let len = list.len() as i64;
-                
+
                 // Handle negative indices
                 let start_idx = if start < 0 {
                     std::cmp::max(len + start, 0) as usize
                 } else {
                     start as usize
                 };
-                
+
                 let stop_idx = if stop < 0 {
                     let raw = len + stop;
                     if raw < 0 {
@@ -443,26 +451,31 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if start_idx > stop_idx || start_idx >= list.len() {
                     return Ok((None, ()));
                 }
-                
+
                 let stop_idx = std::cmp::min(stop_idx, list.len() - 1);
-                let trimmed: Vec<Vec<u8>> = list.into_iter()
+                let trimmed: Vec<Vec<u8>> = list
+                    .into_iter()
                     .enumerate()
                     .filter(|(i, _)| *i >= start_idx && *i <= stop_idx)
                     .map(|(_, v)| v)
                     .collect();
-                
+
                 if trimmed.is_empty() {
                     Ok((None, ()))
                 } else {
-                    let serialized = bincode::serialize(&trimmed)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+                    let serialized = bincode::serialize(&trimmed).map_err(|e| {
+                        crate::storage::error::StorageError::InternalError(format!(
+                            "Serialization error: {}",
+                            e
+                        ))
+                    })?;
                     Ok((Some(serialized), ()))
                 }
             }
             None => Ok((None, ())),
         }
     })?;
-    
+
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -475,19 +488,21 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
 
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                list.splice(0..0, elements.clone());
-                let length = list.len() as i64;
-                let serialized = bincode::serialize(&list)
-                    .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                Ok((Some(serialized), length))
-            }
-            None => Ok((None, 0i64)),
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+            list.splice(0..0, elements.clone());
+            let length = list.len() as i64;
+            let serialized = bincode::serialize(&list).map_err(|e| {
+                crate::storage::error::StorageError::InternalError(format!(
+                    "Serialization error: {}",
+                    e
+                ))
+            })?;
+            Ok((Some(serialized), length))
         }
+        None => Ok((None, 0i64)),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -502,19 +517,21 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                list.extend(elements.clone());
-                let length = list.len() as i64;
-                let serialized = bincode::serialize(&list)
-                    .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                Ok((Some(serialized), length))
-            }
-            None => Ok((None, 0i64)),
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+            list.extend(elements.clone());
+            let length = list.len() as i64;
+            let serialized = bincode::serialize(&list).map_err(|e| {
+                crate::storage::error::StorageError::InternalError(format!(
+                    "Serialization error: {}",
+                    e
+                ))
+            })?;
+            Ok((Some(serialized), length))
         }
+        None => Ok((None, 0i64)),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -535,25 +552,27 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         return Err(CommandError::InvalidArgument("syntax error".to_string()));
     }
 
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                if let Some(idx) = list.iter().position(|e| *e == pivot) {
-                    let insert_idx = if position == "BEFORE" { idx } else { idx + 1 };
-                    list.insert(insert_idx, element.clone());
-                    let length = list.len() as i64;
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), length))
-                } else {
-                    Ok((Some(data.clone()), -1i64))
-                }
+            if let Some(idx) = list.iter().position(|e| *e == pivot) {
+                let insert_idx = if position == "BEFORE" { idx } else { idx + 1 };
+                list.insert(insert_idx, element.clone());
+                let length = list.len() as i64;
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), length))
+            } else {
+                Ok((Some(data.clone()), -1i64))
             }
-            None => Ok((None, 0i64)),
         }
+        None => Ok((None, 0i64)),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -572,31 +591,33 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
     let element = args[2].clone();
 
-    engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                let len = list.len() as i64;
-                let actual_index = if index < 0 { len + index } else { index };
+            let len = list.len() as i64;
+            let actual_index = if index < 0 { len + index } else { index };
 
-                if actual_index < 0 || actual_index >= len {
-                    return Err(crate::storage::error::StorageError::InternalError(
-                        "index out of range".to_string(),
-                    ));
-                }
-
-                list[actual_index as usize] = element.clone();
-
-                let serialized = bincode::serialize(&list)
-                    .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                Ok((Some(serialized), ()))
+            if actual_index < 0 || actual_index >= len {
+                return Err(crate::storage::error::StorageError::InternalError(
+                    "index out of range".to_string(),
+                ));
             }
-            None => Err(crate::storage::error::StorageError::InternalError(
-                "no such key".to_string(),
-            )),
+
+            list[actual_index as usize] = element.clone();
+
+            let serialized = bincode::serialize(&list).map_err(|e| {
+                crate::storage::error::StorageError::InternalError(format!(
+                    "Serialization error: {}",
+                    e
+                ))
+            })?;
+            Ok((Some(serialized), ()))
         }
+        None => Err(crate::storage::error::StorageError::InternalError(
+            "no such key".to_string(),
+        )),
     })?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -618,57 +639,59 @@ pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
     let element = args[2].clone();
 
-    let removed = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    let removed = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                let mut removed = 0i64;
-                let max_removals = if count == 0 {
-                    list.len() as i64
-                } else {
-                    count.abs()
-                };
+            let mut removed = 0i64;
+            let max_removals = if count == 0 {
+                list.len() as i64
+            } else {
+                count.abs()
+            };
 
-                if count >= 0 {
-                    list.retain(|e| {
-                        if removed >= max_removals {
-                            return true;
-                        }
-                        if *e == element {
-                            removed += 1;
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                } else {
-                    list.reverse();
-                    list.retain(|e| {
-                        if removed >= max_removals {
-                            return true;
-                        }
-                        if *e == element {
-                            removed += 1;
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    list.reverse();
-                }
-
-                if list.is_empty() {
-                    Ok((None, removed))
-                } else {
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), removed))
-                }
+            if count >= 0 {
+                list.retain(|e| {
+                    if removed >= max_removals {
+                        return true;
+                    }
+                    if *e == element {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            } else {
+                list.reverse();
+                list.retain(|e| {
+                    if removed >= max_removals {
+                        return true;
+                    }
+                    if *e == element {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                list.reverse();
             }
-            None => Ok((None, 0i64)),
+
+            if list.is_empty() {
+                Ok((None, removed))
+            } else {
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), removed))
+            }
         }
+        None => Ok((None, 0i64)),
     })?;
 
     Ok(RespValue::Integer(removed))
@@ -696,10 +719,14 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
                 i += 1;
                 rank = bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if rank == 0 {
-                    return Err(CommandError::InvalidArgument("RANK can't be zero: use a positive or negative rank".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "RANK can't be zero: use a positive or negative rank".to_string(),
+                    ));
                 }
             }
             "COUNT" => {
@@ -708,10 +735,14 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
                 i += 1;
                 count = Some(bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?);
                 if count.unwrap() < 0 {
-                    return Err(CommandError::InvalidArgument("COUNT can't be negative".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "COUNT can't be negative".to_string(),
+                    ));
                 }
             }
             "MAXLEN" => {
@@ -720,10 +751,14 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
                 i += 1;
                 let ml = bytes_to_string(&args[i])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if ml < 0 {
-                    return Err(CommandError::InvalidArgument("MAXLEN can't be negative".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "MAXLEN can't be negative".to_string(),
+                    ));
                 }
                 maxlen = ml as usize;
             }
@@ -746,20 +781,27 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let list = match engine.get(key).await? {
-        Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(&data)
-            .map_err(|_| CommandError::WrongType)?,
-        None => return Ok(if count.is_some() {
-            RespValue::Array(Some(vec![]))
-        } else {
-            RespValue::BulkString(None)
-        }),
+        Some(data) => {
+            bincode::deserialize::<Vec<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
+        }
+        None => {
+            return Ok(if count.is_some() {
+                RespValue::Array(Some(vec![]))
+            } else {
+                RespValue::BulkString(None)
+            });
+        }
     };
 
     let mut matches = Vec::new();
 
     if rank > 0 {
         // Forward scan
-        let search_len = if maxlen > 0 { maxlen.min(list.len()) } else { list.len() };
+        let search_len = if maxlen > 0 {
+            maxlen.min(list.len())
+        } else {
+            list.len()
+        };
         let mut found = 0i64;
         for (idx, item) in list[..search_len].iter().enumerate() {
             if *item == *element {
@@ -779,7 +821,11 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     } else {
         // Reverse scan
         let abs_rank = rank.unsigned_abs();
-        let start = if maxlen > 0 { list.len().saturating_sub(maxlen) } else { 0 };
+        let start = if maxlen > 0 {
+            list.len().saturating_sub(maxlen)
+        } else {
+            0
+        };
         let mut found = 0u64;
         for idx in (start..list.len()).rev() {
             if list[idx] == *element {
@@ -800,7 +846,7 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     if count.is_some() {
         Ok(RespValue::Array(Some(
-            matches.into_iter().map(RespValue::Integer).collect()
+            matches.into_iter().map(RespValue::Integer).collect(),
         )))
     } else {
         match matches.first() {
@@ -830,8 +876,8 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     if source == destination {
         // Same-key: use atomic_modify for single-key atomicity
-        let result = engine.atomic_modify(source, RedisDataType::List, |current| {
-            match current {
+        let result =
+            engine.atomic_modify(source, RedisDataType::List, |current| match current {
                 Some(data) => {
                     let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
                         .map_err(|_| crate::storage::error::StorageError::WrongType)?;
@@ -852,13 +898,16 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         list.push(element.clone());
                     }
 
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+                    let serialized = bincode::serialize(&list).map_err(|e| {
+                        crate::storage::error::StorageError::InternalError(format!(
+                            "Serialization error: {}",
+                            e
+                        ))
+                    })?;
                     Ok((Some(serialized), Some(element)))
                 }
                 None => Ok((None, None)),
-            }
-        })?;
+            })?;
 
         return match result {
             Some(element) => Ok(RespValue::BulkString(Some(element))),
@@ -867,35 +916,39 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     // Different keys: use lock_keys for cross-key atomicity
-    let _guard = engine.lock_keys(&[source.clone(), destination.clone()]).await;
+    let _guard = engine
+        .lock_keys(&[source.clone(), destination.clone()])
+        .await;
 
     // Pop from source using atomic_modify
-    let element = engine.atomic_modify(source, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+    let element = engine.atomic_modify(source, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                if list.is_empty() {
-                    return Ok((Some(data.clone()), None));
-                }
-
-                let element = if wherefrom == "LEFT" {
-                    list.remove(0)
-                } else {
-                    list.pop().unwrap()
-                };
-
-                if list.is_empty() {
-                    Ok((None, Some(element)))
-                } else {
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), Some(element)))
-                }
+            if list.is_empty() {
+                return Ok((Some(data.clone()), None));
             }
-            None => Ok((None, None)),
+
+            let element = if wherefrom == "LEFT" {
+                list.remove(0)
+            } else {
+                list.pop().unwrap()
+            };
+
+            if list.is_empty() {
+                Ok((None, Some(element)))
+            } else {
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), Some(element)))
+            }
         }
+        None => Ok((None, None)),
     })?;
 
     let element = match element {
@@ -918,8 +971,12 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             list.push(elem_for_push.clone());
         }
 
-        let serialized = bincode::serialize(&list)
-            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
+        let serialized = bincode::serialize(&list).map_err(|e| {
+            crate::storage::error::StorageError::InternalError(format!(
+                "Serialization error: {}",
+                e
+            ))
+        })?;
         Ok((Some(serialized), ()))
     })?;
 
@@ -955,7 +1012,9 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
 
     if numkeys == 0 {
-        return Err(CommandError::InvalidArgument("numkeys can't be non-positive".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "numkeys can't be non-positive".to_string(),
+        ));
     }
 
     if args.len() < 1 + numkeys + 1 {
@@ -978,11 +1037,17 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             if opt_idx >= args.len() {
                 return Err(CommandError::WrongNumberOfArguments);
             }
-            count = bytes_to_string(&args[opt_idx])?.parse::<usize>().map_err(|_| {
-                CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-            })?;
+            count = bytes_to_string(&args[opt_idx])?
+                .parse::<usize>()
+                .map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
+                })?;
             if count == 0 {
-                return Err(CommandError::InvalidArgument("COUNT value of 0 is not allowed".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "COUNT value of 0 is not allowed".to_string(),
+                ));
             }
         }
     }
@@ -990,43 +1055,46 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let left = direction == "LEFT";
 
     for key in keys {
-        let result = engine.atomic_modify(key, RedisDataType::List, |current| {
-            match current {
-                Some(data) => {
-                    let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                        .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+        let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+            Some(data) => {
+                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                    if list.is_empty() {
-                        return Ok((Some(data.clone()), None));
-                    }
-
-                    let pop_count = count.min(list.len());
-                    let mut popped = Vec::with_capacity(pop_count);
-
-                    if left {
-                        popped.extend(list.drain(..pop_count));
-                    } else {
-                        let start = list.len() - pop_count;
-                        popped.extend(list.drain(start..));
-                        popped.reverse();
-                    }
-
-                    if list.is_empty() {
-                        Ok((None, Some(popped)))
-                    } else {
-                        let serialized = bincode::serialize(&list)
-                            .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                        Ok((Some(serialized), Some(popped)))
-                    }
+                if list.is_empty() {
+                    return Ok((Some(data.clone()), None));
                 }
-                None => Ok((None, None)),
+
+                let pop_count = count.min(list.len());
+                let mut popped = Vec::with_capacity(pop_count);
+
+                if left {
+                    popped.extend(list.drain(..pop_count));
+                } else {
+                    let start = list.len() - pop_count;
+                    popped.extend(list.drain(start..));
+                    popped.reverse();
+                }
+
+                if list.is_empty() {
+                    Ok((None, Some(popped)))
+                } else {
+                    let serialized = bincode::serialize(&list).map_err(|e| {
+                        crate::storage::error::StorageError::InternalError(format!(
+                            "Serialization error: {}",
+                            e
+                        ))
+                    })?;
+                    Ok((Some(serialized), Some(popped)))
+                }
             }
+            None => Ok((None, None)),
         });
 
         let result = result?;
 
         if let Some(popped) = result {
-            let elements: Vec<RespValue> = popped.into_iter()
+            let elements: Vec<RespValue> = popped
+                .into_iter()
                 .map(|e| RespValue::BulkString(Some(e)))
                 .collect();
 
@@ -1044,33 +1112,39 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
 /// Helper: try to pop an element from a list
 /// Uses atomic_modify for thread-safe read-modify-write
-async fn try_pop(engine: &StorageEngine, key: &[u8], left: bool) -> Result<Option<Vec<u8>>, CommandError> {
-    let result = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+async fn try_pop(
+    engine: &StorageEngine,
+    key: &[u8],
+    left: bool,
+) -> Result<Option<Vec<u8>>, CommandError> {
+    let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
+                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
 
-                if list.is_empty() {
-                    return Ok((Some(data.clone()), None));
-                }
-
-                let element = if left {
-                    list.remove(0)
-                } else {
-                    list.pop().unwrap()
-                };
-
-                if list.is_empty() {
-                    Ok((None, Some(element)))
-                } else {
-                    let serialized = bincode::serialize(&list)
-                        .map_err(|e| crate::storage::error::StorageError::InternalError(format!("Serialization error: {}", e)))?;
-                    Ok((Some(serialized), Some(element)))
-                }
+            if list.is_empty() {
+                return Ok((Some(data.clone()), None));
             }
-            None => Ok((None, None)),
+
+            let element = if left {
+                list.remove(0)
+            } else {
+                list.pop().unwrap()
+            };
+
+            if list.is_empty() {
+                Ok((None, Some(element)))
+            } else {
+                let serialized = bincode::serialize(&list).map_err(|e| {
+                    crate::storage::error::StorageError::InternalError(format!(
+                        "Serialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok((Some(serialized), Some(element)))
+            }
         }
+        None => Ok((None, None)),
     })?;
 
     Ok(result)
@@ -1105,9 +1179,7 @@ async fn blocking_pop(
 
     loop {
         // Subscribe to all keys before checking (avoids race condition)
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
 
         // Try to pop from each key
         for key in keys {
@@ -1123,8 +1195,13 @@ async fn blocking_pop(
         }
 
         // Wait for any key to get data or timeout
-        let futs: Vec<_> = receivers.into_iter()
-            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+        let futs: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                Box::pin(async move {
+                    let _ = rx.changed().await;
+                })
+            })
             .collect();
 
         if futs.is_empty() {
@@ -1136,7 +1213,10 @@ async fn blocking_pop(
             if remaining.is_zero() {
                 return Ok(RespValue::Array(None));
             }
-            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+            if tokio::time::timeout(remaining, select_all(futs))
+                .await
+                .is_err()
+            {
                 return Ok(RespValue::Array(None));
             }
         } else {
@@ -1146,7 +1226,11 @@ async fn blocking_pop(
 }
 
 /// Redis BLPOP command - Blocking left pop with timeout
-pub async fn blpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn blpop(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -1156,7 +1240,9 @@ pub async fn blpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
     if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "timeout is negative".to_string(),
+        ));
     }
 
     let keys = &args[..args.len() - 1];
@@ -1164,7 +1250,11 @@ pub async fn blpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
 }
 
 /// Redis BRPOP command - Blocking right pop with timeout
-pub async fn brpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn brpop(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -1174,7 +1264,9 @@ pub async fn brpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
     if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "timeout is negative".to_string(),
+        ));
     }
 
     let keys = &args[..args.len() - 1];
@@ -1182,7 +1274,11 @@ pub async fn brpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Bloc
 }
 
 /// Redis BLMOVE command - Blocking LMOVE with timeout
-pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn blmove(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() != 5 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -1204,11 +1300,18 @@ pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
     if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "timeout is negative".to_string(),
+        ));
     }
 
     // Try immediately first
-    let lmove_args = vec![source.clone(), destination.clone(), args[2].clone(), args[3].clone()];
+    let lmove_args = vec![
+        source.clone(),
+        destination.clone(),
+        args[2].clone(),
+        args[3].clone(),
+    ];
     let result = lmove(engine, &lmove_args).await?;
     if result != RespValue::BulkString(None) {
         return Ok(result);
@@ -1230,8 +1333,13 @@ pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
             return Ok(result);
         }
 
-        let futs: Vec<_> = receivers.into_iter()
-            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+        let futs: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                Box::pin(async move {
+                    let _ = rx.changed().await;
+                })
+            })
             .collect();
 
         if let Some(deadline) = deadline {
@@ -1239,7 +1347,10 @@ pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
             if remaining.is_zero() {
                 return Ok(RespValue::BulkString(None));
             }
-            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+            if tokio::time::timeout(remaining, select_all(futs))
+                .await
+                .is_err()
+            {
                 return Ok(RespValue::BulkString(None));
             }
         } else {
@@ -1249,7 +1360,11 @@ pub async fn blmove(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
 }
 
 /// Redis BLMPOP command - Blocking LMPOP with timeout
-pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &BlockingManager) -> CommandResult {
+pub async fn blmpop(
+    engine: &StorageEngine,
+    args: &[Vec<u8>],
+    blocking_mgr: &BlockingManager,
+) -> CommandResult {
     if args.len() < 4 {
         return Err(CommandError::WrongNumberOfArguments);
     }
@@ -1259,7 +1374,9 @@ pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
         CommandError::InvalidArgument("timeout is not a float or out of range".to_string())
     })?;
     if timeout_secs < 0.0 {
-        return Err(CommandError::InvalidArgument("timeout is negative".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "timeout is negative".to_string(),
+        ));
     }
 
     // Parse remaining args as LMPOP args (numkeys key... direction [COUNT count])
@@ -1290,17 +1407,20 @@ pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
     };
 
     loop {
-        let receivers: Vec<_> = keys.iter()
-            .map(|k| blocking_mgr.subscribe(k))
-            .collect();
+        let receivers: Vec<_> = keys.iter().map(|k| blocking_mgr.subscribe(k)).collect();
 
         let result = lmpop(engine, lmpop_args).await?;
         if result != RespValue::Array(None) {
             return Ok(result);
         }
 
-        let futs: Vec<_> = receivers.into_iter()
-            .map(|mut rx| Box::pin(async move { let _ = rx.changed().await; }))
+        let futs: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                Box::pin(async move {
+                    let _ = rx.changed().await;
+                })
+            })
             .collect();
 
         if futs.is_empty() {
@@ -1312,7 +1432,10 @@ pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
             if remaining.is_zero() {
                 return Ok(RespValue::Array(None));
             }
-            if tokio::time::timeout(remaining, select_all(futs)).await.is_err() {
+            if tokio::time::timeout(remaining, select_all(futs))
+                .await
+                .is_err()
+            {
                 return Ok(RespValue::Array(None));
             }
         } else {
@@ -1324,38 +1447,28 @@ pub async fn blmpop(engine: &StorageEngine, args: &[Vec<u8>], blocking_mgr: &Blo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::commands;
     use crate::storage::engine::StorageConfig;
     use std::sync::Arc;
-    use crate::command::commands;
-    
+
     // Test LPUSH and RPUSH
     #[tokio::test]
     async fn test_lpush_rpush() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Test LPUSH - First push creates the list
-        let args = vec![
-            b"mylist".to_vec(),
-            b"world".to_vec(),
-        ];
+        let args = vec![b"mylist".to_vec(), b"world".to_vec()];
         let result = lpush(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
-        
+
         // Test LPUSH - Second push prepends
-        let args = vec![
-            b"mylist".to_vec(),
-            b"hello".to_vec(),
-        ];
+        let args = vec![b"mylist".to_vec(), b"hello".to_vec()];
         let result = lpush(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-        
+
         // Check the list with LRANGE
-        let args = vec![
-            b"mylist".to_vec(),
-            b"0".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let args = vec![b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 2);
@@ -1364,21 +1477,14 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Test RPUSH - Appends to the end
-        let args = vec![
-            b"mylist".to_vec(),
-            b"!".to_vec(),
-        ];
+        let args = vec![b"mylist".to_vec(), b"!".to_vec()];
         let result = rpush(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
-        
+
         // Check the updated list
-        let args = vec![
-            b"mylist".to_vec(),
-            b"0".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let args = vec![b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 3);
@@ -1389,57 +1495,61 @@ mod tests {
             panic!("Unexpected result type");
         }
     }
-    
+
     // Test LPOP and RPOP
     #[tokio::test]
     async fn test_lpop_rpop() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Use a key with "list" in the name to ensure it's recognized as a list type
         let key = b"test_list_poplist".to_vec();
-        
+
         // Force delete the key to ensure it doesn't exist
         engine.del(&key).await.unwrap();
-        
+
         // Create a list directly first using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        engine.set_with_type(key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
-        
+        engine
+            .set_with_type(
+                key.clone(),
+                serialized,
+                crate::storage::item::RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
+
         // DEBUG: Check the key type
         let key_type = engine.get_type(&key).await.unwrap();
         println!("DEBUG: Key type after setting empty list: {}", key_type);
         assert_eq!(key_type, "list"); // Assert that the key is recognized as a list
-        
-        // Now push elements using rpush 
+
+        // Now push elements using rpush
         let mut args = vec![key.clone()];
         args.push(b"one".to_vec());
         args.push(b"two".to_vec());
         args.push(b"three".to_vec());
-        
+
         rpush(&engine, &args).await.unwrap();
-        
+
         // DEBUG: Check key type again after rpush
         let key_type = engine.get_type(&key).await.unwrap();
         println!("DEBUG: Key type after rpush: {}", key_type);
-        
+
         // Test LPOP - removes and returns first element
         let args = vec![key.clone()];
         let result = lpop(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"one".to_vec())));
-        
+
         // Test RPOP - removes and returns last element
         let args = vec![key.clone()];
         let result = rpop(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"three".to_vec())));
-        
+
         // Check the remaining list
-        let args = vec![
-            key.clone(),
-            b"0".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let args = vec![key.clone(), b"0".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 1);
@@ -1447,24 +1557,24 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Empty the list
         lpop(&engine, &[key.clone()]).await.unwrap();
-        
+
         // LPOP and RPOP on empty list should return nil
         let result = lpop(&engine, &[key.clone()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
-        
+
         let result = rpop(&engine, &[key.clone()]).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
-    
+
     // Test LRANGE with different indices
     #[tokio::test]
     async fn test_lrange() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Setup a list with values
         let args = vec![
             b"rangelist".to_vec(),
@@ -1475,13 +1585,9 @@ mod tests {
             b"five".to_vec(),
         ];
         rpush(&engine, &args).await.unwrap();
-        
+
         // Test positive indices
-        let args = vec![
-            b"rangelist".to_vec(),
-            b"0".to_vec(),
-            b"2".to_vec(),
-        ];
+        let args = vec![b"rangelist".to_vec(), b"0".to_vec(), b"2".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 3);
@@ -1491,13 +1597,9 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Test negative indices
-        let args = vec![
-            b"rangelist".to_vec(),
-            b"-3".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let args = vec![b"rangelist".to_vec(), b"-3".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 3);
@@ -1507,13 +1609,9 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Test out of bounds indices
-        let args = vec![
-            b"rangelist".to_vec(),
-            b"10".to_vec(),
-            b"20".to_vec(),
-        ];
+        let args = vec![b"rangelist".to_vec(), b"10".to_vec(), b"20".to_vec()];
         let result = lrange(&engine, &args).await.unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 0); // Should return an empty array
@@ -1521,54 +1619,61 @@ mod tests {
             panic!("Unexpected result type");
         }
     }
-    
+
     // Test LRANGE with large lists to verify chunked processing works
     #[tokio::test]
     async fn test_lrange_large_list() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Create a large list
         let key = b"largelist".to_vec();
         let mut items = Vec::new();
-        
+
         // Add 5000 items to make it large enough to test chunking
         for i in 0..5000 {
             items.push(format!("item-{}", i).into_bytes());
         }
-        
+
         // Push all items at once
         let mut args = vec![key.clone()];
         args.extend(items.clone());
         rpush(&engine, &args).await.unwrap();
-        
+
         // Test retrieving the entire list
-        let result = lrange(
-            &engine, 
-            &[key.clone(), b"0".to_vec(), b"-1".to_vec()]
-        ).await.unwrap();
-        
+        let result = lrange(&engine, &[key.clone(), b"0".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
+
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 5000);
-            
+
             // Check a few sample values
             assert_eq!(values[0], RespValue::BulkString(Some(b"item-0".to_vec())));
-            assert_eq!(values[1000], RespValue::BulkString(Some(b"item-1000".to_vec())));
-            assert_eq!(values[4999], RespValue::BulkString(Some(b"item-4999".to_vec())));
+            assert_eq!(
+                values[1000],
+                RespValue::BulkString(Some(b"item-1000".to_vec()))
+            );
+            assert_eq!(
+                values[4999],
+                RespValue::BulkString(Some(b"item-4999".to_vec()))
+            );
         } else {
             panic!("Expected array response from LRANGE");
         }
-        
+
         // Test retrieving a subset that spans multiple chunks
-        let result = lrange(
-            &engine, 
-            &[key.clone(), b"950".to_vec(), b"1050".to_vec()]
-        ).await.unwrap();
-        
+        let result = lrange(&engine, &[key.clone(), b"950".to_vec(), b"1050".to_vec()])
+            .await
+            .unwrap();
+
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 101);
             assert_eq!(values[0], RespValue::BulkString(Some(b"item-950".to_vec())));
-            assert_eq!(values[100], RespValue::BulkString(Some(b"item-1050".to_vec())));
+            assert_eq!(
+                values[100],
+                RespValue::BulkString(Some(b"item-1050".to_vec()))
+            );
         } else {
             panic!("Expected array response from LRANGE");
         }
@@ -1578,55 +1683,61 @@ mod tests {
     async fn test_llen() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Use a key with "list" in the name to ensure it's recognized as a list type
         let key = b"test_list_lenlist".to_vec();
-        
+
         // Force delete the key to ensure it doesn't exist
         engine.del(&key).await.unwrap();
-        
+
         // Create a list directly first using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        engine.set_with_type(key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
-        
+        engine
+            .set_with_type(
+                key.clone(),
+                serialized,
+                crate::storage::item::RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
+
         // DEBUG: Check the key type
         let key_type = engine.get_type(&key).await.unwrap();
         println!("DEBUG: Key type after setting empty list: {}", key_type);
         assert_eq!(key_type, "list"); // Assert that the key is recognized as a list
-        
+
         // Empty list (key doesn't exist)
-        let args = vec![
-            b"nonexistent".to_vec(),
-        ];
+        let args = vec![b"nonexistent".to_vec()];
         let result = llen(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
-        
+
         // Setup a list with some values
         let mut args = vec![key.clone()];
         args.push(b"one".to_vec());
         args.push(b"two".to_vec());
         args.push(b"three".to_vec());
-        
+
         rpush(&engine, &args).await.unwrap();
-        
+
         // Test LLEN
         let args = vec![key.clone()];
         let result = llen(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
-        
+
         // Add more elements
         let mut args = vec![key.clone()];
         args.push(b"four".to_vec());
         args.push(b"five".to_vec());
-        
+
         rpush(&engine, &args).await.unwrap();
-        
+
         // Check LLEN again
         let args = vec![key.clone()];
         let result = llen(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(5));
-        
+
         // Remove an element and check again
         lpop(&engine, &[key.clone()]).await.unwrap();
         let result = llen(&engine, &[key.clone()]).await.unwrap();
@@ -1637,7 +1748,7 @@ mod tests {
     async fn test_ltrim() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Setup a test list
         let lpush_args = vec![
             b"trim_list".to_vec(),
@@ -1648,24 +1759,16 @@ mod tests {
             b"a".to_vec(),
         ];
         let _ = lpush(&engine, &lpush_args).await.unwrap();
-        
+
         // Test LTRIM to keep only elements 1-3 (b, c, d)
-        let ltrim_args = vec![
-            b"trim_list".to_vec(),
-            b"1".to_vec(),
-            b"3".to_vec(),
-        ];
+        let ltrim_args = vec![b"trim_list".to_vec(), b"1".to_vec(), b"3".to_vec()];
         let result = ltrim(&engine, &ltrim_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check that the list was trimmed correctly
-        let lrange_args = vec![
-            b"trim_list".to_vec(),
-            b"0".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let lrange_args = vec![b"trim_list".to_vec(), b"0".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &lrange_args).await.unwrap();
-        
+
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
@@ -1674,24 +1777,20 @@ mod tests {
         } else {
             panic!("Expected array response");
         }
-        
+
         // Test LTRIM with negative indices
         let ltrim_args = vec![
             b"trim_list".to_vec(),
             b"0".to_vec(),
-            b"-2".to_vec(),  // Keep first element to second-to-last
+            b"-2".to_vec(), // Keep first element to second-to-last
         ];
         let result = ltrim(&engine, &ltrim_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check that the list was trimmed correctly (should be "b" and "c")
-        let lrange_args = vec![
-            b"trim_list".to_vec(),
-            b"0".to_vec(),
-            b"-1".to_vec(),
-        ];
+        let lrange_args = vec![b"trim_list".to_vec(), b"0".to_vec(), b"-1".to_vec()];
         let result = lrange(&engine, &lrange_args).await.unwrap();
-        
+
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"b".to_vec())));
@@ -1699,25 +1798,21 @@ mod tests {
         } else {
             panic!("Expected array response");
         }
-        
+
         // Test LTRIM on non-existent key
-        let ltrim_args = vec![
-            b"nonexistent_list".to_vec(),
-            b"0".to_vec(),
-            b"1".to_vec(),
-        ];
+        let ltrim_args = vec![b"nonexistent_list".to_vec(), b"0".to_vec(), b"1".to_vec()];
         let result = ltrim(&engine, &ltrim_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Test LTRIM that results in an empty list (should remove the key)
         let ltrim_args = vec![
             b"trim_list".to_vec(),
             b"10".to_vec(),
-            b"20".to_vec(),  // Indices beyond the list length
+            b"20".to_vec(), // Indices beyond the list length
         ];
         let result = ltrim(&engine, &ltrim_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check that the key no longer exists
         let exists_args = vec![b"trim_list".to_vec()];
         let result = commands::exists(&engine, &exists_args).await.unwrap();
@@ -1728,7 +1823,7 @@ mod tests {
     async fn test_lindex() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
-        
+
         // Create a list with values
         let args = vec![
             b"indexlist".to_vec(),
@@ -1739,42 +1834,42 @@ mod tests {
             b"four".to_vec(),
         ];
         rpush(&engine, &args).await.unwrap();
-        
+
         // Test positive indices
         let args = vec![b"indexlist".to_vec(), b"0".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"zero".to_vec())));
-        
+
         let args = vec![b"indexlist".to_vec(), b"2".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"two".to_vec())));
-        
+
         let args = vec![b"indexlist".to_vec(), b"4".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"four".to_vec())));
-        
+
         // Test negative indices
         let args = vec![b"indexlist".to_vec(), b"-1".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"four".to_vec())));
-        
+
         let args = vec![b"indexlist".to_vec(), b"-2".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"three".to_vec())));
-        
+
         let args = vec![b"indexlist".to_vec(), b"-5".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"zero".to_vec())));
-        
+
         // Test out of bounds indices
         let args = vec![b"indexlist".to_vec(), b"10".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
-        
+
         let args = vec![b"indexlist".to_vec(), b"-10".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
-        
+
         // Test on non-existent key
         let args = vec![b"nonexistent".to_vec(), b"0".to_vec()];
         let result = lindex(&engine, &args).await.unwrap();
@@ -1792,22 +1887,35 @@ mod tests {
         assert_eq!(result, RespValue::Integer(0));
 
         // Create the list first
-        rpush(&engine, &[b"mylist".to_vec(), b"x".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"mylist".to_vec(), b"x".to_vec()])
+            .await
+            .unwrap();
 
         // LPUSHX on existing list works
-        let result = lpushx(&engine, &[b"mylist".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = lpushx(&engine, &[b"mylist".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(2));
 
         // RPUSHX on non-existent key returns 0
-        let result = rpushx(&engine, &[b"nolist".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = rpushx(&engine, &[b"nolist".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0));
 
         // RPUSHX on existing list works
-        let result = rpushx(&engine, &[b"mylist".to_vec(), b"z".to_vec()]).await.unwrap();
+        let result = rpushx(&engine, &[b"mylist".to_vec(), b"z".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(3));
 
         // Verify order: [a, x, z]
-        let result = lrange(&engine, &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(
+            &engine,
+            &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 3);
             assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
@@ -1824,18 +1932,53 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create list [a, b, d]
-        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"d".to_vec()]).await.unwrap();
+        rpush(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"d".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // Insert "c" BEFORE "d"
-        let result = linsert(&engine, &[b"mylist".to_vec(), b"BEFORE".to_vec(), b"d".to_vec(), b"c".to_vec()]).await.unwrap();
+        let result = linsert(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"BEFORE".to_vec(),
+                b"d".to_vec(),
+                b"c".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(4));
 
         // Insert "e" AFTER "d"
-        let result = linsert(&engine, &[b"mylist".to_vec(), b"AFTER".to_vec(), b"d".to_vec(), b"e".to_vec()]).await.unwrap();
+        let result = linsert(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"AFTER".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(5));
 
         // Verify: [a, b, c, d, e]
-        let result = lrange(&engine, &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(
+            &engine,
+            &[b"mylist".to_vec(), b"0".to_vec(), b"-1".to_vec()],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 5);
             assert_eq!(values[2], RespValue::BulkString(Some(b"c".to_vec())));
@@ -1845,11 +1988,31 @@ mod tests {
         }
 
         // Pivot not found returns -1
-        let result = linsert(&engine, &[b"mylist".to_vec(), b"BEFORE".to_vec(), b"z".to_vec(), b"x".to_vec()]).await.unwrap();
+        let result = linsert(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"BEFORE".to_vec(),
+                b"z".to_vec(),
+                b"x".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(-1));
 
         // Non-existent key returns 0
-        let result = linsert(&engine, &[b"nolist".to_vec(), b"BEFORE".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+        let result = linsert(
+            &engine,
+            &[
+                b"nolist".to_vec(),
+                b"BEFORE".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -1859,25 +2022,50 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create list [a, b, c]
-        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        rpush(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // Set index 1 to "B"
-        let result = lset(&engine, &[b"mylist".to_vec(), b"1".to_vec(), b"B".to_vec()]).await.unwrap();
+        let result = lset(&engine, &[b"mylist".to_vec(), b"1".to_vec(), b"B".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // Verify
-        let result = lindex(&engine, &[b"mylist".to_vec(), b"1".to_vec()]).await.unwrap();
+        let result = lindex(&engine, &[b"mylist".to_vec(), b"1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"B".to_vec())));
 
         // Negative index
-        let result = lset(&engine, &[b"mylist".to_vec(), b"-1".to_vec(), b"C".to_vec()]).await.unwrap();
+        let result = lset(
+            &engine,
+            &[b"mylist".to_vec(), b"-1".to_vec(), b"C".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
-        let result = lindex(&engine, &[b"mylist".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lindex(&engine, &[b"mylist".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"C".to_vec())));
 
         // Out of range index
-        let result = lset(&engine, &[b"mylist".to_vec(), b"10".to_vec(), b"x".to_vec()]).await;
+        let result = lset(
+            &engine,
+            &[b"mylist".to_vec(), b"10".to_vec(), b"x".to_vec()],
+        )
+        .await;
         assert!(result.is_err());
 
         // Non-existent key
@@ -1891,14 +2079,38 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create list [a, b, c, b, a]
-        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]).await.unwrap();
+        rpush(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"b".to_vec(),
+                b"a".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // Find first "b"
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec()]).await.unwrap();
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1));
 
         // Find with COUNT 0 (all occurrences)
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec(), b"COUNT".to_vec(), b"0".to_vec()]).await.unwrap();
+        let result = lpos(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"b".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values, vec![RespValue::Integer(1), RespValue::Integer(3)]);
         } else {
@@ -1906,23 +2118,59 @@ mod tests {
         }
 
         // Find with RANK 2 (second occurrence)
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"b".to_vec(), b"RANK".to_vec(), b"2".to_vec()]).await.unwrap();
+        let result = lpos(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"b".to_vec(),
+                b"RANK".to_vec(),
+                b"2".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(3));
 
         // Find with negative RANK (from end)
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"RANK".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lpos(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"RANK".to_vec(),
+                b"-1".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(4));
 
         // Not found returns nil
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"z".to_vec()]).await.unwrap();
+        let result = lpos(&engine, &[b"mylist".to_vec(), b"z".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // Non-existent key returns nil
-        let result = lpos(&engine, &[b"nolist".to_vec(), b"a".to_vec()]).await.unwrap();
+        let result = lpos(&engine, &[b"nolist".to_vec(), b"a".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // With MAXLEN
-        let result = lpos(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"COUNT".to_vec(), b"0".to_vec(), b"MAXLEN".to_vec(), b"3".to_vec()]).await.unwrap();
+        let result = lpos(
+            &engine,
+            &[
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values, vec![RespValue::Integer(0)]);
         } else {
@@ -1936,14 +2184,31 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create source [a, b, c]
-        rpush(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
+        rpush(
+            &engine,
+            &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        )
+        .await
+        .unwrap();
 
         // LMOVE src dst LEFT RIGHT -> moves "a" to end of dst
-        let result = lmove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        let result = lmove(
+            &engine,
+            &[
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"a".to_vec())));
 
         // src should be [b, c]
-        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 2);
             assert_eq!(values[0], RespValue::BulkString(Some(b"b".to_vec())));
@@ -1952,7 +2217,9 @@ mod tests {
         }
 
         // dst should be [a]
-        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 1);
             assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
@@ -1961,14 +2228,36 @@ mod tests {
         }
 
         // Non-existent source returns nil
-        let result = lmove(&engine, &[b"nolist".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        let result = lmove(
+            &engine,
+            &[
+                b"nolist".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         // Same key rotation: src [b, c] -> LMOVE src src LEFT RIGHT -> src [c, b]
-        let result = lmove(&engine, &[b"src".to_vec(), b"src".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec()]).await.unwrap();
+        let result = lmove(
+            &engine,
+            &[
+                b"src".to_vec(),
+                b"src".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"b".to_vec())));
 
-        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(&engine, &[b"src".to_vec(), b"0".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 2);
             assert_eq!(values[0], RespValue::BulkString(Some(b"c".to_vec())));
@@ -1984,11 +2273,33 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create lists
-        rpush(&engine, &[b"list1".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]).await.unwrap();
-        rpush(&engine, &[b"list2".to_vec(), b"x".to_vec(), b"y".to_vec()]).await.unwrap();
+        rpush(
+            &engine,
+            &[
+                b"list1".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
+        rpush(&engine, &[b"list2".to_vec(), b"x".to_vec(), b"y".to_vec()])
+            .await
+            .unwrap();
 
         // Pop 1 from left of first non-empty key
-        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        let result = lmpop(
+            &engine,
+            &[
+                b"2".to_vec(),
+                b"list1".to_vec(),
+                b"list2".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"list1".to_vec())));
             if let RespValue::Array(Some(elements)) = &values[1] {
@@ -2002,7 +2313,19 @@ mod tests {
         }
 
         // Pop 2 from right
-        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"RIGHT".to_vec(), b"COUNT".to_vec(), b"2".to_vec()]).await.unwrap();
+        let result = lmpop(
+            &engine,
+            &[
+                b"2".to_vec(),
+                b"list1".to_vec(),
+                b"list2".to_vec(),
+                b"RIGHT".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"list1".to_vec())));
             if let RespValue::Array(Some(elements)) = &values[1] {
@@ -2017,7 +2340,17 @@ mod tests {
         }
 
         // list1 is now empty, so next pop should come from list2
-        let result = lmpop(&engine, &[b"2".to_vec(), b"list1".to_vec(), b"list2".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        let result = lmpop(
+            &engine,
+            &[
+                b"2".to_vec(),
+                b"list1".to_vec(),
+                b"list2".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"list2".to_vec())));
         } else {
@@ -2025,7 +2358,12 @@ mod tests {
         }
 
         // All empty returns nil
-        let result = lmpop(&engine, &[b"1".to_vec(), b"emptylist".to_vec(), b"LEFT".to_vec()]).await.unwrap();
+        let result = lmpop(
+            &engine,
+            &[b"1".to_vec(), b"emptylist".to_vec(), b"LEFT".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Array(None));
     }
 
@@ -2036,10 +2374,14 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         // Create list with data
-        rpush(&engine, &[b"mylist".to_vec(), b"hello".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"mylist".to_vec(), b"hello".to_vec()])
+            .await
+            .unwrap();
 
         // BLPOP should return immediately
-        let result = blpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr)
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
             assert_eq!(values[1], RespValue::BulkString(Some(b"hello".to_vec())));
@@ -2056,7 +2398,13 @@ mod tests {
 
         // BLPOP on empty list should timeout
         let start = Instant::now();
-        let result = blpop(&engine, &[b"emptylist".to_vec(), b"0.1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blpop(
+            &engine,
+            &[b"emptylist".to_vec(), b"0.1".to_vec()],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(result, RespValue::Array(None));
@@ -2074,14 +2422,21 @@ mod tests {
 
         // Spawn BLPOP in background
         let handle = tokio::spawn(async move {
-            blpop(&engine_clone, &[b"wakekey".to_vec(), b"5".to_vec()], &mgr_clone).await
+            blpop(
+                &engine_clone,
+                &[b"wakekey".to_vec(), b"5".to_vec()],
+                &mgr_clone,
+            )
+            .await
         });
 
         // Give it time to start waiting
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Push data to wake it up
-        rpush(&engine, &[b"wakekey".to_vec(), b"wakedata".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"wakekey".to_vec(), b"wakedata".to_vec()])
+            .await
+            .unwrap();
         blocking_mgr.notify_key(b"wakekey");
 
         let result = handle.await.unwrap().unwrap();
@@ -2099,9 +2454,13 @@ mod tests {
         let engine = StorageEngine::new(config);
         let blocking_mgr = BlockingManager::new();
 
-        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        let result = brpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = brpop(&engine, &[b"mylist".to_vec(), b"1".to_vec()], &blocking_mgr)
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
             assert_eq!(values[1], RespValue::BulkString(Some(b"b".to_vec())));
@@ -2116,13 +2475,29 @@ mod tests {
         let engine = StorageEngine::new(config);
         let blocking_mgr = BlockingManager::new();
 
-        rpush(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        let result = blmove(&engine, &[b"src".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blmove(
+            &engine,
+            &[
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+                b"1".to_vec(),
+            ],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"a".to_vec())));
 
         // Verify dst has the element
-        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()]).await.unwrap();
+        let result = lrange(&engine, &[b"dst".to_vec(), b"0".to_vec(), b"-1".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 1);
             assert_eq!(values[0], RespValue::BulkString(Some(b"a".to_vec())));
@@ -2138,7 +2513,19 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         let start = Instant::now();
-        let result = blmove(&engine, &[b"empty".to_vec(), b"dst".to_vec(), b"LEFT".to_vec(), b"RIGHT".to_vec(), b"0.1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blmove(
+            &engine,
+            &[
+                b"empty".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+                b"0.1".to_vec(),
+            ],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(result, RespValue::BulkString(None));
@@ -2151,10 +2538,23 @@ mod tests {
         let engine = StorageEngine::new(config);
         let blocking_mgr = BlockingManager::new();
 
-        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
         // BLMPOP timeout numkeys key LEFT
-        let result = blmpop(&engine, &[b"1".to_vec(), b"1".to_vec(), b"mylist".to_vec(), b"LEFT".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blmpop(
+            &engine,
+            &[
+                b"1".to_vec(),
+                b"1".to_vec(),
+                b"mylist".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"mylist".to_vec())));
             if let RespValue::Array(Some(elements)) = &values[1] {
@@ -2174,7 +2574,18 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         let start = Instant::now();
-        let result = blmpop(&engine, &[b"0.1".to_vec(), b"1".to_vec(), b"emptylist".to_vec(), b"LEFT".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blmpop(
+            &engine,
+            &[
+                b"0.1".to_vec(),
+                b"1".to_vec(),
+                b"emptylist".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(result, RespValue::Array(None));
@@ -2188,9 +2599,17 @@ mod tests {
         let blocking_mgr = BlockingManager::new();
 
         // Only second key has data
-        rpush(&engine, &[b"list2".to_vec(), b"hello".to_vec()]).await.unwrap();
+        rpush(&engine, &[b"list2".to_vec(), b"hello".to_vec()])
+            .await
+            .unwrap();
 
-        let result = blpop(&engine, &[b"list1".to_vec(), b"list2".to_vec(), b"1".to_vec()], &blocking_mgr).await.unwrap();
+        let result = blpop(
+            &engine,
+            &[b"list1".to_vec(), b"list2".to_vec(), b"1".to_vec()],
+            &blocking_mgr,
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values[0], RespValue::BulkString(Some(b"list2".to_vec())));
             assert_eq!(values[1], RespValue::BulkString(Some(b"hello".to_vec())));

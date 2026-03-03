@@ -38,7 +38,12 @@ fn test_parse_large_set_command_in_chunks() {
         let end = (offset + chunk_size).min(complete_command.len());
         let chunk = &complete_command[offset..end];
 
-        println!("\n=== Chunk {} ({} bytes, offset={}) ===", chunk_num, chunk.len(), offset);
+        println!(
+            "\n=== Chunk {} ({} bytes, offset={}) ===",
+            chunk_num,
+            chunk.len(),
+            offset
+        );
 
         // Simulate server behavior: combine partial buffer with new chunk
         let mut buffer = BytesMut::new();
@@ -50,7 +55,10 @@ fn test_parse_large_set_command_in_chunks() {
         buffer.extend_from_slice(chunk);
 
         println!("Total buffer size: {} bytes", buffer.len());
-        println!("Buffer starts with: {:?}", String::from_utf8_lossy(&buffer[0..20.min(buffer.len())]));
+        println!(
+            "Buffer starts with: {:?}",
+            String::from_utf8_lossy(&buffer[0..20.min(buffer.len())])
+        );
 
         // Try to parse
         match RespValue::parse(&mut buffer) {
@@ -80,8 +88,10 @@ fn test_parse_large_set_command_in_chunks() {
             }
             Err(e) => {
                 println!("✗ Parse error: {}", e);
-                println!("Buffer content (first 100 bytes): {:?}",
-                    String::from_utf8_lossy(&buffer[0..100.min(buffer.len())]));
+                println!(
+                    "Buffer content (first 100 bytes): {:?}",
+                    String::from_utf8_lossy(&buffer[0..100.min(buffer.len())])
+                );
                 panic!("Should not get parse error for valid command: {}", e);
             }
         }

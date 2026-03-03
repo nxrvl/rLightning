@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::command::{Command, CommandError, CommandResult};
 use crate::command::commands;
 use crate::command::types::blocking::BlockingManager;
+use crate::command::{Command, CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::scripting::ScriptingEngine;
-use crate::storage::engine::{StorageEngine, CURRENT_DB_INDEX};
+use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
 
 /// The CommandHandler routes incoming commands to their implementations
 #[derive(Clone)]
@@ -48,394 +48,479 @@ impl CommandHandler {
     pub fn scripting(&self) -> &Arc<ScriptingEngine> {
         &self.scripting
     }
-    
+
     /// Process a command and return the result
     pub async fn process(&self, command: Command, db_index: usize) -> CommandResult {
-        CURRENT_DB_INDEX.scope(db_index, async move {
-        let cmd_lowercase = command.name.to_lowercase();
+        CURRENT_DB_INDEX
+            .scope(db_index, async move {
+                let cmd_lowercase = command.name.to_lowercase();
 
-        
+                match cmd_lowercase.as_str() {
+                    // Key expiration/TTL commands
+                    "expire" => commands::expire(&self.storage, &command.args).await,
+                    "pexpire" => commands::pexpire(&self.storage, &command.args).await,
+                    "ttl" => commands::ttl(&self.storage, &command.args).await,
+                    "pttl" => commands::pttl(&self.storage, &command.args).await,
+                    "persist" => commands::persist(&self.storage, &command.args).await,
+                    "expireat" => commands::expireat(&self.storage, &command.args).await,
+                    "pexpireat" => commands::pexpireat(&self.storage, &command.args).await,
+                    "expiretime" => commands::expiretime(&self.storage, &command.args).await,
+                    "pexpiretime" => commands::pexpiretime(&self.storage, &command.args).await,
 
-        match cmd_lowercase.as_str() {
-            // Key expiration/TTL commands
-            "expire" => commands::expire(&self.storage, &command.args).await,
-            "pexpire" => commands::pexpire(&self.storage, &command.args).await,
-            "ttl" => commands::ttl(&self.storage, &command.args).await,
-            "pttl" => commands::pttl(&self.storage, &command.args).await,
-            "persist" => commands::persist(&self.storage, &command.args).await,
-            "expireat" => commands::expireat(&self.storage, &command.args).await,
-            "pexpireat" => commands::pexpireat(&self.storage, &command.args).await,
-            "expiretime" => commands::expiretime(&self.storage, &command.args).await,
-            "pexpiretime" => commands::pexpiretime(&self.storage, &command.args).await,
+                    // Basic key operations
+                    "del" => commands::del(&self.storage, &command.args).await,
+                    "unlink" => commands::unlink(&self.storage, &command.args).await,
+                    "exists" => commands::exists(&self.storage, &command.args).await,
+                    "type" => commands::get_type(&self.storage, &command.args).await,
+                    "copy" => commands::copy(&self.storage, &command.args).await,
+                    "move" => commands::move_cmd(&self.storage, &command.args).await,
+                    "touch" => commands::touch(&self.storage, &command.args).await,
+                    "object" => commands::object(&self.storage, &command.args).await,
+                    "dump" => commands::dump(&self.storage, &command.args).await,
+                    "restore" => commands::restore(&self.storage, &command.args).await,
+                    "sort" => commands::sort(&self.storage, &command.args).await,
+                    "sort_ro" => commands::sort_ro(&self.storage, &command.args).await,
+                    "waitaof" => commands::waitaof(&self.storage, &command.args).await,
+                    "select" => commands::select(&self.storage, &command.args).await,
 
-            // Basic key operations
-            "del" => commands::del(&self.storage, &command.args).await,
-            "unlink" => commands::unlink(&self.storage, &command.args).await,
-            "exists" => commands::exists(&self.storage, &command.args).await,
-            "type" => commands::get_type(&self.storage, &command.args).await,
-            "copy" => commands::copy(&self.storage, &command.args).await,
-            "move" => commands::move_cmd(&self.storage, &command.args).await,
-            "touch" => commands::touch(&self.storage, &command.args).await,
-            "object" => commands::object(&self.storage, &command.args).await,
-            "dump" => commands::dump(&self.storage, &command.args).await,
-            "restore" => commands::restore(&self.storage, &command.args).await,
-            "sort" => commands::sort(&self.storage, &command.args).await,
-            "sort_ro" => commands::sort_ro(&self.storage, &command.args).await,
-            "waitaof" => commands::waitaof(&self.storage, &command.args).await,
-            "select" => commands::select(&self.storage, &command.args).await,
-            
-            // Server commands
-            "ping" => {
-                if command.args.is_empty() {
-                    Ok(RespValue::SimpleString("PONG".to_string()))
-                } else {
-                    Ok(RespValue::BulkString(Some(command.args[0].clone())))
+                    // Server commands
+                    "ping" => {
+                        if command.args.is_empty() {
+                            Ok(RespValue::SimpleString("PONG".to_string()))
+                        } else {
+                            Ok(RespValue::BulkString(Some(command.args[0].clone())))
+                        }
+                    }
+
+                    // String commands
+                    "set" => commands::set(&self.storage, &command.args).await,
+                    "get" => commands::get(&self.storage, &command.args).await,
+                    "mget" => commands::mget(&self.storage, &command.args).await,
+                    "mset" => commands::mset(&self.storage, &command.args).await,
+                    "msetnx" => commands::msetnx(&self.storage, &command.args).await,
+                    "setnx" => commands::setnx(&self.storage, &command.args).await,
+                    "setex" => commands::setex(&self.storage, &command.args).await,
+                    "incr" => commands::incr(&self.storage, &command.args).await,
+                    "decr" => commands::decr(&self.storage, &command.args).await,
+                    "incrby" => commands::incrby(&self.storage, &command.args).await,
+                    "decrby" => commands::decrby(&self.storage, &command.args).await,
+                    "incrbyfloat" => commands::incrbyfloat(&self.storage, &command.args).await,
+                    "append" => commands::append(&self.storage, &command.args).await,
+                    "strlen" => commands::strlen(&self.storage, &command.args).await,
+                    "getrange" => commands::getrange(&self.storage, &command.args).await,
+                    "setrange" => commands::setrange(&self.storage, &command.args).await,
+                    "getset" => commands::getset(&self.storage, &command.args).await,
+                    "getex" => commands::getex(&self.storage, &command.args).await,
+                    "getdel" => commands::getdel(&self.storage, &command.args).await,
+                    "psetex" => commands::psetex(&self.storage, &command.args).await,
+                    "lcs" => commands::lcs(&self.storage, &command.args).await,
+                    "substr" => commands::substr(&self.storage, &command.args).await,
+
+                    // Bitmap commands
+                    "setbit" => commands::setbit(&self.storage, &command.args).await,
+                    "getbit" => commands::getbit(&self.storage, &command.args).await,
+                    "bitcount" => commands::bitcount(&self.storage, &command.args).await,
+                    "bitpos" => commands::bitpos(&self.storage, &command.args).await,
+                    "bitop" => commands::bitop(&self.storage, &command.args).await,
+                    "bitfield" => commands::bitfield(&self.storage, &command.args).await,
+                    "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
+
+                    // HyperLogLog commands
+                    "pfadd" => commands::pfadd(&self.storage, &command.args).await,
+                    "pfcount" => commands::pfcount(&self.storage, &command.args).await,
+                    "pfmerge" => commands::pfmerge(&self.storage, &command.args).await,
+
+                    // Geo commands
+                    "geoadd" => commands::geoadd(&self.storage, &command.args).await,
+                    "geodist" => commands::geodist(&self.storage, &command.args).await,
+                    "geohash" => commands::geohash(&self.storage, &command.args).await,
+                    "geopos" => commands::geopos(&self.storage, &command.args).await,
+                    "geosearch" => commands::geosearch(&self.storage, &command.args).await,
+                    "geosearchstore" => {
+                        commands::geosearchstore(&self.storage, &command.args).await
+                    }
+                    "georadius" => commands::georadius(&self.storage, &command.args).await,
+                    "georadiusbymember" => {
+                        commands::georadiusbymember(&self.storage, &command.args).await
+                    }
+
+                    // List commands
+                    "lpush" => {
+                        let result = commands::lpush(&self.storage, &command.args).await;
+                        if result.is_ok() && !command.args.is_empty() {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "rpush" => {
+                        let result = commands::rpush(&self.storage, &command.args).await;
+                        if result.is_ok() && !command.args.is_empty() {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "lpushx" => {
+                        let result = commands::lpushx(&self.storage, &command.args).await;
+                        if let Ok(RespValue::Integer(n)) = &result
+                            && *n > 0
+                            && !command.args.is_empty()
+                        {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "rpushx" => {
+                        let result = commands::rpushx(&self.storage, &command.args).await;
+                        if let Ok(RespValue::Integer(n)) = &result
+                            && *n > 0
+                            && !command.args.is_empty()
+                        {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "linsert" => {
+                        let result = commands::linsert(&self.storage, &command.args).await;
+                        if let Ok(RespValue::Integer(n)) = &result
+                            && *n > 0
+                            && !command.args.is_empty()
+                        {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "lpop" => commands::lpop(&self.storage, &command.args).await,
+                    "rpop" => commands::rpop(&self.storage, &command.args).await,
+                    "lrange" => commands::lrange(&self.storage, &command.args).await,
+                    "lindex" => commands::lindex(&self.storage, &command.args).await,
+                    "llen" => commands::llen(&self.storage, &command.args).await,
+                    "ltrim" => commands::ltrim(&self.storage, &command.args).await,
+                    "lset" => commands::lset(&self.storage, &command.args).await,
+                    "lrem" => commands::lrem(&self.storage, &command.args).await,
+                    "lpos" => commands::lpos(&self.storage, &command.args).await,
+                    "lmove" => {
+                        let result = commands::lmove(&self.storage, &command.args).await;
+                        // Notify destination key if move succeeded
+                        if result.is_ok()
+                            && command.args.len() >= 2
+                            && let Ok(RespValue::BulkString(Some(_))) = &result
+                        {
+                            self.blocking_mgr.notify_key(&command.args[1]);
+                        }
+                        result
+                    }
+                    "rpoplpush" => {
+                        let result = commands::rpoplpush(&self.storage, &command.args).await;
+                        // Notify destination key if move succeeded
+                        if result.is_ok()
+                            && command.args.len() >= 2
+                            && let Ok(RespValue::BulkString(Some(_))) = &result
+                        {
+                            self.blocking_mgr.notify_key(&command.args[1]);
+                        }
+                        result
+                    }
+                    "lmpop" => commands::lmpop(&self.storage, &command.args).await,
+                    "blpop" => {
+                        commands::blpop(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "brpop" => {
+                        commands::brpop(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "blmove" => {
+                        let result =
+                            commands::blmove(&self.storage, &command.args, &self.blocking_mgr)
+                                .await;
+                        // Notify destination key if move succeeded
+                        if result.is_ok()
+                            && command.args.len() >= 2
+                            && let Ok(RespValue::BulkString(Some(_))) = &result
+                        {
+                            self.blocking_mgr.notify_key(&command.args[1]);
+                        }
+                        result
+                    }
+                    "blmpop" => {
+                        commands::blmpop(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+
+                    // Hash commands
+                    "hset" => commands::hset(&self.storage, &command.args).await,
+                    "hget" => commands::hget(&self.storage, &command.args).await,
+                    "hgetall" => commands::hgetall(&self.storage, &command.args).await,
+                    "hdel" => commands::hdel(&self.storage, &command.args).await,
+                    "hexists" => commands::hexists(&self.storage, &command.args).await,
+                    "hmset" => commands::hmset(&self.storage, &command.args).await,
+                    "hkeys" => commands::hkeys(&self.storage, &command.args).await,
+                    "hvals" => commands::hvals(&self.storage, &command.args).await,
+                    "hlen" => commands::hlen(&self.storage, &command.args).await,
+                    "hmget" => commands::hmget(&self.storage, &command.args).await,
+                    "hincrby" => commands::hincrby(&self.storage, &command.args).await,
+                    "hincrbyfloat" => commands::hincrbyfloat(&self.storage, &command.args).await,
+                    "hsetnx" => commands::hsetnx(&self.storage, &command.args).await,
+                    "hstrlen" => commands::hstrlen(&self.storage, &command.args).await,
+                    "hrandfield" => commands::hrandfield(&self.storage, &command.args).await,
+                    "hscan" => commands::hscan(&self.storage, &command.args).await,
+
+                    // Set commands
+                    "sadd" => commands::sadd(&self.storage, &command.args).await,
+                    "srem" => commands::srem(&self.storage, &command.args).await,
+                    "smembers" => commands::smembers(&self.storage, &command.args).await,
+                    "sismember" => commands::sismember(&self.storage, &command.args).await,
+                    "scard" => commands::scard(&self.storage, &command.args).await,
+                    "spop" => commands::spop(&self.storage, &command.args).await,
+                    "srandmember" => commands::srandmember(&self.storage, &command.args).await,
+                    "sinter" => commands::sinter(&self.storage, &command.args).await,
+                    "sinterstore" => commands::sinterstore(&self.storage, &command.args).await,
+                    "sunion" => commands::sunion(&self.storage, &command.args).await,
+                    "sunionstore" => commands::sunionstore(&self.storage, &command.args).await,
+                    "sdiff" => commands::sdiff(&self.storage, &command.args).await,
+                    "sdiffstore" => commands::sdiffstore(&self.storage, &command.args).await,
+                    "smove" => commands::smove(&self.storage, &command.args).await,
+                    "sintercard" => commands::sintercard(&self.storage, &command.args).await,
+                    "smismember" => commands::smismember(&self.storage, &command.args).await,
+                    "sscan" => commands::sscan(&self.storage, &command.args).await,
+
+                    // Sorted Set commands
+                    "zadd" => commands::zadd(&self.storage, &command.args).await,
+                    "zrange" => commands::zrange_unified(&self.storage, &command.args).await,
+                    "zrem" => commands::zrem(&self.storage, &command.args).await,
+                    "zscore" => commands::zscore(&self.storage, &command.args).await,
+                    "zcard" => commands::zcard(&self.storage, &command.args).await,
+                    "zcount" => commands::zcount(&self.storage, &command.args).await,
+                    "zrank" => commands::zrank(&self.storage, &command.args).await,
+                    "zrevrange" => commands::zrevrange(&self.storage, &command.args).await,
+                    "zincrby" => commands::zincrby(&self.storage, &command.args).await,
+                    "zrangebyscore" => commands::zrangebyscore(&self.storage, &command.args).await,
+                    "zrevrangebyscore" => {
+                        commands::zrevrangebyscore(&self.storage, &command.args).await
+                    }
+                    "zrangebylex" => commands::zrangebylex(&self.storage, &command.args).await,
+                    "zrevrangebylex" => {
+                        commands::zrevrangebylex(&self.storage, &command.args).await
+                    }
+                    "zremrangebyrank" => {
+                        commands::zremrangebyrank(&self.storage, &command.args).await
+                    }
+                    "zremrangebyscore" => {
+                        commands::zremrangebyscore(&self.storage, &command.args).await
+                    }
+                    "zremrangebylex" => {
+                        commands::zremrangebylex(&self.storage, &command.args).await
+                    }
+                    "zlexcount" => commands::zlexcount(&self.storage, &command.args).await,
+                    "zrevrank" => commands::zrevrank(&self.storage, &command.args).await,
+                    "zinterstore" => commands::zinterstore(&self.storage, &command.args).await,
+                    "zunionstore" => commands::zunionstore(&self.storage, &command.args).await,
+                    "zinter" => commands::zinter(&self.storage, &command.args).await,
+                    "zunion" => commands::zunion(&self.storage, &command.args).await,
+                    "zdiff" => commands::zdiff(&self.storage, &command.args).await,
+                    "zdiffstore" => commands::zdiffstore(&self.storage, &command.args).await,
+                    "zpopmin" => commands::zpopmin(&self.storage, &command.args).await,
+                    "zpopmax" => commands::zpopmax(&self.storage, &command.args).await,
+                    "bzpopmin" => {
+                        commands::bzpopmin(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "bzpopmax" => {
+                        commands::bzpopmax(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "zrandmember" => commands::zrandmember(&self.storage, &command.args).await,
+                    "zmscore" => commands::zmscore(&self.storage, &command.args).await,
+                    "zmpop" => commands::zmpop(&self.storage, &command.args).await,
+                    "bzmpop" => {
+                        commands::bzmpop(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "zrangestore" => commands::zrangestore(&self.storage, &command.args).await,
+                    "zscan" => commands::zscan(&self.storage, &command.args).await,
+
+                    // JSON commands
+                    "json.get" | "jsonget" | "get_json" | "getjson" => {
+                        commands::json_get(&self.storage, &command.args).await
+                    }
+                    "json.set" | "jsonset" | "set_json" | "setjson" => {
+                        commands::json_set(&self.storage, &command.args).await
+                    }
+                    "json.type" | "jsontype" => {
+                        commands::json_type(&self.storage, &command.args).await
+                    }
+                    "json.arrappend" | "jsonarrappend" => {
+                        commands::json_arrappend(&self.storage, &command.args).await
+                    }
+                    "json.arrtrim" | "jsonarrtrim" => {
+                        commands::json_arrtrim(&self.storage, &command.args).await
+                    }
+                    "json.resp" | "jsonresp" => {
+                        commands::json_resp(&self.storage, &command.args).await
+                    }
+                    "json.del" | "jsondel" => {
+                        commands::json_del(&self.storage, &command.args).await
+                    }
+                    "json.objkeys" | "jsonobjkeys" => {
+                        commands::json_objkeys(&self.storage, &command.args).await
+                    }
+                    "json.objlen" | "jsonobjlen" => {
+                        commands::json_objlen(&self.storage, &command.args).await
+                    }
+                    "json.arrlen" | "jsonarrlen" => {
+                        commands::json_arrlen(&self.storage, &command.args).await
+                    }
+                    "json.numincrby" | "jsonnumincrby" => {
+                        commands::json_numincrby(&self.storage, &command.args).await
+                    }
+                    "json.mget" | "jsonmget" => {
+                        commands::json_mget(&self.storage, &command.args).await
+                    }
+                    "json.arrindex" | "jsonarrindex" => {
+                        commands::json_arrindex(&self.storage, &command.args).await
+                    }
+
+                    // Server commands
+                    "info" => commands::info_expanded(&self.storage, &command.args).await,
+                    "auth" => commands::auth(&self.storage, &command.args).await,
+                    "config" => {
+                        if !command.args.is_empty() {
+                            let subcmd = String::from_utf8_lossy(&command.args[0]).to_uppercase();
+                            match subcmd.as_str() {
+                                "SET" => {
+                                    commands::config_set(&self.storage, &command.args[1..]).await
+                                }
+                                "REWRITE" => commands::config_rewrite(&self.storage, &[]).await,
+                                "RESETSTAT" => commands::config_resetstat(&self.storage, &[]).await,
+                                _ => commands::config(&self.storage, &command.args).await,
+                            }
+                        } else {
+                            commands::config(&self.storage, &command.args).await
+                        }
+                    }
+                    "keys" => commands::keys(&self.storage, &command.args).await,
+                    "rename" => commands::rename(&self.storage, &command.args).await,
+                    "renamenx" => commands::renamenx(&self.storage, &command.args).await,
+                    "flushall" => commands::flushall(&self.storage, &command.args).await,
+                    "flushdb" => commands::flushdb(&self.storage, &command.args).await,
+                    "monitor" => commands::monitor(&self.storage, &command.args).await,
+                    "scan" => commands::scan_with_type(&self.storage, &command.args).await,
+                    "dbsize" => commands::dbsize(&self.storage, &command.args).await,
+                    "randomkey" => commands::randomkey(&self.storage, &command.args).await,
+
+                    // Stream commands
+                    "xadd" => {
+                        let result = commands::xadd(&self.storage, &command.args).await;
+                        if result.is_ok() && !command.args.is_empty() {
+                            self.blocking_mgr.notify_key(&command.args[0]);
+                        }
+                        result
+                    }
+                    "xlen" => commands::xlen(&self.storage, &command.args).await,
+                    "xrange" => commands::xrange(&self.storage, &command.args).await,
+                    "xrevrange" => commands::xrevrange(&self.storage, &command.args).await,
+                    "xread" => {
+                        commands::xread(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "xtrim" => commands::xtrim(&self.storage, &command.args).await,
+                    "xdel" => commands::xdel(&self.storage, &command.args).await,
+                    "xinfo" => commands::xinfo(&self.storage, &command.args).await,
+                    "xgroup" => commands::xgroup(&self.storage, &command.args).await,
+                    "xreadgroup" => {
+                        commands::xreadgroup(&self.storage, &command.args, &self.blocking_mgr).await
+                    }
+                    "xack" => commands::xack(&self.storage, &command.args).await,
+                    "xpending" => commands::xpending(&self.storage, &command.args).await,
+                    "xclaim" => commands::xclaim(&self.storage, &command.args).await,
+                    "xautoclaim" => commands::xautoclaim(&self.storage, &command.args).await,
+
+                    // Scripting commands
+                    "eval" => self.scripting.handle_eval(self, &command.args, false).await,
+                    "eval_ro" => self.scripting.handle_eval(self, &command.args, true).await,
+                    "evalsha" => {
+                        self.scripting
+                            .handle_evalsha(self, &command.args, false)
+                            .await
+                    }
+                    "evalsha_ro" => {
+                        self.scripting
+                            .handle_evalsha(self, &command.args, true)
+                            .await
+                    }
+                    "script" => self.scripting.handle_script(&command.args),
+                    "function" => self.scripting.handle_function(&command.args),
+                    "fcall" => {
+                        self.scripting
+                            .handle_fcall(self, &command.args, false)
+                            .await
+                    }
+                    "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
+
+                    // Connection commands
+                    "quit" => commands::quit(&self.storage, &command.args).await,
+                    "reset" => commands::reset(&self.storage, &command.args).await,
+                    "echo" => commands::echo(&self.storage, &command.args).await,
+                    "client" => commands::client(&self.storage, &command.args).await,
+                    "command" => commands::command_cmd(&self.storage, &command.args).await,
+
+                    // Persistence commands
+                    "save" => commands::save(&self.storage, &command.args).await,
+                    "bgsave" => commands::bgsave(&self.storage, &command.args).await,
+                    "bgrewriteaof" => commands::bgrewriteaof(&self.storage, &command.args).await,
+                    "lastsave" => commands::lastsave(&self.storage, &command.args).await,
+                    "shutdown" => commands::shutdown(&self.storage, &command.args).await,
+
+                    // Monitoring commands
+                    "slowlog" => commands::slowlog(&self.storage, &command.args).await,
+                    "latency" => commands::latency(&self.storage, &command.args).await,
+                    "memory" => commands::memory(&self.storage, &command.args).await,
+                    "debug" => commands::debug(&self.storage, &command.args).await,
+
+                    // Database commands
+                    "swapdb" => commands::swapdb(&self.storage, &command.args).await,
+                    "time" => commands::time(&self.storage, &command.args).await,
+                    "lolwut" => commands::lolwut(&self.storage, &command.args).await,
+
+                    // Cluster commands are handled at the server level (needs access to ClusterManager)
+                    "cluster" => Ok(RespValue::Error(
+                        "ERR Cluster commands must be handled at the server level".to_string(),
+                    )),
+                    "asking" => commands::asking(&self.storage, &command.args).await,
+                    "readonly" => commands::readonly(&self.storage, &command.args).await,
+                    "readwrite" => commands::readwrite(&self.storage, &command.args).await,
+                    "migrate" => commands::migrate(&self.storage, &command.args).await,
+
+                    // Module commands (stubs - rLightning doesn't support C-extension modules)
+                    "module" => commands::module_command(&self.storage, &command.args).await,
+
+                    // ACL commands are handled in server.rs, but return a friendly message here
+                    "acl" => Ok(RespValue::Error(
+                        "ERR ACL commands must be handled at the server level".to_string(),
+                    )),
+
+                    // Replication commands are handled at the server level
+                    "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" => {
+                        Ok(RespValue::Error(
+                            "ERR Replication commands must be handled at the server level"
+                                .to_string(),
+                        ))
+                    }
+
+                    // Sentinel commands are handled at the server level
+                    "sentinel" => Ok(RespValue::Error(
+                        "ERR Sentinel commands must be handled at the server level".to_string(),
+                    )),
+
+                    // WAIT is handled at the server level (needs access to ReplicationManager)
+                    "wait" => commands::wait_cmd(&self.storage, &command.args).await,
+
+                    // Unknown command
+                    _ => Err(CommandError::UnknownCommand(command.name)),
                 }
-            },
-            
-            // String commands
-            "set" => commands::set(&self.storage, &command.args).await,
-            "get" => commands::get(&self.storage, &command.args).await,
-            "mget" => commands::mget(&self.storage, &command.args).await,
-            "mset" => commands::mset(&self.storage, &command.args).await,
-            "msetnx" => commands::msetnx(&self.storage, &command.args).await,
-            "setnx" => commands::setnx(&self.storage, &command.args).await,
-            "setex" => commands::setex(&self.storage, &command.args).await,
-            "incr" => commands::incr(&self.storage, &command.args).await,
-            "decr" => commands::decr(&self.storage, &command.args).await,
-            "incrby" => commands::incrby(&self.storage, &command.args).await,
-            "decrby" => commands::decrby(&self.storage, &command.args).await,
-            "incrbyfloat" => commands::incrbyfloat(&self.storage, &command.args).await,
-            "append" => commands::append(&self.storage, &command.args).await,
-            "strlen" => commands::strlen(&self.storage, &command.args).await,
-            "getrange" => commands::getrange(&self.storage, &command.args).await,
-            "setrange" => commands::setrange(&self.storage, &command.args).await,
-            "getset" => commands::getset(&self.storage, &command.args).await,
-            "getex" => commands::getex(&self.storage, &command.args).await,
-            "getdel" => commands::getdel(&self.storage, &command.args).await,
-            "psetex" => commands::psetex(&self.storage, &command.args).await,
-            "lcs" => commands::lcs(&self.storage, &command.args).await,
-            "substr" => commands::substr(&self.storage, &command.args).await,
-
-            // Bitmap commands
-            "setbit" => commands::setbit(&self.storage, &command.args).await,
-            "getbit" => commands::getbit(&self.storage, &command.args).await,
-            "bitcount" => commands::bitcount(&self.storage, &command.args).await,
-            "bitpos" => commands::bitpos(&self.storage, &command.args).await,
-            "bitop" => commands::bitop(&self.storage, &command.args).await,
-            "bitfield" => commands::bitfield(&self.storage, &command.args).await,
-            "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
-
-            // HyperLogLog commands
-            "pfadd" => commands::pfadd(&self.storage, &command.args).await,
-            "pfcount" => commands::pfcount(&self.storage, &command.args).await,
-            "pfmerge" => commands::pfmerge(&self.storage, &command.args).await,
-
-            // Geo commands
-            "geoadd" => commands::geoadd(&self.storage, &command.args).await,
-            "geodist" => commands::geodist(&self.storage, &command.args).await,
-            "geohash" => commands::geohash(&self.storage, &command.args).await,
-            "geopos" => commands::geopos(&self.storage, &command.args).await,
-            "geosearch" => commands::geosearch(&self.storage, &command.args).await,
-            "geosearchstore" => commands::geosearchstore(&self.storage, &command.args).await,
-            "georadius" => commands::georadius(&self.storage, &command.args).await,
-            "georadiusbymember" => commands::georadiusbymember(&self.storage, &command.args).await,
-
-            // List commands
-            "lpush" => {
-                let result = commands::lpush(&self.storage, &command.args).await;
-                if result.is_ok() && !command.args.is_empty() {
-                    self.blocking_mgr.notify_key(&command.args[0]);
-                }
-                result
-            },
-            "rpush" => {
-                let result = commands::rpush(&self.storage, &command.args).await;
-                if result.is_ok() && !command.args.is_empty() {
-                    self.blocking_mgr.notify_key(&command.args[0]);
-                }
-                result
-            },
-            "lpushx" => {
-                let result = commands::lpushx(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result
-                    && *n > 0 && !command.args.is_empty() {
-                        self.blocking_mgr.notify_key(&command.args[0]);
-                    }
-                result
-            },
-            "rpushx" => {
-                let result = commands::rpushx(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result
-                    && *n > 0 && !command.args.is_empty() {
-                        self.blocking_mgr.notify_key(&command.args[0]);
-                    }
-                result
-            },
-            "linsert" => {
-                let result = commands::linsert(&self.storage, &command.args).await;
-                if let Ok(RespValue::Integer(n)) = &result
-                    && *n > 0 && !command.args.is_empty() {
-                        self.blocking_mgr.notify_key(&command.args[0]);
-                    }
-                result
-            },
-            "lpop" => commands::lpop(&self.storage, &command.args).await,
-            "rpop" => commands::rpop(&self.storage, &command.args).await,
-            "lrange" => commands::lrange(&self.storage, &command.args).await,
-            "lindex" => commands::lindex(&self.storage, &command.args).await,
-            "llen" => commands::llen(&self.storage, &command.args).await,
-            "ltrim" => commands::ltrim(&self.storage, &command.args).await,
-            "lset" => commands::lset(&self.storage, &command.args).await,
-            "lrem" => commands::lrem(&self.storage, &command.args).await,
-            "lpos" => commands::lpos(&self.storage, &command.args).await,
-            "lmove" => {
-                let result = commands::lmove(&self.storage, &command.args).await;
-                // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2
-                    && let Ok(RespValue::BulkString(Some(_))) = &result {
-                        self.blocking_mgr.notify_key(&command.args[1]);
-                    }
-                result
-            },
-            "rpoplpush" => {
-                let result = commands::rpoplpush(&self.storage, &command.args).await;
-                // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2
-                    && let Ok(RespValue::BulkString(Some(_))) = &result {
-                        self.blocking_mgr.notify_key(&command.args[1]);
-                    }
-                result
-            },
-            "lmpop" => commands::lmpop(&self.storage, &command.args).await,
-            "blpop" => commands::blpop(&self.storage, &command.args, &self.blocking_mgr).await,
-            "brpop" => commands::brpop(&self.storage, &command.args, &self.blocking_mgr).await,
-            "blmove" => {
-                let result = commands::blmove(&self.storage, &command.args, &self.blocking_mgr).await;
-                // Notify destination key if move succeeded
-                if result.is_ok() && command.args.len() >= 2
-                    && let Ok(RespValue::BulkString(Some(_))) = &result {
-                        self.blocking_mgr.notify_key(&command.args[1]);
-                    }
-                result
-            },
-            "blmpop" => commands::blmpop(&self.storage, &command.args, &self.blocking_mgr).await,
-            
-            // Hash commands
-            "hset" => commands::hset(&self.storage, &command.args).await,
-            "hget" => commands::hget(&self.storage, &command.args).await,
-            "hgetall" => commands::hgetall(&self.storage, &command.args).await,
-            "hdel" => commands::hdel(&self.storage, &command.args).await,
-            "hexists" => commands::hexists(&self.storage, &command.args).await,
-            "hmset" => commands::hmset(&self.storage, &command.args).await,
-            "hkeys" => commands::hkeys(&self.storage, &command.args).await,
-            "hvals" => commands::hvals(&self.storage, &command.args).await,
-            "hlen" => commands::hlen(&self.storage, &command.args).await,
-            "hmget" => commands::hmget(&self.storage, &command.args).await,
-            "hincrby" => commands::hincrby(&self.storage, &command.args).await,
-            "hincrbyfloat" => commands::hincrbyfloat(&self.storage, &command.args).await,
-            "hsetnx" => commands::hsetnx(&self.storage, &command.args).await,
-            "hstrlen" => commands::hstrlen(&self.storage, &command.args).await,
-            "hrandfield" => commands::hrandfield(&self.storage, &command.args).await,
-            "hscan" => commands::hscan(&self.storage, &command.args).await,
-
-            // Set commands
-            "sadd" => commands::sadd(&self.storage, &command.args).await,
-            "srem" => commands::srem(&self.storage, &command.args).await,
-            "smembers" => commands::smembers(&self.storage, &command.args).await,
-            "sismember" => commands::sismember(&self.storage, &command.args).await,
-            "scard" => commands::scard(&self.storage, &command.args).await,
-            "spop" => commands::spop(&self.storage, &command.args).await,
-            "srandmember" => commands::srandmember(&self.storage, &command.args).await,
-            "sinter" => commands::sinter(&self.storage, &command.args).await,
-            "sinterstore" => commands::sinterstore(&self.storage, &command.args).await,
-            "sunion" => commands::sunion(&self.storage, &command.args).await,
-            "sunionstore" => commands::sunionstore(&self.storage, &command.args).await,
-            "sdiff" => commands::sdiff(&self.storage, &command.args).await,
-            "sdiffstore" => commands::sdiffstore(&self.storage, &command.args).await,
-            "smove" => commands::smove(&self.storage, &command.args).await,
-            "sintercard" => commands::sintercard(&self.storage, &command.args).await,
-            "smismember" => commands::smismember(&self.storage, &command.args).await,
-            "sscan" => commands::sscan(&self.storage, &command.args).await,
-
-            // Sorted Set commands
-            "zadd" => commands::zadd(&self.storage, &command.args).await,
-            "zrange" => commands::zrange_unified(&self.storage, &command.args).await,
-            "zrem" => commands::zrem(&self.storage, &command.args).await,
-            "zscore" => commands::zscore(&self.storage, &command.args).await,
-            "zcard" => commands::zcard(&self.storage, &command.args).await,
-            "zcount" => commands::zcount(&self.storage, &command.args).await,
-            "zrank" => commands::zrank(&self.storage, &command.args).await,
-            "zrevrange" => commands::zrevrange(&self.storage, &command.args).await,
-            "zincrby" => commands::zincrby(&self.storage, &command.args).await,
-            "zrangebyscore" => commands::zrangebyscore(&self.storage, &command.args).await,
-            "zrevrangebyscore" => commands::zrevrangebyscore(&self.storage, &command.args).await,
-            "zrangebylex" => commands::zrangebylex(&self.storage, &command.args).await,
-            "zrevrangebylex" => commands::zrevrangebylex(&self.storage, &command.args).await,
-            "zremrangebyrank" => commands::zremrangebyrank(&self.storage, &command.args).await,
-            "zremrangebyscore" => commands::zremrangebyscore(&self.storage, &command.args).await,
-            "zremrangebylex" => commands::zremrangebylex(&self.storage, &command.args).await,
-            "zlexcount" => commands::zlexcount(&self.storage, &command.args).await,
-            "zrevrank" => commands::zrevrank(&self.storage, &command.args).await,
-            "zinterstore" => commands::zinterstore(&self.storage, &command.args).await,
-            "zunionstore" => commands::zunionstore(&self.storage, &command.args).await,
-            "zinter" => commands::zinter(&self.storage, &command.args).await,
-            "zunion" => commands::zunion(&self.storage, &command.args).await,
-            "zdiff" => commands::zdiff(&self.storage, &command.args).await,
-            "zdiffstore" => commands::zdiffstore(&self.storage, &command.args).await,
-            "zpopmin" => commands::zpopmin(&self.storage, &command.args).await,
-            "zpopmax" => commands::zpopmax(&self.storage, &command.args).await,
-            "bzpopmin" => commands::bzpopmin(&self.storage, &command.args, &self.blocking_mgr).await,
-            "bzpopmax" => commands::bzpopmax(&self.storage, &command.args, &self.blocking_mgr).await,
-            "zrandmember" => commands::zrandmember(&self.storage, &command.args).await,
-            "zmscore" => commands::zmscore(&self.storage, &command.args).await,
-            "zmpop" => commands::zmpop(&self.storage, &command.args).await,
-            "bzmpop" => commands::bzmpop(&self.storage, &command.args, &self.blocking_mgr).await,
-            "zrangestore" => commands::zrangestore(&self.storage, &command.args).await,
-            "zscan" => commands::zscan(&self.storage, &command.args).await,
-            
-            // JSON commands
-            "json.get" | "jsonget" | "get_json" | "getjson" => commands::json_get(&self.storage, &command.args).await,
-            "json.set" | "jsonset" | "set_json" | "setjson" => commands::json_set(&self.storage, &command.args).await,
-            "json.type" | "jsontype" => commands::json_type(&self.storage, &command.args).await,
-            "json.arrappend" | "jsonarrappend" => commands::json_arrappend(&self.storage, &command.args).await,
-            "json.arrtrim" | "jsonarrtrim" => commands::json_arrtrim(&self.storage, &command.args).await,
-            "json.resp" | "jsonresp" => commands::json_resp(&self.storage, &command.args).await,
-            "json.del" | "jsondel" => commands::json_del(&self.storage, &command.args).await,
-            "json.objkeys" | "jsonobjkeys" => commands::json_objkeys(&self.storage, &command.args).await,
-            "json.objlen" | "jsonobjlen" => commands::json_objlen(&self.storage, &command.args).await,
-            "json.arrlen" | "jsonarrlen" => commands::json_arrlen(&self.storage, &command.args).await,
-            "json.numincrby" | "jsonnumincrby" => commands::json_numincrby(&self.storage, &command.args).await,
-            "json.mget" | "jsonmget" => commands::json_mget(&self.storage, &command.args).await,
-            "json.arrindex" | "jsonarrindex" => commands::json_arrindex(&self.storage, &command.args).await,
-
-            // Server commands
-            "info" => commands::info_expanded(&self.storage, &command.args).await,
-            "auth" => commands::auth(&self.storage, &command.args).await,
-            "config" => {
-                if !command.args.is_empty() {
-                    let subcmd = String::from_utf8_lossy(&command.args[0]).to_uppercase();
-                    match subcmd.as_str() {
-                        "SET" => commands::config_set(&self.storage, &command.args[1..]).await,
-                        "REWRITE" => commands::config_rewrite(&self.storage, &[]).await,
-                        "RESETSTAT" => commands::config_resetstat(&self.storage, &[]).await,
-                        _ => commands::config(&self.storage, &command.args).await,
-                    }
-                } else {
-                    commands::config(&self.storage, &command.args).await
-                }
-            },
-            "keys" => commands::keys(&self.storage, &command.args).await,
-            "rename" => commands::rename(&self.storage, &command.args).await,
-            "renamenx" => commands::renamenx(&self.storage, &command.args).await,
-            "flushall" => commands::flushall(&self.storage, &command.args).await,
-            "flushdb" => commands::flushdb(&self.storage, &command.args).await,
-            "monitor" => commands::monitor(&self.storage, &command.args).await,
-            "scan" => commands::scan_with_type(&self.storage, &command.args).await,
-            "dbsize" => commands::dbsize(&self.storage, &command.args).await,
-            "randomkey" => commands::randomkey(&self.storage, &command.args).await,
-
-            // Stream commands
-            "xadd" => {
-                let result = commands::xadd(&self.storage, &command.args).await;
-                if result.is_ok() && !command.args.is_empty() {
-                    self.blocking_mgr.notify_key(&command.args[0]);
-                }
-                result
-            }
-            "xlen" => commands::xlen(&self.storage, &command.args).await,
-            "xrange" => commands::xrange(&self.storage, &command.args).await,
-            "xrevrange" => commands::xrevrange(&self.storage, &command.args).await,
-            "xread" => commands::xread(&self.storage, &command.args, &self.blocking_mgr).await,
-            "xtrim" => commands::xtrim(&self.storage, &command.args).await,
-            "xdel" => commands::xdel(&self.storage, &command.args).await,
-            "xinfo" => commands::xinfo(&self.storage, &command.args).await,
-            "xgroup" => commands::xgroup(&self.storage, &command.args).await,
-            "xreadgroup" => commands::xreadgroup(&self.storage, &command.args, &self.blocking_mgr).await,
-            "xack" => commands::xack(&self.storage, &command.args).await,
-            "xpending" => commands::xpending(&self.storage, &command.args).await,
-            "xclaim" => commands::xclaim(&self.storage, &command.args).await,
-            "xautoclaim" => commands::xautoclaim(&self.storage, &command.args).await,
-
-            // Scripting commands
-            "eval" => self.scripting.handle_eval(self, &command.args, false).await,
-            "eval_ro" => self.scripting.handle_eval(self, &command.args, true).await,
-            "evalsha" => self.scripting.handle_evalsha(self, &command.args, false).await,
-            "evalsha_ro" => self.scripting.handle_evalsha(self, &command.args, true).await,
-            "script" => self.scripting.handle_script(&command.args),
-            "function" => self.scripting.handle_function(&command.args),
-            "fcall" => self.scripting.handle_fcall(self, &command.args, false).await,
-            "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
-
-            // Connection commands
-            "quit" => commands::quit(&self.storage, &command.args).await,
-            "reset" => commands::reset(&self.storage, &command.args).await,
-            "echo" => commands::echo(&self.storage, &command.args).await,
-            "client" => commands::client(&self.storage, &command.args).await,
-            "command" => commands::command_cmd(&self.storage, &command.args).await,
-
-            // Persistence commands
-            "save" => commands::save(&self.storage, &command.args).await,
-            "bgsave" => commands::bgsave(&self.storage, &command.args).await,
-            "bgrewriteaof" => commands::bgrewriteaof(&self.storage, &command.args).await,
-            "lastsave" => commands::lastsave(&self.storage, &command.args).await,
-            "shutdown" => commands::shutdown(&self.storage, &command.args).await,
-
-            // Monitoring commands
-            "slowlog" => commands::slowlog(&self.storage, &command.args).await,
-            "latency" => commands::latency(&self.storage, &command.args).await,
-            "memory" => commands::memory(&self.storage, &command.args).await,
-            "debug" => commands::debug(&self.storage, &command.args).await,
-
-            // Database commands
-            "swapdb" => commands::swapdb(&self.storage, &command.args).await,
-            "time" => commands::time(&self.storage, &command.args).await,
-            "lolwut" => commands::lolwut(&self.storage, &command.args).await,
-
-            // Cluster commands are handled at the server level (needs access to ClusterManager)
-            "cluster" => {
-                Ok(RespValue::Error("ERR Cluster commands must be handled at the server level".to_string()))
-            },
-            "asking" => commands::asking(&self.storage, &command.args).await,
-            "readonly" => commands::readonly(&self.storage, &command.args).await,
-            "readwrite" => commands::readwrite(&self.storage, &command.args).await,
-            "migrate" => commands::migrate(&self.storage, &command.args).await,
-
-            // Module commands (stubs - rLightning doesn't support C-extension modules)
-            "module" => commands::module_command(&self.storage, &command.args).await,
-
-            // ACL commands are handled in server.rs, but return a friendly message here
-            "acl" => {
-                Ok(RespValue::Error("ERR ACL commands must be handled at the server level".to_string()))
-            },
-
-            // Replication commands are handled at the server level
-            "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" => {
-                Ok(RespValue::Error("ERR Replication commands must be handled at the server level".to_string()))
-            },
-
-            // Sentinel commands are handled at the server level
-            "sentinel" => {
-                Ok(RespValue::Error("ERR Sentinel commands must be handled at the server level".to_string()))
-            },
-
-            // WAIT is handled at the server level (needs access to ReplicationManager)
-            "wait" => commands::wait_cmd(&self.storage, &command.args).await,
-
-            // Unknown command
-            _ => {
-                Err(CommandError::UnknownCommand(command.name))
-            }
-        }
-        }).await
+            })
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::StorageConfig;
     use crate::command::Command;
+    use crate::storage::engine::StorageConfig;
     use std::time::Duration;
 
     #[tokio::test]
@@ -443,135 +528,135 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test basic PING
         let command = Command {
             name: "ping".to_string(),
             args: vec![],
         };
-        
+
         let result = handler.process(command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("PONG".to_string()));
-        
+
         // Test PING with argument
         let command = Command {
             name: "ping".to_string(),
             args: vec![b"hello".to_vec()],
         };
-        
+
         let result = handler.process(command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
     }
-    
+
     #[tokio::test]
     async fn test_set_get_command() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test SET command
         let set_command = Command {
             name: "set".to_string(),
             args: vec![b"mykey".to_vec(), b"myvalue".to_vec()],
         };
-        
+
         let result = handler.process(set_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Test GET command
         let get_command = Command {
             name: "get".to_string(),
             args: vec![b"mykey".to_vec()],
         };
-        
+
         let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
-        
+
         // Test GET for non-existent key
         let get_missing = Command {
             name: "get".to_string(),
             args: vec![b"nonexistent".to_vec()],
         };
-        
+
         let result = handler.process(get_missing, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
-    
+
     #[tokio::test]
     async fn test_set_with_expiry() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test SET with EX option
         let set_ex_command = Command {
             name: "set".to_string(),
             args: vec![
-                b"ex_key".to_vec(), 
+                b"ex_key".to_vec(),
                 b"ex_value".to_vec(),
                 b"EX".to_vec(),
                 b"1".to_vec(), // 1 second expiry
             ],
         };
-        
+
         let result = handler.process(set_ex_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check TTL
         let ttl_command = Command {
             name: "ttl".to_string(),
             args: vec![b"ex_key".to_vec()],
         };
-        
+
         let result = handler.process(ttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl > 0 && ttl <= 1);
         } else {
             panic!("Expected integer response from TTL");
         }
-        
+
         // Test SET with PX option
         let set_px_command = Command {
             name: "set".to_string(),
             args: vec![
-                b"px_key".to_vec(), 
+                b"px_key".to_vec(),
                 b"px_value".to_vec(),
                 b"PX".to_vec(),
                 b"100".to_vec(), // 100ms expiry
             ],
         };
-        
+
         let result = handler.process(set_px_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Verify that the key exists
         let get_command = Command {
             name: "get".to_string(),
             args: vec![b"px_key".to_vec()],
         };
-        
+
         let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"px_value".to_vec())));
-        
+
         // Wait for expiration
         tokio::time::sleep(Duration::from_millis(150)).await;
-        
+
         // Verify that the key is gone
         let get_command_after = Command {
             name: "get".to_string(),
             args: vec![b"px_key".to_vec()],
         };
-        
+
         let result = handler.process(get_command_after, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
-    
+
     #[tokio::test]
     async fn test_del_exists_command() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Set up a few keys
         for i in 1..=3 {
             let set_command = Command {
@@ -583,7 +668,7 @@ mod tests {
             };
             handler.process(set_command, 0).await.unwrap();
         }
-        
+
         // Test EXISTS command
         let exists_command = Command {
             name: "exists".to_string(),
@@ -593,10 +678,10 @@ mod tests {
                 b"nonexistent".to_vec(),
             ],
         };
-        
+
         let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-        
+
         // Test DEL command
         let del_command = Command {
             name: "del".to_string(),
@@ -606,38 +691,35 @@ mod tests {
                 b"nonexistent".to_vec(),
             ],
         };
-        
+
         let result = handler.process(del_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-        
+
         // Verify keys are gone with EXISTS
         let exists_command = Command {
             name: "exists".to_string(),
-            args: vec![
-                b"delkey1".to_vec(),
-                b"delkey2".to_vec(),
-            ],
+            args: vec![b"delkey1".to_vec(), b"delkey2".to_vec()],
         };
-        
+
         let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
-        
+
         // Verify delkey3 still exists
         let exists_command = Command {
             name: "exists".to_string(),
             args: vec![b"delkey3".to_vec()],
         };
-        
+
         let result = handler.process(exists_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
     }
-    
+
     #[tokio::test]
     async fn test_mget_command() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Set up a few keys
         let keys = ["mgetkey1", "mgetkey2", "mgetkey3"];
         for (i, key) in keys.iter().enumerate() {
@@ -645,12 +727,12 @@ mod tests {
                 name: "set".to_string(),
                 args: vec![
                     key.as_bytes().to_vec(),
-                    format!("mgetvalue{}", i+1).into_bytes(),
+                    format!("mgetvalue{}", i + 1).into_bytes(),
                 ],
             };
             handler.process(set_command, 0).await.unwrap();
         }
-        
+
         // Test MGET command
         let mget_command = Command {
             name: "mget".to_string(),
@@ -661,76 +743,77 @@ mod tests {
                 b"mgetkey3".to_vec(),
             ],
         };
-        
+
         let result = handler.process(mget_command, 0).await.unwrap();
-        
+
         if let RespValue::Array(Some(values)) = result {
             assert_eq!(values.len(), 4);
-            assert_eq!(values[0], RespValue::BulkString(Some(b"mgetvalue1".to_vec())));
-            assert_eq!(values[1], RespValue::BulkString(Some(b"mgetvalue2".to_vec())));
+            assert_eq!(
+                values[0],
+                RespValue::BulkString(Some(b"mgetvalue1".to_vec()))
+            );
+            assert_eq!(
+                values[1],
+                RespValue::BulkString(Some(b"mgetvalue2".to_vec()))
+            );
             assert_eq!(values[2], RespValue::BulkString(None));
-            assert_eq!(values[3], RespValue::BulkString(Some(b"mgetvalue3".to_vec())));
+            assert_eq!(
+                values[3],
+                RespValue::BulkString(Some(b"mgetvalue3".to_vec()))
+            );
         } else {
             panic!("Expected Array response from MGET");
         }
     }
-    
+
     #[tokio::test]
     async fn test_unknown_command() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test an unknown command
         let unknown_command = Command {
             name: "notacommand".to_string(),
             args: vec![],
         };
-        
+
         let result = handler.process(unknown_command, 0).await;
-        
+
         // The result should be an error, not an unwrapped value
         assert!(result.is_err());
         match result {
             Err(CommandError::UnknownCommand(cmd)) => {
                 assert_eq!(cmd, "notacommand");
-            },
-            _ => panic!("Expected UnknownCommand error")
+            }
+            _ => panic!("Expected UnknownCommand error"),
         }
     }
-    
+
     #[tokio::test]
     async fn test_hash_commands() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test HSET command
         let hset_cmd = Command {
             name: "hset".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"name".to_vec(),
-                b"John".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"name".to_vec(), b"John".to_vec()],
         };
-        
+
         let result = handler.process(hset_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
-        
+
         // Test HSET again with the same field
         let hset_again_cmd = Command {
             name: "hset".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"name".to_vec(),
-                b"Jane".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"name".to_vec(), b"Jane".to_vec()],
         };
-        
+
         let result = handler.process(hset_again_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Field already existed
-        
+
         // Add another field
         let hset_email_cmd = Command {
             name: "hset".to_string(),
@@ -740,91 +823,83 @@ mod tests {
                 b"jane@example.com".to_vec(),
             ],
         };
-        
+
         handler.process(hset_email_cmd, 0).await.unwrap();
-        
+
         // Test HGET command
         let hget_cmd = Command {
             name: "hget".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"name".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"name".to_vec()],
         };
-        
+
         let result = handler.process(hget_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"Jane".to_vec())));
-        
+
         // Test HGET for non-existent field
         let hget_missing_cmd = Command {
             name: "hget".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"phone".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"phone".to_vec()],
         };
-        
+
         let result = handler.process(hget_missing_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
-        
+
         // Test HEXISTS command
         let hexists_cmd = Command {
             name: "hexists".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"name".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"name".to_vec()],
         };
-        
+
         let result = handler.process(hexists_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Field exists
-        
+
         // Test HEXISTS for non-existent field
         let hexists_missing_cmd = Command {
             name: "hexists".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"phone".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"phone".to_vec()],
         };
-        
+
         let result = handler.process(hexists_missing_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Field doesn't exist
-        
+
         // Test HGETALL command
         let hgetall_cmd = Command {
             name: "hgetall".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec()],
         };
-        
+
         let result = handler.process(hgetall_cmd, 0).await.unwrap();
         if let RespValue::Array(Some(fields_and_values)) = result {
             assert_eq!(fields_and_values.len(), 4); // 2 fields = 4 items (field + value pairs)
-            
+
             // Results should contain both fields and their values
             let mut found_name = false;
             let mut found_email = false;
-            
+
             for i in (0..fields_and_values.len()).step_by(2) {
                 if let RespValue::BulkString(Some(field)) = &fields_and_values[i] {
                     if field == b"name" {
                         found_name = true;
-                        assert_eq!(fields_and_values[i+1], RespValue::BulkString(Some(b"Jane".to_vec())));
+                        assert_eq!(
+                            fields_and_values[i + 1],
+                            RespValue::BulkString(Some(b"Jane".to_vec()))
+                        );
                     } else if field == b"email" {
                         found_email = true;
-                        assert_eq!(fields_and_values[i+1], RespValue::BulkString(Some(b"jane@example.com".to_vec())));
+                        assert_eq!(
+                            fields_and_values[i + 1],
+                            RespValue::BulkString(Some(b"jane@example.com".to_vec()))
+                        );
                     }
                 }
             }
-            
+
             assert!(found_name, "Should find 'name' field");
             assert!(found_email, "Should find 'email' field");
         } else {
             panic!("Expected Array response from HGETALL");
         }
-        
+
         // Test HDEL command
         let hdel_cmd = Command {
             name: "hdel".to_string(),
@@ -834,38 +909,36 @@ mod tests {
                 b"nonexistent".to_vec(),
             ],
         };
-        
+
         let result = handler.process(hdel_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 field deleted
-        
+
         // Verify the field was deleted
         let hget_after_del_cmd = Command {
             name: "hget".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-                b"name".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec(), b"name".to_vec()],
         };
-        
+
         let result = handler.process(hget_after_del_cmd, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None)); // Field should be gone
-        
+
         // Check HGETALL after deletion
         let hgetall_after_cmd = Command {
             name: "hgetall".to_string(),
-            args: vec![
-                b"user:1".to_vec(),
-            ],
+            args: vec![b"user:1".to_vec()],
         };
-        
+
         let result = handler.process(hgetall_after_cmd, 0).await.unwrap();
         if let RespValue::Array(Some(fields_and_values)) = result {
             assert_eq!(fields_and_values.len(), 2); // 1 field = 2 items (field + value)
-            
+
             // Only email should remain
             if let RespValue::BulkString(Some(field)) = &fields_and_values[0] {
                 assert_eq!(field, b"email");
-                assert_eq!(fields_and_values[1], RespValue::BulkString(Some(b"jane@example.com".to_vec())));
+                assert_eq!(
+                    fields_and_values[1],
+                    RespValue::BulkString(Some(b"jane@example.com".to_vec()))
+                );
             } else {
                 panic!("Expected BulkString for field");
             }
@@ -879,67 +952,62 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Use a key with "list" in the name to clearly indicate type
         let list_key = b"list_key_for_test".to_vec();
-        
+
         // Ensure the key doesn't exist
         let del_command = Command {
             name: "del".to_string(),
             args: vec![list_key.clone()],
         };
         let _ = handler.process(del_command, 0).await.unwrap();
-        
+
         // Initialize the key as a list using set_with_type to properly track type
         let empty_list: Vec<Vec<u8>> = Vec::new();
         let serialized = bincode::serialize(&empty_list).unwrap();
-        storage.set_with_type(list_key.clone(), serialized, crate::storage::item::RedisDataType::List, None).await.unwrap();
+        storage
+            .set_with_type(
+                list_key.clone(),
+                serialized,
+                crate::storage::item::RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Verify the key type
         let key_type = storage.get_type(&list_key).await.unwrap();
         assert_eq!(key_type, "list");
-        
+
         // Test LPUSH
         let lpush_command = Command {
             name: "lpush".to_string(),
-            args: vec![
-                list_key.clone(),
-                b"world".to_vec(),
-            ],
+            args: vec![list_key.clone(), b"world".to_vec()],
         };
         let result = handler.process(lpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
-        
+
         // Test LPUSH again (prepends)
         let lpush_command = Command {
             name: "lpush".to_string(),
-            args: vec![
-                list_key.clone(),
-                b"hello".to_vec(),
-            ],
+            args: vec![list_key.clone(), b"hello".to_vec()],
         };
         let result = handler.process(lpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-        
+
         // Test RPUSH (appends)
         let rpush_command = Command {
             name: "rpush".to_string(),
-            args: vec![
-                list_key.clone(),
-                b"!".to_vec(),
-            ],
+            args: vec![list_key.clone(), b"!".to_vec()],
         };
         let result = handler.process(rpush_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(3));
-        
+
         // Test LRANGE to get the entire list
         let lrange_command = Command {
             name: "lrange".to_string(),
-            args: vec![
-                list_key.clone(),
-                b"0".to_vec(), 
-                b"-1".to_vec(),
-            ],
+            args: vec![list_key.clone(), b"0".to_vec(), b"-1".to_vec()],
         };
         let result = handler.process(lrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
@@ -950,7 +1018,7 @@ mod tests {
         } else {
             panic!("Expected array response");
         }
-        
+
         // Test LPOP
         let lpop_command = Command {
             name: "lpop".to_string(),
@@ -958,7 +1026,7 @@ mod tests {
         };
         let result = handler.process(lpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
-        
+
         // Test RPOP
         let rpop_command = Command {
             name: "rpop".to_string(),
@@ -966,15 +1034,11 @@ mod tests {
         };
         let result = handler.process(rpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"!".to_vec())));
-        
+
         // Verify the list now has only one element
         let lrange_command = Command {
             name: "lrange".to_string(),
-            args: vec![
-                list_key.clone(),
-                b"0".to_vec(), 
-                b"-1".to_vec(),
-            ],
+            args: vec![list_key.clone(), b"0".to_vec(), b"-1".to_vec()],
         };
         let result = handler.process(lrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(items)) = result {
@@ -983,7 +1047,7 @@ mod tests {
         } else {
             panic!("Expected array response");
         }
-        
+
         // Pop the last element and verify the key is removed
         let lpop_command = Command {
             name: "lpop".to_string(),
@@ -991,7 +1055,7 @@ mod tests {
         };
         let result = handler.process(lpop_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"world".to_vec())));
-        
+
         // Test LPOP on empty list
         let lpop_command = Command {
             name: "lpop".to_string(),
@@ -1006,53 +1070,61 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test SADD command
         let sadd_command = Command {
             name: "sadd".to_string(),
-            args: vec![b"test_set_key".to_vec(), b"member1".to_vec(), b"member2".to_vec()],
+            args: vec![
+                b"test_set_key".to_vec(),
+                b"member1".to_vec(),
+                b"member2".to_vec(),
+            ],
         };
-        
+
         let result = handler.process(sadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2)); // 2 members added
-        
+
         // Test SADD with duplicate member
         let sadd_command = Command {
             name: "sadd".to_string(),
-            args: vec![b"test_set_key".to_vec(), b"member2".to_vec(), b"member3".to_vec()],
+            args: vec![
+                b"test_set_key".to_vec(),
+                b"member2".to_vec(),
+                b"member3".to_vec(),
+            ],
         };
-        
+
         let result = handler.process(sadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Only 1 new member added
-        
+
         // Test SISMEMBER with existing member
         let sismember_command = Command {
             name: "sismember".to_string(),
             args: vec![b"test_set_key".to_vec(), b"member1".to_vec()],
         };
-        
+
         let result = handler.process(sismember_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Member exists
-        
+
         // Test SISMEMBER with non-existing member
         let sismember_command = Command {
             name: "sismember".to_string(),
             args: vec![b"test_set_key".to_vec(), b"nonexistent".to_vec()],
         };
-        
+
         let result = handler.process(sismember_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Member doesn't exist
-        
+
         // Test SMEMBERS to get all members
         let smembers_command = Command {
             name: "smembers".to_string(),
             args: vec![b"test_set_key".to_vec()],
         };
-        
+
         let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 3); // Should have 3 members
-            
+
             // Extract the members
             let mut member_values = Vec::new();
             for member in members {
@@ -1060,7 +1132,7 @@ mod tests {
                     member_values.push(value);
                 }
             }
-            
+
             // Check that all expected members are present
             assert!(member_values.contains(&b"member1".to_vec()));
             assert!(member_values.contains(&b"member2".to_vec()));
@@ -1068,26 +1140,30 @@ mod tests {
         } else {
             panic!("Expected array response from SMEMBERS");
         }
-        
+
         // Test SREM to remove members
         let srem_command = Command {
             name: "srem".to_string(),
-            args: vec![b"test_set_key".to_vec(), b"member1".to_vec(), b"nonexistent".to_vec()],
+            args: vec![
+                b"test_set_key".to_vec(),
+                b"member1".to_vec(),
+                b"nonexistent".to_vec(),
+            ],
         };
-        
+
         let result = handler.process(srem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 member removed
-        
+
         // Verify members after removal
         let smembers_command = Command {
             name: "smembers".to_string(),
             args: vec![b"test_set_key".to_vec()],
         };
-        
+
         let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 2); // Should have 2 members now
-            
+
             // Extract the members
             let mut member_values = Vec::new();
             for member in members {
@@ -1095,7 +1171,7 @@ mod tests {
                     member_values.push(value);
                 }
             }
-            
+
             // Check that the expected members are present
             assert!(!member_values.contains(&b"member1".to_vec())); // This was removed
             assert!(member_values.contains(&b"member2".to_vec()));
@@ -1103,22 +1179,26 @@ mod tests {
         } else {
             panic!("Expected array response from SMEMBERS");
         }
-        
+
         // Test SREM to remove all remaining members
         let srem_command = Command {
             name: "srem".to_string(),
-            args: vec![b"test_set_key".to_vec(), b"member2".to_vec(), b"member3".to_vec()],
+            args: vec![
+                b"test_set_key".to_vec(),
+                b"member2".to_vec(),
+                b"member3".to_vec(),
+            ],
         };
-        
+
         let result = handler.process(srem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(2)); // 2 members removed
-        
+
         // Verify the set is empty
         let smembers_command = Command {
             name: "smembers".to_string(),
             args: vec![b"test_set_key".to_vec()],
         };
-        
+
         let result = handler.process(smembers_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 0); // Set should be empty
@@ -1132,43 +1212,39 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test ZADD - Add members to a sorted set
         let zadd_command = Command {
             name: "zadd".to_string(),
             args: vec![
                 b"myzset".to_vec(),
-                b"1.0".to_vec(), b"one".to_vec(),
-                b"2.0".to_vec(), b"two".to_vec(),
-                b"3.0".to_vec(), b"three".to_vec(),
+                b"1.0".to_vec(),
+                b"one".to_vec(),
+                b"2.0".to_vec(),
+                b"two".to_vec(),
+                b"3.0".to_vec(),
+                b"three".to_vec(),
             ],
         };
-        
+
         let result = handler.process(zadd_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(3)); // 3 members added
-        
+
         // Test ZSCORE - Get score of a member
         let zscore_command = Command {
             name: "zscore".to_string(),
-            args: vec![
-                b"myzset".to_vec(),
-                b"two".to_vec(),
-            ],
+            args: vec![b"myzset".to_vec(), b"two".to_vec()],
         };
-        
+
         let result = handler.process(zscore_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"2".to_vec())));
-        
+
         // Test ZRANGE - Get range of members by index
         let zrange_command = Command {
             name: "zrange".to_string(),
-            args: vec![
-                b"myzset".to_vec(),
-                b"0".to_vec(),
-                b"-1".to_vec(),
-            ],
+            args: vec![b"myzset".to_vec(), b"0".to_vec(), b"-1".to_vec()],
         };
-        
+
         let result = handler.process(zrange_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 3);
@@ -1178,7 +1254,7 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Test ZRANGE with WITHSCORES
         let zrange_with_scores_command = Command {
             name: "zrange".to_string(),
@@ -1189,8 +1265,11 @@ mod tests {
                 b"WITHSCORES".to_vec(),
             ],
         };
-        
-        let result = handler.process(zrange_with_scores_command, 0).await.unwrap();
+
+        let result = handler
+            .process(zrange_with_scores_command, 0)
+            .await
+            .unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 6); // 3 members + 3 scores
             assert_eq!(members[0], RespValue::BulkString(Some(b"one".to_vec())));
@@ -1202,30 +1281,22 @@ mod tests {
         } else {
             panic!("Unexpected result type");
         }
-        
+
         // Test ZREM - Remove members
         let zrem_command = Command {
             name: "zrem".to_string(),
-            args: vec![
-                b"myzset".to_vec(),
-                b"two".to_vec(),
-                b"nonexistent".to_vec(),
-            ],
+            args: vec![b"myzset".to_vec(), b"two".to_vec(), b"nonexistent".to_vec()],
         };
-        
+
         let result = handler.process(zrem_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 member removed
-        
+
         // Verify after removal
         let zrange_after_command = Command {
             name: "zrange".to_string(),
-            args: vec![
-                b"myzset".to_vec(),
-                b"0".to_vec(),
-                b"-1".to_vec(),
-            ],
+            args: vec![b"myzset".to_vec(), b"0".to_vec(), b"-1".to_vec()],
         };
-        
+
         let result = handler.process(zrange_after_command, 0).await.unwrap();
         if let RespValue::Array(Some(members)) = result {
             assert_eq!(members.len(), 2);
@@ -1242,94 +1313,99 @@ mod tests {
         let storage = StorageEngine::new(config);
         let storage = Arc::new(storage);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Use specific key names to help with type detection
         let setnx_key = b"string_setnx_test_key".to_vec();
         let setex_key = b"string_setex_test_key".to_vec();
         let hash_key = b"hash_test_key".to_vec();
         let list_key = b"list_test_key".to_vec();
         let zset_key = b"zset_test_key".to_vec();
-        
+
         // Clean up any keys that might exist from previous tests
         let _ = handler.storage.del(&setnx_key).await;
         let _ = handler.storage.del(&setex_key).await;
         let _ = handler.storage.del(&hash_key).await;
         let _ = handler.storage.del(&list_key).await;
         let _ = handler.storage.del(&zset_key).await;
-        
+
         // Test SETNX command - key does not exist
         let setnx_command = Command {
             name: "setnx".to_string(),
             args: vec![setnx_key.clone(), b"setnx_value".to_vec()],
         };
-        
+
         let result = handler.process(setnx_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Success, key was set
-        
+
         // Test SETNX command - key exists
         let setnx_command = Command {
             name: "setnx".to_string(),
             args: vec![setnx_key.clone(), b"new_value".to_vec()],
         };
-        
+
         let result = handler.process(setnx_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Failed, key exists
-        
+
         // Verify the value wasn't changed
         let get_command = Command {
             name: "get".to_string(),
             args: vec![setnx_key.clone()],
         };
-        
+
         let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"setnx_value".to_vec())));
-        
+
         // Test SETEX command
         let setex_command = Command {
             name: "setex".to_string(),
             args: vec![setex_key.clone(), b"2".to_vec(), b"setex_value".to_vec()],
         };
-        
+
         let result = handler.process(setex_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check TTL directly via storage engine
         let ttl = handler.storage.ttl(&setex_key).await.unwrap();
         assert!(ttl.is_some(), "TTL should be set on key");
         let ttl_secs = ttl.unwrap().as_secs();
-        assert!(ttl_secs > 0 && ttl_secs <= 2, "TTL should be between 0 and 2 seconds");
-        
+        assert!(
+            ttl_secs > 0 && ttl_secs <= 2,
+            "TTL should be between 0 and 2 seconds"
+        );
+
         // Verify SETEX value was set
         let get_command = Command {
             name: "get".to_string(),
             args: vec![setex_key.clone()],
         };
-        
+
         let result = handler.process(get_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"setex_value".to_vec())));
-        
+
         // Test HMSET command
         let hmset_command = Command {
             name: "hmset".to_string(),
             args: vec![
                 hash_key.clone(),
-                b"field1".to_vec(), b"value1".to_vec(),
-                b"field2".to_vec(), b"value2".to_vec(),
+                b"field1".to_vec(),
+                b"value1".to_vec(),
+                b"field2".to_vec(),
+                b"value2".to_vec(),
             ],
         };
-        
+
         let result = handler.process(hmset_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Test HGET to verify
         let hget_command = Command {
             name: "hget".to_string(),
             args: vec![hash_key.clone(), b"field1".to_vec()],
         };
-        
+
         let result = handler.process(hget_command, 0).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
-        
+
         // Test LTRIM command
         // First set up a list
         let lpush_command = Command {
@@ -1341,26 +1417,26 @@ mod tests {
                 b"a".to_vec(),
             ],
         };
-        
+
         let _ = handler.process(lpush_command, 0).await.unwrap();
-        
+
         // Now trim the list
         let ltrim_command = Command {
             name: "ltrim".to_string(),
             args: vec![list_key.clone(), b"0".to_vec(), b"1".to_vec()],
         };
-        
+
         let result = handler.process(ltrim_command, 0).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         // Check result with LRANGE
         let lrange_command = Command {
             name: "lrange".to_string(),
             args: vec![list_key.clone(), b"0".to_vec(), b"-1".to_vec()],
         };
-        
+
         let result = handler.process(lrange_command, 0).await.unwrap();
-        
+
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"a".to_vec())));
@@ -1368,43 +1444,49 @@ mod tests {
         } else {
             panic!("Expected array response");
         }
-        
+
         // Test ZRANGE with WITHSCORES
         // First set up a sorted set
         let zadd_command = Command {
             name: "zadd".to_string(),
             args: vec![
                 zset_key.clone(),
-                b"1.1".to_vec(), b"one".to_vec(),
-                b"2.2".to_vec(), b"two".to_vec(),
-                b"3.3".to_vec(), b"three".to_vec(),
+                b"1.1".to_vec(),
+                b"one".to_vec(),
+                b"2.2".to_vec(),
+                b"two".to_vec(),
+                b"3.3".to_vec(),
+                b"three".to_vec(),
             ],
         };
-        
+
         let _ = handler.process(zadd_command, 0).await.unwrap();
-        
+
         // Now get the range with scores
         let zrange_command = Command {
             name: "zrange".to_string(),
             args: vec![
-                zset_key.clone(), b"0".to_vec(), b"-1".to_vec(), b"WITHSCORES".to_vec(),
+                zset_key.clone(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"WITHSCORES".to_vec(),
             ],
         };
-        
+
         let result = handler.process(zrange_command, 0).await.unwrap();
-        
+
         if let RespValue::Array(Some(items)) = result {
             // Check that we get 6 items (3 members + 3 scores)
             assert_eq!(items.len(), 6);
-            
+
             // Check first member-score pair
             assert_eq!(items[0], RespValue::BulkString(Some(b"one".to_vec())));
             assert_eq!(items[1], RespValue::BulkString(Some(b"1.1".to_vec())));
-            
+
             // Check second member-score pair
             assert_eq!(items[2], RespValue::BulkString(Some(b"two".to_vec())));
             assert_eq!(items[3], RespValue::BulkString(Some(b"2.2".to_vec())));
-            
+
             // Check third member-score pair
             assert_eq!(items[4], RespValue::BulkString(Some(b"three".to_vec())));
             assert_eq!(items[5], RespValue::BulkString(Some(b"3.3".to_vec())));
@@ -1418,69 +1500,69 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
-        
+
         // Test PEXPIRE command
         let set_command = Command {
             name: "set".to_string(),
             args: vec![b"pexpire_key".to_vec(), b"pexpire_value".to_vec()],
         };
         handler.process(set_command, 0).await.unwrap();
-        
+
         let pexpire_command = Command {
             name: "pexpire".to_string(),
             args: vec![b"pexpire_key".to_vec(), b"2000".to_vec()], // 2000 milliseconds
         };
-        
+
         let result = handler.process(pexpire_command, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
-        
+
         // Check PTTL
         let pttl_command = Command {
             name: "pttl".to_string(),
             args: vec![b"pexpire_key".to_vec()],
         };
-        
+
         let result = handler.process(pttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl <= 2000 && ttl > 0);
         } else {
             panic!("Expected Integer response from PTTL command");
         }
-        
+
         // Check regular TTL as well (should be in seconds)
         let ttl_command = Command {
             name: "ttl".to_string(),
             args: vec![b"pexpire_key".to_vec()],
         };
-        
+
         let result = handler.process(ttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
             assert!(ttl <= 2 && ttl >= 1);
         } else {
             panic!("Expected Integer response from TTL command");
         }
-        
+
         // Test PTTL on non-existent key
         let pttl_nonexistent = Command {
             name: "pttl".to_string(),
             args: vec![b"nonexistent_key".to_vec()],
         };
-        
+
         let result = handler.process(pttl_nonexistent, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(-2)); // -2 means key does not exist
-        
+
         // Test PTTL on key with no expiration
         let set_noexpire = Command {
             name: "set".to_string(),
             args: vec![b"noexpire_key".to_vec(), b"value".to_vec()],
         };
         handler.process(set_noexpire, 0).await.unwrap();
-        
+
         let pttl_noexpire = Command {
             name: "pttl".to_string(),
             args: vec![b"noexpire_key".to_vec()],
         };
-        
+
         let result = handler.process(pttl_noexpire, 0).await.unwrap();
         assert_eq!(result, RespValue::Integer(-1)); // -1 means key exists but has no expiration
     }

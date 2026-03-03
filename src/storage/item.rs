@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 
 /// Redis data type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ impl RedisDataType {
     pub fn as_str(&self) -> &'static str {
         match self {
             RedisDataType::String => "string",
-            RedisDataType::List => "list", 
+            RedisDataType::List => "list",
             RedisDataType::Set => "set",
             RedisDataType::Hash => "hash",
             RedisDataType::ZSet => "zset",
@@ -48,7 +48,7 @@ impl StorageItem {
     /// Create a new storage item with string type (for backwards compatibility)
     pub fn new(value: Vec<u8>) -> Self {
         let now = Instant::now();
-        
+
         StorageItem {
             value,
             data_type: RedisDataType::String,
@@ -57,11 +57,11 @@ impl StorageItem {
             expires_at: None,
         }
     }
-    
+
     /// Create a new storage item with explicit type
     pub fn new_with_type(value: Vec<u8>, data_type: RedisDataType) -> Self {
         let now = Instant::now();
-        
+
         StorageItem {
             value,
             data_type,
@@ -70,7 +70,7 @@ impl StorageItem {
             expires_at: None,
         }
     }
-    
+
     /// Check if this item has expired
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
@@ -79,7 +79,7 @@ impl StorageItem {
             false
         }
     }
-    
+
     /// Calculate the remaining TTL (time-to-live)
     pub fn ttl(&self) -> Option<Duration> {
         self.expires_at.map(|expires_at| {
@@ -91,19 +91,19 @@ impl StorageItem {
             }
         })
     }
-    
+
     /// Update the item's access time
     pub fn touch(&mut self) {
         self.last_accessed = Instant::now();
     }
-    
+
     /// Set a new expiration time
     pub fn expire(&mut self, ttl: Duration) {
         self.expires_at = Some(Instant::now() + ttl);
     }
-    
+
     /// Remove the expiration time
     pub fn remove_expiry(&mut self) {
         self.expires_at = None;
     }
-} 
+}

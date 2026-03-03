@@ -1,5 +1,5 @@
-use crate::command::{CommandError, CommandResult};
 use crate::command::utils::{bytes_to_string, parse_ttl};
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::{SetResult, StorageEngine};
 use crate::storage::item::RedisDataType;
@@ -33,7 +33,7 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 let seconds = parse_ttl(&args[i + 1])?;
                 ttl = seconds;
                 i += 2;
-            },
+            }
             "PX" => {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
@@ -45,12 +45,12 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
                 if millis <= 0 {
                     return Err(CommandError::InvalidArgument(
-                        "invalid expire time in 'set' command".to_string()
+                        "invalid expire time in 'set' command".to_string(),
                     ));
                 }
                 ttl = Some(std::time::Duration::from_millis(millis as u64));
                 i += 2;
-            },
+            }
             "EXAT" => {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
@@ -61,7 +61,7 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 })?;
                 if timestamp <= 0 {
                     return Err(CommandError::InvalidArgument(
-                        "invalid expire time in 'set' command".to_string()
+                        "invalid expire time in 'set' command".to_string(),
                     ));
                 }
                 let now_secs = std::time::SystemTime::now()
@@ -76,7 +76,7 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     ttl = Some(std::time::Duration::from_secs(diff as u64));
                 }
                 i += 2;
-            },
+            }
             "PXAT" => {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
@@ -87,7 +87,7 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 })?;
                 if timestamp_ms <= 0 {
                     return Err(CommandError::InvalidArgument(
-                        "invalid expire time in 'set' command".to_string()
+                        "invalid expire time in 'set' command".to_string(),
                     ));
                 }
                 let now_ms = std::time::SystemTime::now()
@@ -101,26 +101,27 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     ttl = Some(std::time::Duration::from_millis(diff_ms as u64));
                 }
                 i += 2;
-            },
+            }
             "GET" => {
                 get_old = true;
                 i += 1;
-            },
+            }
             "NX" => {
                 nx = true;
                 i += 1;
-            },
+            }
             "XX" => {
                 xx = true;
                 i += 1;
-            },
+            }
             "KEEPTTL" => {
                 keepttl = true;
                 i += 1;
-            },
+            }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unsupported SET option: {}", option
+                    "Unsupported SET option: {}",
+                    option
                 )));
             }
         }
@@ -129,32 +130,36 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // KEEPTTL and EX/PX are mutually exclusive
     if keepttl && ttl.is_some() {
         return Err(CommandError::InvalidArgument(
-            "KEEPTTL and EX/PX options cannot be used together".to_string()
+            "KEEPTTL and EX/PX options cannot be used together".to_string(),
         ));
     }
 
     // NX and XX options are mutually exclusive
     if nx && xx {
         return Err(CommandError::InvalidArgument(
-            "NX and XX options cannot be used together".to_string()
+            "NX and XX options cannot be used together".to_string(),
         ));
     }
 
     // For large values, add debug logging
     if value.len() > 10240 {
-        tracing::debug!("SET command with large value: key length={}, value length={}",
-                        key.len(), value.len());
+        tracing::debug!(
+            "SET command with large value: key length={}, value length={}",
+            key.len(),
+            value.len()
+        );
     }
 
     // Use atomic set_with_options for NX/XX/GET/KEEPTTL - single atomic operation
-    match engine.set_with_options(key, value, ttl, nx, xx, get_old, keepttl).await? {
+    match engine
+        .set_with_options(key, value, ttl, nx, xx, get_old, keepttl)
+        .await?
+    {
         SetResult::OldValue(old_val) => {
             // GET flag was specified
             Ok(RespValue::BulkString(old_val))
         }
-        SetResult::Ok => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        SetResult::Ok => Ok(RespValue::SimpleString("OK".to_string())),
         SetResult::NotSet => {
             // NX/XX condition not met
             if get_old {
@@ -179,9 +184,7 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
 
     // Single DashMap lookup: type check + value read atomically
-    let value = engine.atomic_read(key, RedisDataType::String, |data| {
-        Ok(data.cloned())
-    })?;
+    let value = engine.atomic_read(key, RedisDataType::String, |data| Ok(data.cloned()))?;
 
     Ok(RespValue::BulkString(value))
 }
@@ -191,7 +194,7 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let mut values = Vec::with_capacity(args.len());
     for key in args {
         // Redis MGET returns nil for non-string keys (never WRONGTYPE)
@@ -205,7 +208,7 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
     }
-    
+
     Ok(RespValue::Array(Some(values)))
 }
 
@@ -216,17 +219,22 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     // Collect all keys for atomic locking
-    let keys: Vec<Vec<u8>> = (0..args.len()).step_by(2).map(|i| args[i].clone()).collect();
+    let keys: Vec<Vec<u8>> = (0..args.len())
+        .step_by(2)
+        .map(|i| args[i].clone())
+        .collect();
 
     // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions/MSETNX
     let _guard = engine.lock_keys(&keys).await;
 
     for i in (0..args.len()).step_by(2) {
-        engine.set(args[i].clone(), args[i+1].clone(), None).await?;
+        engine
+            .set(args[i].clone(), args[i + 1].clone(), None)
+            .await?;
     }
-    
+
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
@@ -301,17 +309,22 @@ pub async fn strlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
-    
+
     // Check if the key exists and get its type
     let key_type = engine.get_type(&key).await?;
-    
+
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
+    if key_type == "list"
+        || key_type == "set"
+        || key_type == "zset"
+        || key_type == "hash"
+        || key_type == "stream"
+    {
         return Err(CommandError::WrongType);
     }
-    
+
     // Get the value length
     match engine.get(&key).await? {
         Some(value) => Ok(RespValue::Integer(value.len() as i64)),
@@ -324,47 +337,52 @@ pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
-    
+
     // Parse start and end positions
     let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Start position is not a valid integer".to_string())
     })?;
-    
+
     let end = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("End position is not a valid integer".to_string())
     })?;
-    
+
     // Check if the key exists and get its type
     let key_type = engine.get_type(&key).await?;
-    
+
     // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list" || key_type == "set" || key_type == "zset" || key_type == "hash" || key_type == "stream" {
+    if key_type == "list"
+        || key_type == "set"
+        || key_type == "zset"
+        || key_type == "hash"
+        || key_type == "stream"
+    {
         return Err(CommandError::WrongType);
     }
-    
+
     // Get the value
     let value = match engine.get(&key).await? {
         Some(data) => data,
         None => return Ok(RespValue::BulkString(Some(Vec::new()))),
     };
-    
+
     let len = value.len() as i64;
-    
+
     // Handle negative indices (Python-style)
     let norm_start = if start < 0 { len + start } else { start };
     let norm_end = if end < 0 { len + end } else { end };
-    
+
     // Clamp to valid range
     let start_idx = std::cmp::max(0, norm_start) as usize;
     let end_idx = std::cmp::min(len - 1, norm_end) as usize;
-    
+
     // Extract substring
     if start_idx >= value.len() || norm_start > norm_end {
         return Ok(RespValue::BulkString(Some(Vec::new())));
     }
-    
+
     let result = value[start_idx..=std::cmp::min(end_idx, value.len() - 1)].to_vec();
     Ok(RespValue::BulkString(Some(result)))
 }
@@ -380,9 +398,9 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let value_to_set = args[2].clone();
 
     // Parse offset
-    let offset = bytes_to_string(&args[1])?.parse::<usize>().map_err(|_| {
-        CommandError::InvalidArgument("Offset is not a valid integer".to_string())
-    })?;
+    let offset = bytes_to_string(&args[1])?
+        .parse::<usize>()
+        .map_err(|_| CommandError::InvalidArgument("Offset is not a valid integer".to_string()))?;
 
     // Validate size before acquiring lock
     const MAX_STRING_SIZE: usize = 512 * 1024 * 1024;
@@ -438,7 +456,10 @@ pub async fn msetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     // Collect all keys for atomic locking
-    let keys: Vec<Vec<u8>> = (0..args.len()).step_by(2).map(|i| args[i].clone()).collect();
+    let keys: Vec<Vec<u8>> = (0..args.len())
+        .step_by(2)
+        .map(|i| args[i].clone())
+        .collect();
 
     // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions
     let _guard = engine.lock_keys(&keys).await;
@@ -451,7 +472,10 @@ pub async fn msetnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut all_inserted = true;
 
     for i in (0..args.len()).step_by(2) {
-        match engine.set_nx(args[i].clone(), args[i + 1].clone(), None).await {
+        match engine
+            .set_nx(args[i].clone(), args[i + 1].clone(), None)
+            .await
+        {
             Ok((true, version)) => {
                 inserted_keys.push((args[i].clone(), version));
             }
@@ -492,9 +516,9 @@ pub async fn incrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let increment = bytes_to_string(&args[1])?.parse::<f64>().map_err(|_| {
-        CommandError::InvalidArgument("value is not a valid float".to_string())
-    })?;
+    let increment = bytes_to_string(&args[1])?
+        .parse::<f64>()
+        .map_err(|_| CommandError::InvalidArgument("value is not a valid float".to_string()))?;
 
     let new_value = engine.atomic_incr_float(&args[0], increment)?;
 
@@ -518,7 +542,10 @@ pub async fn setnx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = args[0].clone();
     let value = args[1].clone();
 
-    match engine.set_with_options(key, value, None, true, false, false, false).await? {
+    match engine
+        .set_with_options(key, value, None, true, false, false, false)
+        .await?
+    {
         SetResult::Ok => Ok(RespValue::Integer(1)),
         SetResult::NotSet => Ok(RespValue::Integer(0)),
         _ => Ok(RespValue::Integer(0)),
@@ -538,7 +565,9 @@ pub async fn setex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
 
     if seconds <= 0 {
-        return Err(CommandError::InvalidArgument("invalid expire time in 'setex' command".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "invalid expire time in 'setex' command".to_string(),
+        ));
     }
 
     let value = args[2].clone();
@@ -604,16 +633,18 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         }
         if gt
             && let Some(current) = current_ttl
-                && let Some(new_ttl) = &ttl
-                    && *new_ttl <= current {
-                        return Ok(RespValue::Integer(0));
-                    }
+            && let Some(new_ttl) = &ttl
+            && *new_ttl <= current
+        {
+            return Ok(RespValue::Integer(0));
+        }
         if lt
             && let Some(current) = current_ttl
-                && let Some(new_ttl) = &ttl
-                    && *new_ttl >= current {
-                        return Ok(RespValue::Integer(0));
-                    }
+            && let Some(new_ttl) = &ttl
+            && *new_ttl >= current
+        {
+            return Ok(RespValue::Integer(0));
+        }
     }
 
     match engine.expire(&key, ttl).await? {
@@ -627,24 +658,28 @@ pub async fn pttl(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
-    
+
     let key = args[0].clone();
-    
+
     // First check if the key exists
     let exists = engine.exists(&key).await?;
     if !exists {
         return Ok(RespValue::Integer(-2)); // Key does not exist
     }
-    
+
     // If key exists, check its TTL
     let ttl = engine.ttl(&key).await?;
-    
+
     match ttl {
         Some(duration) => {
             // Return milliseconds, ensure we return at least 1 if the duration is >0
             let millis = duration.as_millis();
-            Ok(RespValue::Integer(if millis > 0 { millis as i64 } else { 1 }))
-        },
+            Ok(RespValue::Integer(if millis > 0 {
+                millis as i64
+            } else {
+                1
+            }))
+        }
         None => Ok(RespValue::Integer(-1)), // Key exists but has no expiration
     }
 }
@@ -669,34 +704,46 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let seconds = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if seconds <= 0 {
-                    return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'getex' command".to_string(),
+                    ));
                 }
                 Some(Some(std::time::Duration::from_secs(seconds as u64)))
-            },
+            }
             "PX" => {
                 if args.len() != 3 {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let millis = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if millis <= 0 {
-                    return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'getex' command".to_string(),
+                    ));
                 }
                 Some(Some(std::time::Duration::from_millis(millis as u64)))
-            },
+            }
             "EXAT" => {
                 if args.len() != 3 {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let timestamp = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if timestamp <= 0 {
-                    return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'getex' command".to_string(),
+                    ));
                 }
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -706,18 +753,24 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     // Past timestamp - set a zero duration so key expires immediately
                     Some(Some(std::time::Duration::from_secs(0)))
                 } else {
-                    Some(Some(std::time::Duration::from_secs((timestamp - now_unix) as u64)))
+                    Some(Some(std::time::Duration::from_secs(
+                        (timestamp - now_unix) as u64,
+                    )))
                 }
-            },
+            }
             "PXAT" => {
                 if args.len() != 3 {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let timestamp_ms = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+                    CommandError::InvalidArgument(
+                        "value is not an integer or out of range".to_string(),
+                    )
                 })?;
                 if timestamp_ms <= 0 {
-                    return Err(CommandError::InvalidArgument("invalid expire time in 'getex' command".to_string()));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'getex' command".to_string(),
+                    ));
                 }
                 let now_unix_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -726,18 +779,21 @@ pub async fn getex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if timestamp_ms <= now_unix_ms {
                     Some(Some(std::time::Duration::from_secs(0)))
                 } else {
-                    Some(Some(std::time::Duration::from_millis((timestamp_ms - now_unix_ms) as u64)))
+                    Some(Some(std::time::Duration::from_millis(
+                        (timestamp_ms - now_unix_ms) as u64,
+                    )))
                 }
-            },
+            }
             "PERSIST" => {
                 if args.len() != 2 {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 Some(None) // Remove expiry
-            },
+            }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unsupported GETEX option: {}", option
+                    "Unsupported GETEX option: {}",
+                    option
                 )));
             }
         }
@@ -774,7 +830,9 @@ pub async fn psetex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
 
     if millis <= 0 {
-        return Err(CommandError::InvalidArgument("invalid expire time in 'psetex' command".to_string()));
+        return Err(CommandError::InvalidArgument(
+            "invalid expire time in 'psetex' command".to_string(),
+        ));
     }
 
     let value = args[2].clone();
@@ -811,27 +869,32 @@ pub async fn lcs(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             "LEN" => {
                 len_only = true;
                 i += 1;
-            },
+            }
             "IDX" => {
                 idx = true;
                 i += 1;
-            },
+            }
             "MINMATCHLEN" => {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
-                min_match_len = bytes_to_string(&args[i + 1])?.parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-                })?;
+                min_match_len = bytes_to_string(&args[i + 1])?
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        CommandError::InvalidArgument(
+                            "value is not an integer or out of range".to_string(),
+                        )
+                    })?;
                 i += 2;
-            },
+            }
             "WITHMATCHLEN" => {
                 with_match_len = true;
                 i += 1;
-            },
+            }
             _ => {
                 return Err(CommandError::InvalidArgument(format!(
-                    "Unsupported LCS option: {}", option
+                    "Unsupported LCS option: {}",
+                    option
                 )));
             }
         }
@@ -969,53 +1032,53 @@ mod tests {
     use super::*;
     use crate::storage::engine::StorageConfig;
     use std::sync::Arc;
-    
+
     #[tokio::test]
     async fn test_string_commands() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Test SET and GET
         let set_args = vec![b"test_key".to_vec(), b"test_value".to_vec()];
         let result = set(&engine, &set_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
-        
+
         let get_args = vec![b"test_key".to_vec()];
         let result = get(&engine, &get_args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"test_value".to_vec())));
-        
+
         // Test INCR
         let incr_args = vec![b"counter".to_vec()];
         let result = incr(&engine, &incr_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
-        
+
         let result = incr(&engine, &incr_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(2));
-        
+
         // Test DECR
         let decr_args = vec![b"counter".to_vec()];
         let result = decr(&engine, &decr_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
-        
+
         // Test APPEND
         let append_args = vec![b"str_key".to_vec(), b"Hello".to_vec()];
         let result = append(&engine, &append_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(5));
-        
+
         let append_args = vec![b"str_key".to_vec(), b" World".to_vec()];
         let result = append(&engine, &append_args).await.unwrap();
         assert_eq!(result, RespValue::Integer(11));
-        
+
         let get_args = vec![b"str_key".to_vec()];
         let result = get(&engine, &get_args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"Hello World".to_vec())));
     }
-    
+
     #[tokio::test]
     async fn test_set_conflicting_options() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Test SET with conflicting NX and XX options
         let set_args = vec![
             b"key".to_vec(),
@@ -1023,17 +1086,17 @@ mod tests {
             b"NX".to_vec(),
             b"XX".to_vec(),
         ];
-        
+
         let result = set(&engine, &set_args).await;
         assert!(result.is_err());
-        
+
         if let Err(CommandError::InvalidArgument(msg)) = result {
             assert!(msg.contains("NX and XX options cannot be used together"));
         } else {
             panic!("Expected InvalidArgument error for conflicting options");
         }
     }
-    
+
     #[tokio::test]
     async fn test_large_json_value() {
         let mut config = StorageConfig::default();
@@ -1041,78 +1104,94 @@ mod tests {
         config.max_value_size = 1024 * 1024 * 10; // 10MB
         config.max_memory = 1024 * 1024 * 100; // 100MB - ensure enough memory for the test
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Create a large JSON string with various special characters and nested structures
         let mut large_json = String::from("{\n  \"items\": [\n");
-        
+
         // Generate a large nested JSON structure - reduce size to avoid test failures
         // Using a smaller dataset to ensure test passes in CI environments
         for i in 0..100 {
             large_json.push_str(&format!(
                 "    {{\n      \"id\": {},\n      \"name\": \"Item {}\",\n      \"description\": \"A description with quotes and special chars\",\n      \"active\": {}\n    }}{}\n",
-                i, 
+                i,
                 i,
                 if i % 2 == 0 { "true" } else { "false" },
                 if i < 99 { "," } else { "" }
             ));
         }
-        
+
         large_json.push_str("  ]\n}");
-        
+
         // Verify size is still good for testing
-        assert!(large_json.len() > 5000, "Generated JSON should be at least 5KB");
+        assert!(
+            large_json.len() > 5000,
+            "Generated JSON should be at least 5KB"
+        );
         println!("Large JSON size for test: {} bytes", large_json.len());
-        
+
         // Test setting the large JSON value
         let key = "test_json_key".to_string();
-        let set_args = vec![
-            key.as_bytes().to_vec(),
-            large_json.as_bytes().to_vec(),
-        ];
-        
+        let set_args = vec![key.as_bytes().to_vec(), large_json.as_bytes().to_vec()];
+
         // Try setting the value
         let result = set(&engine, &set_args).await;
         if result.is_err() {
             println!("Set error: {:?}", result);
             if let Err(CommandError::InvalidArgument(msg)) = &result {
                 if msg.contains("SET operation failed") {
-                    println!("Storage error during SET operation. Check memory limits and value size.");
+                    println!(
+                        "Storage error during SET operation. Check memory limits and value size."
+                    );
                 }
             }
         }
-        
-        assert!(result.is_ok(), "Failed to set large JSON value: {:?}", result);
+
+        assert!(
+            result.is_ok(),
+            "Failed to set large JSON value: {:?}",
+            result
+        );
         assert_eq!(result.unwrap(), RespValue::SimpleString("OK".to_string()));
-        
+
         // Test retrieving the large JSON value
         let get_args = vec![key.as_bytes().to_vec()];
         let result = get(&engine, &get_args).await;
-        
+
         if result.is_err() {
             println!("Get error: {:?}", result);
         }
-        assert!(result.is_ok(), "Failed to get large JSON value: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "Failed to get large JSON value: {:?}",
+            result
+        );
+
         if let Ok(RespValue::BulkString(Some(value))) = result {
             let retrieved_json = String::from_utf8_lossy(&value);
-            
+
             // Check if lengths match first
             if retrieved_json.len() != large_json.len() {
-                println!("Length mismatch! Original: {}, Retrieved: {}", 
-                         large_json.len(), retrieved_json.len());
+                println!(
+                    "Length mismatch! Original: {}, Retrieved: {}",
+                    large_json.len(),
+                    retrieved_json.len()
+                );
             }
-            
-            assert_eq!(retrieved_json, large_json, "Retrieved JSON does not match original");
+
+            assert_eq!(
+                retrieved_json, large_json,
+                "Retrieved JSON does not match original"
+            );
         } else {
             panic!("Expected BulkString response for large JSON value");
         }
     }
-    
+
     #[tokio::test]
     async fn test_json_with_control_characters() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Create a JSON string with control characters that could potentially cause issues
         let json_with_controls = format!(
             "{{\"data\":\"Some data with control chars: {}{}{}{}{}\",\"binary\":\"ABC\"}}",
@@ -1122,68 +1201,91 @@ mod tests {
             '\u{001B}', // ESC (Escape)
             '\u{001F}'  // US (Unit Separator)
         );
-        
+
         // Test setting the value with control characters
         let set_args = vec![
             b"control_key".to_vec(),
             json_with_controls.as_bytes().to_vec(),
         ];
-        
+
         let result = set(&engine, &set_args).await;
         // We should still be able to store this, even with the control characters
-        assert!(result.is_ok(), "Failed to set JSON with control characters: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "Failed to set JSON with control characters: {:?}",
+            result
+        );
+
         // Test retrieving the value
         let get_args = vec![b"control_key".to_vec()];
         let result = get(&engine, &get_args).await;
-        assert!(result.is_ok(), "Failed to get JSON with control characters: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "Failed to get JSON with control characters: {:?}",
+            result
+        );
+
         if let Ok(RespValue::BulkString(Some(value))) = result {
             let retrieved_json = String::from_utf8_lossy(&value);
-            assert_eq!(retrieved_json, json_with_controls, "Retrieved JSON does not match original");
+            assert_eq!(
+                retrieved_json, json_with_controls,
+                "Retrieved JSON does not match original"
+            );
         } else {
             panic!("Expected BulkString response for JSON with control characters");
         }
     }
-    
+
     #[tokio::test]
     async fn test_problematic_resp_patterns() {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
-        
+
         // Test data patterns that previously caused RESP parsing issues
         let test_patterns = vec![
             "B64JSON:W3data",
-            "+FAKE_SIMPLE_STRING", 
+            "+FAKE_SIMPLE_STRING",
             "-FAKE_ERROR",
             ":12345_FAKE_INTEGER",
             "$999\r\nFAKE_BULK",
             "*2\r\nFAKE_ARRAY",
         ];
-        
+
         for (i, pattern) in test_patterns.iter().enumerate() {
             let key = format!("test_key_{}", i).into_bytes();
-            
+
             // Store the problematic pattern - this should work now
             let set_args = vec![key.clone(), pattern.as_bytes().to_vec()];
             let result = set(&engine, &set_args).await;
-            assert!(result.is_ok(), "Should be able to store pattern: {}", pattern);
+            assert!(
+                result.is_ok(),
+                "Should be able to store pattern: {}",
+                pattern
+            );
             assert_eq!(result.unwrap(), RespValue::SimpleString("OK".to_string()));
-            
+
             // Retrieve the pattern - this should also work and return exact data
             let get_args = vec![key];
             let result = get(&engine, &get_args).await;
-            assert!(result.is_ok(), "Should be able to retrieve pattern: {}", pattern);
-            
+            assert!(
+                result.is_ok(),
+                "Should be able to retrieve pattern: {}",
+                pattern
+            );
+
             if let Ok(RespValue::BulkString(Some(data))) = result {
                 let retrieved = String::from_utf8_lossy(&data);
-                assert_eq!(retrieved, *pattern, "Data should match exactly for pattern: {}", pattern);
+                assert_eq!(
+                    retrieved, *pattern,
+                    "Data should match exactly for pattern: {}",
+                    pattern
+                );
             } else {
                 panic!("Expected BulkString response for pattern: {}", pattern);
             }
         }
     }
-    
+
     #[tokio::test]
     async fn test_b64json_specific_case() {
         let config = StorageConfig::default();
@@ -1199,18 +1301,32 @@ mod tests {
         ];
 
         let set_result = set(&engine, &set_args).await;
-        assert!(set_result.is_ok(), "SET with B64JSON data should succeed: {:?}", set_result);
-        assert_eq!(set_result.unwrap(), RespValue::SimpleString("OK".to_string()));
+        assert!(
+            set_result.is_ok(),
+            "SET with B64JSON data should succeed: {:?}",
+            set_result
+        );
+        assert_eq!(
+            set_result.unwrap(),
+            RespValue::SimpleString("OK".to_string())
+        );
 
         // GET the data back
         let get_args = vec![b"test_b64json_key".to_vec()];
         let get_result = get(&engine, &get_args).await;
-        assert!(get_result.is_ok(), "GET with B64JSON data should succeed: {:?}", get_result);
+        assert!(
+            get_result.is_ok(),
+            "GET with B64JSON data should succeed: {:?}",
+            get_result
+        );
 
         // Verify we get back exactly the same data
         if let Ok(RespValue::BulkString(Some(retrieved_data))) = get_result {
             let retrieved_str = String::from_utf8_lossy(&retrieved_data);
-            assert_eq!(retrieved_str, b64json_data, "Retrieved B64JSON data should match original exactly");
+            assert_eq!(
+                retrieved_str, b64json_data,
+                "Retrieved B64JSON data should match original exactly"
+            );
             println!("✅ B64JSON test passed! Original: {}", b64json_data);
             println!("✅ Retrieved: {}", retrieved_str);
         } else {
@@ -1238,19 +1354,35 @@ mod tests {
             // SET the data
             let set_args = vec![key.clone(), data.as_bytes().to_vec()];
             let set_result = set(&engine, &set_args).await;
-            assert!(set_result.is_ok(), "SET should succeed for: {} - {:?}", description, set_result);
-            assert_eq!(set_result.unwrap(), RespValue::SimpleString("OK".to_string()));
+            assert!(
+                set_result.is_ok(),
+                "SET should succeed for: {} - {:?}",
+                description,
+                set_result
+            );
+            assert_eq!(
+                set_result.unwrap(),
+                RespValue::SimpleString("OK".to_string())
+            );
 
             // GET the data back
             let get_args = vec![key.clone()];
             let get_result = get(&engine, &get_args).await;
-            assert!(get_result.is_ok(), "GET should succeed for: {} - {:?}", description, get_result);
+            assert!(
+                get_result.is_ok(),
+                "GET should succeed for: {} - {:?}",
+                description,
+                get_result
+            );
 
             // Verify exact match
             if let Ok(RespValue::BulkString(Some(retrieved_data))) = get_result {
                 let retrieved_str = String::from_utf8_lossy(&retrieved_data);
-                assert_eq!(retrieved_str, data,
-                    "Data mismatch for {}: expected '{}', got '{}'", description, data, retrieved_str);
+                assert_eq!(
+                    retrieved_str, data,
+                    "Data mismatch for {}: expected '{}', got '{}'",
+                    description, data, retrieved_str
+                );
                 println!("✅ Test passed for: {}", description);
             } else {
                 panic!("Expected BulkString response for: {}", description);
@@ -1285,9 +1417,11 @@ mod tests {
 
             if let Ok(RespValue::BulkString(Some(data))) = result {
                 let retrieved = String::from_utf8_lossy(&data);
-                assert_eq!(retrieved, *expected_value,
+                assert_eq!(
+                    retrieved, *expected_value,
                     "Data mismatch for key {}: expected '{}', got '{}'",
-                    key, expected_value, retrieved);
+                    key, expected_value, retrieved
+                );
             } else {
                 panic!("Expected BulkString for key {}", key);
             }
@@ -1307,7 +1441,10 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(None));
 
         // Set a key, then GETEX without options just returns the value
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
         let args = vec![b"mykey".to_vec()];
         let result = getex(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
@@ -1318,7 +1455,10 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
 
         // GETEX with EX sets expiration in seconds
         let args = vec![b"mykey".to_vec(), b"EX".to_vec(), b"100".to_vec()];
@@ -1337,7 +1477,10 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
 
         // GETEX with PX sets expiration in milliseconds
         let args = vec![b"mykey".to_vec(), b"PX".to_vec(), b"50000".to_vec()];
@@ -1356,7 +1499,14 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Set with TTL
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), Some(std::time::Duration::from_secs(60))).await.unwrap();
+        engine
+            .set(
+                b"mykey".to_vec(),
+                b"myvalue".to_vec(),
+                Some(std::time::Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
 
         // GETEX PERSIST removes the TTL
         let args = vec![b"mykey".to_vec(), b"PERSIST".to_vec()];
@@ -1372,7 +1522,10 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
 
         // EX with non-positive value
         let args = vec![b"mykey".to_vec(), b"EX".to_vec(), b"0".to_vec()];
@@ -1397,7 +1550,10 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(None));
 
         // Set a key, GETDEL returns value and deletes
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
         let args = vec![b"mykey".to_vec()];
         let result = getdel(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
@@ -1470,8 +1626,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"ohmytext".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"mynewtext".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"ohmytext".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"mynewtext".to_vec(), None)
+            .await
+            .unwrap();
 
         // Default: returns the LCS string
         let args = vec![b"key1".to_vec(), b"key2".to_vec()];
@@ -1484,8 +1646,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"ohmytext".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"mynewtext".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"ohmytext".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"mynewtext".to_vec(), None)
+            .await
+            .unwrap();
 
         // LEN option returns just the length
         let args = vec![b"key1".to_vec(), b"key2".to_vec(), b"LEN".to_vec()];
@@ -1498,8 +1666,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"ohmytext".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"mynewtext".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"ohmytext".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"mynewtext".to_vec(), None)
+            .await
+            .unwrap();
 
         // IDX option returns matching ranges
         let args = vec![b"key1".to_vec(), b"key2".to_vec(), b"IDX".to_vec()];
@@ -1521,12 +1695,20 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"ohmytext".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"mynewtext".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"ohmytext".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"mynewtext".to_vec(), None)
+            .await
+            .unwrap();
 
         let args = vec![
-            b"key1".to_vec(), b"key2".to_vec(),
-            b"IDX".to_vec(), b"WITHMATCHLEN".to_vec(),
+            b"key1".to_vec(),
+            b"key2".to_vec(),
+            b"IDX".to_vec(),
+            b"WITHMATCHLEN".to_vec(),
         ];
         let result = lcs(&engine, &args).await.unwrap();
 
@@ -1550,13 +1732,22 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"ohmytext".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"mynewtext".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"ohmytext".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"mynewtext".to_vec(), None)
+            .await
+            .unwrap();
 
         // MINMATCHLEN 4 filters out matches shorter than 4
         let args = vec![
-            b"key1".to_vec(), b"key2".to_vec(),
-            b"IDX".to_vec(), b"MINMATCHLEN".to_vec(), b"4".to_vec(),
+            b"key1".to_vec(),
+            b"key2".to_vec(),
+            b"IDX".to_vec(),
+            b"MINMATCHLEN".to_vec(),
+            b"4".to_vec(),
         ];
         let result = lcs(&engine, &args).await.unwrap();
 
@@ -1566,7 +1757,9 @@ mod tests {
                 for m in matches {
                     if let RespValue::Array(Some(entry)) = m {
                         if let RespValue::Array(Some(a_range)) = &entry[0] {
-                            if let (RespValue::Integer(start), RespValue::Integer(end)) = (&a_range[0], &a_range[1]) {
+                            if let (RespValue::Integer(start), RespValue::Integer(end)) =
+                                (&a_range[0], &a_range[1])
+                            {
                                 assert!((end - start + 1) >= 4);
                             }
                         }
@@ -1587,7 +1780,10 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(Vec::new())));
 
         // One key exists
-        engine.set(b"key1".to_vec(), b"hello".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"hello".to_vec(), None)
+            .await
+            .unwrap();
         let result = lcs(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(Vec::new())));
     }
@@ -1597,8 +1793,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"key1".to_vec(), b"hello".to_vec(), None).await.unwrap();
-        engine.set(b"key2".to_vec(), b"hello".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key1".to_vec(), b"hello".to_vec(), None)
+            .await
+            .unwrap();
+        engine
+            .set(b"key2".to_vec(), b"hello".to_vec(), None)
+            .await
+            .unwrap();
 
         let args = vec![b"key1".to_vec(), b"key2".to_vec()];
         let result = lcs(&engine, &args).await.unwrap();
@@ -1614,7 +1816,10 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"mykey".to_vec(), b"Hello, World!".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"Hello, World!".to_vec(), None)
+            .await
+            .unwrap();
 
         // SUBSTR should behave exactly like GETRANGE
         let args = vec![b"mykey".to_vec(), b"0".to_vec(), b"4".to_vec()];
@@ -1622,14 +1827,20 @@ mod tests {
         let getrange_result = getrange(&engine, &args).await.unwrap();
         let substr_result = substr(&engine, &args).await.unwrap();
         assert_eq!(getrange_result, substr_result);
-        assert_eq!(substr_result, RespValue::BulkString(Some(b"Hello".to_vec())));
+        assert_eq!(
+            substr_result,
+            RespValue::BulkString(Some(b"Hello".to_vec()))
+        );
 
         // Test with negative indices too
         let args = vec![b"mykey".to_vec(), b"-6".to_vec(), b"-1".to_vec()];
         let getrange_result = getrange(&engine, &args).await.unwrap();
         let substr_result = substr(&engine, &args).await.unwrap();
         assert_eq!(getrange_result, substr_result);
-        assert_eq!(substr_result, RespValue::BulkString(Some(b"World!".to_vec())));
+        assert_eq!(
+            substr_result,
+            RespValue::BulkString(Some(b"World!".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -1732,7 +1943,10 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Start from 1000
-        engine.set(b"decr_counter".to_vec(), b"1000".to_vec(), None).await.unwrap();
+        engine
+            .set(b"decr_counter".to_vec(), b"1000".to_vec(), None)
+            .await
+            .unwrap();
 
         let num_tasks = 100;
         let mut handles = Vec::new();
@@ -1784,13 +1998,19 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Set one key that will block the MSETNX
-        engine.set(b"ms_key2".to_vec(), b"existing".to_vec(), None).await.unwrap();
+        engine
+            .set(b"ms_key2".to_vec(), b"existing".to_vec(), None)
+            .await
+            .unwrap();
 
         // MSETNX should fail because ms_key2 exists
         let args = vec![
-            b"ms_key1".to_vec(), b"val1".to_vec(),
-            b"ms_key2".to_vec(), b"val2".to_vec(),
-            b"ms_key3".to_vec(), b"val3".to_vec(),
+            b"ms_key1".to_vec(),
+            b"val1".to_vec(),
+            b"ms_key2".to_vec(),
+            b"val2".to_vec(),
+            b"ms_key3".to_vec(),
+            b"val3".to_vec(),
         ];
         let result = msetnx(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
@@ -1811,8 +2031,10 @@ mod tests {
 
         // MSETNX with no existing keys should succeed
         let args = vec![
-            b"msnx_a".to_vec(), b"v1".to_vec(),
-            b"msnx_b".to_vec(), b"v2".to_vec(),
+            b"msnx_a".to_vec(),
+            b"v1".to_vec(),
+            b"msnx_b".to_vec(),
+            b"v2".to_vec(),
         ];
         let result = msetnx(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
@@ -1866,7 +2088,10 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set(b"gd_key".to_vec(), b"myval".to_vec(), None).await.unwrap();
+        engine
+            .set(b"gd_key".to_vec(), b"myval".to_vec(), None)
+            .await
+            .unwrap();
 
         let args = vec![b"gd_key".to_vec()];
         let result = getdel(&engine, &args).await.unwrap();
@@ -1887,8 +2112,10 @@ mod tests {
 
         // Set with TTL
         let args = vec![
-            b"kt_key".to_vec(), b"val1".to_vec(),
-            b"EX".to_vec(), b"100".to_vec(),
+            b"kt_key".to_vec(),
+            b"val1".to_vec(),
+            b"EX".to_vec(),
+            b"100".to_vec(),
         ];
         set(&engine, &args).await.unwrap();
 
@@ -1897,10 +2124,7 @@ mod tests {
         assert!(ttl.is_some());
 
         // SET with KEEPTTL should preserve the TTL
-        let args = vec![
-            b"kt_key".to_vec(), b"val2".to_vec(),
-            b"KEEPTTL".to_vec(),
-        ];
+        let args = vec![b"kt_key".to_vec(), b"val2".to_vec(), b"KEEPTTL".to_vec()];
         set(&engine, &args).await.unwrap();
 
         // Value should be updated
@@ -1963,8 +2187,14 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Set a key with TTL
-        engine.set(b"ttl_key".to_vec(), b"hello".to_vec(),
-            Some(std::time::Duration::from_secs(3600))).await.unwrap();
+        engine
+            .set(
+                b"ttl_key".to_vec(),
+                b"hello".to_vec(),
+                Some(std::time::Duration::from_secs(3600)),
+            )
+            .await
+            .unwrap();
 
         // SETRANGE should preserve the TTL
         let args = vec![b"ttl_key".to_vec(), b"0".to_vec(), b"world".to_vec()];
@@ -1981,7 +2211,15 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create a list key
-        engine.set_with_type(b"list_key".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"list_key".to_vec(),
+                b"data".to_vec(),
+                RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         // SETRANGE on a list key should return WRONGTYPE
         let args = vec![b"list_key".to_vec(), b"0".to_vec(), b"hello".to_vec()];
@@ -1995,7 +2233,10 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Initialize key with enough space
-        engine.set(b"concurrent_sr".to_vec(), vec![0u8; 100], None).await.unwrap();
+        engine
+            .set(b"concurrent_sr".to_vec(), vec![0u8; 100], None)
+            .await
+            .unwrap();
 
         // Spawn multiple tasks doing SETRANGE on overlapping ranges
         let mut handles = Vec::new();
@@ -2027,7 +2268,8 @@ mod tests {
             assert!(
                 segment.iter().all(|&b| b == segment[0]),
                 "Segment {} has mixed bytes (data corruption from race condition): {:?}",
-                i, segment
+                i,
+                segment
             );
         }
     }
@@ -2044,11 +2286,7 @@ mod tests {
             let engine = engine.clone();
             handles.push(tokio::spawn(async move {
                 let value = vec![b'A' + i; 5];
-                let args = vec![
-                    b"overlap_sr".to_vec(),
-                    b"0".to_vec(),
-                    value,
-                ];
+                let args = vec![b"overlap_sr".to_vec(), b"0".to_vec(), value];
                 setrange(&engine, &args).await.unwrap();
             }));
         }
@@ -2073,7 +2311,15 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create a list key
-        engine.set_with_type(b"list_key2".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"list_key2".to_vec(),
+                b"data".to_vec(),
+                RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         // GET on a list key should return WRONGTYPE
         let args = vec![b"list_key2".to_vec()];
@@ -2098,7 +2344,10 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Set a key
-        engine.set(b"getex_key".to_vec(), b"value1".to_vec(), None).await.unwrap();
+        engine
+            .set(b"getex_key".to_vec(), b"value1".to_vec(), None)
+            .await
+            .unwrap();
 
         // GETEX with EX should return value and set TTL
         let args = vec![b"getex_key".to_vec(), b"EX".to_vec(), b"3600".to_vec()];
@@ -2134,7 +2383,15 @@ mod tests {
         let config = StorageConfig::default();
         let engine = Arc::new(StorageEngine::new(config));
 
-        engine.set_with_type(b"list_getex".to_vec(), b"data".to_vec(), RedisDataType::List, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"list_getex".to_vec(),
+                b"data".to_vec(),
+                RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         let args = vec![b"list_getex".to_vec(), b"EX".to_vec(), b"100".to_vec()];
         let result = getex(&engine, &args).await;
@@ -2148,9 +2405,12 @@ mod tests {
 
         // MSET with 3 key-value pairs
         let args = vec![
-            b"k1".to_vec(), b"v1".to_vec(),
-            b"k2".to_vec(), b"v2".to_vec(),
-            b"k3".to_vec(), b"v3".to_vec(),
+            b"k1".to_vec(),
+            b"v1".to_vec(),
+            b"k2".to_vec(),
+            b"v2".to_vec(),
+            b"k3".to_vec(),
+            b"v3".to_vec(),
         ];
         let result = mset(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
@@ -2195,9 +2455,12 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let val = format!("task_{task_id}").into_bytes();
                 let args = vec![
-                    b"mset_ck1".to_vec(), val.clone(),
-                    b"mset_ck2".to_vec(), val.clone(),
-                    b"mset_ck3".to_vec(), val,
+                    b"mset_ck1".to_vec(),
+                    val.clone(),
+                    b"mset_ck2".to_vec(),
+                    val.clone(),
+                    b"mset_ck3".to_vec(),
+                    val,
                 ];
                 mset(&eng, &args).await.unwrap();
             }));
@@ -2258,8 +2521,10 @@ mod tests {
 
         // MSETNX should succeed when none of the keys exist
         let args = vec![
-            b"nx1".to_vec(), b"v1".to_vec(),
-            b"nx2".to_vec(), b"v2".to_vec(),
+            b"nx1".to_vec(),
+            b"v1".to_vec(),
+            b"nx2".to_vec(),
+            b"v2".to_vec(),
         ];
         let result = msetnx(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(1));
@@ -2277,13 +2542,19 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Pre-set one key
-        engine.set(b"nxe2".to_vec(), b"existing".to_vec(), None).await.unwrap();
+        engine
+            .set(b"nxe2".to_vec(), b"existing".to_vec(), None)
+            .await
+            .unwrap();
 
         // MSETNX with one existing key should fail and rollback
         let args = vec![
-            b"nxe1".to_vec(), b"new1".to_vec(),
-            b"nxe2".to_vec(), b"new2".to_vec(),  // This key exists
-            b"nxe3".to_vec(), b"new3".to_vec(),
+            b"nxe1".to_vec(),
+            b"new1".to_vec(),
+            b"nxe2".to_vec(),
+            b"new2".to_vec(), // This key exists
+            b"nxe3".to_vec(),
+            b"new3".to_vec(),
         ];
         let result = msetnx(&engine, &args).await.unwrap();
         assert_eq!(result, RespValue::Integer(0));
@@ -2317,8 +2588,10 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let val = format!("task_{task_id}").into_bytes();
                 let args = vec![
-                    b"msetnx_ck1".to_vec(), val.clone(),
-                    b"msetnx_ck2".to_vec(), val,
+                    b"msetnx_ck1".to_vec(),
+                    val.clone(),
+                    b"msetnx_ck2".to_vec(),
+                    val,
                 ];
                 let result = msetnx(&eng, &args).await.unwrap();
                 if let RespValue::Integer(n) = result {

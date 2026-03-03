@@ -1,9 +1,8 @@
-/// Test to verify the exact scenarios from the bug report
-
-use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use rlightning::networking::resp::RespValue;
 use rlightning::networking::client::Client;
+use rlightning::networking::resp::RespValue;
 use rlightning::networking::server::Server;
+/// Test to verify the exact scenarios from the bug report
+use rlightning::storage::engine::{StorageConfig, StorageEngine};
 use std::sync::Arc;
 
 /// Test the exact Python scenario from the bug report
@@ -15,8 +14,7 @@ async fn test_bug_report_exact_scenario() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19020));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024);
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024);
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -82,8 +80,7 @@ async fn test_type_mismatch_after_error() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19021));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024);
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024);
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -144,8 +141,7 @@ async fn test_base64_json_data() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19022));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024);
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024);
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -160,7 +156,10 @@ async fn test_base64_json_data() {
 
     let key = "bnf:stories_list:test";
 
-    match client.send_command_str("SET", &[key, &json_like_value]).await {
+    match client
+        .send_command_str("SET", &[key, &json_like_value])
+        .await
+    {
         Ok(RespValue::SimpleString(s)) if s == "OK" => {
             println!("✓ Base64-like data SET succeeded");
 

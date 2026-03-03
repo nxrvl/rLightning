@@ -48,7 +48,10 @@ async fn test_resp3_config_get_returns_map() {
     let response = send_resp3_command(&mut client, "CONFIG", &["GET", "maxmemory"]).await;
     match response {
         RespValue::Map(pairs) => {
-            assert!(!pairs.is_empty(), "CONFIG GET maxmemory should return at least 1 pair");
+            assert!(
+                !pairs.is_empty(),
+                "CONFIG GET maxmemory should return at least 1 pair"
+            );
         }
         other => panic!("Expected Map for CONFIG GET in RESP3, got {:?}", other),
     }
@@ -69,11 +72,14 @@ async fn test_resp3_xinfo_stream_returns_map() {
     let response = send_resp3_command(&mut client, "XINFO", &["STREAM", "mystream"]).await;
     match response {
         RespValue::Map(pairs) => {
-            assert!(pairs.len() >= 2, "XINFO STREAM should return multiple kv pairs");
+            assert!(
+                pairs.len() >= 2,
+                "XINFO STREAM should return multiple kv pairs"
+            );
             // Verify a known key exists
-            let has_length = pairs.iter().any(|(k, _)| {
-                matches!(k, RespValue::BulkString(Some(data)) if data == b"length")
-            });
+            let has_length = pairs
+                .iter()
+                .any(|(k, _)| matches!(k, RespValue::BulkString(Some(data)) if data == b"length"));
             assert!(has_length, "XINFO STREAM should have 'length' key");
         }
         other => panic!("Expected Map for XINFO STREAM in RESP3, got {:?}", other),
@@ -102,9 +108,9 @@ async fn test_resp3_xinfo_groups_returns_array_of_maps() {
             assert_eq!(items.len(), 1, "Should have 1 group");
             match &items[0] {
                 RespValue::Map(pairs) => {
-                    let has_name = pairs.iter().any(|(k, _)| {
-                        matches!(k, RespValue::BulkString(Some(data)) if data == b"name")
-                    });
+                    let has_name = pairs.iter().any(
+                        |(k, _)| matches!(k, RespValue::BulkString(Some(data)) if data == b"name"),
+                    );
                     assert!(has_name, "Group info should have 'name' key");
                 }
                 other => panic!("Expected Map for each group, got {:?}", other),
@@ -257,16 +263,16 @@ async fn test_resp3_xread_returns_map_with_entry_maps() {
         .await
         .unwrap();
 
-    let response =
-        send_resp3_command(&mut client, "XREAD", &["COUNT", "10", "STREAMS", "stream1", "0"])
-            .await;
+    let response = send_resp3_command(
+        &mut client,
+        "XREAD",
+        &["COUNT", "10", "STREAMS", "stream1", "0"],
+    )
+    .await;
     match response {
         RespValue::Map(pairs) => {
             assert_eq!(pairs.len(), 1, "XREAD should return 1 stream");
-            assert_eq!(
-                pairs[0].0,
-                RespValue::BulkString(Some(b"stream1".to_vec()))
-            );
+            assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"stream1".to_vec())));
             // Entries should have Map field-values
             if let RespValue::Array(Some(entries)) = &pairs[0].1 {
                 assert!(!entries.is_empty());
@@ -293,7 +299,10 @@ async fn test_resp3_command_docs_returns_map() {
     let response = send_resp3_command(&mut client, "COMMAND", &["DOCS", "get"]).await;
     match response {
         RespValue::Map(pairs) => {
-            assert!(!pairs.is_empty(), "COMMAND DOCS should return at least 1 pair");
+            assert!(
+                !pairs.is_empty(),
+                "COMMAND DOCS should return at least 1 pair"
+            );
         }
         other => panic!("Expected Map for COMMAND DOCS in RESP3, got {:?}", other),
     }

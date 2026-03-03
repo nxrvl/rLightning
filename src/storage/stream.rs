@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use serde::{Serialize, Deserialize};
 
 /// A stream entry ID in the format "timestamp-sequence"
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -18,7 +18,10 @@ impl StreamEntryId {
     }
 
     pub fn max() -> Self {
-        StreamEntryId { ms: u64::MAX, seq: u64::MAX }
+        StreamEntryId {
+            ms: u64::MAX,
+            seq: u64::MAX,
+        }
     }
 
     /// Parse a stream entry ID from a string like "1526919030474-55"
@@ -83,7 +86,6 @@ impl StreamEntryId {
         };
         Some(StreamEntryId { ms, seq })
     }
-
 }
 
 impl std::fmt::Display for StreamEntryId {
@@ -112,7 +114,7 @@ pub struct PendingEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamConsumer {
     pub name: String,
-    pub seen_time: u64, // last time this consumer was active (ms)
+    pub seen_time: u64,              // last time this consumer was active (ms)
     pub pending: Vec<StreamEntryId>, // IDs pending for this consumer
 }
 
@@ -144,13 +146,13 @@ impl ConsumerGroup {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        self.consumers.entry(name.to_string()).or_insert_with(|| {
-            StreamConsumer {
+        self.consumers
+            .entry(name.to_string())
+            .or_insert_with(|| StreamConsumer {
                 name: name.to_string(),
                 seen_time: now_ms,
                 pending: Vec::new(),
-            }
-        })
+            })
     }
 }
 
@@ -184,7 +186,11 @@ impl StreamData {
     }
 
     /// Generate the next entry ID based on auto-generation rules
-    pub fn generate_id(&self, explicit_ms: Option<u64>, explicit_seq: Option<u64>) -> Result<StreamEntryId, &'static str> {
+    pub fn generate_id(
+        &self,
+        explicit_ms: Option<u64>,
+        explicit_seq: Option<u64>,
+    ) -> Result<StreamEntryId, &'static str> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -208,7 +214,9 @@ impl StreamData {
                 } else if ms > self.last_id.ms {
                     0
                 } else {
-                    return Err("The ID specified in XADD is equal or smaller than the target stream top item");
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
                 };
                 Ok(StreamEntryId::new(ms, seq))
             }
@@ -216,22 +224,28 @@ impl StreamData {
             (Some(ms), Some(seq)) => {
                 let new_id = StreamEntryId::new(ms, seq);
                 if new_id <= self.last_id && !(self.last_id.ms == 0 && self.last_id.seq == 0) {
-                    return Err("The ID specified in XADD is equal or smaller than the target stream top item");
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
                 }
                 // Special case: 0-0 is not allowed if stream is not empty
                 if ms == 0 && seq == 0 && !self.entries.is_empty() {
-                    return Err("The ID specified in XADD is equal or smaller than the target stream top item");
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
                 }
                 Ok(new_id)
             }
-            (None, Some(_)) => {
-                Err("Invalid stream ID format")
-            }
+            (None, Some(_)) => Err("Invalid stream ID format"),
         }
     }
 
     /// Add an entry to the stream, returns the entry ID
-    pub fn add_entry(&mut self, id: StreamEntryId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> StreamEntryId {
+    pub fn add_entry(
+        &mut self,
+        id: StreamEntryId,
+        fields: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> StreamEntryId {
         if self.first_entry_id.is_none() {
             self.first_entry_id = Some(id.clone());
         }
@@ -246,27 +260,39 @@ impl StreamData {
     }
 
     /// Get entries in a range (inclusive)
-    pub fn range(&self, start: &StreamEntryId, end: &StreamEntryId, count: Option<usize>) -> Vec<&StreamEntry> {
+    pub fn range(
+        &self,
+        start: &StreamEntryId,
+        end: &StreamEntryId,
+        count: Option<usize>,
+    ) -> Vec<&StreamEntry> {
         let mut result = Vec::new();
         for (_, entry) in self.entries.range(start.clone()..=end.clone()) {
             result.push(entry);
             if let Some(max) = count
-                && result.len() >= max {
-                    break;
-                }
+                && result.len() >= max
+            {
+                break;
+            }
         }
         result
     }
 
     /// Get entries in reverse range (inclusive)
-    pub fn rev_range(&self, start: &StreamEntryId, end: &StreamEntryId, count: Option<usize>) -> Vec<&StreamEntry> {
+    pub fn rev_range(
+        &self,
+        start: &StreamEntryId,
+        end: &StreamEntryId,
+        count: Option<usize>,
+    ) -> Vec<&StreamEntry> {
         let mut result = Vec::new();
         for (_, entry) in self.entries.range(end.clone()..=start.clone()).rev() {
             result.push(entry);
             if let Some(max) = count
-                && result.len() >= max {
-                    break;
-                }
+                && result.len() >= max
+            {
+                break;
+            }
         }
         result
     }
@@ -280,15 +306,23 @@ impl StreamData {
         // For approximate trimming, we trim at least ~10% less aggressively
         let actual_remove = if approximate {
             // Approximate: remove a bit less, but at least something
-            to_remove.saturating_sub(to_remove / 10).max(1).min(to_remove)
+            to_remove
+                .saturating_sub(to_remove / 10)
+                .max(1)
+                .min(to_remove)
         } else {
             to_remove
         };
         let mut removed = 0u64;
-        let ids_to_remove: Vec<StreamEntryId> = self.entries.keys().take(actual_remove).cloned().collect();
+        let ids_to_remove: Vec<StreamEntryId> =
+            self.entries.keys().take(actual_remove).cloned().collect();
         for id in ids_to_remove {
             self.entries.remove(&id);
-            if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > *max) {
+            if self
+                .max_deleted_entry_id
+                .as_ref()
+                .is_none_or(|max| id > *max)
+            {
                 self.max_deleted_entry_id = Some(id);
             }
             removed += 1;
@@ -298,19 +332,30 @@ impl StreamData {
 
     /// Trim entries with IDs less than the given minid
     pub fn trim_minid(&mut self, minid: &StreamEntryId, approximate: bool) -> u64 {
-        let ids_to_remove: Vec<StreamEntryId> = self.entries.range(..minid.clone()).map(|(k, _)| k.clone()).collect();
+        let ids_to_remove: Vec<StreamEntryId> = self
+            .entries
+            .range(..minid.clone())
+            .map(|(k, _)| k.clone())
+            .collect();
         if ids_to_remove.is_empty() {
             return 0;
         }
         let to_remove = if approximate {
-            ids_to_remove.len().saturating_sub(ids_to_remove.len() / 10).max(1)
+            ids_to_remove
+                .len()
+                .saturating_sub(ids_to_remove.len() / 10)
+                .max(1)
         } else {
             ids_to_remove.len()
         };
         let mut removed = 0u64;
         for id in ids_to_remove.into_iter().take(to_remove) {
             self.entries.remove(&id);
-            if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > *max) {
+            if self
+                .max_deleted_entry_id
+                .as_ref()
+                .is_none_or(|max| id > *max)
+            {
                 self.max_deleted_entry_id = Some(id);
             }
             removed += 1;
@@ -323,7 +368,11 @@ impl StreamData {
         let mut deleted = 0u64;
         for id in ids {
             if self.entries.remove(id).is_some() {
-                if self.max_deleted_entry_id.as_ref().is_none_or(|max| id > max) {
+                if self
+                    .max_deleted_entry_id
+                    .as_ref()
+                    .is_none_or(|max| id > max)
+                {
                     self.max_deleted_entry_id = Some(id.clone());
                 }
                 deleted += 1;
@@ -346,9 +395,10 @@ impl StreamData {
         for (_, entry) in self.entries.range(start..) {
             result.push(entry);
             if let Some(max) = count
-                && result.len() >= max {
-                    break;
-                }
+                && result.len() >= max
+            {
+                break;
+            }
         }
         result
     }
@@ -425,9 +475,18 @@ mod tests {
     #[test]
     fn test_stream_rev_range() {
         let mut stream = StreamData::new();
-        stream.add_entry(StreamEntryId::new(1000, 0), vec![(b"a".to_vec(), b"1".to_vec())]);
-        stream.add_entry(StreamEntryId::new(2000, 0), vec![(b"b".to_vec(), b"2".to_vec())]);
-        stream.add_entry(StreamEntryId::new(3000, 0), vec![(b"c".to_vec(), b"3".to_vec())]);
+        stream.add_entry(
+            StreamEntryId::new(1000, 0),
+            vec![(b"a".to_vec(), b"1".to_vec())],
+        );
+        stream.add_entry(
+            StreamEntryId::new(2000, 0),
+            vec![(b"b".to_vec(), b"2".to_vec())],
+        );
+        stream.add_entry(
+            StreamEntryId::new(3000, 0),
+            vec![(b"c".to_vec(), b"3".to_vec())],
+        );
 
         let results = stream.rev_range(&StreamEntryId::max(), &StreamEntryId::min(), None);
         assert_eq!(results.len(), 3);
@@ -439,7 +498,10 @@ mod tests {
     fn test_stream_trim_maxlen() {
         let mut stream = StreamData::new();
         for i in 0..10 {
-            stream.add_entry(StreamEntryId::new(i * 1000, 0), vec![(b"k".to_vec(), b"v".to_vec())]);
+            stream.add_entry(
+                StreamEntryId::new(i * 1000, 0),
+                vec![(b"k".to_vec(), b"v".to_vec())],
+            );
         }
         assert_eq!(stream.len(), 10);
 
@@ -452,7 +514,10 @@ mod tests {
     fn test_stream_trim_minid() {
         let mut stream = StreamData::new();
         for i in 1..=10 {
-            stream.add_entry(StreamEntryId::new(i * 1000, 0), vec![(b"k".to_vec(), b"v".to_vec())]);
+            stream.add_entry(
+                StreamEntryId::new(i * 1000, 0),
+                vec![(b"k".to_vec(), b"v".to_vec())],
+            );
         }
 
         let removed = stream.trim_minid(&StreamEntryId::new(5000, 0), false);

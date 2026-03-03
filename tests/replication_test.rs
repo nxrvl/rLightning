@@ -1,18 +1,22 @@
-use std::time::Duration;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use rlightning::networking::resp::RespValue;
-use rlightning::storage::engine::{StorageEngine, StorageConfig};
-use rlightning::replication::{ReplicationManager, ReplicationRole, MasterLinkStatus};
 use rlightning::replication::config::ReplicationConfig;
+use rlightning::replication::{MasterLinkStatus, ReplicationManager, ReplicationRole};
+use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 mod test_utils;
-use test_utils::{setup_test_server_with_replication, create_client};
+use test_utils::{create_client, setup_test_server_with_replication};
 
 // Helper function to send a command to a Redis server via raw TCP
-async fn send_command(stream: &mut TcpStream, command: &str, args: &[&str]) -> Result<RespValue, Box<dyn std::error::Error>> {
+async fn send_command(
+    stream: &mut TcpStream,
+    command: &str,
+    args: &[&str],
+) -> Result<RespValue, Box<dyn std::error::Error>> {
     let mut cmd_parts = Vec::with_capacity(1 + args.len());
     cmd_parts.push(RespValue::BulkString(Some(command.as_bytes().to_vec())));
 
@@ -26,7 +30,8 @@ async fn send_command(stream: &mut TcpStream, command: &str, args: &[&str]) -> R
 
     let mut buffer = BytesMut::with_capacity(4096);
     loop {
-        let timeout = tokio::time::timeout(Duration::from_secs(5), stream.read_buf(&mut buffer)).await;
+        let timeout =
+            tokio::time::timeout(Duration::from_secs(5), stream.read_buf(&mut buffer)).await;
         match timeout {
             Ok(Ok(0)) => return Err("Connection closed".into()),
             Ok(Ok(_)) => {}
@@ -37,10 +42,12 @@ async fn send_command(stream: &mut TcpStream, command: &str, args: &[&str]) -> R
         match RespValue::parse(&mut buffer) {
             Ok(Some(value)) => return Ok(value),
             Ok(None) => continue,
-            Err(e) => return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Protocol error: {}", e)
-            ))),
+            Err(e) => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Protocol error: {}", e),
+                )));
+            }
         }
     }
 }
@@ -73,7 +80,10 @@ async fn test_replication_manager_disconnect_from_master() {
 
     let replication_manager = ReplicationManager::new(engine.clone(), replication_config);
 
-    replication_manager.connect_to_master("localhost".to_string(), 6379).await.unwrap();
+    replication_manager
+        .connect_to_master("localhost".to_string(), 6379)
+        .await
+        .unwrap();
     let state = replication_manager.get_state().await;
     assert_eq!(state.role, ReplicationRole::Replica);
 
@@ -105,7 +115,9 @@ async fn test_register_unregister_replica() {
     let replication_config = ReplicationConfig::default();
     let mgr = ReplicationManager::new(engine.clone(), replication_config);
 
-    let _rx = mgr.register_replica("replica-1".to_string(), "127.0.0.1".to_string(), 6380).await;
+    let _rx = mgr
+        .register_replica("replica-1".to_string(), "127.0.0.1".to_string(), 6380)
+        .await;
     let state = mgr.get_state().await;
     assert_eq!(state.connected_replicas.len(), 1);
     assert_eq!(state.connected_replicas[0].id, "replica-1");
@@ -151,7 +163,9 @@ async fn test_replicaof_no_one() {
     let replication_config = ReplicationConfig::default();
     let mgr = ReplicationManager::new(engine.clone(), replication_config);
 
-    mgr.connect_to_master("localhost".to_string(), 6379).await.unwrap();
+    mgr.connect_to_master("localhost".to_string(), 6379)
+        .await
+        .unwrap();
     let state = mgr.get_state().await;
     assert_eq!(state.role, ReplicationRole::Replica);
 
@@ -167,7 +181,9 @@ async fn test_replicaof_no_one() {
 #[tokio::test]
 async fn test_role_command_master() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(200, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(200, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let response = send_command(&mut stream, "ROLE", &[]).await.unwrap();
@@ -200,12 +216,16 @@ async fn test_role_command_master() {
 #[tokio::test]
 async fn test_replicaof_command() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(201, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(201, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // REPLICAOF localhost 6379 - should switch to replica mode
-    let response = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // Verify the state changed
@@ -215,7 +235,9 @@ async fn test_replicaof_command() {
     assert_eq!(state.master_port, Some(6379));
 
     // REPLICAOF NO ONE - should switch back to master mode
-    let response = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     let state = repl.get_state().await;
@@ -227,18 +249,24 @@ async fn test_replicaof_command() {
 #[tokio::test]
 async fn test_slaveof_command() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(202, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(202, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // SLAVEOF is an alias for REPLICAOF
-    let response = send_command(&mut stream, "SLAVEOF", &["localhost", "6379"]).await.unwrap();
+    let response = send_command(&mut stream, "SLAVEOF", &["localhost", "6379"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     let state = repl.get_state().await;
     assert_eq!(state.role, ReplicationRole::Replica);
 
-    let response = send_command(&mut stream, "SLAVEOF", &["NO", "ONE"]).await.unwrap();
+    let response = send_command(&mut stream, "SLAVEOF", &["NO", "ONE"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     let state = repl.get_state().await;
@@ -248,12 +276,16 @@ async fn test_slaveof_command() {
 #[tokio::test]
 async fn test_wait_command_no_replicas() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(203, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(203, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // WAIT 1 100 - wait for 1 replica with 100ms timeout, should return 0 immediately
-    let response = send_command(&mut stream, "WAIT", &["1", "100"]).await.unwrap();
+    let response = send_command(&mut stream, "WAIT", &["1", "100"])
+        .await
+        .unwrap();
     if let RespValue::Integer(count) = response {
         assert_eq!(count, 0);
     } else {
@@ -264,7 +296,9 @@ async fn test_wait_command_no_replicas() {
 #[tokio::test]
 async fn test_wait_command_wrong_args() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(204, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(204, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -276,14 +310,20 @@ async fn test_wait_command_wrong_args() {
 #[tokio::test]
 async fn test_failover_no_replicas() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(205, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(205, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // FAILOVER with no connected replicas should return an error
     let response = send_command(&mut stream, "FAILOVER", &[]).await.unwrap();
     if let RespValue::Error(e) = response {
-        assert!(e.contains("FAILOVER requires connected replicas"), "Got error: {}", e);
+        assert!(
+            e.contains("FAILOVER requires connected replicas"),
+            "Got error: {}",
+            e
+        );
     } else {
         panic!("Expected Error response, got: {:?}", response);
     }
@@ -292,40 +332,61 @@ async fn test_failover_no_replicas() {
 #[tokio::test]
 async fn test_replconf_command() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(206, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(206, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // REPLCONF listening-port 6380 should return OK
-    let response = send_command(&mut stream, "REPLCONF", &["listening-port", "6380"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLCONF", &["listening-port", "6380"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // REPLCONF capa eof should return OK
-    let response = send_command(&mut stream, "REPLCONF", &["capa", "eof"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLCONF", &["capa", "eof"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 }
 
 #[tokio::test]
 async fn test_read_only_mode_on_replica() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(207, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(207, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // First, verify we can write as a master
-    let response = send_command(&mut stream, "SET", &["key1", "value1"]).await.unwrap();
+    let response = send_command(&mut stream, "SET", &["key1", "value1"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // Become a replica (which enables read-only mode)
-    let response = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // Now writes should be rejected
-    let response = send_command(&mut stream, "SET", &["key2", "value2"]).await.unwrap();
+    let response = send_command(&mut stream, "SET", &["key2", "value2"])
+        .await
+        .unwrap();
     if let RespValue::Error(e) = response {
-        assert!(e.contains("READONLY"), "Expected READONLY error, got: {}", e);
+        assert!(
+            e.contains("READONLY"),
+            "Expected READONLY error, got: {}",
+            e
+        );
     } else {
-        panic!("Expected Error response for write on replica, got: {:?}", response);
+        panic!(
+            "Expected Error response for write on replica, got: {:?}",
+            response
+        );
     }
 
     // Reads should still work
@@ -337,11 +398,15 @@ async fn test_read_only_mode_on_replica() {
     }
 
     // REPLICAOF NO ONE to go back to master
-    let response = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // Now writes should work again
-    let response = send_command(&mut stream, "SET", &["key3", "value3"]).await.unwrap();
+    let response = send_command(&mut stream, "SET", &["key3", "value3"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::SimpleString(ref s) if s == "OK"));
 
     // Verify
@@ -351,19 +416,25 @@ async fn test_read_only_mode_on_replica() {
 #[tokio::test]
 async fn test_replicaof_wrong_args() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(208, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(208, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // REPLICAOF with wrong number of args
-    let response = send_command(&mut stream, "REPLICAOF", &["localhost"]).await.unwrap();
+    let response = send_command(&mut stream, "REPLICAOF", &["localhost"])
+        .await
+        .unwrap();
     assert!(matches!(response, RespValue::Error(_)));
 }
 
 #[tokio::test]
 async fn test_role_after_replicaof() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(209, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(209, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -380,7 +451,9 @@ async fn test_role_after_replicaof() {
     }
 
     // Become a replica
-    let _ = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"]).await.unwrap();
+    let _ = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"])
+        .await
+        .unwrap();
 
     // Now ROLE should return slave
     let response = send_command(&mut stream, "ROLE", &[]).await.unwrap();
@@ -404,7 +477,9 @@ async fn test_role_after_replicaof() {
     }
 
     // Back to master
-    let _ = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"]).await.unwrap();
+    let _ = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"])
+        .await
+        .unwrap();
 
     let response = send_command(&mut stream, "ROLE", &[]).await.unwrap();
     if let RespValue::Array(Some(parts)) = &response {
@@ -421,18 +496,28 @@ async fn test_role_after_replicaof() {
 #[tokio::test]
 async fn test_command_propagation_to_backlog() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(210, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(210, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // Set some keys (write commands should get propagated to backlog)
-    let _ = send_command(&mut stream, "SET", &["k1", "v1"]).await.unwrap();
-    let _ = send_command(&mut stream, "SET", &["k2", "v2"]).await.unwrap();
+    let _ = send_command(&mut stream, "SET", &["k1", "v1"])
+        .await
+        .unwrap();
+    let _ = send_command(&mut stream, "SET", &["k2", "v2"])
+        .await
+        .unwrap();
     let _ = send_command(&mut stream, "DEL", &["k1"]).await.unwrap();
 
     // The backlog should have received propagated commands
     let offset = repl.get_master_repl_offset();
-    assert!(offset > 0, "Expected replication offset > 0, got {}", offset);
+    assert!(
+        offset > 0,
+        "Expected replication offset > 0, got {}",
+        offset
+    );
 
     // Backlog should contain data
     let backlog = repl.backlog().read().await;
@@ -442,13 +527,17 @@ async fn test_command_propagation_to_backlog() {
 #[tokio::test]
 async fn test_read_commands_not_propagated() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(211, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(211, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // Only write commands should be propagated
     // First, set something so GET has something to read
-    let _ = send_command(&mut stream, "SET", &["k1", "v1"]).await.unwrap();
+    let _ = send_command(&mut stream, "SET", &["k1", "v1"])
+        .await
+        .unwrap();
     let offset_after_write = repl.get_master_repl_offset();
 
     // Read commands should NOT increase the offset
@@ -457,19 +546,25 @@ async fn test_read_commands_not_propagated() {
     let _ = send_command(&mut stream, "INFO", &[]).await.unwrap();
 
     let offset_after_reads = repl.get_master_repl_offset();
-    assert_eq!(offset_after_write, offset_after_reads,
-        "Read commands should not change replication offset");
+    assert_eq!(
+        offset_after_write, offset_after_reads,
+        "Read commands should not change replication offset"
+    );
 }
 
 #[tokio::test]
 async fn test_failover_as_replica_rejected() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(212, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(212, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // Become a replica
-    let _ = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"]).await.unwrap();
+    let _ = send_command(&mut stream, "REPLICAOF", &["localhost", "6379"])
+        .await
+        .unwrap();
 
     // FAILOVER as a replica should be rejected
     let response = send_command(&mut stream, "FAILOVER", &[]).await.unwrap();
@@ -483,35 +578,57 @@ async fn test_failover_as_replica_rejected() {
 #[tokio::test]
 async fn test_multiple_write_commands_backlog() {
     let replication_config = ReplicationConfig::default();
-    let (addr, repl) = setup_test_server_with_replication(213, replication_config).await.unwrap();
+    let (addr, repl) = setup_test_server_with_replication(213, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     // Various write commands
-    let _ = send_command(&mut stream, "SET", &["str_key", "hello"]).await.unwrap();
-    let _ = send_command(&mut stream, "LPUSH", &["list_key", "a", "b", "c"]).await.unwrap();
-    let _ = send_command(&mut stream, "HSET", &["hash_key", "field", "value"]).await.unwrap();
-    let _ = send_command(&mut stream, "SADD", &["set_key", "member1", "member2"]).await.unwrap();
-    let _ = send_command(&mut stream, "ZADD", &["zset_key", "1.0", "member1"]).await.unwrap();
+    let _ = send_command(&mut stream, "SET", &["str_key", "hello"])
+        .await
+        .unwrap();
+    let _ = send_command(&mut stream, "LPUSH", &["list_key", "a", "b", "c"])
+        .await
+        .unwrap();
+    let _ = send_command(&mut stream, "HSET", &["hash_key", "field", "value"])
+        .await
+        .unwrap();
+    let _ = send_command(&mut stream, "SADD", &["set_key", "member1", "member2"])
+        .await
+        .unwrap();
+    let _ = send_command(&mut stream, "ZADD", &["zset_key", "1.0", "member1"])
+        .await
+        .unwrap();
 
     // All should have been propagated to backlog
     let offset = repl.get_master_repl_offset();
-    assert!(offset > 0, "Expected replication offset > 0 after multiple writes");
+    assert!(
+        offset > 0,
+        "Expected replication offset > 0 after multiple writes"
+    );
 
     let backlog = repl.backlog().read().await;
     let all_data = backlog.get_from_offset(0).unwrap();
-    assert!(!all_data.is_empty(), "Backlog should contain propagated commands");
+    assert!(
+        !all_data.is_empty(),
+        "Backlog should contain propagated commands"
+    );
 
     // Verify the data is valid RESP
     let data_str = String::from_utf8_lossy(&all_data);
-    assert!(data_str.contains("SET") || data_str.contains("set"),
-        "Backlog should contain SET command");
+    assert!(
+        data_str.contains("SET") || data_str.contains("set"),
+        "Backlog should contain SET command"
+    );
 }
 
 #[tokio::test]
 async fn test_psync_without_replication() {
     // Test PSYNC on a server without replication manager should return error
-    let (addr, _repl) = setup_test_server_with_replication(214, ReplicationConfig::default()).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(214, ReplicationConfig::default())
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -524,8 +641,11 @@ async fn test_psync_without_replication() {
         Ok(resp) => {
             let resp_str = format!("{:?}", resp);
             assert!(
-                resp_str.contains("FULLRESYNC") || resp_str.contains("ERR") || resp_str.contains("CONTINUE"),
-                "PSYNC should return FULLRESYNC, CONTINUE, or ERR, got: {}", resp_str
+                resp_str.contains("FULLRESYNC")
+                    || resp_str.contains("ERR")
+                    || resp_str.contains("CONTINUE"),
+                "PSYNC should return FULLRESYNC, CONTINUE, or ERR, got: {}",
+                resp_str
             );
         }
         Err(_) => {} // Connection closed (expected for PSYNC entering replication stream)
@@ -534,7 +654,10 @@ async fn test_psync_without_replication() {
     // Verify the server is still alive after PSYNC
     let mut verify_stream = TcpStream::connect(addr).await.unwrap();
     let ping_resp = send_command(&mut verify_stream, "PING", &[]).await;
-    assert!(ping_resp.is_ok(), "Server should still be alive after PSYNC");
+    assert!(
+        ping_resp.is_ok(),
+        "Server should still be alive after PSYNC"
+    );
 }
 
 #[tokio::test]
@@ -554,8 +677,12 @@ async fn test_replication_basic() {
         min_replicas_max_lag: Duration::from_secs(10),
     };
 
-    let master_replication = ReplicationManager::new(master_engine.clone(), master_replication_config);
-    master_replication.init().await.expect("Failed to initialize master replication");
+    let master_replication =
+        ReplicationManager::new(master_engine.clone(), master_replication_config);
+    master_replication
+        .init()
+        .await
+        .expect("Failed to initialize master replication");
 
     let master_state = master_replication.get_state().await;
     assert_eq!(master_state.role, ReplicationRole::Master);
@@ -577,17 +704,23 @@ async fn test_replication_basic() {
         min_replicas_max_lag: Duration::from_secs(10),
     };
 
-    let replica_replication = ReplicationManager::new(replica_engine.clone(), replica_replication_config);
+    let replica_replication =
+        ReplicationManager::new(replica_engine.clone(), replica_replication_config);
 
     // Initially Master until connect_to_master is called
     let replica_state = replica_replication.get_state().await;
     assert_eq!(replica_state.role, ReplicationRole::Master);
     assert_eq!(replica_state.master_host, None);
 
-    replica_replication.connect_to_master("localhost".to_string(), 6379).await
+    replica_replication
+        .connect_to_master("localhost".to_string(), 6379)
+        .await
         .expect("Failed to connect to master");
 
-    replica_replication.disconnect_from_master().await.expect("Failed to disconnect from master");
+    replica_replication
+        .disconnect_from_master()
+        .await
+        .expect("Failed to disconnect from master");
 
     let new_state = replica_replication.get_state().await;
     assert_eq!(new_state.role, ReplicationRole::Master);
@@ -600,7 +733,9 @@ async fn test_replication_basic() {
 async fn test_client_role_command() {
     // Test using the high-level Client API
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(215, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(215, replication_config)
+        .await
+        .unwrap();
 
     let mut client = create_client(addr).await.unwrap();
 
@@ -618,7 +753,9 @@ async fn test_client_role_command() {
 #[tokio::test]
 async fn test_client_wait_command() {
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(216, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(216, replication_config)
+        .await
+        .unwrap();
 
     let mut client = create_client(addr).await.unwrap();
 
@@ -696,9 +833,9 @@ async fn test_replication_select_db_tracking() {
     // Test that simulates the replication client's SELECT tracking behavior.
     // The replication client should track SELECT commands and pass the correct
     // db_index to cmd_handler.process() instead of hardcoding 0.
-    use std::sync::Arc;
-    use rlightning::command::handler::CommandHandler;
     use rlightning::command::Command;
+    use rlightning::command::handler::CommandHandler;
+    use std::sync::Arc;
 
     let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
     let cmd_handler = CommandHandler::new(Arc::clone(&storage));
@@ -746,15 +883,19 @@ async fn test_replication_select_db_tracking() {
     use rlightning::storage::engine::CURRENT_DB_INDEX;
 
     // Check DB 3 has the key
-    let result = CURRENT_DB_INDEX.scope(3, async {
-        cmd_handler.process(
-            Command {
-                name: "GET".to_string(),
-                args: vec![b"repl_test_key".to_vec()],
-            },
-            3,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(3, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"repl_test_key".to_vec()],
+                    },
+                    3,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(Some(val))) => {
             assert_eq!(val, b"db3_value", "Key in DB 3 should have correct value");
@@ -763,15 +904,19 @@ async fn test_replication_select_db_tracking() {
     }
 
     // Check DB 0 does NOT have repl_test_key
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command {
-                name: "GET".to_string(),
-                args: vec![b"repl_test_key".to_vec()],
-            },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"repl_test_key".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(None)) | Ok(RespValue::Null) => {
             // Key should not exist in DB 0 - correct
@@ -780,15 +925,19 @@ async fn test_replication_select_db_tracking() {
     }
 
     // Check DB 0 has repl_test_key_db0
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command {
-                name: "GET".to_string(),
-                args: vec![b"repl_test_key_db0".to_vec()],
-            },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"repl_test_key_db0".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(Some(val))) => {
             assert_eq!(val, b"db0_value", "Key in DB 0 should have correct value");
@@ -803,7 +952,9 @@ async fn test_replication_select_via_server() {
     // This confirms the server properly routes commands to the selected database,
     // which is the same mechanism the replication client uses.
     let replication_config = ReplicationConfig::default();
-    let (addr, _repl) = setup_test_server_with_replication(217, replication_config).await.unwrap();
+    let (addr, _repl) = setup_test_server_with_replication(217, replication_config)
+        .await
+        .unwrap();
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -815,14 +966,18 @@ async fn test_replication_select_via_server() {
     }
 
     // SET a key in DB 3
-    let resp = send_command(&mut stream, "SET", &["repl_db_test", "value_in_db3"]).await.unwrap();
+    let resp = send_command(&mut stream, "SET", &["repl_db_test", "value_in_db3"])
+        .await
+        .unwrap();
     match resp {
         RespValue::SimpleString(s) => assert_eq!(s, "OK"),
         other => panic!("Expected OK from SET, got: {:?}", other),
     }
 
     // GET the key - should exist in DB 3
-    let resp = send_command(&mut stream, "GET", &["repl_db_test"]).await.unwrap();
+    let resp = send_command(&mut stream, "GET", &["repl_db_test"])
+        .await
+        .unwrap();
     match resp {
         RespValue::BulkString(Some(val)) => {
             assert_eq!(String::from_utf8_lossy(&val), "value_in_db3");
@@ -838,7 +993,9 @@ async fn test_replication_select_via_server() {
     }
 
     // GET the key in DB 0 - should NOT exist
-    let resp = send_command(&mut stream, "GET", &["repl_db_test"]).await.unwrap();
+    let resp = send_command(&mut stream, "GET", &["repl_db_test"])
+        .await
+        .unwrap();
     match resp {
         RespValue::BulkString(None) | RespValue::Null => {
             // Key does not exist in DB 0 - correct
@@ -852,10 +1009,10 @@ async fn test_replication_multi_exec_transaction() {
     // Test that simulates the replication client's MULTI/EXEC buffering behavior.
     // When the master sends MULTI, the replica should buffer subsequent commands
     // and execute them atomically when EXEC is received.
-    use std::sync::Arc;
-    use rlightning::command::handler::CommandHandler;
     use rlightning::command::Command;
+    use rlightning::command::handler::CommandHandler;
     use rlightning::command::transaction::{TransactionState, handle_exec};
+    use std::sync::Arc;
 
     let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
     let cmd_handler = CommandHandler::new(Arc::clone(&storage));
@@ -913,7 +1070,8 @@ async fn test_replication_multi_exec_transaction() {
                     for buffered_cmd in buffered_commands {
                         tx_state.queue.push(buffered_cmd);
                     }
-                    let result = handle_exec(&mut tx_state, &cmd_handler, &storage, current_db).await;
+                    let result =
+                        handle_exec(&mut tx_state, &cmd_handler, &storage, current_db).await;
                     assert!(result.is_ok(), "EXEC should succeed, got: {:?}", result);
                     // Verify the result is an Array of responses
                     match result.unwrap() {
@@ -940,34 +1098,55 @@ async fn test_replication_multi_exec_transaction() {
     // Verify all keys were set atomically
     use rlightning::storage::engine::CURRENT_DB_INDEX;
 
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"tx_key1".to_vec()] },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"tx_key1".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"tx_value1"),
         other => panic!("Expected tx_key1 to be set, got: {:?}", other),
     }
 
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"tx_key2".to_vec()] },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"tx_key2".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"tx_value2"),
         other => panic!("Expected tx_key2 to be set, got: {:?}", other),
     }
 
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"tx_counter".to_vec()] },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"tx_counter".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(Some(val))) => assert_eq!(val, b"1"),
         other => panic!("Expected tx_counter to be 1, got: {:?}", other),
@@ -977,21 +1156,27 @@ async fn test_replication_multi_exec_transaction() {
 #[tokio::test]
 async fn test_replication_multi_discard() {
     // Test that DISCARD during replication aborts the transaction buffer
-    use std::sync::Arc;
-    use rlightning::command::handler::CommandHandler;
     use rlightning::command::Command;
+    use rlightning::command::handler::CommandHandler;
+    use std::sync::Arc;
 
     let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
     let cmd_handler = CommandHandler::new(Arc::clone(&storage));
 
     // Simulate: MULTI, SET, DISCARD — keys should NOT be set
     let commands: Vec<Command> = vec![
-        Command { name: "MULTI".to_string(), args: vec![] },
+        Command {
+            name: "MULTI".to_string(),
+            args: vec![],
+        },
         Command {
             name: "SET".to_string(),
             args: vec![b"discarded_key".to_vec(), b"should_not_exist".to_vec()],
         },
-        Command { name: "DISCARD".to_string(), args: vec![] },
+        Command {
+            name: "DISCARD".to_string(),
+            args: vec![],
+        },
     ];
 
     let mut tx_buffer: Option<Vec<Command>> = None;
@@ -999,9 +1184,15 @@ async fn test_replication_multi_discard() {
     for cmd in commands {
         let cmd_name_lower = cmd.name.to_lowercase();
         match cmd_name_lower.as_str() {
-            "multi" => { tx_buffer = Some(Vec::new()); }
-            "exec" => { tx_buffer = None; }
-            "discard" => { tx_buffer = None; }
+            "multi" => {
+                tx_buffer = Some(Vec::new());
+            }
+            "exec" => {
+                tx_buffer = None;
+            }
+            "discard" => {
+                tx_buffer = None;
+            }
             _ => {
                 if let Some(ref mut buf) = tx_buffer {
                     buf.push(cmd);
@@ -1015,12 +1206,19 @@ async fn test_replication_multi_discard() {
     // Verify the key was NOT set
     use rlightning::storage::engine::CURRENT_DB_INDEX;
 
-    let result = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"discarded_key".to_vec()] },
-            0,
-        ).await
-    }).await;
+    let result = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"discarded_key".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
     match result {
         Ok(RespValue::BulkString(None)) | Ok(RespValue::Null) => {
             // Key should not exist - correct
@@ -1034,10 +1232,10 @@ async fn test_replication_multi_exec_consistency() {
     // Test that verifies transaction atomicity: if commands inside MULTI/EXEC
     // are executed atomically, concurrent reads should see either all or none
     // of the changes.
-    use std::sync::Arc;
-    use rlightning::command::handler::CommandHandler;
     use rlightning::command::Command;
+    use rlightning::command::handler::CommandHandler;
     use rlightning::command::transaction::{TransactionState, handle_exec};
+    use std::sync::Arc;
 
     let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
     let cmd_handler = CommandHandler::new(Arc::clone(&storage));
@@ -1060,18 +1258,32 @@ async fn test_replication_multi_exec_consistency() {
     // Both keys should exist after EXEC
     use rlightning::storage::engine::CURRENT_DB_INDEX;
 
-    let val1 = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"atomic_key1".to_vec()] },
-            0,
-        ).await
-    }).await;
-    let val2 = CURRENT_DB_INDEX.scope(0, async {
-        cmd_handler.process(
-            Command { name: "GET".to_string(), args: vec![b"atomic_key2".to_vec()] },
-            0,
-        ).await
-    }).await;
+    let val1 = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"atomic_key1".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
+    let val2 = CURRENT_DB_INDEX
+        .scope(0, async {
+            cmd_handler
+                .process(
+                    Command {
+                        name: "GET".to_string(),
+                        args: vec![b"atomic_key2".to_vec()],
+                    },
+                    0,
+                )
+                .await
+        })
+        .await;
 
     match (val1, val2) {
         (Ok(RespValue::BulkString(Some(v1))), Ok(RespValue::BulkString(Some(v2)))) => {

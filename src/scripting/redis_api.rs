@@ -1,19 +1,28 @@
-use mlua::{Lua, MultiValue, Value, IntoLua, HookTriggers, VmState};
+use mlua::{HookTriggers, IntoLua, Lua, MultiValue, Value, VmState};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::command::{Command, CommandError, CommandResult};
 use crate::command::handler::CommandHandler;
+use crate::command::{Command, CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 
 /// Apply sandbox restrictions to a Lua state, matching Redis behavior.
 /// Disables dangerous globals and libraries that could allow sandbox escape.
 fn sandbox_lua(lua: &Lua) {
     let globals_to_disable = [
-        "io", "os", "loadfile", "dofile", "debug", "require", "package",
-        "load", "loadstring",
-        "setfenv", "getfenv", "newproxy",
+        "io",
+        "os",
+        "loadfile",
+        "dofile",
+        "debug",
+        "require",
+        "package",
+        "load",
+        "loadstring",
+        "setfenv",
+        "getfenv",
+        "newproxy",
     ];
     for name in &globals_to_disable {
         let _ = lua.globals().set(*name, Value::Nil);
@@ -28,28 +37,129 @@ fn sandbox_lua(lua: &Lua) {
 /// These commands manage connection state, subscriptions, or transactions that
 /// should not be manipulated from inside a script.
 const BLOCKED_SCRIPT_COMMANDS: &[&str] = &[
-    "auth", "acl", "subscribe", "unsubscribe", "psubscribe", "punsubscribe",
-    "ssubscribe", "sunsubscribe", "multi", "exec", "discard", "watch", "unwatch",
-    "wait", "waitaof", "hello", "reset", "quit", "monitor", "debug", "shutdown",
-    "cluster", "failover", "psync", "replconf", "replicaof", "slaveof",
+    "auth",
+    "acl",
+    "subscribe",
+    "unsubscribe",
+    "psubscribe",
+    "punsubscribe",
+    "ssubscribe",
+    "sunsubscribe",
+    "multi",
+    "exec",
+    "discard",
+    "watch",
+    "unwatch",
+    "wait",
+    "waitaof",
+    "hello",
+    "reset",
+    "quit",
+    "monitor",
+    "debug",
+    "shutdown",
+    "cluster",
+    "failover",
+    "psync",
+    "replconf",
+    "replicaof",
+    "slaveof",
 ];
 
 /// List of Redis write commands for read-only script enforcement
 const WRITE_COMMANDS: &[&str] = &[
-    "set", "setnx", "setex", "psetex", "mset", "msetnx", "append", "incr", "incrby",
-    "incrbyfloat", "decr", "decrby", "getset", "getdel", "getex", "del", "unlink",
-    "expire", "expireat", "pexpire", "pexpireat", "persist", "rename", "renamenx",
-    "copy", "move", "lpush", "rpush", "lpushx", "rpushx", "lpop", "rpop", "linsert", "lset", "ltrim",
-    "lmove", "lmpop", "lrem", "rpoplpush", "blpop", "brpop", "blmove", "blmpop",
-    "sadd", "srem", "smove", "spop", "sinterstore",
-    "sunionstore", "sdiffstore", "zadd", "zrem", "zincrby", "zpopmin", "zpopmax",
-    "zrangestore", "zinterstore", "zunionstore", "zdiffstore", "zremrangebyrank",
-    "zremrangebyscore", "zremrangebylex", "bzpopmin", "bzpopmax", "bzmpop",
-    "hset", "hsetnx", "hmset",
-    "hdel", "hincrby", "hincrbyfloat", "xadd", "xdel", "xtrim", "xgroup",
-    "xack", "xclaim", "xautoclaim", "pfadd", "pfmerge", "geoadd", "geosearchstore",
-    "georadius", "georadiusbymember",
-    "setbit", "setrange", "bitop", "bitfield", "flushdb", "flushall", "swapdb", "sort",
+    "set",
+    "setnx",
+    "setex",
+    "psetex",
+    "mset",
+    "msetnx",
+    "append",
+    "incr",
+    "incrby",
+    "incrbyfloat",
+    "decr",
+    "decrby",
+    "getset",
+    "getdel",
+    "getex",
+    "del",
+    "unlink",
+    "expire",
+    "expireat",
+    "pexpire",
+    "pexpireat",
+    "persist",
+    "rename",
+    "renamenx",
+    "copy",
+    "move",
+    "lpush",
+    "rpush",
+    "lpushx",
+    "rpushx",
+    "lpop",
+    "rpop",
+    "linsert",
+    "lset",
+    "ltrim",
+    "lmove",
+    "lmpop",
+    "lrem",
+    "rpoplpush",
+    "blpop",
+    "brpop",
+    "blmove",
+    "blmpop",
+    "sadd",
+    "srem",
+    "smove",
+    "spop",
+    "sinterstore",
+    "sunionstore",
+    "sdiffstore",
+    "zadd",
+    "zrem",
+    "zincrby",
+    "zpopmin",
+    "zpopmax",
+    "zrangestore",
+    "zinterstore",
+    "zunionstore",
+    "zdiffstore",
+    "zremrangebyrank",
+    "zremrangebyscore",
+    "zremrangebylex",
+    "bzpopmin",
+    "bzpopmax",
+    "bzmpop",
+    "hset",
+    "hsetnx",
+    "hmset",
+    "hdel",
+    "hincrby",
+    "hincrbyfloat",
+    "xadd",
+    "xdel",
+    "xtrim",
+    "xgroup",
+    "xack",
+    "xclaim",
+    "xautoclaim",
+    "pfadd",
+    "pfmerge",
+    "geoadd",
+    "geosearchstore",
+    "georadius",
+    "georadiusbymember",
+    "setbit",
+    "setrange",
+    "bitop",
+    "bitfield",
+    "flushdb",
+    "flushall",
+    "swapdb",
+    "sort",
     "restore",
 ];
 
@@ -69,13 +179,18 @@ pub fn execute_in_lua(
 
     // Install kill hook so SCRIPT KILL can interrupt running scripts
     if let Some(flag) = kill_flag {
-        lua.set_hook(HookTriggers::new().every_nth_instruction(10000), move |_lua, _debug| {
-            if flag.load(Ordering::SeqCst) {
-                Err(mlua::Error::runtime("Script killed by user with SCRIPT KILL"))
-            } else {
-                Ok(VmState::Continue)
-            }
-        });
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(10000),
+            move |_lua, _debug| {
+                if flag.load(Ordering::SeqCst) {
+                    Err(mlua::Error::runtime(
+                        "Script killed by user with SCRIPT KILL",
+                    ))
+                } else {
+                    Ok(VmState::Continue)
+                }
+            },
+        );
     }
 
     setup_keys_argv(&lua, &keys, &args)
@@ -111,13 +226,18 @@ pub fn execute_function_in_lua(
 
     // Install kill hook so SCRIPT KILL can interrupt running functions
     if let Some(flag) = kill_flag {
-        lua.set_hook(HookTriggers::new().every_nth_instruction(10000), move |_lua, _debug| {
-            if flag.load(Ordering::SeqCst) {
-                Err(mlua::Error::runtime("Script killed by user with SCRIPT KILL"))
-            } else {
-                Ok(VmState::Continue)
-            }
-        });
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(10000),
+            move |_lua, _debug| {
+                if flag.load(Ordering::SeqCst) {
+                    Err(mlua::Error::runtime(
+                        "Script killed by user with SCRIPT KILL",
+                    ))
+                } else {
+                    Ok(VmState::Continue)
+                }
+            },
+        );
     }
 
     setup_redis_api(&lua, handler, handle, read_only)
@@ -163,7 +283,11 @@ pub fn execute_function_in_lua(
 
     // Call the named function safely (avoid string interpolation to prevent injection)
     lua.globals()
-        .set("__target_func_name", lua.create_string(func_name.as_bytes()).map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?)
+        .set(
+            "__target_func_name",
+            lua.create_string(func_name.as_bytes())
+                .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?,
+        )
         .map_err(|e| CommandError::InternalError(format!("ERR {}", e)))?;
 
     let call_script = "local func = __registered_functions[__target_func_name]\n\
@@ -243,7 +367,10 @@ fn setup_redis_api(
         let parts: Vec<String> = args
             .iter()
             .map(|v| match v {
-                Value::String(s) => s.to_str().map(|b| b.to_string()).unwrap_or_else(|_| "<binary>".to_string()),
+                Value::String(s) => s
+                    .to_str()
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|_| "<binary>".to_string()),
                 Value::Integer(n) => n.to_string(),
                 Value::Number(n) => n.to_string(),
                 Value::Boolean(b) => b.to_string(),
@@ -331,7 +458,10 @@ fn redis_call_impl(
     // Block commands that should never be called from Lua scripts (matching Redis behavior)
     let cmd_lower = cmd_name.to_lowercase();
     if BLOCKED_SCRIPT_COMMANDS.contains(&cmd_lower.as_str()) {
-        let msg = format!("ERR This Redis command is not allowed from script: {}", cmd_name);
+        let msg = format!(
+            "ERR This Redis command is not allowed from script: {}",
+            cmd_name
+        );
         if protected {
             let table = lua.create_table()?;
             table.set("err", msg.as_str())?;
@@ -341,16 +471,18 @@ fn redis_call_impl(
     }
 
     // Enforce read-only mode: block write commands in EVAL_RO/FCALL_RO
-    if read_only
-        && WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
-            let msg = format!("ERR Write commands are not allowed from read-only scripts. Command '{}' is a write command.", cmd_name);
-            if protected {
-                let table = lua.create_table()?;
-                table.set("err", msg.as_str())?;
-                return Ok(Value::Table(table));
-            }
-            return Err(mlua::Error::external(msg));
+    if read_only && WRITE_COMMANDS.contains(&cmd_lower.as_str()) {
+        let msg = format!(
+            "ERR Write commands are not allowed from read-only scripts. Command '{}' is a write command.",
+            cmd_name
+        );
+        if protected {
+            let table = lua.create_table()?;
+            table.set("err", msg.as_str())?;
+            return Ok(Value::Table(table));
         }
+        return Err(mlua::Error::external(msg));
+    }
 
     // Convert remaining arguments to byte vectors
     let cmd_args: Vec<Vec<u8>> = args
@@ -384,7 +516,9 @@ fn redis_call_impl(
 
     // Execute the command using the handler (blocking bridge to async)
     // Use the current db_index from the task-local, defaulting to 0
-    let db_index = crate::storage::engine::CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
+    let db_index = crate::storage::engine::CURRENT_DB_INDEX
+        .try_with(|v| *v)
+        .unwrap_or(0);
     let result = handle.block_on(handler.process(command, db_index));
 
     match result {
@@ -413,9 +547,7 @@ fn redis_call_impl(
 pub fn resp_to_lua(lua: &Lua, resp: &RespValue) -> mlua::Result<Value> {
     match resp {
         RespValue::Integer(n) => Ok(Value::Integer(*n)),
-        RespValue::BulkString(Some(bytes)) => {
-            Ok(Value::String(lua.create_string(bytes)?))
-        }
+        RespValue::BulkString(Some(bytes)) => Ok(Value::String(lua.create_string(bytes)?)),
         RespValue::BulkString(None) => Ok(Value::Boolean(false)),
         RespValue::SimpleString(s) => {
             let table = lua.create_table()?;
@@ -473,14 +605,16 @@ pub fn lua_to_resp(value: &Value) -> RespValue {
         Value::Table(t) => {
             // Check for error table: {err = "message"}
             if let Ok(err) = t.get::<mlua::String>("err")
-                && let Ok(s) = err.to_str() {
-                    return RespValue::Error(s.to_string());
-                }
+                && let Ok(s) = err.to_str()
+            {
+                return RespValue::Error(s.to_string());
+            }
             // Check for status table: {ok = "message"}
             if let Ok(ok) = t.get::<mlua::String>("ok")
-                && let Ok(s) = ok.to_str() {
-                    return RespValue::SimpleString(s.to_string());
-                }
+                && let Ok(s) = ok.to_str()
+            {
+                return RespValue::SimpleString(s.to_string());
+            }
 
             // Regular array table
             let len = t.raw_len();
@@ -499,7 +633,9 @@ pub fn lua_to_resp(value: &Value) -> RespValue {
 /// Discover function names from a library's Lua code.
 /// Creates a temporary Lua state and evaluates the library to find registered functions.
 #[allow(clippy::type_complexity)]
-pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec<String>)>, CommandError> {
+pub fn discover_functions(
+    code: &str,
+) -> Result<Vec<(String, Option<String>, Vec<String>)>, CommandError> {
     let lua = Lua::new();
     sandbox_lua(&lua);
     let functions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -513,9 +649,10 @@ pub fn discover_functions(code: &str) -> Result<Vec<(String, Option<String>, Vec
             if args_vec.len() >= 2 {
                 // Simple form: redis.register_function('name', callback)
                 if let Value::String(ref s) = args_vec[0]
-                    && let Ok(name) = s.to_str() {
-                        funcs.push((name.to_string(), None, vec![]));
-                    }
+                    && let Ok(name) = s.to_str()
+                {
+                    funcs.push((name.to_string(), None, vec![]));
+                }
             } else if let Some(Value::Table(t)) = args_vec.first() {
                 // Table form: redis.register_function{function_name=..., callback=...}
                 if let Ok(name) = t.get::<String>("function_name") {

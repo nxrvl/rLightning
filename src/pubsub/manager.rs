@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// Unique identifier for a client connection
 pub type ClientId = u64;
@@ -18,30 +18,15 @@ pub type ClientId = u64;
 #[allow(dead_code)]
 pub enum SubscriptionMessage {
     /// Confirmation of channel subscription: (channel, subscription_count)
-    Subscribe {
-        channel: Vec<u8>,
-        count: usize,
-    },
+    Subscribe { channel: Vec<u8>, count: usize },
     /// Confirmation of channel unsubscription: (channel, subscription_count)
-    Unsubscribe {
-        channel: Vec<u8>,
-        count: usize,
-    },
+    Unsubscribe { channel: Vec<u8>, count: usize },
     /// Message from a channel: (channel, message)
-    Message {
-        channel: Vec<u8>,
-        data: Vec<u8>,
-    },
+    Message { channel: Vec<u8>, data: Vec<u8> },
     /// Confirmation of pattern subscription: (pattern, subscription_count)
-    PSubscribe {
-        pattern: Vec<u8>,
-        count: usize,
-    },
+    PSubscribe { pattern: Vec<u8>, count: usize },
     /// Confirmation of pattern unsubscription: (pattern, subscription_count)
-    PUnsubscribe {
-        pattern: Vec<u8>,
-        count: usize,
-    },
+    PUnsubscribe { pattern: Vec<u8>, count: usize },
     /// Message matching a pattern: (pattern, channel, message)
     PMessage {
         pattern: Vec<u8>,
@@ -49,20 +34,11 @@ pub enum SubscriptionMessage {
         data: Vec<u8>,
     },
     /// Confirmation of shard channel subscription: (channel, subscription_count)
-    SSubscribe {
-        channel: Vec<u8>,
-        count: usize,
-    },
+    SSubscribe { channel: Vec<u8>, count: usize },
     /// Confirmation of shard channel unsubscription: (channel, subscription_count)
-    SUnsubscribe {
-        channel: Vec<u8>,
-        count: usize,
-    },
+    SUnsubscribe { channel: Vec<u8>, count: usize },
     /// Message from a shard channel: (channel, message)
-    SMessage {
-        channel: Vec<u8>,
-        data: Vec<u8>,
-    },
+    SMessage { channel: Vec<u8>, data: Vec<u8> },
 }
 
 /// State for a single client's subscriptions
@@ -368,12 +344,16 @@ impl PubSubManager {
             if let Some(subscriber_ids) = channels.get(&channel) {
                 for &client_id in subscriber_ids {
                     if let Some(client_sub) = clients.get(&client_id)
-                        && client_sub.tx.send(SubscriptionMessage::Message {
-                            channel: channel.clone(),
-                            data: message.clone(),
-                        }).is_ok() {
-                            recipients += 1;
-                        }
+                        && client_sub
+                            .tx
+                            .send(SubscriptionMessage::Message {
+                                channel: channel.clone(),
+                                data: message.clone(),
+                            })
+                            .is_ok()
+                    {
+                        recipients += 1;
+                    }
                 }
             }
         }
@@ -387,13 +367,17 @@ impl PubSubManager {
                 if Self::matches_pattern(pattern, &channel) {
                     for &client_id in subscriber_ids {
                         if let Some(client_sub) = clients.get(&client_id)
-                            && client_sub.tx.send(SubscriptionMessage::PMessage {
-                                pattern: pattern.clone(),
-                                channel: channel.clone(),
-                                data: message.clone(),
-                            }).is_ok() {
-                                recipients += 1;
-                            }
+                            && client_sub
+                                .tx
+                                .send(SubscriptionMessage::PMessage {
+                                    pattern: pattern.clone(),
+                                    channel: channel.clone(),
+                                    data: message.clone(),
+                                })
+                                .is_ok()
+                        {
+                            recipients += 1;
+                        }
                     }
                 }
             }
@@ -405,7 +389,8 @@ impl PubSubManager {
     /// Get the subscription count for a client (for checking if in subscription mode)
     pub async fn get_subscription_count(&self, client_id: ClientId) -> usize {
         let clients = self.clients.read().await;
-        clients.get(&client_id)
+        clients
+            .get(&client_id)
             .map(|c| c.subscription_count())
             .unwrap_or(0)
     }
@@ -414,7 +399,8 @@ impl PubSubManager {
     /// Returns (sub_count, psub_count) where sub_count includes channels + shard channels
     pub async fn get_subscription_counts(&self, client_id: ClientId) -> (usize, usize) {
         let clients = self.clients.read().await;
-        clients.get(&client_id)
+        clients
+            .get(&client_id)
             .map(|c| (c.channels.len() + c.shard_channels.len(), c.patterns.len()))
             .unwrap_or((0, 0))
     }
@@ -428,7 +414,10 @@ impl PubSubManager {
 
     /// Get receiver for a client (for receiving messages)
     #[allow(dead_code)]
-    pub async fn get_receiver(&self, client_id: ClientId) -> Option<broadcast::Receiver<SubscriptionMessage>> {
+    pub async fn get_receiver(
+        &self,
+        client_id: ClientId,
+    ) -> Option<broadcast::Receiver<SubscriptionMessage>> {
         let clients = self.clients.read().await;
         clients.get(&client_id).map(|c| c.tx.subscribe())
     }
@@ -520,9 +509,9 @@ impl PubSubManager {
                             data: message.clone(),
                         })
                         .is_ok()
-                    {
-                        recipients += 1;
-                    }
+                {
+                    recipients += 1;
+                }
             }
         }
 
@@ -536,9 +525,12 @@ impl PubSubManager {
     pub async fn pubsub_channels(&self, pattern: Option<&[u8]>) -> Vec<Vec<u8>> {
         let channels = self.channels.read().await;
 
-        channels.keys()
+        channels
+            .keys()
             .filter(|channel| {
-                pattern.map(|p| Self::matches_pattern(p, channel)).unwrap_or(true)
+                pattern
+                    .map(|p| Self::matches_pattern(p, channel))
+                    .unwrap_or(true)
             })
             .cloned()
             .collect()
@@ -548,11 +540,10 @@ impl PubSubManager {
     pub async fn pubsub_numsub(&self, channel_names: &[Vec<u8>]) -> Vec<(Vec<u8>, usize)> {
         let channels = self.channels.read().await;
 
-        channel_names.iter()
+        channel_names
+            .iter()
             .map(|channel| {
-                let count = channels.get(channel)
-                    .map(|s| s.len())
-                    .unwrap_or(0);
+                let count = channels.get(channel).map(|s| s.len()).unwrap_or(0);
                 (channel.clone(), count)
             })
             .collect()
@@ -611,10 +602,16 @@ mod tests {
         assert!(PubSubManager::matches_pattern(b"*", b""));
         assert!(PubSubManager::matches_pattern(b"news:*", b"news:sports"));
         assert!(PubSubManager::matches_pattern(b"news:*", b"news:"));
-        assert!(!PubSubManager::matches_pattern(b"news:*", b"weather:sports"));
+        assert!(!PubSubManager::matches_pattern(
+            b"news:*",
+            b"weather:sports"
+        ));
         assert!(PubSubManager::matches_pattern(b"*:sports", b"news:sports"));
         assert!(PubSubManager::matches_pattern(b"*:*", b"news:sports"));
-        assert!(PubSubManager::matches_pattern(b"user:*:messages", b"user:123:messages"));
+        assert!(PubSubManager::matches_pattern(
+            b"user:*:messages",
+            b"user:123:messages"
+        ));
     }
 
     #[test]
@@ -642,8 +639,14 @@ mod tests {
 
     #[test]
     fn test_pattern_matching_escape() {
-        assert!(PubSubManager::matches_pattern(b"hello\\*world", b"hello*world"));
-        assert!(!PubSubManager::matches_pattern(b"hello\\*world", b"helloXworld"));
+        assert!(PubSubManager::matches_pattern(
+            b"hello\\*world",
+            b"hello*world"
+        ));
+        assert!(!PubSubManager::matches_pattern(
+            b"hello\\*world",
+            b"helloXworld"
+        ));
     }
 
     #[tokio::test]
@@ -654,7 +657,9 @@ mod tests {
         let (client_id, _rx) = manager.register_client().await;
 
         // Subscribe to channels
-        let results = manager.subscribe(client_id, vec![b"news".to_vec(), b"sports".to_vec()]).await;
+        let results = manager
+            .subscribe(client_id, vec![b"news".to_vec(), b"sports".to_vec()])
+            .await;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1, 1); // First subscription
         assert_eq!(results[1].1, 2); // Second subscription
@@ -663,7 +668,9 @@ mod tests {
         assert_eq!(manager.get_subscription_count(client_id).await, 2);
 
         // Unsubscribe from one channel
-        let results = manager.unsubscribe(client_id, Some(vec![b"news".to_vec()])).await;
+        let results = manager
+            .unsubscribe(client_id, Some(vec![b"news".to_vec()]))
+            .await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, 1); // One subscription remaining
 
@@ -713,17 +720,26 @@ mod tests {
         let (client_id, mut rx) = manager.register_client().await;
 
         // Subscribe to pattern
-        manager.psubscribe(client_id, vec![b"news:*".to_vec()]).await;
+        manager
+            .psubscribe(client_id, vec![b"news:*".to_vec()])
+            .await;
 
         // Note: Subscription confirmations are now sent directly to clients via response buffer,
         // not through the broadcast channel. Only actual messages go through broadcast.
 
         // Publish to matching channel
-        let recipients = manager.publish(b"news:sports".to_vec(), b"Goal!".to_vec()).await;
+        let recipients = manager
+            .publish(b"news:sports".to_vec(), b"Goal!".to_vec())
+            .await;
         assert_eq!(recipients, 1);
 
         // Check pattern message
-        if let Ok(SubscriptionMessage::PMessage { pattern, channel, data }) = rx.recv().await {
+        if let Ok(SubscriptionMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        }) = rx.recv().await
+        {
             assert_eq!(pattern, b"news:*".to_vec());
             assert_eq!(channel, b"news:sports".to_vec());
             assert_eq!(data, b"Goal!".to_vec());
@@ -732,7 +748,9 @@ mod tests {
         }
 
         // Publish to non-matching channel
-        let recipients = manager.publish(b"weather:rain".to_vec(), b"It's raining".to_vec()).await;
+        let recipients = manager
+            .publish(b"weather:rain".to_vec(), b"It's raining".to_vec())
+            .await;
         assert_eq!(recipients, 0);
     }
 
@@ -742,11 +760,16 @@ mod tests {
 
         let (client_id, _rx) = manager.register_client().await;
 
-        manager.subscribe(client_id, vec![
-            b"news:sports".to_vec(),
-            b"news:weather".to_vec(),
-            b"tech:ai".to_vec(),
-        ]).await;
+        manager
+            .subscribe(
+                client_id,
+                vec![
+                    b"news:sports".to_vec(),
+                    b"news:weather".to_vec(),
+                    b"tech:ai".to_vec(),
+                ],
+            )
+            .await;
 
         // Get all channels
         let channels = manager.pubsub_channels(None).await;
@@ -765,9 +788,13 @@ mod tests {
         let (client2, _rx2) = manager.register_client().await;
 
         manager.subscribe(client1, vec![b"news".to_vec()]).await;
-        manager.subscribe(client2, vec![b"news".to_vec(), b"sports".to_vec()]).await;
+        manager
+            .subscribe(client2, vec![b"news".to_vec(), b"sports".to_vec()])
+            .await;
 
-        let counts = manager.pubsub_numsub(&[b"news".to_vec(), b"sports".to_vec(), b"unknown".to_vec()]).await;
+        let counts = manager
+            .pubsub_numsub(&[b"news".to_vec(), b"sports".to_vec(), b"unknown".to_vec()])
+            .await;
 
         assert_eq!(counts.len(), 3);
         assert_eq!(counts[0], (b"news".to_vec(), 2));
@@ -783,7 +810,9 @@ mod tests {
         let (client2, _rx2) = manager.register_client().await;
 
         manager.psubscribe(client1, vec![b"news:*".to_vec()]).await;
-        manager.psubscribe(client2, vec![b"news:*".to_vec(), b"tech:*".to_vec()]).await;
+        manager
+            .psubscribe(client2, vec![b"news:*".to_vec(), b"tech:*".to_vec()])
+            .await;
 
         // Should count unique patterns, not subscriptions
         let numpat = manager.pubsub_numpat().await;
@@ -797,7 +826,9 @@ mod tests {
         let (client_id, _rx) = manager.register_client().await;
 
         manager.subscribe(client_id, vec![b"news".to_vec()]).await;
-        manager.psubscribe(client_id, vec![b"tech:*".to_vec()]).await;
+        manager
+            .psubscribe(client_id, vec![b"tech:*".to_vec()])
+            .await;
 
         // Verify subscriptions exist
         let channels = manager.pubsub_channels(None).await;
@@ -823,7 +854,10 @@ mod tests {
 
         // Subscribe to shard channels
         let results = manager
-            .ssubscribe(client_id, vec![b"shard:news".to_vec(), b"shard:sports".to_vec()])
+            .ssubscribe(
+                client_id,
+                vec![b"shard:news".to_vec(), b"shard:sports".to_vec()],
+            )
             .await;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1, 1); // First subscription
@@ -1008,7 +1042,11 @@ mod tests {
         manager
             .ssubscribe(
                 client_id,
-                vec![b"shard:a".to_vec(), b"shard:b".to_vec(), b"shard:c".to_vec()],
+                vec![
+                    b"shard:a".to_vec(),
+                    b"shard:b".to_vec(),
+                    b"shard:c".to_vec(),
+                ],
             )
             .await;
 

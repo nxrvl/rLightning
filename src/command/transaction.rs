@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::command::{Command, CommandError, CommandResult};
 use crate::command::handler::CommandHandler;
+use crate::command::{Command, CommandError, CommandResult};
 use crate::networking::resp::RespValue;
-use crate::storage::engine::{StorageEngine, IN_TRANSACTION};
+use crate::storage::engine::{IN_TRANSACTION, StorageEngine};
 
 /// Extract all keys that a command will access from its arguments.
 /// Used by EXEC to collect keys for transaction-level locking.
@@ -11,13 +11,13 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
     let cmd_lower = cmd.name.to_lowercase();
     match cmd_lower.as_str() {
         // Commands with no data keys (server, connection, admin)
-        "ping" | "echo" | "info" | "auth" | "config" | "keys" | "scan" | "dbsize"
-        | "randomkey" | "flushall" | "flushdb" | "monitor" | "select" | "quit" | "reset"
-        | "client" | "command" | "save" | "bgsave" | "bgrewriteaof" | "lastsave"
-        | "shutdown" | "slowlog" | "latency" | "memory" | "debug" | "swapdb" | "time"
-        | "lolwut" | "cluster" | "asking" | "readonly" | "readwrite" | "module" | "acl"
-        | "wait" | "waitaof" | "role" | "replicaof" | "slaveof" | "replconf" | "psync"
-        | "failover" | "sentinel" | "script" | "function" => vec![],
+        "ping" | "echo" | "info" | "auth" | "config" | "keys" | "scan" | "dbsize" | "randomkey"
+        | "flushall" | "flushdb" | "monitor" | "select" | "quit" | "reset" | "client"
+        | "command" | "save" | "bgsave" | "bgrewriteaof" | "lastsave" | "shutdown" | "slowlog"
+        | "latency" | "memory" | "debug" | "swapdb" | "time" | "lolwut" | "cluster" | "asking"
+        | "readonly" | "readwrite" | "module" | "acl" | "wait" | "waitaof" | "role"
+        | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" | "sentinel" | "script"
+        | "function" => vec![],
 
         // All args are keys
         "del" | "unlink" | "exists" | "touch" => cmd.args.clone(),
@@ -31,16 +31,24 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // Two-key commands: args[0] and args[1]
         "rename" | "renamenx" | "lmove" | "rpoplpush" | "smove" | "copy" | "lcs" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
-            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
+            if cmd.args.len() > 1 {
+                keys.push(cmd.args[1].clone());
+            }
             keys
         }
 
         // BLMOVE: args[0] source, args[1] dest
         "blmove" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
-            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
+            if cmd.args.len() > 1 {
+                keys.push(cmd.args[1].clone());
+            }
             keys
         }
 
@@ -55,7 +63,11 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // LMPOP/ZMPOP: args[0] is numkeys, args[1..1+numkeys] are keys
         "lmpop" | "zmpop" => {
-            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if let Some(numkeys) = cmd
+                .args
+                .first()
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 cmd.args.iter().skip(1).take(numkeys).cloned().collect()
             } else {
                 vec![]
@@ -64,7 +76,11 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // BLMPOP/BZMPOP: args[0] is timeout, args[1] is numkeys, args[2..2+numkeys] are keys
         "blmpop" | "bzmpop" => {
-            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if let Some(numkeys) = cmd
+                .args
+                .get(1)
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 cmd.args.iter().skip(2).take(numkeys).cloned().collect()
             } else {
                 vec![]
@@ -76,7 +92,11 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // SINTERCARD: args[0] is numkeys, args[1..1+numkeys] are keys
         "sintercard" => {
-            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if let Some(numkeys) = cmd
+                .args
+                .first()
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 cmd.args.iter().skip(1).take(numkeys).cloned().collect()
             } else {
                 vec![]
@@ -89,8 +109,14 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // ZINTERSTORE/ZUNIONSTORE/ZDIFFSTORE: args[0] dest, args[1] numkeys, args[2..2+numkeys] source keys
         "zinterstore" | "zunionstore" | "zdiffstore" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
-            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
+            if let Some(numkeys) = cmd
+                .args
+                .get(1)
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 for k in cmd.args.iter().skip(2).take(numkeys) {
                     keys.push(k.clone());
                 }
@@ -100,7 +126,11 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // ZINTER/ZUNION/ZDIFF: args[0] numkeys, args[1..1+numkeys] source keys
         "zinter" | "zunion" | "zdiff" => {
-            if let Some(numkeys) = cmd.args.first().and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if let Some(numkeys) = cmd
+                .args
+                .first()
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 cmd.args.iter().skip(1).take(numkeys).cloned().collect()
             } else {
                 vec![]
@@ -110,15 +140,21 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // ZRANGESTORE/GEOSEARCHSTORE: args[0] dest, args[1] source
         "zrangestore" | "geosearchstore" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
-            if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
+            if cmd.args.len() > 1 {
+                keys.push(cmd.args[1].clone());
+            }
             keys
         }
 
         // GEORADIUS/GEORADIUSBYMEMBER: args[0] is source key, may have STORE/STOREDIST dest key
         "georadius" | "georadius_ro" | "georadiusbymember" | "georadiusbymember_ro" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
             // Scan options for STORE/STOREDIST destination key
             for i in 1..cmd.args.len() {
                 if (cmd.args[i].eq_ignore_ascii_case(b"STORE")
@@ -142,9 +178,10 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // XREAD/XREADGROUP: keys appear after "STREAMS" keyword
         "xread" | "xreadgroup" => {
-            let streams_pos = cmd.args.iter().position(|a| {
-                a.eq_ignore_ascii_case(b"STREAMS")
-            });
+            let streams_pos = cmd
+                .args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
             if let Some(pos) = streams_pos {
                 let remaining = &cmd.args[pos + 1..];
                 // Keys are the first half, IDs are the second half
@@ -157,7 +194,11 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
 
         // EVAL/EVALSHA/FCALL: args[0] is script/sha/function, args[1] is numkeys, args[2..2+numkeys] are keys
         "eval" | "evalsha" | "eval_ro" | "evalsha_ro" | "fcall" | "fcall_ro" => {
-            if let Some(numkeys) = cmd.args.get(1).and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok()) {
+            if let Some(numkeys) = cmd
+                .args
+                .get(1)
+                .and_then(|a| String::from_utf8_lossy(a).parse::<usize>().ok())
+            {
                 cmd.args.iter().skip(2).take(numkeys).cloned().collect()
             } else {
                 vec![]
@@ -167,7 +208,9 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
         // SORT/SORT_RO: args[0] is key, may have STORE dest
         "sort" | "sort_ro" => {
             let mut keys = Vec::new();
-            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
+            if !cmd.args.is_empty() {
+                keys.push(cmd.args[0].clone());
+            }
             // Check for STORE option
             for i in 1..cmd.args.len() {
                 if cmd.args[i].eq_ignore_ascii_case(b"STORE") {
@@ -326,7 +369,8 @@ pub fn handle_watch(
     }
 
     // Record flush epoch for this database (only if not already tracked)
-    state.flush_epochs_at_watch
+    state
+        .flush_epochs_at_watch
         .entry(db_index)
         .or_insert_with(|| engine.get_flush_epoch_for_db(db_index));
 
@@ -372,19 +416,20 @@ pub fn queue_command(state: &mut TransactionState, command: Command) -> CommandR
             ));
         }
         // Pub/sub commands change connection state and are not allowed inside MULTI
-        "subscribe" | "unsubscribe" | "psubscribe" | "punsubscribe"
-        | "ssubscribe" | "sunsubscribe" => {
-            return Err(CommandError::InternalError(
-                format!("Command not allowed inside MULTI: {}", cmd_lower),
-            ));
+        "subscribe" | "unsubscribe" | "psubscribe" | "punsubscribe" | "ssubscribe"
+        | "sunsubscribe" => {
+            return Err(CommandError::InternalError(format!(
+                "Command not allowed inside MULTI: {}",
+                cmd_lower
+            )));
         }
         // Blocking commands would block the entire EXEC and are not allowed
-        "blpop" | "brpop" | "blmove" | "blmpop"
-        | "bzpopmin" | "bzpopmax" | "bzmpop"
-        | "wait" | "waitaof" => {
-            return Err(CommandError::InternalError(
-                format!("Command not allowed inside MULTI: {}", cmd_lower),
-            ));
+        "blpop" | "brpop" | "blmove" | "blmpop" | "bzpopmin" | "bzpopmax" | "bzmpop" | "wait"
+        | "waitaof" => {
+            return Err(CommandError::InternalError(format!(
+                "Command not allowed inside MULTI: {}",
+                cmd_lower
+            )));
         }
         _ => {}
     }
@@ -433,16 +478,18 @@ pub async fn handle_exec(
     // Execute all queued commands while holding locks.
     // Set IN_TRANSACTION so nested lock_keys calls (e.g. from MSETNX) are no-ops,
     // avoiding deadlocks since EXEC already holds all necessary locks.
-    let results = IN_TRANSACTION.scope(true, async {
-        let mut results = Vec::with_capacity(commands.len());
-        for cmd in commands {
-            match handler.process(cmd, db_index).await {
-                Ok(response) => results.push(response),
-                Err(e) => results.push(RespValue::Error(e.to_string())),
+    let results = IN_TRANSACTION
+        .scope(true, async {
+            let mut results = Vec::with_capacity(commands.len());
+            for cmd in commands {
+                match handler.process(cmd, db_index).await {
+                    Ok(response) => results.push(response),
+                    Err(e) => results.push(RespValue::Error(e.to_string())),
+                }
             }
-        }
-        results
-    }).await;
+            results
+        })
+        .await;
 
     // Clear transaction state (locks released when _lock_guard is dropped)
     state.reset();
@@ -453,8 +500,8 @@ pub async fn handle_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::storage::engine::StorageConfig;
+    use std::sync::Arc;
 
     fn create_engine() -> Arc<StorageEngine> {
         StorageEngine::new(StorageConfig::default())
@@ -549,8 +596,13 @@ mod tests {
         let engine = create_engine();
         let mut state = TransactionState::new();
 
-        let result =
-            handle_watch(&mut state, &engine, &[b"key1".to_vec(), b"key2".to_vec()], 0).unwrap();
+        let result = handle_watch(
+            &mut state,
+            &engine,
+            &[b"key1".to_vec(), b"key2".to_vec()],
+            0,
+        )
+        .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
         assert_eq!(state.watched_keys.len(), 2);
         assert!(state.watched_keys.contains_key(&(0, b"key1".to_vec())));
@@ -642,10 +694,7 @@ mod tests {
             RespValue::Array(Some(ref results)) => {
                 assert_eq!(results.len(), 2);
                 assert_eq!(results[0], RespValue::SimpleString("OK".to_string()));
-                assert_eq!(
-                    results[1],
-                    RespValue::BulkString(Some(b"myvalue".to_vec()))
-                );
+                assert_eq!(results[1], RespValue::BulkString(Some(b"myvalue".to_vec())));
             }
             _ => panic!("Expected Array response from EXEC"),
         }
@@ -1157,7 +1206,9 @@ mod tests {
             },
         )
         .unwrap();
-        let result2 = handle_exec(&mut state2, &handler2, &engine, 0).await.unwrap();
+        let result2 = handle_exec(&mut state2, &handler2, &engine, 0)
+            .await
+            .unwrap();
         // Client 2's transaction should succeed
         match result2 {
             RespValue::Array(Some(ref results)) => {
@@ -1416,10 +1467,7 @@ mod tests {
                 b"km".to_vec(),
             ],
         };
-        assert_eq!(
-            extract_keys_from_command(&cmd),
-            vec![b"mygeo".to_vec()]
-        );
+        assert_eq!(extract_keys_from_command(&cmd), vec![b"mygeo".to_vec()]);
     }
 
     #[test]

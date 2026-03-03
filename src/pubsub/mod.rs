@@ -20,4 +20,4 @@
 
 pub mod manager;
 
-pub use manager::{PubSubManager, SubscriptionMessage, ClientId};
+pub use manager::{ClientId, PubSubManager, SubscriptionMessage};

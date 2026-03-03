@@ -12,7 +12,6 @@
 ///   docker compose -f .devcontainer/docker-compose.test.yml up -d
 ///   REDIS_COMPAT_TEST=1 cargo test --test redis_full_compatibility_test
 ///   docker compose -f .devcontainer/docker-compose.test.yml down
-
 mod test_utils;
 
 use std::collections::HashSet;
@@ -43,7 +42,9 @@ fn assert_ok(resp: &RespValue) {
 /// Assert response is an integer with the given value
 fn assert_int(resp: &RespValue, expected: i64) {
     match resp {
-        RespValue::Integer(v) => assert_eq!(*v, expected, "Expected integer {}, got {}", expected, v),
+        RespValue::Integer(v) => {
+            assert_eq!(*v, expected, "Expected integer {}, got {}", expected, v)
+        }
         _ => panic!("Expected Integer({}), got: {:?}", expected, resp),
     }
 }
@@ -53,7 +54,13 @@ fn assert_bulk(resp: &RespValue, expected: &str) {
     match resp {
         RespValue::BulkString(Some(v)) => {
             let s = String::from_utf8_lossy(v);
-            assert_eq!(s.as_ref(), expected, "Expected bulk string '{}', got '{}'", expected, s);
+            assert_eq!(
+                s.as_ref(),
+                expected,
+                "Expected bulk string '{}', got '{}'",
+                expected,
+                s
+            );
         }
         _ => panic!("Expected BulkString(Some({:?})), got: {:?}", expected, resp),
     }
@@ -102,10 +109,7 @@ fn assert_array_len(resp: &RespValue, expected_len: usize) {
                 arr.len()
             );
         }
-        _ => panic!(
-            "Expected Array of length {}, got: {:?}",
-            expected_len, resp
-        ),
+        _ => panic!("Expected Array of length {}, got: {:?}", expected_len, resp),
     }
 }
 
@@ -148,7 +152,9 @@ async fn try_connect_redis() -> Option<Client> {
     match Client::connect(addr).await {
         Ok(client) => Some(client),
         Err(_) => {
-            eprintln!("Warning: REDIS_COMPAT_TEST set but cannot connect to Redis at 127.0.0.1:6399");
+            eprintln!(
+                "Warning: REDIS_COMPAT_TEST set but cannot connect to Redis at 127.0.0.1:6399"
+            );
             None
         }
     }
@@ -368,7 +374,10 @@ async fn test_compat_key_exists_del_type() {
     assert_int(&cmd(&mut c, &["EXISTS", "strkey"]).await, 1);
     assert_int(&cmd(&mut c, &["EXISTS", "nosuch"]).await, 0);
     // Multiple keys
-    assert_int(&cmd(&mut c, &["EXISTS", "strkey", "listkey", "nosuch"]).await, 2);
+    assert_int(
+        &cmd(&mut c, &["EXISTS", "strkey", "listkey", "nosuch"]).await,
+        2,
+    );
 
     // TYPE (returns SimpleString in Redis protocol, not BulkString)
     let r = cmd(&mut c, &["TYPE", "strkey"]).await;
@@ -687,7 +696,11 @@ async fn test_compat_list_lmpop() {
     cmd(&mut c, &["RPUSH", "list1", "a", "b", "c"]).await;
     cmd(&mut c, &["RPUSH", "list2", "d", "e"]).await;
 
-    let r = cmd(&mut c, &["LMPOP", "2", "list1", "list2", "LEFT", "COUNT", "2"]).await;
+    let r = cmd(
+        &mut c,
+        &["LMPOP", "2", "list1", "list2", "LEFT", "COUNT", "2"],
+    )
+    .await;
     let arr = get_array(&r);
     assert_eq!(arr.len(), 2);
     let popped = get_array(&arr[1]);
@@ -715,7 +728,10 @@ async fn test_compat_hash_basic() {
     let addr = setup_test_server(2140).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    assert_int(&cmd(&mut c, &["HSET", "h", "f1", "v1", "f2", "v2"]).await, 2);
+    assert_int(
+        &cmd(&mut c, &["HSET", "h", "f1", "v1", "f2", "v2"]).await,
+        2,
+    );
     assert_bulk(&cmd(&mut c, &["HGET", "h", "f1"]).await, "v1");
     assert_null(&cmd(&mut c, &["HGET", "h", "nosuch"]).await);
 
@@ -762,7 +778,10 @@ async fn test_compat_hash_incr_setnx() {
     assert_int(&cmd(&mut c, &["HSETNX", "h", "newfield", "val"]).await, 1);
 
     // HDEL
-    assert_int(&cmd(&mut c, &["HDEL", "h", "counter", "newfield", "nosuch"]).await, 2);
+    assert_int(
+        &cmd(&mut c, &["HDEL", "h", "counter", "newfield", "nosuch"]).await,
+        2,
+    );
 
     // HSTRLEN
     cmd(&mut c, &["HSET", "h", "name", "Alice"]).await;
@@ -902,7 +921,10 @@ async fn test_compat_zset_basic() {
     let addr = setup_test_server(2160).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    assert_int(&cmd(&mut c, &["ZADD", "zs", "1", "a", "2", "b", "3", "c"]).await, 3);
+    assert_int(
+        &cmd(&mut c, &["ZADD", "zs", "1", "a", "2", "b", "3", "c"]).await,
+        3,
+    );
     assert_int(&cmd(&mut c, &["ZCARD", "zs"]).await, 3);
 
     // ZSCORE
@@ -930,7 +952,11 @@ async fn test_compat_zset_range_operations() {
     let addr = setup_test_server(2161).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    cmd(&mut c, &["ZADD", "zs", "1", "a", "2", "b", "3", "c", "4", "d"]).await;
+    cmd(
+        &mut c,
+        &["ZADD", "zs", "1", "a", "2", "b", "3", "c", "4", "d"],
+    )
+    .await;
 
     // ZRANGEBYSCORE
     let r = cmd(&mut c, &["ZRANGEBYSCORE", "zs", "2", "3"]).await;
@@ -957,7 +983,13 @@ async fn test_compat_zset_rem_range() {
     let addr = setup_test_server(2162).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    cmd(&mut c, &["ZADD", "zs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]).await;
+    cmd(
+        &mut c,
+        &[
+            "ZADD", "zs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e",
+        ],
+    )
+    .await;
 
     // ZREMRANGEBYRANK
     assert_int(&cmd(&mut c, &["ZREMRANGEBYRANK", "zs", "0", "1"]).await, 2);
@@ -1012,13 +1044,22 @@ async fn test_compat_zset_store_operations() {
     cmd(&mut c, &["ZADD", "zs2", "10", "b", "20", "c", "30", "d"]).await;
 
     // ZUNIONSTORE
-    assert_int(&cmd(&mut c, &["ZUNIONSTORE", "out1", "2", "zs1", "zs2"]).await, 4);
+    assert_int(
+        &cmd(&mut c, &["ZUNIONSTORE", "out1", "2", "zs1", "zs2"]).await,
+        4,
+    );
 
     // ZINTERSTORE
-    assert_int(&cmd(&mut c, &["ZINTERSTORE", "out2", "2", "zs1", "zs2"]).await, 2);
+    assert_int(
+        &cmd(&mut c, &["ZINTERSTORE", "out2", "2", "zs1", "zs2"]).await,
+        2,
+    );
 
     // ZDIFFSTORE
-    assert_int(&cmd(&mut c, &["ZDIFFSTORE", "out3", "2", "zs1", "zs2"]).await, 1);
+    assert_int(
+        &cmd(&mut c, &["ZDIFFSTORE", "out3", "2", "zs1", "zs2"]).await,
+        1,
+    );
 
     // ZSCAN
     let r = cmd(&mut c, &["ZSCAN", "zs1", "0"]).await;
@@ -1070,13 +1111,21 @@ async fn test_compat_hyperloglog() {
 
     // PFCOUNT
     let count = get_int(&cmd(&mut c, &["PFCOUNT", "hll"]).await);
-    assert!(count >= 3 && count <= 5, "HLL count should be ~4, got {}", count);
+    assert!(
+        count >= 3 && count <= 5,
+        "HLL count should be ~4, got {}",
+        count
+    );
 
     // PFMERGE
     cmd(&mut c, &["PFADD", "hll2", "c", "d", "e", "f"]).await;
     assert_ok(&cmd(&mut c, &["PFMERGE", "merged", "hll", "hll2"]).await);
     let count = get_int(&cmd(&mut c, &["PFCOUNT", "merged"]).await);
-    assert!(count >= 5 && count <= 7, "Merged HLL count should be ~6, got {}", count);
+    assert!(
+        count >= 5 && count <= 7,
+        "Merged HLL count should be ~6, got {}",
+        count
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,7 +1140,16 @@ async fn test_compat_geo() {
     // GEOADD
     let r = cmd(
         &mut c,
-        &["GEOADD", "places", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania"],
+        &[
+            "GEOADD",
+            "places",
+            "13.361389",
+            "38.115556",
+            "Palermo",
+            "15.087269",
+            "37.502669",
+            "Catania",
+        ],
     )
     .await;
     assert_int(&r, 2);
@@ -1105,7 +1163,11 @@ async fn test_compat_geo() {
     let r = cmd(&mut c, &["GEODIST", "places", "Palermo", "Catania", "km"]).await;
     let dist_str = get_string(&r);
     let dist: f64 = dist_str.parse().unwrap();
-    assert!(dist > 150.0 && dist < 170.0, "Distance should be ~166km, got {}", dist);
+    assert!(
+        dist > 150.0 && dist < 170.0,
+        "Distance should be ~166km, got {}",
+        dist
+    );
 
     // GEOHASH
     let r = cmd(&mut c, &["GEOHASH", "places", "Palermo"]).await;
@@ -1117,7 +1179,17 @@ async fn test_compat_geo() {
     // GEOSEARCH
     let r = cmd(
         &mut c,
-        &["GEOSEARCH", "places", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"],
+        &[
+            "GEOSEARCH",
+            "places",
+            "FROMLONLAT",
+            "15",
+            "37",
+            "BYRADIUS",
+            "200",
+            "km",
+            "ASC",
+        ],
     )
     .await;
     let arr = get_array(&r);
@@ -1134,9 +1206,17 @@ async fn test_compat_stream_basic() {
     let mut c = create_client(addr).await.unwrap();
 
     // XADD
-    let r = cmd(&mut c, &["XADD", "stream", "*", "name", "Alice", "age", "30"]).await;
+    let r = cmd(
+        &mut c,
+        &["XADD", "stream", "*", "name", "Alice", "age", "30"],
+    )
+    .await;
     let id1 = get_string(&r);
-    assert!(id1.contains('-'), "Stream ID should contain -, got: {}", id1);
+    assert!(
+        id1.contains('-'),
+        "Stream ID should contain -, got: {}",
+        id1
+    );
 
     let r = cmd(&mut c, &["XADD", "stream", "*", "name", "Bob", "age", "25"]).await;
     let _id2 = get_string(&r);
@@ -1201,7 +1281,17 @@ async fn test_compat_stream_consumer_groups() {
     // XREADGROUP
     let r = cmd(
         &mut c,
-        &["XREADGROUP", "GROUP", "mygroup", "consumer1", "COUNT", "1", "STREAMS", "stream", ">"],
+        &[
+            "XREADGROUP",
+            "GROUP",
+            "mygroup",
+            "consumer1",
+            "COUNT",
+            "1",
+            "STREAMS",
+            "stream",
+            ">",
+        ],
     )
     .await;
     let streams = get_array(&r);
@@ -1347,7 +1437,13 @@ async fn test_compat_eval_basic() {
     // EVAL SET and GET
     let r = cmd(
         &mut c,
-        &["EVAL", "redis.call('SET', KEYS[1], ARGV[1]) return redis.call('GET', KEYS[1])", "1", "luakey", "luaval"],
+        &[
+            "EVAL",
+            "redis.call('SET', KEYS[1], ARGV[1]) return redis.call('GET', KEYS[1])",
+            "1",
+            "luakey",
+            "luaval",
+        ],
     )
     .await;
     assert_bulk(&r, "luaval");
@@ -1364,7 +1460,16 @@ async fn test_compat_script_caching() {
     assert_eq!(sha.len(), 40);
 
     // SCRIPT EXISTS
-    let r = cmd(&mut c, &["SCRIPT", "EXISTS", &sha, "0000000000000000000000000000000000000000"]).await;
+    let r = cmd(
+        &mut c,
+        &[
+            "SCRIPT",
+            "EXISTS",
+            &sha,
+            "0000000000000000000000000000000000000000",
+        ],
+    )
+    .await;
     let arr = get_array(&r);
     assert_int(&arr[0], 1);
     assert_int(&arr[1], 0);
@@ -1386,27 +1491,33 @@ async fn test_compat_acl_basic() {
     // ACL WHOAMI - returns current user (may be "default" or "OK" depending on auth state)
     let r = cmd(&mut c, &["ACL", "WHOAMI"]).await;
     let user = get_string(&r);
-    assert!(!user.is_empty(), "ACL WHOAMI should return a non-empty response");
+    assert!(
+        !user.is_empty(),
+        "ACL WHOAMI should return a non-empty response"
+    );
 
     // ACL USERS - returns user list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "USERS"]).await;
     assert!(
         !matches!(&r, RespValue::Error(_)),
-        "ACL USERS should not return an error, got: {:?}", r
+        "ACL USERS should not return an error, got: {:?}",
+        r
     );
 
     // ACL LIST - returns rule list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "LIST"]).await;
     assert!(
         !matches!(&r, RespValue::Error(_)),
-        "ACL LIST should not return an error, got: {:?}", r
+        "ACL LIST should not return an error, got: {:?}",
+        r
     );
 
     // ACL CAT - returns category list when security is enabled, OK when not configured
     let r = cmd(&mut c, &["ACL", "CAT"]).await;
     assert!(
         !matches!(&r, RespValue::Error(_)),
-        "ACL CAT should not return an error, got: {:?}", r
+        "ACL CAT should not return an error, got: {:?}",
+        r
     );
 
     // ACL GENPASS
@@ -1465,7 +1576,11 @@ async fn test_compat_info() {
 
     let r = cmd(&mut c, &["INFO"]).await;
     let info = get_string(&r);
-    assert!(info.contains("redis_version") || info.contains("rlightning_version") || info.contains("server"));
+    assert!(
+        info.contains("redis_version")
+            || info.contains("rlightning_version")
+            || info.contains("server")
+    );
 }
 
 #[tokio::test]
@@ -1508,7 +1623,10 @@ async fn test_compat_client_setname_getname() {
         RespValue::BulkString(None) | RespValue::Null => {
             // Some implementations don't track names across the connection
         }
-        _ => panic!("Expected BulkString or Null from CLIENT GETNAME, got: {:?}", r),
+        _ => panic!(
+            "Expected BulkString or Null from CLIENT GETNAME, got: {:?}",
+            r
+        ),
     }
 }
 
@@ -1651,7 +1769,12 @@ async fn test_compat_edge_special_chars_in_keys() {
     let addr = setup_test_server(2282).await.unwrap();
     let mut c = create_client(addr).await.unwrap();
 
-    let special_keys = vec!["key:with:colons", "key.with.dots", "key-with-dashes", "key/with/slashes"];
+    let special_keys = vec![
+        "key:with:colons",
+        "key.with.dots",
+        "key-with-dashes",
+        "key/with/slashes",
+    ];
     for key in &special_keys {
         cmd(&mut c, &["SET", key, "val"]).await;
         assert_bulk(&cmd(&mut c, &["GET", key]).await, "val");
@@ -1695,14 +1818,16 @@ async fn test_compat_hello_resp3() {
     let r = cmd(&mut c, &["HELLO"]).await;
     assert!(
         matches!(&r, RespValue::Array(Some(arr)) if !arr.is_empty()),
-        "HELLO should return non-empty server info, got: {:?}", r
+        "HELLO should return non-empty server info, got: {:?}",
+        r
     );
 
     // HELLO 2 (explicitly request RESP2 - should return server info)
     let r = cmd(&mut c, &["HELLO", "2"]).await;
     assert!(
         !matches!(&r, RespValue::Error(_)),
-        "HELLO 2 should not return an error, got: {:?}", r
+        "HELLO 2 should not return an error, got: {:?}",
+        r
     );
 }
 
@@ -1723,7 +1848,8 @@ async fn test_compat_persistence_commands() {
     let r = cmd(&mut c, &["BGSAVE"]).await;
     assert!(
         !matches!(&r, RespValue::Error(_)),
-        "BGSAVE should not return an error, got: {:?}", r
+        "BGSAVE should not return an error, got: {:?}",
+        r
     );
 }
 
@@ -1771,15 +1897,24 @@ async fn test_compat_redis_rs_client() {
     assert_bulk(&cmd(&mut c, &["HGET", "client_hash", "f1"]).await, "v1");
 
     // List operations
-    assert_int(&cmd(&mut c, &["RPUSH", "client_list", "a", "b", "c"]).await, 3);
+    assert_int(
+        &cmd(&mut c, &["RPUSH", "client_list", "a", "b", "c"]).await,
+        3,
+    );
     assert_int(&cmd(&mut c, &["LLEN", "client_list"]).await, 3);
 
     // Set operations
-    assert_int(&cmd(&mut c, &["SADD", "client_set", "x", "y", "z"]).await, 3);
+    assert_int(
+        &cmd(&mut c, &["SADD", "client_set", "x", "y", "z"]).await,
+        3,
+    );
     assert_int(&cmd(&mut c, &["SCARD", "client_set"]).await, 3);
 
     // Sorted set operations
-    assert_int(&cmd(&mut c, &["ZADD", "client_zset", "1", "one", "2", "two"]).await, 2);
+    assert_int(
+        &cmd(&mut c, &["ZADD", "client_zset", "1", "one", "2", "two"]).await,
+        2,
+    );
     assert_int(&cmd(&mut c, &["ZCARD", "client_zset"]).await, 2);
 
     // Pipeline-like behavior (multiple commands in sequence)
@@ -1803,7 +1938,9 @@ async fn test_compat_docker_comparison() {
 
     let redis_client = try_connect_redis().await;
     if redis_client.is_none() {
-        println!("Skipping Docker comparison test (REDIS_COMPAT_TEST not set or Redis not available)");
+        println!(
+            "Skipping Docker comparison test (REDIS_COMPAT_TEST not set or Redis not available)"
+        );
         // Still run basic validation against rLightning
         assert_ok(&cmd(&mut rl, &["SET", "test", "val"]).await);
         assert_bulk(&cmd(&mut rl, &["GET", "test"]).await, "val");

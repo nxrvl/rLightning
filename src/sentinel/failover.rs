@@ -24,7 +24,9 @@ impl FailoverOrchestrator {
 
         for name in master_names {
             // First, check if we need to start a new failover (requires epoch increment)
-            let needs_failover_start = state.masters.get(&name)
+            let needs_failover_start = state
+                .masters
+                .get(&name)
                 .map(|m| {
                     m.failover_state == FailoverState::None
                         && m.objective_down
@@ -106,7 +108,10 @@ impl FailoverOrchestrator {
                         master.failover_state = FailoverState::Done;
                     }
                     FailoverState::Done => {
-                        info!("Sentinel +failover-end master '{}' failover completed successfully", name);
+                        info!(
+                            "Sentinel +failover-end master '{}' failover completed successfully",
+                            name
+                        );
                         master.failover_state = FailoverState::None;
                         master.failover_start_time = None;
                         master.promoted_replica = None;
@@ -120,17 +125,19 @@ impl FailoverOrchestrator {
                 }
 
                 // Check for failover timeout
-                if master.failover_state != FailoverState::None && master.failover_state != FailoverState::Done
-                    && let Some(start_time) = master.failover_start_time {
-                        let elapsed = start_time.elapsed().as_millis() as u64;
-                        if elapsed > master.failover_timeout_ms {
-                            warn!(
-                                "Sentinel failover timeout for master '{}' ({}ms > {}ms)",
-                                name, elapsed, master.failover_timeout_ms
-                            );
-                            Self::abort_failover(master);
-                        }
+                if master.failover_state != FailoverState::None
+                    && master.failover_state != FailoverState::Done
+                    && let Some(start_time) = master.failover_start_time
+                {
+                    let elapsed = start_time.elapsed().as_millis() as u64;
+                    if elapsed > master.failover_timeout_ms {
+                        warn!(
+                            "Sentinel failover timeout for master '{}' ({}ms > {}ms)",
+                            name, elapsed, master.failover_timeout_ms
+                        );
+                        Self::abort_failover(master);
                     }
+                }
             }
         }
     }
@@ -151,7 +158,9 @@ impl FailoverOrchestrator {
             self.check_failovers().await;
             let state = self.state.read().await;
             if let Some(master) = state.masters.get(master_name) {
-                if master.failover_state == FailoverState::None && master.failover_start_time.is_none() {
+                if master.failover_state == FailoverState::None
+                    && master.failover_start_time.is_none()
+                {
                     // Either not started or completed
                     if master.config_epoch > 0 {
                         return Ok(()); // Successfully completed
@@ -184,7 +193,7 @@ impl FailoverOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sentinel::{SentinelConfig, SentinelManager, MasterStatus, ReplicaEntry};
+    use crate::sentinel::{MasterStatus, ReplicaEntry, SentinelConfig, SentinelManager};
     use crate::storage::engine::{StorageConfig, StorageEngine};
     use std::time::Duration;
 
@@ -206,7 +215,9 @@ mod tests {
     async fn test_failover_from_odown() {
         let (mgr, failover) = create_test_failover();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         // Add a replica
         {
@@ -239,7 +250,9 @@ mod tests {
     async fn test_failover_no_replicas_aborts() {
         let (mgr, failover) = create_test_failover();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         // Set ODOWN without replicas
         {
@@ -277,7 +290,9 @@ mod tests {
         let mgr = SentinelManager::new(Arc::clone(&storage), sentinel_config);
         let failover = FailoverOrchestrator::new(Arc::clone(mgr.state()));
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         // Manually put into WaitStart with start time in the past
         {
@@ -301,13 +316,17 @@ mod tests {
     async fn test_failover_state_progression() {
         let (mgr, failover) = create_test_failover();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         // Add replicas
         {
             let mut state = mgr.state().write().await;
             let master = state.masters.get_mut("mymaster").unwrap();
-            master.replicas.push(ReplicaEntry::new("10.0.0.1".to_string(), 6380));
+            master
+                .replicas
+                .push(ReplicaEntry::new("10.0.0.1".to_string(), 6380));
             master.subjective_down = true;
             master.objective_down = true;
         }
@@ -367,7 +386,9 @@ mod tests {
     async fn test_is_failover_in_progress() {
         let (mgr, failover) = create_test_failover();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         assert!(!failover.is_failover_in_progress("mymaster").await);
 
@@ -385,7 +406,9 @@ mod tests {
     async fn test_failover_promoted_replica_removed_from_list() {
         let (mgr, failover) = create_test_failover();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         // Add two replicas
         {

@@ -23,7 +23,14 @@ impl std::fmt::Debug for SecurityConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityConfig")
             .field("require_auth", &self.require_auth)
-            .field("password", &if self.password.is_empty() { "(none)" } else { "[REDACTED]" })
+            .field(
+                "password",
+                &if self.password.is_empty() {
+                    "(none)"
+                } else {
+                    "[REDACTED]"
+                },
+            )
             .field("acl_file", &self.acl_file)
             .finish()
     }

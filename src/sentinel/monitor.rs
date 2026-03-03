@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use super::{SentinelState, SentinelPeer};
+use super::{SentinelPeer, SentinelState};
 
 /// Monitoring loop for sentinel instances.
 /// In production, this would run as a background task periodically pinging
@@ -51,11 +51,7 @@ impl MonitorLoop {
             if master.objective_down && !was_odown {
                 info!(
                     "Sentinel +odown master {} {}:{} #quorum {}/{}",
-                    master.name,
-                    master.host,
-                    master.port,
-                    master.odown_vote_count,
-                    master.quorum
+                    master.name, master.host, master.port, master.odown_vote_count, master.quorum
                 );
             } else if !master.objective_down && was_odown {
                 info!(
@@ -161,8 +157,12 @@ impl MonitorLoop {
                 master.sentinels.push(peer);
                 info!(
                     "Sentinel +sentinel sentinel {} {}:{} @ {} {}:{}",
-                    sentinel_runid, sentinel_ip, sentinel_port,
-                    master.name, master.host, master.port
+                    sentinel_runid,
+                    sentinel_ip,
+                    sentinel_port,
+                    master.name,
+                    master.host,
+                    master.port
                 );
             }
         }
@@ -213,7 +213,9 @@ impl MonitorLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sentinel::{SentinelConfig, SentinelManager, MasterStatus, ReplicaEntry, SentinelPeer};
+    use crate::sentinel::{
+        MasterStatus, ReplicaEntry, SentinelConfig, SentinelManager, SentinelPeer,
+    };
     use crate::storage::engine::{StorageConfig, StorageEngine};
 
     fn create_test_monitor() -> (Arc<SentinelManager>, MonitorLoop) {
@@ -234,7 +236,9 @@ mod tests {
     async fn test_monitor_check_sdown() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Initially should be UP
         monitor.check_masters().await;
@@ -264,7 +268,9 @@ mod tests {
     async fn test_monitor_check_odown() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Add a sentinel peer that votes master is down
         {
@@ -292,7 +298,9 @@ mod tests {
     async fn test_monitor_recovery() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Simulate timeout
         {
@@ -323,7 +331,9 @@ mod tests {
     async fn test_monitor_replica_sdown() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Add a replica
         {
@@ -346,10 +356,13 @@ mod tests {
     async fn test_hello_message_processing() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Process a hello message from another sentinel
-        let msg = "10.0.0.2,26379,abcdef0123456789abcdef0123456789abcdef01,1,mymaster,127.0.0.1,6379,0";
+        let msg =
+            "10.0.0.2,26379,abcdef0123456789abcdef0123456789abcdef01,1,mymaster,127.0.0.1,6379,0";
         monitor.process_hello_message(msg).await;
 
         // Should have added a sentinel peer
@@ -364,10 +377,13 @@ mod tests {
     async fn test_hello_message_update_epoch() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Process a hello with higher epoch
-        let msg = "10.0.0.2,26379,abcdef0123456789abcdef0123456789abcdef01,5,mymaster,127.0.0.1,6379,0";
+        let msg =
+            "10.0.0.2,26379,abcdef0123456789abcdef0123456789abcdef01,5,mymaster,127.0.0.1,6379,0";
         monitor.process_hello_message(msg).await;
 
         let state = mgr.state().read().await;
@@ -378,7 +394,9 @@ mod tests {
     async fn test_hello_message_ignore_self() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let my_id = mgr.state().read().await.my_id.clone();
 
@@ -396,7 +414,9 @@ mod tests {
     async fn test_build_hello_message() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let msg = monitor.build_hello_message("mymaster").await.unwrap();
         let parts: Vec<&str> = msg.split(',').collect();
@@ -410,7 +430,9 @@ mod tests {
     async fn test_sentinel_peer_sdown() {
         let (mgr, monitor) = create_test_monitor();
 
-        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        mgr.monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Add a sentinel with old hello
         {

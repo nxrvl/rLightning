@@ -23,9 +23,8 @@ pub async fn cluster_command(
         None => {
             // When cluster mode is not enabled, return appropriate responses
             return match subcommand.as_str() {
-                "INFO" => {
-                    Ok(RespValue::BulkString(Some(
-                        b"cluster_enabled:0\r\n\
+                "INFO" => Ok(RespValue::BulkString(Some(
+                    b"cluster_enabled:0\r\n\
                           cluster_state:ok\r\n\
                           cluster_slots_assigned:0\r\n\
                           cluster_slots_ok:0\r\n\
@@ -38,9 +37,8 @@ pub async fn cluster_command(
                           cluster_stats_messages_sent:0\r\n\
                           cluster_stats_messages_received:0\r\n\
                           total_cluster_links_buffer_limit_exceeded:0"
-                            .to_vec(),
-                    )))
-                }
+                        .to_vec(),
+                ))),
                 "MYID" => Ok(RespValue::BulkString(Some(
                     b"0000000000000000000000000000000000000000".to_vec(),
                 ))),
@@ -177,9 +175,7 @@ pub async fn cluster_command(
             }
             let epoch: u64 = String::from_utf8_lossy(&args[1])
                 .parse()
-                .map_err(|_| {
-                    CommandError::InvalidArgument("Invalid config epoch".to_string())
-                })?;
+                .map_err(|_| CommandError::InvalidArgument("Invalid config epoch".to_string()))?;
             cluster_set_config_epoch(mgr, epoch).await
         }
         "COUNT-FAILURE-REPORTS" => {
@@ -347,11 +343,7 @@ async fn cluster_countkeysinslot(mgr: &ClusterManager, slot: u16) -> CommandResu
     Ok(RespValue::Integer(count))
 }
 
-async fn cluster_getkeysinslot(
-    mgr: &ClusterManager,
-    slot: u16,
-    count: usize,
-) -> CommandResult {
+async fn cluster_getkeysinslot(mgr: &ClusterManager, slot: u16, count: usize) -> CommandResult {
     let keys = mgr
         .get_keys_in_slot(slot, count)
         .await
@@ -384,10 +376,7 @@ async fn cluster_set_config_epoch(mgr: &ClusterManager, epoch: u64) -> CommandRe
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
-async fn cluster_count_failure_reports(
-    mgr: &ClusterManager,
-    node_id: &str,
-) -> CommandResult {
+async fn cluster_count_failure_reports(mgr: &ClusterManager, node_id: &str) -> CommandResult {
     let state = mgr.state().read().await;
     let count = state
         .nodes
@@ -473,10 +462,7 @@ pub async fn readwrite(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandRes
 }
 
 /// Handle MIGRATE command
-pub async fn migrate(
-    engine: &StorageEngine,
-    args: &[Vec<u8>],
-) -> CommandResult {
+pub async fn migrate(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // MIGRATE host port key|"" destination-db timeout [COPY] [REPLACE] [AUTH password] [AUTH2 username password] [KEYS key [key ...]]
     if args.len() < 5 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -592,13 +578,9 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
 
-        let result = cluster_command(
-            &storage,
-            &[b"KEYSLOT".to_vec(), b"foo".to_vec()],
-            None,
-        )
-        .await
-        .unwrap();
+        let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"foo".to_vec()], None)
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(12182));
     }
 
@@ -805,11 +787,7 @@ mod tests {
 
         let result = cluster_command(
             &storage,
-            &[
-                b"GETKEYSINSLOT".to_vec(),
-                b"12182".to_vec(),
-                b"10".to_vec(),
-            ],
+            &[b"GETKEYSINSLOT".to_vec(), b"12182".to_vec(), b"10".to_vec()],
             Some(&mgr),
         )
         .await
@@ -817,10 +795,7 @@ mod tests {
 
         if let RespValue::Array(Some(keys)) = result {
             assert_eq!(keys.len(), 1);
-            assert_eq!(
-                keys[0],
-                RespValue::BulkString(Some(b"foo".to_vec()))
-            );
+            assert_eq!(keys[0], RespValue::BulkString(Some(b"foo".to_vec())));
         } else {
             panic!("Expected Array");
         }
@@ -844,12 +819,7 @@ mod tests {
         // Get the other node's ID
         let state = mgr.state().read().await;
         let my_id = state.my_id.clone();
-        let other_id = state
-            .nodes
-            .keys()
-            .find(|k| **k != my_id)
-            .unwrap()
-            .clone();
+        let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
         drop(state);
 
         // Add slot 100 to ourselves first
@@ -873,11 +843,7 @@ mod tests {
         // Set slot as STABLE
         let result = cluster_command(
             &storage,
-            &[
-                b"SETSLOT".to_vec(),
-                b"100".to_vec(),
-                b"STABLE".to_vec(),
-            ],
+            &[b"SETSLOT".to_vec(), b"100".to_vec(), b"STABLE".to_vec()],
             Some(&mgr),
         )
         .await
@@ -899,13 +865,9 @@ mod tests {
 
         let old_id = mgr.my_id().await;
 
-        let result = cluster_command(
-            &storage,
-            &[b"RESET".to_vec(), b"HARD".to_vec()],
-            Some(&mgr),
-        )
-        .await
-        .unwrap();
+        let result = cluster_command(&storage, &[b"RESET".to_vec(), b"HARD".to_vec()], Some(&mgr))
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         let new_id = mgr.my_id().await;

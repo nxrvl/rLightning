@@ -1,15 +1,15 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
-use tracing::{debug, error, info, warn};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time;
+use tracing::{debug, error, info, warn};
 
 use crate::persistence::config::PersistenceConfig;
 use crate::persistence::error::PersistenceError;
@@ -73,60 +73,65 @@ impl RdbPersistence {
             in_progress: Arc::new(Mutex::new(false)),
         }
     }
-    
+
     /// Load data from RDB file on startup
     pub async fn load(&self) -> Result<(), PersistenceError> {
         if !self.path.exists() {
             debug!(path = ?self.path, "No RDB file found, skipping load");
             return Ok(());
         }
-        
+
         info!(path = ?self.path, "Loading RDB file");
-        
+
         // Perform file reading in a blocking task to avoid blocking the event loop
         let path = self.path.clone();
         let engine = self.engine.clone();
-        
+
         tokio::task::spawn_blocking(move || -> Result<(), PersistenceError> {
-            let file = File::open(&path)
-                .map_err(PersistenceError::Io)?;
-            
+            let file = File::open(&path).map_err(PersistenceError::Io)?;
+
             let mut reader = BufReader::new(file);
-            
+
             // Read and verify magic string
             let mut magic = [0u8; 4];
-            reader.read_exact(&mut magic)
+            reader
+                .read_exact(&mut magic)
                 .map_err(PersistenceError::Io)?;
-            
+
             if magic != RDB_MAGIC_STRING {
                 return Err(PersistenceError::CorruptedFile(
-                    "Invalid RDB file format (wrong magic string)".to_string()
+                    "Invalid RDB file format (wrong magic string)".to_string(),
                 ));
             }
-            
+
             // Read version
-            let version = reader.read_u8()
-                .map_err(PersistenceError::Io)?;
-            
+            let version = reader.read_u8().map_err(PersistenceError::Io)?;
+
             if version != RDB_VERSION {
-                return Err(PersistenceError::CorruptedFile(
-                    format!("Unsupported RDB version: {}", version)
-                ));
+                return Err(PersistenceError::CorruptedFile(format!(
+                    "Unsupported RDB version: {}",
+                    version
+                )));
             }
-            
+
             // Create a CRC32 hasher to verify the file integrity
             let mut hasher = Hasher::new();
             hasher.update(&magic);
             hasher.update(&[version]);
-            
+
             // Read data: (db_index, key, value, data_type, ttl)
             #[allow(clippy::type_complexity)]
-            let mut data: Vec<(usize, Vec<u8>, Vec<u8>, RedisDataType, Option<Duration>)> = Vec::new();
+            let mut data: Vec<(
+                usize,
+                Vec<u8>,
+                Vec<u8>,
+                RedisDataType,
+                Option<Duration>,
+            )> = Vec::new();
             let mut current_db: usize = 0;
 
             loop {
-                let type_marker = reader.read_u8()
-                    .map_err(PersistenceError::Io)?;
+                let type_marker = reader.read_u8().map_err(PersistenceError::Io)?;
 
                 hasher.update(&[type_marker]);
 
@@ -136,42 +141,44 @@ impl RdbPersistence {
 
                 // Handle DB selector
                 if type_marker == TYPE_DB_SELECT {
-                    let db_idx = reader.read_u8()
-                        .map_err(PersistenceError::Io)?;
+                    let db_idx = reader.read_u8().map_err(PersistenceError::Io)?;
                     hasher.update(&[db_idx]);
                     let idx = db_idx as usize;
                     if idx >= crate::storage::engine::NUM_DATABASES {
-                        return Err(PersistenceError::CorruptedFile(
-                            format!("RDB contains DB selector {} which exceeds max databases ({})",
-                                    idx, crate::storage::engine::NUM_DATABASES)
-                        ));
+                        return Err(PersistenceError::CorruptedFile(format!(
+                            "RDB contains DB selector {} which exceeds max databases ({})",
+                            idx,
+                            crate::storage::engine::NUM_DATABASES
+                        )));
                     }
                     current_db = idx;
                     continue;
                 }
 
-                let data_type = marker_to_data_type(type_marker)
-                    .ok_or_else(|| PersistenceError::CorruptedFile(
-                        format!("Unknown data type marker: {}", type_marker)
-                    ))?;
+                let data_type = marker_to_data_type(type_marker).ok_or_else(|| {
+                    PersistenceError::CorruptedFile(format!(
+                        "Unknown data type marker: {}",
+                        type_marker
+                    ))
+                })?;
 
                 // Read key
-                let key_len = reader.read_u32::<BigEndian>()
+                let key_len = reader
+                    .read_u32::<BigEndian>()
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&key_len.to_be_bytes());
 
                 let mut key = vec![0u8; key_len as usize];
-                reader.read_exact(&mut key)
-                    .map_err(PersistenceError::Io)?;
+                reader.read_exact(&mut key).map_err(PersistenceError::Io)?;
                 hasher.update(&key);
 
                 // Read expiry (if any)
-                let has_expiry = reader.read_u8()
-                    .map_err(PersistenceError::Io)?;
+                let has_expiry = reader.read_u8().map_err(PersistenceError::Io)?;
                 hasher.update(&[has_expiry]);
 
                 let expiry = if has_expiry == 1 {
-                    let secs = reader.read_u64::<BigEndian>()
+                    let secs = reader
+                        .read_u64::<BigEndian>()
                         .map_err(PersistenceError::Io)?;
                     hasher.update(&secs.to_be_bytes());
 
@@ -190,12 +197,14 @@ impl RdbPersistence {
                 };
 
                 // Read value (same binary format for all types)
-                let value_len = reader.read_u32::<BigEndian>()
+                let value_len = reader
+                    .read_u32::<BigEndian>()
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&value_len.to_be_bytes());
 
                 let mut value = vec![0u8; value_len as usize];
-                reader.read_exact(&mut value)
+                reader
+                    .read_exact(&mut value)
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&value);
 
@@ -203,16 +212,17 @@ impl RdbPersistence {
             }
 
             // Read and verify checksum
-            let expected_checksum = reader.read_u32::<BigEndian>()
+            let expected_checksum = reader
+                .read_u32::<BigEndian>()
                 .map_err(PersistenceError::Io)?;
 
             let computed_checksum = hasher.finalize();
 
             if expected_checksum != computed_checksum {
-                return Err(PersistenceError::CrcValidationFailed(
-                    format!("CRC check failed: expected {}, got {}",
-                            expected_checksum, computed_checksum)
-                ));
+                return Err(PersistenceError::CrcValidationFailed(format!(
+                    "CRC check failed: expected {}, got {}",
+                    expected_checksum, computed_checksum
+                )));
             }
 
             // Transfer loaded data to the storage engine with correct data types
@@ -221,20 +231,26 @@ impl RdbPersistence {
                 use crate::storage::engine::CURRENT_DB_INDEX;
                 for (db_idx, key, value, data_type, ttl) in data {
                     let engine_ref = &engine;
-                    let result = CURRENT_DB_INDEX.scope(db_idx, async move {
-                        engine_ref.set_with_type(key.clone(), value, data_type.clone(), ttl).await
-                    }).await;
+                    let result = CURRENT_DB_INDEX
+                        .scope(db_idx, async move {
+                            engine_ref
+                                .set_with_type(key.clone(), value, data_type.clone(), ttl)
+                                .await
+                        })
+                        .await;
                     if let Err(e) = result {
                         warn!(db = db_idx, "Error restoring key from RDB: {:?}", e);
                     }
                 }
             });
-            
+
             info!(path = ?path, "Successfully loaded RDB file");
             Ok(())
-        }).await.map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?
+        })
+        .await
+        .map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?
     }
-    
+
     /// Save a snapshot of the current dataset to an RDB file
     pub async fn save(&self) -> Result<(), PersistenceError> {
         // Avoid multiple concurrent snapshots
@@ -243,17 +259,18 @@ impl RdbPersistence {
             debug!("RDB save already in progress, skipping");
             return Ok(());
         }
-        
+
         *in_progress = true;
-        
+
         info!(path = ?self.path, "Starting RDB snapshot");
-        
+
         // Create a temporary file path
         let temp_path = self.path.with_extension("tmp");
-        
+
         // Get a consistent snapshot of all databases
-        let all_dbs = self.engine.snapshot_all_dbs().await
-            .map_err(|e| PersistenceError::RdbSnapshotFailed(format!("Failed to get data snapshot: {:?}", e)))?;
+        let all_dbs = self.engine.snapshot_all_dbs().await.map_err(|e| {
+            PersistenceError::RdbSnapshotFailed(format!("Failed to get data snapshot: {:?}", e))
+        })?;
 
         // Perform file writing in a blocking task
         let temp_path_clone = temp_path.clone();
@@ -264,8 +281,7 @@ impl RdbPersistence {
                     .map_err(|e| PersistenceError::DirectoryCreationFailed(e.to_string()))?;
             }
 
-            let file = File::create(&temp_path_clone)
-                .map_err(PersistenceError::Io)?;
+            let file = File::create(&temp_path_clone).map_err(PersistenceError::Io)?;
 
             let mut writer = BufWriter::new(file);
 
@@ -273,12 +289,12 @@ impl RdbPersistence {
             let mut hasher = Hasher::new();
 
             // Write magic string and version
-            writer.write_all(RDB_MAGIC_STRING)
+            writer
+                .write_all(RDB_MAGIC_STRING)
                 .map_err(PersistenceError::Io)?;
             hasher.update(RDB_MAGIC_STRING);
 
-            writer.write_u8(RDB_VERSION)
-                .map_err(PersistenceError::Io)?;
+            writer.write_u8(RDB_VERSION).map_err(PersistenceError::Io)?;
             hasher.update(&[RDB_VERSION]);
 
             // Write data from all databases
@@ -288,32 +304,34 @@ impl RdbPersistence {
                 }
 
                 // Write DB selector marker
-                writer.write_u8(TYPE_DB_SELECT)
+                writer
+                    .write_u8(TYPE_DB_SELECT)
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&[TYPE_DB_SELECT]);
-                writer.write_u8(db_idx as u8)
+                writer
+                    .write_u8(db_idx as u8)
                     .map_err(PersistenceError::Io)?;
                 hasher.update(&[db_idx as u8]);
 
                 for (key, item) in data.iter() {
                     let type_marker = data_type_to_marker(&item.data_type);
 
-                    writer.write_u8(type_marker)
-                        .map_err(PersistenceError::Io)?;
+                    writer.write_u8(type_marker).map_err(PersistenceError::Io)?;
                     hasher.update(&[type_marker]);
 
                     // Write key
-                    writer.write_u32::<BigEndian>(key.len() as u32)
+                    writer
+                        .write_u32::<BigEndian>(key.len() as u32)
                         .map_err(PersistenceError::Io)?;
                     hasher.update(&(key.len() as u32).to_be_bytes());
 
-                    writer.write_all(key)
-                        .map_err(PersistenceError::Io)?;
+                    writer.write_all(key).map_err(PersistenceError::Io)?;
                     hasher.update(key);
 
                     // Write expiry information
                     if let Some(ttl) = item.ttl() {
-                        writer.write_u8(1) // Has expiry
+                        writer
+                            .write_u8(1) // Has expiry
                             .map_err(PersistenceError::Io)?;
                         hasher.update(&[1]);
 
@@ -324,43 +342,48 @@ impl RdbPersistence {
 
                         let expiry_time = now + ttl.as_secs();
 
-                        writer.write_u64::<BigEndian>(expiry_time)
+                        writer
+                            .write_u64::<BigEndian>(expiry_time)
                             .map_err(PersistenceError::Io)?;
                         hasher.update(&expiry_time.to_be_bytes());
                     } else {
-                        writer.write_u8(0) // No expiry
+                        writer
+                            .write_u8(0) // No expiry
                             .map_err(PersistenceError::Io)?;
                         hasher.update(&[0]);
                     }
 
                     // Write value (raw bytes for all types - collection types are already bincode-serialized)
-                    writer.write_u32::<BigEndian>(item.value.len() as u32)
+                    writer
+                        .write_u32::<BigEndian>(item.value.len() as u32)
                         .map_err(PersistenceError::Io)?;
                     hasher.update(&(item.value.len() as u32).to_be_bytes());
 
-                    writer.write_all(&item.value)
+                    writer
+                        .write_all(&item.value)
                         .map_err(PersistenceError::Io)?;
                     hasher.update(&item.value);
                 }
             }
 
             // Write EOF marker
-            writer.write_u8(TYPE_EOF)
-                .map_err(PersistenceError::Io)?;
+            writer.write_u8(TYPE_EOF).map_err(PersistenceError::Io)?;
             hasher.update(&[TYPE_EOF]);
 
             // Write CRC32 checksum
             let checksum = hasher.finalize();
-            writer.write_u32::<BigEndian>(checksum)
+            writer
+                .write_u32::<BigEndian>(checksum)
                 .map_err(PersistenceError::Io)?;
 
             // Ensure all data is flushed to disk
-            writer.flush()
-                .map_err(PersistenceError::Io)?;
+            writer.flush().map_err(PersistenceError::Io)?;
 
             Ok(())
-        }).await.map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?;
-        
+        })
+        .await
+        .map_err(|e| PersistenceError::BackgroundTaskFailed(e.to_string()))?;
+
         // If successful, atomically rename the temporary file to the final location
         if result.is_ok() {
             if let Err(e) = fs::rename(&temp_path, &self.path) {
@@ -368,43 +391,48 @@ impl RdbPersistence {
                 let _ = fs::remove_file(&temp_path);
                 return Err(PersistenceError::AtomicRenameFailed(e.to_string()));
             }
-            
+
             // Update last save time
             *self.last_save.write().await = Instant::now();
-            
+
             // Reset write counter
             self.write_count.store(0, Ordering::SeqCst);
-            
+
             info!(path = ?self.path, "RDB snapshot completed successfully");
         } else {
             // Clean up temp file on error
             let _ = fs::remove_file(&temp_path);
             error!(path = ?self.path, "RDB snapshot failed");
         }
-        
+
         // Mark snapshot as no longer in progress
         *in_progress = false;
-        
+
         result
     }
-    
+
     /// Schedule periodic RDB snapshots
-    pub async fn schedule_snapshots(&self, config: &PersistenceConfig) -> Result<(), PersistenceError> {
+    pub async fn schedule_snapshots(
+        &self,
+        config: &PersistenceConfig,
+    ) -> Result<(), PersistenceError> {
         let engine = self.engine.clone();
         let rdb = Arc::new(self.clone());
         let interval = config.rdb_snapshot_interval;
         let threshold = config.rdb_snapshot_threshold;
-        
+
         // Register the write counter with the storage engine
-        engine.register_write_counter(self.write_count.clone()).await;
-        
+        engine
+            .register_write_counter(self.write_count.clone())
+            .await;
+
         // Spawn a background task for time-based snapshots
         tokio::spawn(async move {
             let mut timer = time::interval(interval);
-            
+
             loop {
                 timer.tick().await;
-                
+
                 // Check if enough time has passed since the last save
                 let last_save = *rdb.last_save.read().await;
                 if last_save.elapsed() >= interval {
@@ -413,21 +441,24 @@ impl RdbPersistence {
                         error!("Error during scheduled RDB snapshot: {:?}", e);
                     }
                 }
-                
+
                 // Check if we've reached the write threshold
                 let write_count = rdb.write_count.load(Ordering::SeqCst);
                 if write_count >= threshold {
-                    debug!("Triggering write-threshold RDB snapshot after {} writes", write_count);
+                    debug!(
+                        "Triggering write-threshold RDB snapshot after {} writes",
+                        write_count
+                    );
                     if let Err(e) = rdb.save().await {
                         error!("Error during threshold-based RDB snapshot: {:?}", e);
                     }
                 }
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// Increment the write counter
     /// This is called by the StorageEngine when a write operation is performed
     /// Used to trigger RDB snapshots based on write threshold
@@ -435,7 +466,7 @@ impl RdbPersistence {
     pub fn increment_write_count(&self) {
         self.write_count.fetch_add(1, Ordering::SeqCst);
     }
-    
+
     /// Get the current write count
     pub fn get_write_count(&self) -> u64 {
         self.write_count.load(Ordering::SeqCst)
@@ -454,14 +485,13 @@ impl Clone for RdbPersistence {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap as StdHashMap, HashSet};
+    use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
     use crate::storage::item::RedisDataType;
-    use crate::command::types::sorted_set::SortedSetData;
+    use std::collections::{HashMap as StdHashMap, HashSet};
     use tempfile::NamedTempFile;
 
     fn create_test_engine() -> Arc<StorageEngine> {
@@ -476,7 +506,10 @@ mod tests {
         drop(temp);
 
         // Set a string key
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
 
         // Save
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
@@ -501,7 +534,10 @@ mod tests {
         // Create a list
         let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
         let serialized = bincode::serialize(&list).unwrap();
-        engine.set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None).await.unwrap();
+        engine
+            .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -529,7 +565,10 @@ mod tests {
         set.insert(b"x".to_vec());
         set.insert(b"y".to_vec());
         let serialized = bincode::serialize(&set).unwrap();
-        engine.set_with_type(b"myset".to_vec(), serialized, RedisDataType::Set, None).await.unwrap();
+        engine
+            .set_with_type(b"myset".to_vec(), serialized, RedisDataType::Set, None)
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -557,7 +596,10 @@ mod tests {
         zset.insert(1.0, b"alice".to_vec());
         zset.insert(2.5, b"bob".to_vec());
         let serialized = bincode::serialize(&zset).unwrap();
-        engine.set_with_type(b"myzset".to_vec(), serialized, RedisDataType::ZSet, None).await.unwrap();
+        engine
+            .set_with_type(b"myzset".to_vec(), serialized, RedisDataType::ZSet, None)
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -586,7 +628,10 @@ mod tests {
         hash.insert(b"field1".to_vec(), b"val1".to_vec());
         hash.insert(b"field2".to_vec(), b"val2".to_vec());
         let serialized = bincode::serialize(&hash).unwrap();
-        engine.set_with_type(b"myhash".to_vec(), serialized, RedisDataType::Hash, None).await.unwrap();
+        engine
+            .set_with_type(b"myhash".to_vec(), serialized, RedisDataType::Hash, None)
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -621,7 +666,15 @@ mod tests {
         stream.entries.insert(entry.id.clone(), entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
         let serialized = bincode::serialize(&stream).unwrap();
-        engine.set_with_type(b"mystream".to_vec(), serialized, RedisDataType::Stream, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"mystream".to_vec(),
+                serialized,
+                RedisDataType::Stream,
+                None,
+            )
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -645,26 +698,61 @@ mod tests {
         drop(temp);
 
         // String
-        engine.set(b"str".to_vec(), b"hello".to_vec(), None).await.unwrap();
+        engine
+            .set(b"str".to_vec(), b"hello".to_vec(), None)
+            .await
+            .unwrap();
 
         // List
         let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec()];
-        engine.set_with_type(b"lst".to_vec(), bincode::serialize(&list).unwrap(), RedisDataType::List, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"lst".to_vec(),
+                bincode::serialize(&list).unwrap(),
+                RedisDataType::List,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Set
         let mut set = HashSet::new();
         set.insert(b"a".to_vec());
-        engine.set_with_type(b"st".to_vec(), bincode::serialize(&set).unwrap(), RedisDataType::Set, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"st".to_vec(),
+                bincode::serialize(&set).unwrap(),
+                RedisDataType::Set,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Hash
         let mut hash = StdHashMap::new();
         hash.insert(b"f".to_vec(), b"v".to_vec());
-        engine.set_with_type(b"hs".to_vec(), bincode::serialize(&hash).unwrap(), RedisDataType::Hash, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"hs".to_vec(),
+                bincode::serialize(&hash).unwrap(),
+                RedisDataType::Hash,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Sorted set
         let mut zset = SortedSetData::new();
         zset.insert(3.0, b"m".to_vec());
-        engine.set_with_type(b"zs".to_vec(), bincode::serialize(&zset).unwrap(), RedisDataType::ZSet, None).await.unwrap();
+        engine
+            .set_with_type(
+                b"zs".to_vec(),
+                bincode::serialize(&zset).unwrap(),
+                RedisDataType::ZSet,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Save
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
@@ -693,11 +781,26 @@ mod tests {
         drop(temp);
 
         // String with TTL
-        engine.set(b"expiring".to_vec(), b"val".to_vec(), Some(Duration::from_secs(3600))).await.unwrap();
+        engine
+            .set(
+                b"expiring".to_vec(),
+                b"val".to_vec(),
+                Some(Duration::from_secs(3600)),
+            )
+            .await
+            .unwrap();
 
         // List with TTL
         let list: Vec<Vec<u8>> = vec![b"item".to_vec()];
-        engine.set_with_type(b"explist".to_vec(), bincode::serialize(&list).unwrap(), RedisDataType::List, Some(Duration::from_secs(7200))).await.unwrap();
+        engine
+            .set_with_type(
+                b"explist".to_vec(),
+                bincode::serialize(&list).unwrap(),
+                RedisDataType::List,
+                Some(Duration::from_secs(7200)),
+            )
+            .await
+            .unwrap();
 
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
@@ -719,7 +822,10 @@ mod tests {
         let path = temp.path().to_path_buf();
         drop(temp);
 
-        engine.set(b"key".to_vec(), b"val".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key".to_vec(), b"val".to_vec(), None)
+            .await
+            .unwrap();
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
         rdb.save().await.unwrap();
 
@@ -746,18 +852,38 @@ mod tests {
         drop(temp);
 
         // Set keys in DB 0
-        engine.set(b"db0_key".to_vec(), b"db0_value".to_vec(), None).await.unwrap();
+        engine
+            .set(b"db0_key".to_vec(), b"db0_value".to_vec(), None)
+            .await
+            .unwrap();
 
         // Set keys in DB 3
-        CURRENT_DB_INDEX.scope(3, async {
-            engine.set(b"db3_key".to_vec(), b"db3_value".to_vec(), None).await.unwrap();
-            engine.set(b"db3_another".to_vec(), b"another_value".to_vec(), None).await.unwrap();
-        }).await;
+        CURRENT_DB_INDEX
+            .scope(3, async {
+                engine
+                    .set(b"db3_key".to_vec(), b"db3_value".to_vec(), None)
+                    .await
+                    .unwrap();
+                engine
+                    .set(b"db3_another".to_vec(), b"another_value".to_vec(), None)
+                    .await
+                    .unwrap();
+            })
+            .await;
 
         // Set keys in DB 7 with TTL
-        CURRENT_DB_INDEX.scope(7, async {
-            engine.set(b"db7_key".to_vec(), b"db7_value".to_vec(), Some(Duration::from_secs(3600))).await.unwrap();
-        }).await;
+        CURRENT_DB_INDEX
+            .scope(7, async {
+                engine
+                    .set(
+                        b"db7_key".to_vec(),
+                        b"db7_value".to_vec(),
+                        Some(Duration::from_secs(3600)),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
 
         // Save
         let rdb = RdbPersistence::new(engine.clone(), path.clone());
@@ -777,26 +903,26 @@ mod tests {
         assert_eq!(val, None);
 
         // Verify DB 3
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine2.get(b"db3_key").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine2.get(b"db3_key").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"db3_value".to_vec()));
 
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine2.get(b"db3_another").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine2.get(b"db3_another").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"another_value".to_vec()));
 
         // Verify DB 3 does NOT have DB 0's keys
-        let val = CURRENT_DB_INDEX.scope(3, async {
-            engine2.get(b"db0_key").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(3, async { engine2.get(b"db0_key").await.unwrap() })
+            .await;
         assert_eq!(val, None);
 
         // Verify DB 7 (with TTL)
-        let val = CURRENT_DB_INDEX.scope(7, async {
-            engine2.get(b"db7_key").await.unwrap()
-        }).await;
+        let val = CURRENT_DB_INDEX
+            .scope(7, async { engine2.get(b"db7_key").await.unwrap() })
+            .await;
         assert_eq!(val, Some(b"db7_value".to_vec()));
     }
 }

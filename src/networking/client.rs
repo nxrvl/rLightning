@@ -18,19 +18,25 @@ pub struct Client {
 impl Client {
     /// Connect to a Redis server
     #[allow(dead_code)]
-    pub async fn connect(addr: SocketAddr) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect(
+        addr: SocketAddr,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = TcpStream::connect(addr).await?;
-        
+
         Ok(Self {
             stream,
             buffer: BytesMut::with_capacity(64 * 1024 * 1024), // 64MB buffer for large JSON values
         })
     }
-    
+
     /// Send a command to the server
     /// Helper method to easily send a command with string arguments
     #[allow(dead_code)]
-    pub async fn send_command_str(&mut self, command: &str, args: &[&str]) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn send_command_str(
+        &mut self,
+        command: &str,
+        args: &[&str],
+    ) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
         let mut cmd_args = Vec::with_capacity(1 + args.len());
         cmd_args.push(command.as_bytes());
         for arg in args {
@@ -38,19 +44,29 @@ impl Client {
         }
         self.send_command_raw(cmd_args).await
     }
-    
+
     /// Send a command - backward compatibility method that routes to send_command_raw
     #[allow(dead_code)]
-    pub async fn send_command<B>(&mut self, args: Vec<B>) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> 
-    where B: AsRef<[u8]> {
+    pub async fn send_command<B>(
+        &mut self,
+        args: Vec<B>,
+    ) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>>
+    where
+        B: AsRef<[u8]>,
+    {
         self.send_command_raw(args).await
     }
-    
+
     /// Send a command with raw byte arguments
     /// Takes a vector of command arguments, each convertible to byte slices
     #[allow(dead_code)]
-    pub async fn send_command_raw<B>(&mut self, args: Vec<B>) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>>
-    where B: AsRef<[u8]> {
+    pub async fn send_command_raw<B>(
+        &mut self,
+        args: Vec<B>,
+    ) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>>
+    where
+        B: AsRef<[u8]>,
+    {
         // Convert the command to a RESP array
         let mut items = Vec::with_capacity(args.len());
 
@@ -80,11 +96,13 @@ impl Client {
 
         Err("Failed to get response after retries".into())
     }
-    
+
     /// Helper method to read a response from the server
     /// This can be used to read messages in pub/sub mode
     #[allow(dead_code)]
-    pub async fn read_response(&mut self) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn read_response(
+        &mut self,
+    ) -> Result<RespValue, Box<dyn std::error::Error + Send + Sync>> {
         loop {
             // First, try to parse a complete response from what's already in the buffer
             if let Some(value) = RespValue::parse(&mut self.buffer)? {
@@ -96,9 +114,10 @@ impl Client {
             if n == 0 {
                 // Connection closed - try to parse what we have one more time
                 if !self.buffer.is_empty()
-                    && let Some(value) = RespValue::parse(&mut self.buffer)? {
-                        return Ok(value);
-                    }
+                    && let Some(value) = RespValue::parse(&mut self.buffer)?
+                {
+                    return Ok(value);
+                }
                 return Err("Connection closed by server".into());
             }
         }

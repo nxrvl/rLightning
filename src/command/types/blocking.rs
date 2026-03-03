@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 
 /// Manages blocking operations for list commands (BLPOP, BRPOP, BLMOVE, BLMPOP).
@@ -38,19 +38,18 @@ impl BlockingManager {
     /// Subscribe to notifications for a key. Returns a watch::Receiver that will
     /// be notified when data is pushed to this key.
     pub fn subscribe(&self, key: &[u8]) -> watch::Receiver<u64> {
-        let entry = self.signals
-            .entry(key.to_vec())
-            .or_insert_with(|| {
-                let (tx, _rx) = watch::channel(0);
-                tx
-            });
+        let entry = self.signals.entry(key.to_vec()).or_insert_with(|| {
+            let (tx, _rx) = watch::channel(0);
+            tx
+        });
         entry.subscribe()
     }
 
     /// Remove entries where all receivers have been dropped to prevent memory leaks.
     /// Should be called periodically (e.g., from the TTL cleanup timer).
     pub fn cleanup_stale_entries(&self) {
-        self.signals.retain(|_key, sender| sender.receiver_count() > 0);
+        self.signals
+            .retain(|_key, sender| sender.receiver_count() > 0);
     }
 }
 
@@ -58,7 +57,7 @@ impl BlockingManager {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn test_blocking_manager_notify() {

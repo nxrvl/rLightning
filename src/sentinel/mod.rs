@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-pub mod monitor;
 pub mod failover;
+pub mod monitor;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -234,7 +234,13 @@ pub struct MonitoredMaster {
 }
 
 impl MonitoredMaster {
-    pub fn new(name: String, host: String, port: u16, quorum: usize, config: &SentinelConfig) -> Self {
+    pub fn new(
+        name: String,
+        host: String,
+        port: u16,
+        quorum: usize,
+        config: &SentinelConfig,
+    ) -> Self {
         let now = Instant::now();
         MonitoredMaster {
             name,
@@ -394,29 +400,37 @@ impl SentinelManager {
         if !self.config.enabled {
             return;
         }
-        info!("Sentinel mode enabled, sentinel ID: {}", self.state.read().await.my_id);
+        info!(
+            "Sentinel mode enabled, sentinel ID: {}",
+            self.state.read().await.my_id
+        );
 
         // Start the background monitoring loop that periodically checks
         // SDOWN/ODOWN for all monitored masters and their replicas
-        let monitor = monitor::MonitorLoop::new(
-            Arc::clone(&self.state),
-            self.config.ping_period_ms,
-        );
+        let monitor =
+            monitor::MonitorLoop::new(Arc::clone(&self.state), self.config.ping_period_ms);
         let ping_period = self.config.ping_period_ms;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_millis(ping_period),
-            );
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(ping_period));
             loop {
                 interval.tick().await;
                 monitor.check_masters().await;
             }
         });
-        info!("Sentinel monitoring loop started (ping period: {}ms)", self.config.ping_period_ms);
+        info!(
+            "Sentinel monitoring loop started (ping period: {}ms)",
+            self.config.ping_period_ms
+        );
     }
 
     /// Monitor a new master
-    pub async fn monitor_master(&self, name: &str, host: &str, port: u16, quorum: usize) -> Result<(), String> {
+    pub async fn monitor_master(
+        &self,
+        name: &str,
+        host: &str,
+        port: u16,
+        quorum: usize,
+    ) -> Result<(), String> {
         let mut state = self.state.write().await;
         if state.masters.contains_key(name) {
             return Err(format!("ERR Duplicated master name '{}'", name));
@@ -470,28 +484,37 @@ impl SentinelManager {
             "MASTERS" => self.cmd_masters().await,
             "MASTER" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel master' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel master' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_master(&name).await
             }
             "REPLICAS" | "SLAVES" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel replicas' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel replicas' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_replicas(&name).await
             }
             "SENTINELS" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel sentinels' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel sentinels' command"
+                            .to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_sentinels(&name).await
             }
             "MONITOR" => {
                 if args.len() < 5 {
-                    return Err("ERR wrong number of arguments for 'sentinel monitor' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel monitor' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 let host = String::from_utf8_lossy(&args[2]).to_string();
@@ -506,7 +529,9 @@ impl SentinelManager {
             }
             "REMOVE" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel remove' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel remove' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.remove_master(&name).await?;
@@ -514,7 +539,9 @@ impl SentinelManager {
             }
             "SET" => {
                 if args.len() < 4 {
-                    return Err("ERR wrong number of arguments for 'sentinel set' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel set' command".to_string()
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 let option = String::from_utf8_lossy(&args[2]).to_lowercase();
@@ -530,28 +557,32 @@ impl SentinelManager {
             }
             "RESET" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel reset' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel reset' command".to_string()
+                    );
                 }
                 let pattern = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_reset(&pattern).await
             }
             "FAILOVER" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel failover' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel failover' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_failover(&name).await
             }
             "CKQUORUM" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel ckquorum' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel ckquorum' command".to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_ckquorum(&name).await
             }
-            "FLUSHCONFIG" => {
-                self.cmd_flushconfig().await
-            }
+            "FLUSHCONFIG" => self.cmd_flushconfig().await,
             "IS-MASTER-DOWN-BY-ADDR" => {
                 if args.len() < 5 {
                     return Err("ERR wrong number of arguments for 'sentinel is-master-down-by-addr' command".to_string());
@@ -564,7 +595,8 @@ impl SentinelManager {
                     .parse()
                     .map_err(|_| "ERR Invalid epoch".to_string())?;
                 let run_id = String::from_utf8_lossy(&args[4]).to_string();
-                self.cmd_is_master_down_by_addr(&ip, port, current_epoch, &run_id).await
+                self.cmd_is_master_down_by_addr(&ip, port, current_epoch, &run_id)
+                    .await
             }
             "MYID" => {
                 let state = self.state.read().await;
@@ -572,7 +604,9 @@ impl SentinelManager {
             }
             "CONFIG" => {
                 if args.len() < 3 {
-                    return Err("ERR wrong number of arguments for 'sentinel config' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel config' command".to_string(),
+                    );
                 }
                 let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
                 let param = String::from_utf8_lossy(&args[2]).to_string();
@@ -580,7 +614,10 @@ impl SentinelManager {
                     "GET" => self.cmd_config_get(&param).await,
                     "SET" => {
                         if args.len() < 4 {
-                            return Err("ERR wrong number of arguments for 'sentinel config set' command".to_string());
+                            return Err(
+                                "ERR wrong number of arguments for 'sentinel config set' command"
+                                    .to_string(),
+                            );
                         }
                         let val = String::from_utf8_lossy(&args[3]).to_string();
                         self.cmd_config_set(&param, &val).await
@@ -590,7 +627,10 @@ impl SentinelManager {
             }
             "INFO-CACHE" => {
                 if args.len() < 2 {
-                    return Err("ERR wrong number of arguments for 'sentinel info-cache' command".to_string());
+                    return Err(
+                        "ERR wrong number of arguments for 'sentinel info-cache' command"
+                            .to_string(),
+                    );
                 }
                 let name = String::from_utf8_lossy(&args[1]).to_string();
                 self.cmd_info_cache(&name).await
@@ -634,11 +674,8 @@ impl SentinelManager {
         let state = self.state.read().await;
         match state.masters.get(name) {
             Some(master) => {
-                let replicas: Vec<RespValue> = master
-                    .replicas
-                    .iter()
-                    .map(replica_to_resp)
-                    .collect();
+                let replicas: Vec<RespValue> =
+                    master.replicas.iter().map(replica_to_resp).collect();
                 Ok(RespValue::Array(Some(replicas)))
             }
             None => Err("ERR No such master with that name".to_string()),
@@ -650,11 +687,8 @@ impl SentinelManager {
         let state = self.state.read().await;
         match state.masters.get(name) {
             Some(master) => {
-                let sentinels: Vec<RespValue> = master
-                    .sentinels
-                    .iter()
-                    .map(sentinel_peer_to_resp)
-                    .collect();
+                let sentinels: Vec<RespValue> =
+                    master.sentinels.iter().map(sentinel_peer_to_resp).collect();
                 Ok(RespValue::Array(Some(sentinels)))
             }
             None => Err("ERR No such master with that name".to_string()),
@@ -680,16 +714,17 @@ impl SentinelManager {
         let names: Vec<String> = state.masters.keys().cloned().collect();
         for name in &names {
             if glob_match(pattern, name)
-                && let Some(master) = state.masters.get_mut(name) {
-                    master.replicas.clear();
-                    master.sentinels.clear();
-                    master.subjective_down = false;
-                    master.objective_down = false;
-                    master.status = MasterStatus::Up;
-                    master.failover_state = FailoverState::None;
-                    master.odown_vote_count = 0;
-                    count += 1;
-                }
+                && let Some(master) = state.masters.get_mut(name)
+            {
+                master.replicas.clear();
+                master.sentinels.clear();
+                master.subjective_down = false;
+                master.objective_down = false;
+                master.status = MasterStatus::Up;
+                master.failover_state = FailoverState::None;
+                master.odown_vote_count = 0;
+                count += 1;
+            }
         }
         Ok(RespValue::Integer(count))
     }
@@ -796,22 +831,33 @@ impl SentinelManager {
             Some(master) => {
                 match option {
                     "down-after-milliseconds" => {
-                        master.down_after_ms = value.parse().map_err(|_| "ERR Invalid value".to_string())?;
+                        master.down_after_ms =
+                            value.parse().map_err(|_| "ERR Invalid value".to_string())?;
                     }
                     "failover-timeout" => {
-                        master.failover_timeout_ms = value.parse().map_err(|_| "ERR Invalid value".to_string())?;
+                        master.failover_timeout_ms =
+                            value.parse().map_err(|_| "ERR Invalid value".to_string())?;
                     }
                     "parallel-syncs" => {
-                        master.parallel_syncs = value.parse().map_err(|_| "ERR Invalid value".to_string())?;
+                        master.parallel_syncs =
+                            value.parse().map_err(|_| "ERR Invalid value".to_string())?;
                     }
                     "quorum" => {
-                        master.quorum = value.parse().map_err(|_| "ERR Invalid value".to_string())?;
+                        master.quorum =
+                            value.parse().map_err(|_| "ERR Invalid value".to_string())?;
                     }
                     "auth-pass" => {
-                        master.auth_pass = if value.is_empty() { None } else { Some(value.to_string()) };
+                        master.auth_pass = if value.is_empty() {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        };
                     }
                     _ => {
-                        return Err(format!("ERR Invalid argument '{}' for SENTINEL SET", option));
+                        return Err(format!(
+                            "ERR Invalid argument '{}' for SENTINEL SET",
+                            option
+                        ));
                     }
                 }
                 Ok(RespValue::SimpleString("OK".to_string()))
@@ -837,7 +883,10 @@ impl SentinelManager {
             "announce-port" => {
                 let state = self.state.read().await;
                 results.push(RespValue::BulkString(Some(b"announce-port".to_vec())));
-                let val = state.announce_port.map(|p| p.to_string()).unwrap_or_else(|| "0".to_string());
+                let val = state
+                    .announce_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "0".to_string());
                 results.push(RespValue::BulkString(Some(val.as_bytes().to_vec())));
             }
             _ => {
@@ -852,7 +901,11 @@ impl SentinelManager {
         let mut state = self.state.write().await;
         match param {
             "announce-ip" => {
-                state.announce_ip = if value.is_empty() { None } else { Some(value.to_string()) };
+                state.announce_ip = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
             }
             "announce-port" => {
                 let port: u16 = value.parse().map_err(|_| "ERR Invalid port".to_string())?;
@@ -877,13 +930,11 @@ impl SentinelManager {
                     "# Server\r\nredis_version:7.0.0\r\n# Replication\r\nrole:master\r\nconnected_slaves:{}\r\nmaster_replid:0000000000000000000000000000000000000000\r\nmaster_repl_offset:0\r\n",
                     master.replicas.len()
                 );
-                Ok(RespValue::Array(Some(vec![
-                    RespValue::Array(Some(vec![
-                        RespValue::BulkString(Some(master.addr().as_bytes().to_vec())),
-                        RespValue::Integer(age_ms),
-                        RespValue::BulkString(Some(info_str.as_bytes().to_vec())),
-                    ])),
-                ])))
+                Ok(RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(master.addr().as_bytes().to_vec())),
+                    RespValue::Integer(age_ms),
+                    RespValue::BulkString(Some(info_str.as_bytes().to_vec())),
+                ]))])))
             }
             None => Err("ERR No such master with that name".to_string()),
         }
@@ -955,17 +1006,35 @@ fn master_to_resp(master: &MonitoredMaster) -> RespValue {
         RespValue::BulkString(Some(b"0".to_vec())),
         RespValue::BulkString(Some(b"last-ok-ping-reply".to_vec())),
         RespValue::BulkString(Some(
-            master.last_ok_ping.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            master
+                .last_ok_ping
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"last-ping-reply".to_vec())),
         RespValue::BulkString(Some(
-            master.last_ping_reply.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            master
+                .last_ping_reply
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"down-after-milliseconds".to_vec())),
         RespValue::BulkString(Some(master.down_after_ms.to_string().as_bytes().to_vec())),
         RespValue::BulkString(Some(b"info-refresh".to_vec())),
         RespValue::BulkString(Some(
-            master.info_refresh.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            master
+                .info_refresh
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"role-reported".to_vec())),
         RespValue::BulkString(Some(b"master".to_vec())),
@@ -980,7 +1049,9 @@ fn master_to_resp(master: &MonitoredMaster) -> RespValue {
         RespValue::BulkString(Some(b"quorum".to_vec())),
         RespValue::BulkString(Some(master.quorum.to_string().as_bytes().to_vec())),
         RespValue::BulkString(Some(b"failover-timeout".to_vec())),
-        RespValue::BulkString(Some(master.failover_timeout_ms.to_string().as_bytes().to_vec())),
+        RespValue::BulkString(Some(
+            master.failover_timeout_ms.to_string().as_bytes().to_vec(),
+        )),
         RespValue::BulkString(Some(b"parallel-syncs".to_vec())),
         RespValue::BulkString(Some(master.parallel_syncs.to_string().as_bytes().to_vec())),
     ];
@@ -1017,11 +1088,23 @@ fn replica_to_resp(replica: &ReplicaEntry) -> RespValue {
         RespValue::BulkString(Some(b"0".to_vec())),
         RespValue::BulkString(Some(b"last-ok-ping-reply".to_vec())),
         RespValue::BulkString(Some(
-            replica.last_ok_ping.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            replica
+                .last_ok_ping
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"last-ping-reply".to_vec())),
         RespValue::BulkString(Some(
-            replica.last_ping_reply.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            replica
+                .last_ping_reply
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"slave-repl-offset".to_vec())),
         RespValue::BulkString(Some(replica.repl_offset.to_string().as_bytes().to_vec())),
@@ -1061,7 +1144,13 @@ fn sentinel_peer_to_resp(sentinel: &SentinelPeer) -> RespValue {
         RespValue::BulkString(Some(b"1".to_vec())),
         RespValue::BulkString(Some(b"last-hello-message".to_vec())),
         RespValue::BulkString(Some(
-            sentinel.last_hello.elapsed().as_millis().to_string().as_bytes().to_vec(),
+            sentinel
+                .last_hello
+                .elapsed()
+                .as_millis()
+                .to_string()
+                .as_bytes()
+                .to_vec(),
         )),
         RespValue::BulkString(Some(b"voted-leader".to_vec())),
         RespValue::BulkString(Some(sentinel.leader_id.as_bytes().to_vec())),
@@ -1139,8 +1228,8 @@ fn sentinel_help() -> RespValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use crate::storage::engine::StorageConfig;
+    use std::time::Duration;
 
     fn create_test_sentinel() -> (Arc<StorageEngine>, Arc<SentinelManager>) {
         let config = StorageConfig::default();
@@ -1212,7 +1301,10 @@ mod tests {
     async fn test_sentinel_master_info() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"MASTER".to_vec(), b"mymaster".to_vec()])
@@ -1234,7 +1326,10 @@ mod tests {
     async fn test_sentinel_get_master_addr_by_name() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"GET-MASTER-ADDR-BY-NAME".to_vec(), b"mymaster".to_vec()])
@@ -1258,7 +1353,10 @@ mod tests {
         let (_storage, sentinel) = create_test_sentinel();
 
         let result = sentinel
-            .handle_sentinel_command(&[b"GET-MASTER-ADDR-BY-NAME".to_vec(), b"nonexistent".to_vec()])
+            .handle_sentinel_command(&[
+                b"GET-MASTER-ADDR-BY-NAME".to_vec(),
+                b"nonexistent".to_vec(),
+            ])
             .await
             .unwrap();
         assert_eq!(result, RespValue::Null);
@@ -1268,7 +1366,10 @@ mod tests {
     async fn test_sentinel_remove_master() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"REMOVE".to_vec(), b"mymaster".to_vec()])
@@ -1290,9 +1391,14 @@ mod tests {
     async fn test_sentinel_duplicate_monitor() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
-        let result = sentinel.monitor_master("mymaster", "127.0.0.2", 6380, 3).await;
+        let result = sentinel
+            .monitor_master("mymaster", "127.0.0.2", 6380, 3)
+            .await;
         assert!(result.is_err());
     }
 
@@ -1300,7 +1406,10 @@ mod tests {
     async fn test_sentinel_set_options() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Set down-after-milliseconds
         let result = sentinel
@@ -1324,7 +1433,10 @@ mod tests {
     async fn test_sentinel_replicas_empty() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"REPLICAS".to_vec(), b"mymaster".to_vec()])
@@ -1339,7 +1451,10 @@ mod tests {
     async fn test_sentinel_sentinels_empty() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"SENTINELS".to_vec(), b"mymaster".to_vec()])
@@ -1355,7 +1470,10 @@ mod tests {
         let (_storage, sentinel) = create_test_sentinel();
 
         // With quorum 1, we alone should be enough
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 1).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 1)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"CKQUORUM".to_vec(), b"mymaster".to_vec()])
@@ -1373,7 +1491,10 @@ mod tests {
         let (_storage, sentinel) = create_test_sentinel();
 
         // With quorum 3, we alone are not enough
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 3).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 3)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"CKQUORUM".to_vec(), b"mymaster".to_vec()])
@@ -1385,8 +1506,14 @@ mod tests {
     async fn test_sentinel_reset() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster1", "127.0.0.1", 6379, 2).await.unwrap();
-        sentinel.monitor_master("mymaster2", "127.0.0.1", 6380, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster1", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
+        sentinel
+            .monitor_master("mymaster2", "127.0.0.1", 6380, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"RESET".to_vec(), b"*".to_vec()])
@@ -1399,7 +1526,10 @@ mod tests {
     async fn test_sentinel_failover_no_replicas() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"FAILOVER".to_vec(), b"mymaster".to_vec()])
@@ -1411,7 +1541,10 @@ mod tests {
     async fn test_sentinel_is_master_down_by_addr() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[
@@ -1513,7 +1646,10 @@ mod tests {
     async fn test_sentinel_info() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let info = sentinel.get_sentinel_info().await;
         assert!(info.contains("# Sentinel"));
@@ -1525,7 +1661,10 @@ mod tests {
     async fn test_sentinel_info_cache() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"INFO-CACHE".to_vec(), b"mymaster".to_vec()])
@@ -1545,7 +1684,10 @@ mod tests {
             "127.0.0.1".to_string(),
             6379,
             2,
-            &SentinelConfig { down_after_ms: 100, ..Default::default() },
+            &SentinelConfig {
+                down_after_ms: 100,
+                ..Default::default()
+            },
         );
 
         // Master should be up initially
@@ -1570,7 +1712,10 @@ mod tests {
             "127.0.0.1".to_string(),
             6379,
             2,
-            &SentinelConfig { down_after_ms: 100, ..Default::default() },
+            &SentinelConfig {
+                down_after_ms: 100,
+                ..Default::default()
+            },
         );
 
         // Add a sentinel peer that thinks master is down
@@ -1638,7 +1783,10 @@ mod tests {
     async fn test_sentinel_slaves_alias() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // SLAVES should work as alias for REPLICAS
         let result = sentinel
@@ -1655,7 +1803,10 @@ mod tests {
         let (_storage, sentinel) = create_test_sentinel();
 
         let result = sentinel
-            .handle_sentinel_command(&[b"SIMULATE-FAILURE".to_vec(), b"crash-after-election".to_vec()])
+            .handle_sentinel_command(&[
+                b"SIMULATE-FAILURE".to_vec(),
+                b"crash-after-election".to_vec(),
+            ])
             .await
             .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
@@ -1697,7 +1848,10 @@ mod tests {
     async fn test_sentinel_set_auth_pass() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[
@@ -1719,13 +1873,18 @@ mod tests {
     async fn test_sentinel_failover_with_replicas() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("mymaster", "127.0.0.1", 6379, 2).await.unwrap();
+        sentinel
+            .monitor_master("mymaster", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
 
         // Add a replica
         {
             let mut state = sentinel.state().write().await;
             let master = state.masters.get_mut("mymaster").unwrap();
-            master.replicas.push(ReplicaEntry::new("10.0.0.1".to_string(), 6380));
+            master
+                .replicas
+                .push(ReplicaEntry::new("10.0.0.1".to_string(), 6380));
         }
 
         // Now failover should work
@@ -1745,9 +1904,18 @@ mod tests {
     async fn test_sentinel_multiple_masters() {
         let (_storage, sentinel) = create_test_sentinel();
 
-        sentinel.monitor_master("master1", "127.0.0.1", 6379, 2).await.unwrap();
-        sentinel.monitor_master("master2", "127.0.0.2", 6380, 3).await.unwrap();
-        sentinel.monitor_master("master3", "127.0.0.3", 6381, 1).await.unwrap();
+        sentinel
+            .monitor_master("master1", "127.0.0.1", 6379, 2)
+            .await
+            .unwrap();
+        sentinel
+            .monitor_master("master2", "127.0.0.2", 6380, 3)
+            .await
+            .unwrap();
+        sentinel
+            .monitor_master("master3", "127.0.0.3", 6381, 1)
+            .await
+            .unwrap();
 
         let result = sentinel
             .handle_sentinel_command(&[b"MASTERS".to_vec()])

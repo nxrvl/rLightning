@@ -2,13 +2,13 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
 
+use rlightning::command::handler::CommandHandler;
 use rlightning::networking::client::Client;
 use rlightning::networking::server::Server;
-use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use rlightning::security::{SecurityConfig, SecurityManager};
 use rlightning::replication::ReplicationManager;
 use rlightning::replication::config::ReplicationConfig;
-use rlightning::command::handler::CommandHandler;
+use rlightning::security::{SecurityConfig, SecurityManager};
+use rlightning::storage::engine::{StorageConfig, StorageEngine};
 // Removed unused import: rlightning::persistence::config::AofSyncPolicy
 use std::sync::Arc;
 
@@ -16,7 +16,9 @@ pub const DEFAULT_TEST_PORT: u16 = 17000;
 
 /// Sets up a test server with the specified port offset
 /// Returns the server address
-pub async fn setup_test_server(port_offset: u16) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn setup_test_server(
+    port_offset: u16,
+) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     setup_test_server_with_optional_security(port_offset, StorageConfig::default(), None).await
 }
 
@@ -35,7 +37,8 @@ pub async fn setup_test_server_with_security(
     storage_config: StorageConfig,
     security_config: SecurityConfig,
 ) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    setup_test_server_with_optional_security(port_offset, storage_config, Some(security_config)).await
+    setup_test_server_with_optional_security(port_offset, storage_config, Some(security_config))
+        .await
 }
 
 /// Helper to set up a test server with optional security
@@ -57,7 +60,7 @@ pub async fn setup_test_server_with_optional_security(
         let security_manager = Arc::new(SecurityManager::new(sec_conf));
         server_builder = server_builder.with_security(security_manager);
     }
-    
+
     let server = server_builder;
 
     tokio::spawn(async move {
@@ -72,7 +75,9 @@ pub async fn setup_test_server_with_optional_security(
 }
 
 /// Creates a new Redis client connected to the specified address
-pub async fn create_client(addr: SocketAddr) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn create_client(
+    addr: SocketAddr,
+) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
     let client = match Client::connect(addr).await {
         Ok(client) => client,
         Err(e) => {
@@ -115,4 +120,4 @@ pub async fn setup_test_server_with_replication(
 /// Waits for the specified duration
 pub async fn wait_ms(ms: u64) {
     sleep(Duration::from_millis(ms)).await;
-} 
+}

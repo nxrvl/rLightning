@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::command::{CommandError, CommandResult};
 use crate::command::utils::bytes_to_string;
+use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 
@@ -74,13 +74,13 @@ pub async fn client(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
             // Parse timeout
             let timeout_str = bytes_to_string(&args[1])?;
             let _timeout_ms: u64 = timeout_str.parse().map_err(|_| {
-                CommandError::InvalidArgument("timeout is not an integer or out of range".to_string())
+                CommandError::InvalidArgument(
+                    "timeout is not an integer or out of range".to_string(),
+                )
             })?;
             Ok(RespValue::SimpleString("OK".to_string()))
         }
-        "UNPAUSE" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "UNPAUSE" => Ok(RespValue::SimpleString("OK".to_string())),
         "REPLY" => {
             if args.len() != 2 {
                 return Err(CommandError::WrongNumberOfArguments);
@@ -210,7 +210,9 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
                 results.push(RespValue::BulkString(Some(cmd_name.as_bytes().to_vec())));
                 results.push(RespValue::Array(Some(vec![
                     RespValue::BulkString(Some(b"summary".to_vec())),
-                    RespValue::BulkString(Some(format!("The {} command", cmd_name.to_uppercase()).into_bytes())),
+                    RespValue::BulkString(Some(
+                        format!("The {} command", cmd_name.to_uppercase()).into_bytes(),
+                    )),
                     RespValue::BulkString(Some(b"since".to_vec())),
                     RespValue::BulkString(Some(b"1.0.0".to_vec())),
                     RespValue::BulkString(Some(b"group".to_vec())),
@@ -236,23 +238,26 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
             // For most commands, the first argument after the command name is the key
             let keys = match cmd_name.as_str() {
                 "get" | "set" | "del" | "exists" | "type" | "expire" | "ttl" | "persist"
-                | "incr" | "decr" | "append" | "strlen" | "getrange" | "setrange"
-                | "lpush" | "rpush" | "lpop" | "rpop" | "lrange" | "lindex" | "llen"
-                | "hset" | "hget" | "hdel" | "hexists" | "hgetall" | "hkeys" | "hvals"
-                | "sadd" | "srem" | "smembers" | "sismember" | "scard"
-                | "zadd" | "zrem" | "zscore" | "zrange" | "zcard" | "zrank" => {
+                | "incr" | "decr" | "append" | "strlen" | "getrange" | "setrange" | "lpush"
+                | "rpush" | "lpop" | "rpop" | "lrange" | "lindex" | "llen" | "hset" | "hget"
+                | "hdel" | "hexists" | "hgetall" | "hkeys" | "hvals" | "sadd" | "srem"
+                | "smembers" | "sismember" | "scard" | "zadd" | "zrem" | "zscore" | "zrange"
+                | "zcard" | "zrank" => {
                     if args.len() >= 3 {
                         vec![RespValue::BulkString(Some(args[2].clone()))]
                     } else {
                         vec![]
                     }
                 }
-                "mget" => {
-                    args[2..].iter().map(|a| RespValue::BulkString(Some(a.clone()))).collect()
-                }
-                "mset" | "msetnx" => {
-                    args[2..].iter().step_by(2).map(|a| RespValue::BulkString(Some(a.clone()))).collect()
-                }
+                "mget" => args[2..]
+                    .iter()
+                    .map(|a| RespValue::BulkString(Some(a.clone())))
+                    .collect(),
+                "mset" | "msetnx" => args[2..]
+                    .iter()
+                    .step_by(2)
+                    .map(|a| RespValue::BulkString(Some(a.clone())))
+                    .collect(),
                 _ => {
                     if args.len() >= 3 {
                         vec![RespValue::BulkString(Some(args[2].clone()))]
@@ -265,12 +270,16 @@ pub async fn command_cmd(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
         }
         "HELP" => {
             let help = vec![
-                RespValue::BulkString(Some(b"COMMAND <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec())),
+                RespValue::BulkString(Some(
+                    b"COMMAND <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
                 RespValue::BulkString(Some(b"COUNT".to_vec())),
                 RespValue::BulkString(Some(b"DOCS [<command-name> ...]".to_vec())),
                 RespValue::BulkString(Some(b"GETKEYS <command> [<arg> ...]".to_vec())),
                 RespValue::BulkString(Some(b"INFO [<command-name> ...]".to_vec())),
-                RespValue::BulkString(Some(b"LIST [FILTERBY (MODULE|ACLCAT|PATTERN) <value>]".to_vec())),
+                RespValue::BulkString(Some(
+                    b"LIST [FILTERBY (MODULE|ACLCAT|PATTERN) <value>]".to_vec(),
+                )),
             ];
             Ok(RespValue::Array(Some(help)))
         }
@@ -319,12 +328,16 @@ pub async fn save(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult {
 
 /// Redis BGSAVE command - Asynchronously save the dataset to disk
 pub async fn bgsave(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult {
-    Ok(RespValue::SimpleString("Background saving started".to_string()))
+    Ok(RespValue::SimpleString(
+        "Background saving started".to_string(),
+    ))
 }
 
 /// Redis BGREWRITEAOF command - Asynchronously rewrite the append-only file
 pub async fn bgrewriteaof(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult {
-    Ok(RespValue::SimpleString("Background append only file rewriting started".to_string()))
+    Ok(RespValue::SimpleString(
+        "Background append only file rewriting started".to_string(),
+    ))
 }
 
 /// Redis LASTSAVE command - Get the UNIX timestamp of the last successful save
@@ -368,15 +381,13 @@ pub async fn slowlog(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             let _ = count;
             Ok(RespValue::Array(Some(vec![])))
         }
-        "LEN" => {
-            Ok(RespValue::Integer(0))
-        }
-        "RESET" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "LEN" => Ok(RespValue::Integer(0)),
+        "RESET" => Ok(RespValue::SimpleString("OK".to_string())),
         "HELP" => {
             let help = vec![
-                RespValue::BulkString(Some(b"SLOWLOG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec())),
+                RespValue::BulkString(Some(
+                    b"SLOWLOG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
                 RespValue::BulkString(Some(b"GET [<count>]".to_vec())),
                 RespValue::BulkString(Some(b"LEN".to_vec())),
                 RespValue::BulkString(Some(b"RESET".to_vec())),
@@ -410,18 +421,20 @@ pub async fn latency(_engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             }
             Ok(RespValue::Array(Some(vec![])))
         }
-        "RESET" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "RESET" => Ok(RespValue::SimpleString("OK".to_string())),
         "GRAPH" => {
             if args.len() < 2 {
                 return Err(CommandError::WrongNumberOfArguments);
             }
-            Ok(RespValue::BulkString(Some(b"No latency data available".to_vec())))
+            Ok(RespValue::BulkString(Some(
+                b"No latency data available".to_vec(),
+            )))
         }
         "HELP" => {
             let help = vec![
-                RespValue::BulkString(Some(b"LATENCY <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec())),
+                RespValue::BulkString(Some(
+                    b"LATENCY <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
                 RespValue::BulkString(Some(b"GRAPH <event>".to_vec())),
                 RespValue::BulkString(Some(b"HISTORY <event>".to_vec())),
                 RespValue::BulkString(Some(b"LATEST".to_vec())),
@@ -471,23 +484,27 @@ pub async fn memory(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 used_memory,
                 used_memory,
                 key_count,
-                if key_count > 0 { used_memory / key_count } else { 0 },
+                if key_count > 0 {
+                    used_memory / key_count
+                } else {
+                    0
+                },
                 used_memory,
             );
             Ok(RespValue::BulkString(Some(stats.into_bytes())))
         }
-        "DOCTOR" => {
-            Ok(RespValue::BulkString(Some(b"Sam, I have no memory problems".to_vec())))
-        }
-        "MALLOC-STATS" => {
-            Ok(RespValue::BulkString(Some(b"Memory allocator stats not available (Rust global allocator)".to_vec())))
-        }
-        "PURGE" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "DOCTOR" => Ok(RespValue::BulkString(Some(
+            b"Sam, I have no memory problems".to_vec(),
+        ))),
+        "MALLOC-STATS" => Ok(RespValue::BulkString(Some(
+            b"Memory allocator stats not available (Rust global allocator)".to_vec(),
+        ))),
+        "PURGE" => Ok(RespValue::SimpleString("OK".to_string())),
         "HELP" => {
             let help = vec![
-                RespValue::BulkString(Some(b"MEMORY <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec())),
+                RespValue::BulkString(Some(
+                    b"MEMORY <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
                 RespValue::BulkString(Some(b"DOCTOR".to_vec())),
                 RespValue::BulkString(Some(b"MALLOC-STATS".to_vec())),
                 RespValue::BulkString(Some(b"PURGE".to_vec())),
@@ -518,9 +535,9 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 return Err(CommandError::WrongNumberOfArguments);
             }
             let seconds_str = bytes_to_string(&args[1])?;
-            let seconds: f64 = seconds_str.parse().map_err(|_| {
-                CommandError::InvalidArgument("Invalid sleep duration".to_string())
-            })?;
+            let seconds: f64 = seconds_str
+                .parse()
+                .map_err(|_| CommandError::InvalidArgument("Invalid sleep duration".to_string()))?;
             if !(0.0..=30.0).contains(&seconds) {
                 return Err(CommandError::InvalidArgument(
                     "ERR sleep duration must be between 0 and 30 seconds".to_string(),
@@ -530,15 +547,9 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             tokio::time::sleep(duration).await;
             Ok(RespValue::SimpleString("OK".to_string()))
         }
-        "SET-ACTIVE-EXPIRE" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
-        "JMAP" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
-        "RELOAD" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "SET-ACTIVE-EXPIRE" => Ok(RespValue::SimpleString("OK".to_string())),
+        "JMAP" => Ok(RespValue::SimpleString("OK".to_string())),
+        "RELOAD" => Ok(RespValue::SimpleString("OK".to_string())),
         "OBJECT" => {
             if args.len() < 2 {
                 return Err(CommandError::WrongNumberOfArguments);
@@ -548,21 +559,22 @@ pub async fn debug(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 return Ok(RespValue::Error("ERR no such key".to_string()));
             }
             let key_type = engine.get_type(key).await?;
-            let encoding = engine.get_encoding(key).await?.unwrap_or_else(|| "raw".to_string());
+            let encoding = engine
+                .get_encoding(key)
+                .await?
+                .unwrap_or_else(|| "raw".to_string());
             Ok(RespValue::SimpleString(format!(
                 "Value at:0x0 refcount:1 encoding:{} serializedlength:0 lru:0 lru_seconds_idle:0 type:{}",
                 encoding, key_type
             )))
         }
-        "QUICKLIST-PACKED-THRESHOLD" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
-        "CHANGE-REPL-ID" => {
-            Ok(RespValue::SimpleString("OK".to_string()))
-        }
+        "QUICKLIST-PACKED-THRESHOLD" => Ok(RespValue::SimpleString("OK".to_string())),
+        "CHANGE-REPL-ID" => Ok(RespValue::SimpleString("OK".to_string())),
         "HELP" => {
             let help = vec![
-                RespValue::BulkString(Some(b"DEBUG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec())),
+                RespValue::BulkString(Some(
+                    b"DEBUG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
                 RespValue::BulkString(Some(b"CHANGE-REPL-ID".to_vec())),
                 RespValue::BulkString(Some(b"JMAP".to_vec())),
                 RespValue::BulkString(Some(b"OBJECT <key>".to_vec())),
@@ -592,12 +604,12 @@ pub async fn swapdb(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let db1_str = bytes_to_string(&args[0])?;
     let db2_str = bytes_to_string(&args[1])?;
-    let db1: usize = db1_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("invalid DB index".to_string())
-    })?;
-    let db2: usize = db2_str.parse().map_err(|_| {
-        CommandError::InvalidArgument("invalid DB index".to_string())
-    })?;
+    let db1: usize = db1_str
+        .parse()
+        .map_err(|_| CommandError::InvalidArgument("invalid DB index".to_string()))?;
+    let db2: usize = db2_str
+        .parse()
+        .map_err(|_| CommandError::InvalidArgument("invalid DB index".to_string()))?;
 
     engine.swap_db(db1, db2).await?;
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -637,7 +649,9 @@ pub async fn lolwut(_engine: &StorageEngine, _args: &[Vec<u8>]) -> CommandResult
 
 rLightning ver. 1.0.0 - A Redis-compatible server built in Rust
 "#;
-    Ok(RespValue::BulkString(Some(art.trim_start_matches('\n').as_bytes().to_vec())))
+    Ok(RespValue::BulkString(Some(
+        art.trim_start_matches('\n').as_bytes().to_vec(),
+    )))
 }
 
 // ---- Expanded INFO ----
@@ -747,36 +761,216 @@ fn format_memory_human(bytes: u64) -> String {
 const COMMAND_COUNT: usize = 210;
 
 static KNOWN_COMMANDS: &[&str] = &[
-    "append", "auth", "bgsave", "bgrewriteaof", "bitcount", "bitfield", "bitfield_ro",
-    "bitop", "bitpos", "blmove", "blmpop", "blpop", "brpop", "bzmpop", "bzpopmax",
-    "bzpopmin", "client", "cluster", "command", "config", "copy", "dbsize", "debug",
-    "decr", "decrby", "del", "dump", "echo", "eval", "eval_ro", "evalsha", "evalsha_ro",
-    "exists", "expire", "expireat", "expiretime", "fcall", "fcall_ro", "flushall",
-    "flushdb", "function", "geoadd", "geodist", "geohash", "geopos", "georadius",
-    "georadiusbymember", "geosearch", "geosearchstore", "get", "getbit", "getdel",
-    "getex", "getrange", "getset", "hdel", "hello", "hexists", "hget", "hgetall",
-    "hincrby", "hincrbyfloat", "hkeys", "hlen", "hmget", "hmset", "hrandfield",
-    "hscan", "hset", "hsetnx", "hstrlen", "hvals", "incr", "incrby", "incrbyfloat",
-    "info", "keys", "lastsave", "latency", "lcs", "lindex", "linsert", "llen",
-    "lmove", "lmpop", "lolwut", "lpop", "lpos", "lpush", "lpushx", "lrange",
-    "lset", "ltrim", "memory", "mget", "monitor", "move", "mset", "msetnx",
-    "multi", "object", "persist", "pexpire", "pexpireat", "pexpiretime", "pfadd",
-    "pfcount", "pfmerge", "ping", "psetex", "pttl", "publish", "pubsub",
-    "quit", "randomkey", "rename", "reset", "restore", "rpop", "rpush", "rpushx",
-    "sadd", "save", "scan", "scard", "script", "sdiff", "sdiffstore", "select",
-    "set", "setbit", "setex", "setnx", "setrange", "shutdown", "sinter",
-    "sintercard", "sinterstore", "sismember", "slowlog", "smembers", "smismember",
-    "smove", "sort", "sort_ro", "spop", "srandmember", "sscan", "srem", "strlen",
-    "subscribe", "substr", "sunion", "sunionstore", "swapdb", "time", "touch",
-    "ttl", "type", "unlink", "unsubscribe", "unwatch", "wait", "waitaof", "watch",
-    "xack", "xadd", "xautoclaim", "xclaim", "xdel", "xgroup", "xinfo", "xlen",
-    "xpending", "xrange", "xread", "xreadgroup", "xrevrange", "xtrim",
-    "zadd", "zcard", "zcount", "zdiff", "zdiffstore", "zincrby", "zinter",
-    "zinterstore", "zlexcount", "zmpop", "zmscore", "zpopmax", "zpopmin",
-    "zrandmember", "zrange", "zrangebylex", "zrangebyscore", "zrangestore",
-    "zrank", "zrem", "zremrangebylex", "zremrangebyrank", "zremrangebyscore",
-    "zrevrange", "zrevrangebylex", "zrevrangebyscore", "zrevrank", "zscan",
-    "zscore", "zunion", "zunionstore",
+    "append",
+    "auth",
+    "bgsave",
+    "bgrewriteaof",
+    "bitcount",
+    "bitfield",
+    "bitfield_ro",
+    "bitop",
+    "bitpos",
+    "blmove",
+    "blmpop",
+    "blpop",
+    "brpop",
+    "bzmpop",
+    "bzpopmax",
+    "bzpopmin",
+    "client",
+    "cluster",
+    "command",
+    "config",
+    "copy",
+    "dbsize",
+    "debug",
+    "decr",
+    "decrby",
+    "del",
+    "dump",
+    "echo",
+    "eval",
+    "eval_ro",
+    "evalsha",
+    "evalsha_ro",
+    "exists",
+    "expire",
+    "expireat",
+    "expiretime",
+    "fcall",
+    "fcall_ro",
+    "flushall",
+    "flushdb",
+    "function",
+    "geoadd",
+    "geodist",
+    "geohash",
+    "geopos",
+    "georadius",
+    "georadiusbymember",
+    "geosearch",
+    "geosearchstore",
+    "get",
+    "getbit",
+    "getdel",
+    "getex",
+    "getrange",
+    "getset",
+    "hdel",
+    "hello",
+    "hexists",
+    "hget",
+    "hgetall",
+    "hincrby",
+    "hincrbyfloat",
+    "hkeys",
+    "hlen",
+    "hmget",
+    "hmset",
+    "hrandfield",
+    "hscan",
+    "hset",
+    "hsetnx",
+    "hstrlen",
+    "hvals",
+    "incr",
+    "incrby",
+    "incrbyfloat",
+    "info",
+    "keys",
+    "lastsave",
+    "latency",
+    "lcs",
+    "lindex",
+    "linsert",
+    "llen",
+    "lmove",
+    "lmpop",
+    "lolwut",
+    "lpop",
+    "lpos",
+    "lpush",
+    "lpushx",
+    "lrange",
+    "lset",
+    "ltrim",
+    "memory",
+    "mget",
+    "monitor",
+    "move",
+    "mset",
+    "msetnx",
+    "multi",
+    "object",
+    "persist",
+    "pexpire",
+    "pexpireat",
+    "pexpiretime",
+    "pfadd",
+    "pfcount",
+    "pfmerge",
+    "ping",
+    "psetex",
+    "pttl",
+    "publish",
+    "pubsub",
+    "quit",
+    "randomkey",
+    "rename",
+    "reset",
+    "restore",
+    "rpop",
+    "rpush",
+    "rpushx",
+    "sadd",
+    "save",
+    "scan",
+    "scard",
+    "script",
+    "sdiff",
+    "sdiffstore",
+    "select",
+    "set",
+    "setbit",
+    "setex",
+    "setnx",
+    "setrange",
+    "shutdown",
+    "sinter",
+    "sintercard",
+    "sinterstore",
+    "sismember",
+    "slowlog",
+    "smembers",
+    "smismember",
+    "smove",
+    "sort",
+    "sort_ro",
+    "spop",
+    "srandmember",
+    "sscan",
+    "srem",
+    "strlen",
+    "subscribe",
+    "substr",
+    "sunion",
+    "sunionstore",
+    "swapdb",
+    "time",
+    "touch",
+    "ttl",
+    "type",
+    "unlink",
+    "unsubscribe",
+    "unwatch",
+    "wait",
+    "waitaof",
+    "watch",
+    "xack",
+    "xadd",
+    "xautoclaim",
+    "xclaim",
+    "xdel",
+    "xgroup",
+    "xinfo",
+    "xlen",
+    "xpending",
+    "xrange",
+    "xread",
+    "xreadgroup",
+    "xrevrange",
+    "xtrim",
+    "zadd",
+    "zcard",
+    "zcount",
+    "zdiff",
+    "zdiffstore",
+    "zincrby",
+    "zinter",
+    "zinterstore",
+    "zlexcount",
+    "zmpop",
+    "zmscore",
+    "zpopmax",
+    "zpopmin",
+    "zrandmember",
+    "zrange",
+    "zrangebylex",
+    "zrangebyscore",
+    "zrangestore",
+    "zrank",
+    "zrem",
+    "zremrangebylex",
+    "zremrangebyrank",
+    "zremrangebyscore",
+    "zrevrange",
+    "zrevrangebylex",
+    "zrevrangebyscore",
+    "zrevrank",
+    "zscan",
+    "zscore",
+    "zunion",
+    "zunionstore",
 ];
 
 fn get_command_info(name: &str) -> Option<RespValue> {
@@ -942,7 +1136,9 @@ mod tests {
     #[tokio::test]
     async fn test_client_kill() {
         let engine = setup();
-        let result = client(&engine, &[b("KILL"), b("127.0.0.1:12345")]).await.unwrap();
+        let result = client(&engine, &[b("KILL"), b("127.0.0.1:12345")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
     }
 
@@ -1048,7 +1244,9 @@ mod tests {
     #[tokio::test]
     async fn test_command_info_unknown() {
         let engine = setup();
-        let result = command_cmd(&engine, &[b("INFO"), b("nonexistent_cmd")]).await.unwrap();
+        let result = command_cmd(&engine, &[b("INFO"), b("nonexistent_cmd")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0], RespValue::BulkString(None));
@@ -1082,7 +1280,9 @@ mod tests {
     #[tokio::test]
     async fn test_command_getkeys() {
         let engine = setup();
-        let result = command_cmd(&engine, &[b("GETKEYS"), b("get"), b("mykey")]).await.unwrap();
+        let result = command_cmd(&engine, &[b("GETKEYS"), b("get"), b("mykey")])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(keys)) = result {
             assert_eq!(keys.len(), 1);
             assert_eq!(keys[0], RespValue::BulkString(Some(b("mykey"))));
@@ -1107,7 +1307,9 @@ mod tests {
     #[tokio::test]
     async fn test_config_set() {
         let engine = setup();
-        let result = config_set(&engine, &[b("maxmemory"), b("100mb")]).await.unwrap();
+        let result = config_set(&engine, &[b("maxmemory"), b("100mb")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
     }
 
@@ -1229,7 +1431,9 @@ mod tests {
     #[tokio::test]
     async fn test_latency_history() {
         let engine = setup();
-        let result = latency(&engine, &[b("HISTORY"), b("command")]).await.unwrap();
+        let result = latency(&engine, &[b("HISTORY"), b("command")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
 
@@ -1267,14 +1471,19 @@ mod tests {
     #[tokio::test]
     async fn test_memory_usage_nonexistent() {
         let engine = setup();
-        let result = memory(&engine, &[b("USAGE"), b("nonexistent")]).await.unwrap();
+        let result = memory(&engine, &[b("USAGE"), b("nonexistent")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
     #[tokio::test]
     async fn test_memory_usage_existing() {
         let engine = setup();
-        engine.set(b"mykey".to_vec(), b"myvalue".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myvalue".to_vec(), None)
+            .await
+            .unwrap();
         let result = memory(&engine, &[b("USAGE"), b("mykey")]).await.unwrap();
         if let RespValue::Integer(size) = result {
             assert!(size > 0);
@@ -1348,7 +1557,9 @@ mod tests {
     #[tokio::test]
     async fn test_debug_set_active_expire() {
         let engine = setup();
-        let result = debug(&engine, &[b("SET-ACTIVE-EXPIRE"), b("1")]).await.unwrap();
+        let result = debug(&engine, &[b("SET-ACTIVE-EXPIRE"), b("1")])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
     }
 
@@ -1362,7 +1573,10 @@ mod tests {
     #[tokio::test]
     async fn test_debug_object() {
         let engine = setup();
-        engine.set(b"mykey".to_vec(), b"myval".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey".to_vec(), b"myval".to_vec(), None)
+            .await
+            .unwrap();
         let result = debug(&engine, &[b("OBJECT"), b("mykey")]).await.unwrap();
         if let RespValue::SimpleString(s) = result {
             assert!(s.contains("encoding:"));
@@ -1414,7 +1628,10 @@ mod tests {
     async fn test_swapdb_between_dbs() {
         let engine = setup();
         // Put data in db0
-        engine.set(b"key0".to_vec(), b"val0".to_vec(), None).await.unwrap();
+        engine
+            .set(b"key0".to_vec(), b"val0".to_vec(), None)
+            .await
+            .unwrap();
 
         // Put data in db1 directly
         if let Some(db1) = engine.get_db(1) {
@@ -1533,7 +1750,10 @@ mod tests {
     #[tokio::test]
     async fn test_info_expanded_memory() {
         let engine = setup();
-        engine.set(b"k".to_vec(), b"v".to_vec(), None).await.unwrap();
+        engine
+            .set(b"k".to_vec(), b"v".to_vec(), None)
+            .await
+            .unwrap();
         let result = info_expanded(&engine, &[b("memory")]).await.unwrap();
         if let RespValue::BulkString(Some(data)) = result {
             let s = String::from_utf8_lossy(&data);
@@ -1547,7 +1767,10 @@ mod tests {
     #[tokio::test]
     async fn test_info_expanded_keyspace() {
         let engine = setup();
-        engine.set(b"k".to_vec(), b"v".to_vec(), None).await.unwrap();
+        engine
+            .set(b"k".to_vec(), b"v".to_vec(), None)
+            .await
+            .unwrap();
         let result = info_expanded(&engine, &[b("keyspace")]).await.unwrap();
         if let RespValue::BulkString(Some(data)) = result {
             let s = String::from_utf8_lossy(&data);

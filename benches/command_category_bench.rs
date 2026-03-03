@@ -1,9 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use rlightning::command::handler::CommandHandler;
 use rlightning::command::Command;
+use rlightning::command::handler::CommandHandler;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 fn make_handler(rt: &tokio::runtime::Runtime) -> Arc<CommandHandler> {
@@ -40,10 +40,7 @@ fn bench_string_set_value_sizes(c: &mut Criterion) {
                         for i in 0..100 {
                             let cmd = Command {
                                 name: "set".to_string(),
-                                args: vec![
-                                    format!("strkey:{}", i).into_bytes(),
-                                    make_value(size),
-                                ],
+                                args: vec![format!("strkey:{}", i).into_bytes(), make_value(size)],
                             };
                             black_box(handler.process(cmd, 0).await.unwrap());
                         }
@@ -71,10 +68,7 @@ fn bench_string_get_value_sizes(c: &mut Criterion) {
                     for i in 0..100 {
                         let cmd = Command {
                             name: "set".to_string(),
-                            args: vec![
-                                format!("strkey:{}", i).into_bytes(),
-                                make_value(size),
-                            ],
+                            args: vec![format!("strkey:{}", i).into_bytes(), make_value(size)],
                         };
                         handler.process(cmd, 0).await.unwrap();
                     }
@@ -320,10 +314,7 @@ fn bench_list_lrange(c: &mut Criterion) {
                     for i in 0..list_size {
                         let cmd = Command {
                             name: "rpush".to_string(),
-                            args: vec![
-                                b"rangelist".to_vec(),
-                                format!("item:{}", i).into_bytes(),
-                            ],
+                            args: vec![b"rangelist".to_vec(), format!("item:{}", i).into_bytes()],
                         };
                         handler.process(cmd, 0).await.unwrap();
                     }
@@ -332,11 +323,7 @@ fn bench_list_lrange(c: &mut Criterion) {
                     rt.block_on(async {
                         let cmd = Command {
                             name: "lrange".to_string(),
-                            args: vec![
-                                b"rangelist".to_vec(),
-                                b"0".to_vec(),
-                                b"-1".to_vec(),
-                            ],
+                            args: vec![b"rangelist".to_vec(), b"0".to_vec(), b"-1".to_vec()],
                         };
                         black_box(handler.process(cmd, 0).await.unwrap());
                     })
@@ -490,10 +477,7 @@ fn bench_set_operations(c: &mut Criterion) {
                     for i in 0..set_size {
                         let cmd = Command {
                             name: "sadd".to_string(),
-                            args: vec![
-                                b"interset1".to_vec(),
-                                format!("member:{}", i).into_bytes(),
-                            ],
+                            args: vec![b"interset1".to_vec(), format!("member:{}", i).into_bytes()],
                         };
                         handler.process(cmd, 0).await.unwrap();
                         // Overlapping set
@@ -531,10 +515,7 @@ fn bench_set_operations(c: &mut Criterion) {
                     for i in 0..set_size {
                         let cmd = Command {
                             name: "sadd".to_string(),
-                            args: vec![
-                                b"unionset1".to_vec(),
-                                format!("member:{}", i).into_bytes(),
-                            ],
+                            args: vec![b"unionset1".to_vec(), format!("member:{}", i).into_bytes()],
                         };
                         handler.process(cmd, 0).await.unwrap();
                         let cmd = Command {

@@ -1,5 +1,5 @@
-use std::time::Duration;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Replication configuration
 #[derive(Debug, Clone)]
@@ -75,7 +75,9 @@ impl TryFrom<ReplicationTomlConfig> for ReplicationConfig {
             replication_timeout: Duration::from_secs(config.replication_timeout_secs.unwrap_or(60)),
             replication_backlog_size: config.replication_backlog_size.unwrap_or(1024 * 1024),
             min_replicas_to_write: config.min_replicas_to_write.unwrap_or(0),
-            min_replicas_max_lag: Duration::from_secs(config.min_replicas_max_lag_secs.unwrap_or(10)),
+            min_replicas_max_lag: Duration::from_secs(
+                config.min_replicas_max_lag_secs.unwrap_or(10),
+            ),
         })
     }
 }

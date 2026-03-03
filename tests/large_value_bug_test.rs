@@ -1,10 +1,9 @@
+use rlightning::networking::client::Client;
+use rlightning::networking::resp::RespValue;
+use rlightning::networking::server::Server;
 /// Integration test to reproduce the bug where values > 9004 bytes fail
 /// Bug report: https://github.com/nxrvl/rlightning/issues/XXX
-
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use rlightning::networking::resp::RespValue;
-use rlightning::networking::client::Client;
-use rlightning::networking::server::Server;
 use std::sync::Arc;
 
 /// Test the exact 9004 byte boundary reported in the bug
@@ -12,12 +11,11 @@ use std::sync::Arc;
 async fn test_9004_byte_boundary() {
     let mut config = StorageConfig::default();
     config.max_value_size = 10 * 1024 * 1024; // 10MB to allow large values
-    config.max_memory = 100 * 1024 * 1024;    // 100MB
+    config.max_memory = 100 * 1024 * 1024; // 100MB
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19001));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024); // 1MB buffer
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024); // 1MB buffer
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -34,7 +32,9 @@ async fn test_9004_byte_boundary() {
     // Test 9004 bytes (should work according to bug report)
     println!("\n=== Testing 9004 bytes (reported working) ===");
     let value_9004 = "x".repeat(9004);
-    let result = client.send_command_str("SET", &["test:9004", &value_9004]).await;
+    let result = client
+        .send_command_str("SET", &["test:9004", &value_9004])
+        .await;
 
     match &result {
         Ok(RespValue::SimpleString(s)) if s == "OK" => {
@@ -64,7 +64,9 @@ async fn test_9004_byte_boundary() {
     // Test 9005 bytes (should fail according to bug report)
     println!("\n=== Testing 9005 bytes (reported failing) ===");
     let value_9005 = "x".repeat(9005);
-    let result = client.send_command_str("SET", &["test:9005", &value_9005]).await;
+    let result = client
+        .send_command_str("SET", &["test:9005", &value_9005])
+        .await;
 
     match &result {
         Ok(RespValue::SimpleString(s)) if s == "OK" => {
@@ -105,8 +107,7 @@ async fn test_large_values_comprehensive() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19002));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024); // 1MB buffer
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024); // 1MB buffer
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -120,21 +121,9 @@ async fn test_large_values_comprehensive() {
 
     // Test various sizes around the boundary
     let test_sizes = vec![
-        5000,
-        8000,
-        9000,
-        9004,  // Max working
-        9005,  // First failing
-        9010,
-        9050,
-        9100,
-        10000,
-        15000,
-        20000,
-        50000,
-        100000,
-        500000,
-        1_000_000,
+        5000, 8000, 9000, 9004, // Max working
+        9005, // First failing
+        9010, 9050, 9100, 10000, 15000, 20000, 50000, 100000, 500000, 1_000_000,
     ];
 
     let mut failures = Vec::new();
@@ -192,8 +181,7 @@ async fn test_base64_encoded_large_values() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19003));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024);
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024);
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -211,7 +199,9 @@ async fn test_base64_encoded_large_values() {
 
     println!("Testing base64 data of {} bytes", base64_data.len());
 
-    let result = client.send_command_str("SET", &["story_detail:test", &base64_data]).await;
+    let result = client
+        .send_command_str("SET", &["story_detail:test", &base64_data])
+        .await;
 
     match result {
         Ok(RespValue::SimpleString(s)) if s == "OK" => {

@@ -244,7 +244,8 @@ impl ClusterNode {
     /// Add failure report from a reporter node
     pub fn add_failure_report(&mut self, reporter_id: String) {
         // Remove existing report from same reporter
-        self.failure_reports.retain(|r| r.reporter_id != reporter_id);
+        self.failure_reports
+            .retain(|r| r.reporter_id != reporter_id);
         self.failure_reports.push(FailureReport {
             reporter_id,
             timestamp: Instant::now(),
@@ -486,9 +487,10 @@ impl ClusterManager {
                 return Err(format!("ERR Invalid or out of range slot '{}'", slot));
             }
             if let Some(owner) = &state.slot_owners[slot as usize]
-                && owner != &my_id {
-                    return Err(format!("ERR Slot {} is already busy", slot));
-                }
+                && owner != &my_id
+            {
+                return Err(format!("ERR Slot {} is already busy", slot));
+            }
         }
 
         if let Some(node) = state.nodes.get_mut(&my_id) {
@@ -513,17 +515,16 @@ impl ClusterManager {
 
         // Pre-validate
         {
-            let node = state.nodes.get(&my_id)
+            let node = state
+                .nodes
+                .get(&my_id)
                 .ok_or_else(|| "ERR Node not found".to_string())?;
             for &slot in slots {
                 if slot >= CLUSTER_SLOTS {
                     return Err(format!("ERR Invalid or out of range slot '{}'", slot));
                 }
                 if !node.owns_slot(slot) {
-                    return Err(format!(
-                        "ERR Slot {} is already unassigned",
-                        slot
-                    ));
+                    return Err(format!("ERR Slot {} is already unassigned", slot));
                 }
             }
         }
@@ -619,18 +620,20 @@ impl ClusterManager {
 
         // Check if target is a master
         if let Some(master_node) = state.nodes.get(master_id)
-            && master_node.flags.role != NodeRole::Master {
-                return Err("ERR I can only replicate a master, not a replica.".to_string());
-            }
+            && master_node.flags.role != NodeRole::Master
+        {
+            return Err("ERR I can only replicate a master, not a replica.".to_string());
+        }
 
         // Check if we have slots assigned (can't become replica with slots)
         if let Some(my_node) = state.nodes.get(&my_id)
-            && !my_node.slots.is_empty() {
-                return Err(
-                    "ERR To set a master the node must be empty and without assigned slots."
-                        .to_string(),
-                );
-            }
+            && !my_node.slots.is_empty()
+        {
+            return Err(
+                "ERR To set a master the node must be empty and without assigned slots."
+                    .to_string(),
+            );
+        }
 
         // Update our role to replica
         if let Some(my_node) = state.nodes.get_mut(&my_id) {
@@ -694,12 +697,10 @@ impl ClusterManager {
 
         match subcommand.to_uppercase().as_str() {
             "IMPORTING" => {
-                let source_id = node_id
-                    .ok_or_else(|| "ERR Need node ID for IMPORTING".to_string())?;
+                let source_id =
+                    node_id.ok_or_else(|| "ERR Need node ID for IMPORTING".to_string())?;
                 if source_id == my_id {
-                    return Err(
-                        "ERR I can't import a slot from myself".to_string()
-                    );
+                    return Err("ERR I can't import a slot from myself".to_string());
                 }
                 if !state.nodes.contains_key(source_id) {
                     return Err(format!("ERR Unknown node {}", source_id));
@@ -713,25 +714,17 @@ impl ClusterManager {
                 }
             }
             "MIGRATING" => {
-                let target_id = node_id
-                    .ok_or_else(|| "ERR Need node ID for MIGRATING".to_string())?;
+                let target_id =
+                    node_id.ok_or_else(|| "ERR Need node ID for MIGRATING".to_string())?;
                 if target_id == my_id {
-                    return Err(
-                        "ERR I can't migrate a slot to myself".to_string()
-                    );
+                    return Err("ERR I can't migrate a slot to myself".to_string());
                 }
                 if !state.nodes.contains_key(target_id) {
                     return Err(format!("ERR Unknown node {}", target_id));
                 }
                 // Can only migrate slots we own
-                if !state
-                    .nodes
-                    .get(&my_id)
-                    .is_some_and(|n| n.owns_slot(slot))
-                {
-                    return Err(
-                        "ERR I'm not the owner of hash slot".to_string()
-                    );
+                if !state.nodes.get(&my_id).is_some_and(|n| n.owns_slot(slot)) {
+                    return Err("ERR I'm not the owner of hash slot".to_string());
                 }
                 state
                     .migration_states
@@ -742,8 +735,7 @@ impl ClusterManager {
                 }
             }
             "NODE" => {
-                let owner_id = node_id
-                    .ok_or_else(|| "ERR Need node ID for NODE".to_string())?;
+                let owner_id = node_id.ok_or_else(|| "ERR Need node ID for NODE".to_string())?;
                 if !state.nodes.contains_key(owner_id) {
                     return Err(format!("ERR Unknown node {}", owner_id));
                 }
@@ -786,7 +778,10 @@ impl ClusterManager {
                 }
             }
             _ => {
-                return Err("ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP".to_string());
+                return Err(
+                    "ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP"
+                        .to_string(),
+                );
             }
         }
 
@@ -829,9 +824,7 @@ impl ClusterManager {
                 .ok_or_else(|| "ERR Node not found".to_string())?;
 
             if my_node.flags.role != NodeRole::Replica {
-                return Err(
-                    "ERR You should send CLUSTER FAILOVER to a replica".to_string()
-                );
+                return Err("ERR You should send CLUSTER FAILOVER to a replica".to_string());
             }
 
             let master_id = my_node
@@ -928,22 +921,24 @@ impl ClusterManager {
         }
 
         // Check if PFAIL should be promoted to FAIL
-        let quorum = (state.nodes.values().filter(|n| n.flags.role == NodeRole::Master).count() / 2) + 1;
+        let quorum = (state
+            .nodes
+            .values()
+            .filter(|n| n.flags.role == NodeRole::Master)
+            .count()
+            / 2)
+            + 1;
 
         for (node_id, _) in nodes_to_check {
-            let should_mark_fail = state
-                .nodes
-                .get(&node_id)
-                .is_some_and(|n| {
-                    n.count_failure_reports() >= quorum && n.flags.pfail && !n.flags.fail
-                });
+            let should_mark_fail = state.nodes.get(&node_id).is_some_and(|n| {
+                n.count_failure_reports() >= quorum && n.flags.pfail && !n.flags.fail
+            });
 
-            if should_mark_fail
-                && let Some(node) = state.nodes.get_mut(&node_id) {
-                    node.flags.fail = true;
-                    node.flags.pfail = false;
-                    warn!(node_id = %node_id, "Node marked as FAIL");
-                }
+            if should_mark_fail && let Some(node) = state.nodes.get_mut(&node_id) {
+                node.flags.fail = true;
+                node.flags.pfail = false;
+                warn!(node_id = %node_id, "Node marked as FAIL");
+            }
         }
     }
 
@@ -968,10 +963,7 @@ impl ClusterManager {
             None => return,
         };
 
-        let master_failed = state
-            .nodes
-            .get(&master_id)
-            .is_some_and(|n| n.flags.fail);
+        let master_failed = state.nodes.get(&master_id).is_some_and(|n| n.flags.fail);
 
         if !master_failed {
             return;
@@ -1219,13 +1211,14 @@ impl ClusterManager {
         // Normal case: check if slot owner is us
         if let Some(owner_id) = state.get_slot_owner(slot) {
             if owner_id != state.my_id
-                && let Some(owner_node) = state.nodes.get(owner_id) {
-                    return Some(RedirectInfo {
-                        redirect_type: RedirectType::Moved,
-                        slot,
-                        addr: owner_node.addr,
-                    });
-                }
+                && let Some(owner_node) = state.nodes.get(owner_id)
+            {
+                return Some(RedirectInfo {
+                    redirect_type: RedirectType::Moved,
+                    slot,
+                    addr: owner_node.addr,
+                });
+            }
         } else {
             // Slot is unassigned - cluster state is FAIL
             return None;
@@ -1618,10 +1611,7 @@ mod tests {
         let my_id = manager.my_id().await;
 
         // Assign slot using SETSLOT NODE
-        manager
-            .set_slot(100, "NODE", Some(&my_id))
-            .await
-            .unwrap();
+        manager.set_slot(100, "NODE", Some(&my_id)).await.unwrap();
 
         let state = manager.state().read().await;
         assert!(state.nodes[&my_id].owns_slot(100));

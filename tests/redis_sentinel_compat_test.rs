@@ -7,7 +7,6 @@
 ///   docker compose -f .devcontainer/docker-compose.test.yml --profile sentinel up -d
 ///   SENTINEL_COMPAT_TEST=1 cargo test --test redis_sentinel_compat_test
 ///   docker compose -f .devcontainer/docker-compose.test.yml --profile sentinel down
-
 mod test_utils;
 
 use std::net::SocketAddr;
@@ -18,7 +17,7 @@ use tokio::time::sleep;
 use rlightning::networking::client::Client;
 use rlightning::networking::resp::RespValue;
 use rlightning::networking::server::Server;
-use rlightning::sentinel::{SentinelConfig, SentinelManager, ReplicaEntry};
+use rlightning::sentinel::{ReplicaEntry, SentinelConfig, SentinelManager};
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 use test_utils::{DEFAULT_TEST_PORT, create_client};
@@ -80,7 +79,10 @@ fn is_error(val: &RespValue) -> bool {
 }
 
 fn is_null(val: &RespValue) -> bool {
-    matches!(val, RespValue::Null | RespValue::BulkString(None) | RespValue::Array(None))
+    matches!(
+        val,
+        RespValue::Null | RespValue::BulkString(None) | RespValue::Array(None)
+    )
 }
 
 fn check_docker_sentinel_available() -> bool {
@@ -101,7 +103,13 @@ async fn test_sentinel_compat_monitor_master() {
     let mut c = create_client(addr).await.unwrap();
 
     // MONITOR
-    let r = c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    let r = c
+        .send_command_str(
+            "SENTINEL",
+            &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+        )
+        .await
+        .unwrap();
     assert_eq!(resp_string(&r), "OK");
 
     // MASTERS
@@ -110,7 +118,10 @@ async fn test_sentinel_compat_monitor_master() {
     assert_eq!(masters.len(), 1);
 
     // MASTER by name
-    let r = c.send_command_str("SENTINEL", &["MASTER", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["MASTER", "mymaster"])
+        .await
+        .unwrap();
     let fields = resp_array(&r);
     assert!(fields.len() >= 10, "Master info should have many fields");
 
@@ -135,17 +146,28 @@ async fn test_sentinel_compat_master_addr_by_name() {
     let (addr, _) = setup_sentinel(851, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "10.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "10.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
     // GET-MASTER-ADDR-BY-NAME
-    let r = c.send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "mymaster"])
+        .await
+        .unwrap();
     let arr = resp_array(&r);
     assert_eq!(arr.len(), 2);
     assert_eq!(resp_string(&arr[0]), "10.0.0.1");
     assert_eq!(resp_string(&arr[1]), "6379");
 
     // Nonexistent master
-    let r = c.send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "nosuch"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "nosuch"])
+        .await
+        .unwrap();
     assert!(is_null(&r));
 }
 
@@ -162,7 +184,9 @@ async fn test_sentinel_compat_monitor_multiple_masters() {
     for i in 1..=3 {
         let name = format!("master{}", i);
         let port = format!("{}", 6379 + i);
-        c.send_command_str("SENTINEL", &["MONITOR", &name, "127.0.0.1", &port, "2"]).await.unwrap();
+        c.send_command_str("SENTINEL", &["MONITOR", &name, "127.0.0.1", &port, "2"])
+            .await
+            .unwrap();
     }
 
     let r = c.send_command_str("SENTINEL", &["MASTERS"]).await.unwrap();
@@ -173,7 +197,10 @@ async fn test_sentinel_compat_monitor_multiple_masters() {
     for i in 1..=3 {
         let name = format!("master{}", i);
         let expected_port = format!("{}", 6379 + i);
-        let r = c.send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", &name]).await.unwrap();
+        let r = c
+            .send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", &name])
+            .await
+            .unwrap();
         let arr = resp_array(&r);
         assert_eq!(resp_string(&arr[1]), expected_port);
     }
@@ -192,10 +219,21 @@ async fn test_sentinel_compat_set_config() {
     let (addr, sentinel) = setup_sentinel(853, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
     // SET down-after-milliseconds
-    let r = c.send_command_str("SENTINEL", &["SET", "mymaster", "down-after-milliseconds", "15000"]).await.unwrap();
+    let r = c
+        .send_command_str(
+            "SENTINEL",
+            &["SET", "mymaster", "down-after-milliseconds", "15000"],
+        )
+        .await
+        .unwrap();
     assert_eq!(resp_string(&r), "OK");
 
     // Verify
@@ -214,11 +252,20 @@ async fn test_sentinel_compat_config_set_get() {
     let mut c = create_client(addr).await.unwrap();
 
     // CONFIG SET
-    let r = c.send_command_str("SENTINEL", &["CONFIG", "SET", "announce-ip", "192.168.1.100"]).await.unwrap();
+    let r = c
+        .send_command_str(
+            "SENTINEL",
+            &["CONFIG", "SET", "announce-ip", "192.168.1.100"],
+        )
+        .await
+        .unwrap();
     assert_eq!(resp_string(&r), "OK");
 
     // CONFIG GET
-    let r = c.send_command_str("SENTINEL", &["CONFIG", "GET", "announce-ip"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["CONFIG", "GET", "announce-ip"])
+        .await
+        .unwrap();
     let arr = resp_array(&r);
     assert_eq!(arr.len(), 2);
     assert_eq!(resp_string(&arr[1]), "192.168.1.100");
@@ -238,11 +285,23 @@ async fn test_sentinel_compat_ckquorum() {
     let mut c = create_client(addr).await.unwrap();
 
     // With quorum 1, single sentinel suffices
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "1"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "1"],
+    )
+    .await
+    .unwrap();
 
-    let r = c.send_command_str("SENTINEL", &["CKQUORUM", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["CKQUORUM", "mymaster"])
+        .await
+        .unwrap();
     let msg = resp_string(&r);
-    assert!(msg.starts_with("OK"), "CKQUORUM should pass with quorum=1, got: {}", msg);
+    assert!(
+        msg.starts_with("OK"),
+        "CKQUORUM should pass with quorum=1, got: {}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -254,15 +313,26 @@ async fn test_sentinel_compat_replicas_query() {
     let (addr, _) = setup_sentinel(856, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
     // REPLICAS (empty initially)
-    let r = c.send_command_str("SENTINEL", &["REPLICAS", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["REPLICAS", "mymaster"])
+        .await
+        .unwrap();
     let arr = resp_array(&r);
     assert_eq!(arr.len(), 0);
 
     // SLAVES alias
-    let r = c.send_command_str("SENTINEL", &["SLAVES", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["SLAVES", "mymaster"])
+        .await
+        .unwrap();
     let arr = resp_array(&r);
     assert_eq!(arr.len(), 0);
 }
@@ -276,12 +346,24 @@ async fn test_sentinel_compat_sentinels_query() {
     let (addr, _) = setup_sentinel(857, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
     // Only self as sentinel
-    let r = c.send_command_str("SENTINEL", &["SENTINELS", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["SENTINELS", "mymaster"])
+        .await
+        .unwrap();
     let arr = resp_array(&r);
-    assert_eq!(arr.len(), 0, "Should have 0 other sentinels (only ourselves)");
+    assert_eq!(
+        arr.len(),
+        0,
+        "Should have 0 other sentinels (only ourselves)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +379,17 @@ async fn test_sentinel_compat_remove_master() {
     let (addr, _) = setup_sentinel(858, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
-    let r = c.send_command_str("SENTINEL", &["REMOVE", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["REMOVE", "mymaster"])
+        .await
+        .unwrap();
     assert_eq!(resp_string(&r), "OK");
 
     let r = c.send_command_str("SENTINEL", &["MASTERS"]).await.unwrap();
@@ -316,10 +406,17 @@ async fn test_sentinel_compat_reset() {
     let (addr, _) = setup_sentinel(859, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "m1", "127.0.0.1", "6379", "2"]).await.unwrap();
-    c.send_command_str("SENTINEL", &["MONITOR", "m2", "127.0.0.2", "6380", "2"]).await.unwrap();
+    c.send_command_str("SENTINEL", &["MONITOR", "m1", "127.0.0.1", "6379", "2"])
+        .await
+        .unwrap();
+    c.send_command_str("SENTINEL", &["MONITOR", "m2", "127.0.0.2", "6380", "2"])
+        .await
+        .unwrap();
 
-    let r = c.send_command_str("SENTINEL", &["RESET", "*"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["RESET", "*"])
+        .await
+        .unwrap();
     assert_eq!(resp_int(&r), 2);
 }
 
@@ -337,7 +434,10 @@ async fn test_sentinel_compat_sdown_detection() {
     let (addr, sentinel) = setup_sentinel(860, config).await;
 
     // Monitor a master
-    sentinel.monitor_master("mymaster", "127.0.0.1", 9999, 1).await.unwrap();
+    sentinel
+        .monitor_master("mymaster", "127.0.0.1", 9999, 1)
+        .await
+        .unwrap();
 
     // Simulate timeout
     {
@@ -347,17 +447,24 @@ async fn test_sentinel_compat_sdown_detection() {
     }
 
     // Run monitor check
-    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(
-        Arc::clone(sentinel.state()),
-        50,
-    );
+    let monitor = rlightning::sentinel::monitor::MonitorLoop::new(Arc::clone(sentinel.state()), 50);
     monitor.check_masters().await;
 
     // Verify SDOWN via client
     let mut c = create_client(addr).await.unwrap();
-    let r = c.send_command_str("SENTINEL", &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "9999", "0", "*"]).await.unwrap();
+    let r = c
+        .send_command_str(
+            "SENTINEL",
+            &["IS-MASTER-DOWN-BY-ADDR", "127.0.0.1", "9999", "0", "*"],
+        )
+        .await
+        .unwrap();
     let fields = resp_array(&r);
-    assert_eq!(resp_int(&fields[0]), 1, "Master should be reported as SDOWN");
+    assert_eq!(
+        resp_int(&fields[0]),
+        1,
+        "Master should be reported as SDOWN"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +482,10 @@ async fn test_sentinel_compat_failover() {
     let (_, sentinel) = setup_sentinel(861, config).await;
 
     // Monitor master
-    sentinel.monitor_master("mymaster", "127.0.0.1", 9999, 1).await.unwrap();
+    sentinel
+        .monitor_master("mymaster", "127.0.0.1", 9999, 1)
+        .await
+        .unwrap();
 
     // Add a replica
     {
@@ -395,9 +505,8 @@ async fn test_sentinel_compat_failover() {
     }
 
     // Run failover
-    let failover = rlightning::sentinel::failover::FailoverOrchestrator::new(
-        Arc::clone(sentinel.state()),
-    );
+    let failover =
+        rlightning::sentinel::failover::FailoverOrchestrator::new(Arc::clone(sentinel.state()));
     let result = failover.run_full_failover("mymaster").await;
     assert!(result.is_ok(), "Failover should succeed: {:?}", result);
 
@@ -418,7 +527,10 @@ async fn test_sentinel_compat_failover_selects_best_replica() {
     };
     let (_, sentinel) = setup_sentinel(862, config).await;
 
-    sentinel.monitor_master("mymaster", "127.0.0.1", 9999, 1).await.unwrap();
+    sentinel
+        .monitor_master("mymaster", "127.0.0.1", 9999, 1)
+        .await
+        .unwrap();
 
     // Add replicas with different replication offsets
     {
@@ -441,15 +553,17 @@ async fn test_sentinel_compat_failover_selects_best_replica() {
         master.objective_down = true;
     }
 
-    let failover = rlightning::sentinel::failover::FailoverOrchestrator::new(
-        Arc::clone(sentinel.state()),
-    );
+    let failover =
+        rlightning::sentinel::failover::FailoverOrchestrator::new(Arc::clone(sentinel.state()));
     failover.run_full_failover("mymaster").await.unwrap();
 
     // Best replica (highest offset) should be promoted
     let state = sentinel.state().read().await;
     let master = state.masters.get("mymaster").unwrap();
-    assert_eq!(master.host, "10.0.0.2", "Replica with highest offset should be promoted");
+    assert_eq!(
+        master.host, "10.0.0.2",
+        "Replica with highest offset should be promoted"
+    );
     assert_eq!(master.port, 9997);
 }
 
@@ -518,7 +632,10 @@ async fn test_sentinel_compat_flushconfig() {
     let (addr, _) = setup_sentinel(866, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    let r = c.send_command_str("SENTINEL", &["FLUSHCONFIG"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["FLUSHCONFIG"])
+        .await
+        .unwrap();
     assert_eq!(resp_string(&r), "OK");
 }
 
@@ -531,9 +648,17 @@ async fn test_sentinel_compat_info_cache() {
     let (addr, _) = setup_sentinel(867, config).await;
     let mut c = create_client(addr).await.unwrap();
 
-    c.send_command_str("SENTINEL", &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"]).await.unwrap();
+    c.send_command_str(
+        "SENTINEL",
+        &["MONITOR", "mymaster", "127.0.0.1", "6379", "2"],
+    )
+    .await
+    .unwrap();
 
-    let r = c.send_command_str("SENTINEL", &["INFO-CACHE", "mymaster"]).await.unwrap();
+    let r = c
+        .send_command_str("SENTINEL", &["INFO-CACHE", "mymaster"])
+        .await
+        .unwrap();
     let entries = resp_array(&r);
     assert_eq!(entries.len(), 1);
 }
@@ -573,12 +698,21 @@ async fn test_sentinel_docker_failover() {
     }
 
     // Verify sentinel is monitoring mymaster
-    let r = sentinels[0].send_command_str("SENTINEL", &["MASTERS"]).await.unwrap();
+    let r = sentinels[0]
+        .send_command_str("SENTINEL", &["MASTERS"])
+        .await
+        .unwrap();
     let masters = resp_array(&r);
-    assert!(!masters.is_empty(), "Sentinel should be monitoring at least one master");
+    assert!(
+        !masters.is_empty(),
+        "Sentinel should be monitoring at least one master"
+    );
 
     // Get master address
-    let r = sentinels[0].send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "mymaster"]).await.unwrap();
+    let r = sentinels[0]
+        .send_command_str("SENTINEL", &["GET-MASTER-ADDR-BY-NAME", "mymaster"])
+        .await
+        .unwrap();
     let addr_arr = resp_array(&r);
     assert_eq!(addr_arr.len(), 2);
     let master_host = resp_string(&addr_arr[0]);
@@ -586,9 +720,15 @@ async fn test_sentinel_docker_failover() {
     println!("Master at {}:{}", master_host, master_port);
 
     // Verify at least 2 sentinels know about each other
-    let r = sentinels[0].send_command_str("SENTINEL", &["SENTINELS", "mymaster"]).await.unwrap();
+    let r = sentinels[0]
+        .send_command_str("SENTINEL", &["SENTINELS", "mymaster"])
+        .await
+        .unwrap();
     let other_sentinels = resp_array(&r);
-    assert!(other_sentinels.len() >= 1, "Should know about other sentinels");
+    assert!(
+        other_sentinels.len() >= 1,
+        "Should know about other sentinels"
+    );
 
     println!("Docker sentinel failover test passed");
 }

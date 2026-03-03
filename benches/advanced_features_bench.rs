@@ -1,10 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::Duration;
 
-use rlightning::command::handler::CommandHandler;
 use rlightning::command::Command;
+use rlightning::command::handler::CommandHandler;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 fn make_handler(rt: &tokio::runtime::Runtime) -> Arc<CommandHandler> {
@@ -27,30 +27,26 @@ fn bench_stream_xadd(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
 
     for &count in &[100, 500, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("XADD", count),
-            &count,
-            |b, &count| {
-                b.iter(|| {
-                    // Fresh handler per iteration to avoid accumulating entries
-                    let handler = make_handler(&rt);
-                    rt.block_on(async {
-                        for i in 0..count {
-                            let cmd = Command {
-                                name: "xadd".to_string(),
-                                args: vec![
-                                    b"mystream".to_vec(),
-                                    b"*".to_vec(),
-                                    b"field".to_vec(),
-                                    format!("value:{}", i).into_bytes(),
-                                ],
-                            };
-                            black_box(handler.process(cmd, 0).await.unwrap());
-                        }
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("XADD", count), &count, |b, &count| {
+            b.iter(|| {
+                // Fresh handler per iteration to avoid accumulating entries
+                let handler = make_handler(&rt);
+                rt.block_on(async {
+                    for i in 0..count {
+                        let cmd = Command {
+                            name: "xadd".to_string(),
+                            args: vec![
+                                b"mystream".to_vec(),
+                                b"*".to_vec(),
+                                b"field".to_vec(),
+                                format!("value:{}", i).into_bytes(),
+                            ],
+                        };
+                        black_box(handler.process(cmd, 0).await.unwrap());
+                    }
+                })
+            });
+        });
     }
     group.finish();
 }
@@ -85,11 +81,7 @@ fn bench_stream_xread_xrange(c: &mut Criterion) {
                     rt.block_on(async {
                         let cmd = Command {
                             name: "xrange".to_string(),
-                            args: vec![
-                                b"readstream".to_vec(),
-                                b"-".to_vec(),
-                                b"+".to_vec(),
-                            ],
+                            args: vec![b"readstream".to_vec(), b"-".to_vec(), b"+".to_vec()],
                         };
                         black_box(handler.process(cmd, 0).await.unwrap());
                     })
@@ -121,9 +113,7 @@ fn bench_pubsub_throughput(c: &mut Criterion) {
                 rt.block_on(async {
                     for _ in 0..subscribers {
                         let (id, rx) = pubsub.register_client().await;
-                        pubsub
-                            .subscribe(id, vec![b"bench-channel".to_vec()])
-                            .await;
+                        pubsub.subscribe(id, vec![b"bench-channel".to_vec()]).await;
                         _receivers.push((id, rx));
                     }
                 });
@@ -180,7 +170,9 @@ fn bench_transactions(c: &mut Criterion) {
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(3));
 
-    use rlightning::command::transaction::{handle_exec, handle_multi, queue_command, TransactionState};
+    use rlightning::command::transaction::{
+        TransactionState, handle_exec, handle_multi, queue_command,
+    };
 
     // Non-transactional baseline: 10 SET commands
     group.bench_function("10 SETs without MULTI/EXEC", |b| {
@@ -227,7 +219,11 @@ fn bench_transactions(c: &mut Criterion) {
                     };
                     queue_command(&mut tx_state, cmd).unwrap();
                 }
-                black_box(handle_exec(&mut tx_state, &handler, &storage, 0).await.unwrap());
+                black_box(
+                    handle_exec(&mut tx_state, &handler, &storage, 0)
+                        .await
+                        .unwrap(),
+                );
             })
         });
     });
@@ -265,8 +261,7 @@ fn bench_pipeline(c: &mut Criterion) {
                                 handler_ref.process(cmd, 0).await.unwrap()
                             });
                         }
-                        let results: Vec<_> =
-                            futures::future::join_all(futures).await;
+                        let results: Vec<_> = futures::future::join_all(futures).await;
                         black_box(results);
                     })
                 });
@@ -545,9 +540,7 @@ fn bench_concurrent_clients(c: &mut Criterion) {
                                 handler_ref.process(set_cmd, 0).await.unwrap();
                                 let get_cmd = Command {
                                     name: "get".to_string(),
-                                    args: vec![
-                                        format!("conckey:{}", i % 100).into_bytes(),
-                                    ],
+                                    args: vec![format!("conckey:{}", i % 100).into_bytes()],
                                 };
                                 black_box(handler_ref.process(get_cmd, 0).await.unwrap());
                             });
@@ -802,8 +795,8 @@ fn bench_lua_scripting(c: &mut Criterion) {
         let handler = make_handler(&rt);
         b.iter(|| {
             rt.block_on(async {
-                let script = b"local sum = 0; for i = 1, 1000 do sum = sum + i end; return sum"
-                    .to_vec();
+                let script =
+                    b"local sum = 0; for i = 1, 1000 do sum = sum + i end; return sum".to_vec();
                 let cmd = Command {
                     name: "eval".to_string(),
                     args: vec![script, b"0".to_vec()],

@@ -1,8 +1,8 @@
-pub mod rdb;
 pub mod aof;
-pub mod hybrid;
 pub mod config;
 pub mod error;
+pub mod hybrid;
+pub mod rdb;
 #[cfg(test)]
 mod tests;
 
@@ -29,7 +29,11 @@ pub struct PersistenceManager {
 impl PersistenceManager {
     /// Create a new persistence manager
     pub fn new(engine: Arc<StorageEngine>, config: config::PersistenceConfig) -> Self {
-        Self { engine, config, aof_writer: tokio::sync::OnceCell::new() }
+        Self {
+            engine,
+            config,
+            aof_writer: tokio::sync::OnceCell::new(),
+        }
     }
 
     /// Get or create the cached AOF writer instance
@@ -37,23 +41,34 @@ impl PersistenceManager {
         match self.config.mode {
             config::PersistenceMode::AOF => {
                 if self.config.aof_path.is_some() {
-                    Some(self.aof_writer.get_or_init(|| async {
-                        let path = self.config.aof_path.clone().unwrap();
-                        AofWriter::Aof(Arc::new(aof::AofPersistence::new(self.engine.clone(), path)))
-                    }).await)
+                    Some(
+                        self.aof_writer
+                            .get_or_init(|| async {
+                                let path = self.config.aof_path.clone().unwrap();
+                                AofWriter::Aof(Arc::new(aof::AofPersistence::new(
+                                    self.engine.clone(),
+                                    path,
+                                )))
+                            })
+                            .await,
+                    )
                 } else {
                     None
                 }
             }
             config::PersistenceMode::Hybrid => {
                 if self.config.aof_path.is_some() {
-                    Some(self.aof_writer.get_or_init(|| async {
-                        AofWriter::Hybrid(Arc::new(hybrid::HybridPersistence::new(
-                            self.engine.clone(),
-                            self.config.rdb_path.clone(),
-                            self.config.aof_path.clone(),
-                        )))
-                    }).await)
+                    Some(
+                        self.aof_writer
+                            .get_or_init(|| async {
+                                AofWriter::Hybrid(Arc::new(hybrid::HybridPersistence::new(
+                                    self.engine.clone(),
+                                    self.config.rdb_path.clone(),
+                                    self.config.aof_path.clone(),
+                                )))
+                            })
+                            .await,
+                    )
                 } else {
                     None
                 }
@@ -81,26 +96,37 @@ impl PersistenceManager {
             config::PersistenceMode::AOF => {
                 // Initialize AOF persistence using the shared writer instance
                 if self.config.aof_path.is_some() {
-                    let writer = self.aof_writer.get_or_init(|| async {
-                        let path = self.config.aof_path.clone().unwrap();
-                        AofWriter::Aof(Arc::new(aof::AofPersistence::new(self.engine.clone(), path)))
-                    }).await;
+                    let writer = self
+                        .aof_writer
+                        .get_or_init(|| async {
+                            let path = self.config.aof_path.clone().unwrap();
+                            AofWriter::Aof(Arc::new(aof::AofPersistence::new(
+                                self.engine.clone(),
+                                path,
+                            )))
+                        })
+                        .await;
                     if let AofWriter::Aof(aof_instance) = writer {
                         aof_instance.load().await?;
-                        aof_instance.start_background_rewrite_check(&self.config).await?;
+                        aof_instance
+                            .start_background_rewrite_check(&self.config)
+                            .await?;
                     }
                 }
             }
             config::PersistenceMode::Hybrid => {
                 // Initialize hybrid persistence using the shared writer instance
                 if self.config.aof_path.is_some() {
-                    let writer = self.aof_writer.get_or_init(|| async {
-                        AofWriter::Hybrid(Arc::new(hybrid::HybridPersistence::new(
-                            self.engine.clone(),
-                            self.config.rdb_path.clone(),
-                            self.config.aof_path.clone(),
-                        )))
-                    }).await;
+                    let writer = self
+                        .aof_writer
+                        .get_or_init(|| async {
+                            AofWriter::Hybrid(Arc::new(hybrid::HybridPersistence::new(
+                                self.engine.clone(),
+                                self.config.rdb_path.clone(),
+                                self.config.aof_path.clone(),
+                            )))
+                        })
+                        .await;
                     if let AofWriter::Hybrid(hybrid_instance) = writer {
                         hybrid_instance.load().await?;
                         hybrid_instance.schedule_snapshots(&self.config).await?;
@@ -117,14 +143,23 @@ impl PersistenceManager {
 
     /// Log a command to the AOF, defaulting to DB 0. Convenience wrapper around log_command_for_db.
     #[allow(dead_code)]
-    pub async fn log_command(&self, command: crate::networking::resp::RespCommand, sync_policy: config::AofSyncPolicy) -> Result<(), error::PersistenceError> {
+    pub async fn log_command(
+        &self,
+        command: crate::networking::resp::RespCommand,
+        sync_policy: config::AofSyncPolicy,
+    ) -> Result<(), error::PersistenceError> {
         self.log_command_for_db(command, sync_policy, 0).await
     }
 
     /// Log a command to the AOF with explicit database index.
     /// A SELECT command is always prepended atomically with the write command to establish
     /// explicit DB context and prevent replay corruption across databases.
-    pub async fn log_command_for_db(&self, command: crate::networking::resp::RespCommand, sync_policy: config::AofSyncPolicy, db_index: usize) -> Result<(), error::PersistenceError> {
+    pub async fn log_command_for_db(
+        &self,
+        command: crate::networking::resp::RespCommand,
+        sync_policy: config::AofSyncPolicy,
+        db_index: usize,
+    ) -> Result<(), error::PersistenceError> {
         let writer = match self.get_aof_writer().await {
             Some(w) => w,
             None => return Ok(()),
@@ -141,7 +176,9 @@ impl PersistenceManager {
 
         match writer {
             AofWriter::Aof(aof) => aof.append_commands_batch(commands, sync_policy).await?,
-            AofWriter::Hybrid(hybrid) => hybrid.append_commands_batch(commands, sync_policy).await?,
+            AofWriter::Hybrid(hybrid) => {
+                hybrid.append_commands_batch(commands, sync_policy).await?
+            }
         }
 
         Ok(())
@@ -150,7 +187,12 @@ impl PersistenceManager {
     /// Log a batch of commands to the AOF as a single atomic unit.
     /// Used for MULTI/EXEC transactions to prevent interleaving with concurrent clients.
     /// A SELECT command is always prepended to establish explicit DB context for replay.
-    pub async fn log_commands_batch_for_db(&self, commands: Vec<crate::networking::resp::RespCommand>, sync_policy: config::AofSyncPolicy, db_index: usize) -> Result<(), error::PersistenceError> {
+    pub async fn log_commands_batch_for_db(
+        &self,
+        commands: Vec<crate::networking::resp::RespCommand>,
+        sync_policy: config::AofSyncPolicy,
+        db_index: usize,
+    ) -> Result<(), error::PersistenceError> {
         let writer = match self.get_aof_writer().await {
             Some(w) => w,
             None => return Ok(()),

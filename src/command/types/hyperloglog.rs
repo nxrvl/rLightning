@@ -3,9 +3,9 @@ use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
 
-use std::hash::{Hash, Hasher};
 #[allow(deprecated)]
 use std::hash::SipHasher;
+use std::hash::{Hash, Hasher};
 
 /// Number of registers in a dense HyperLogLog (2^14 = 16384)
 const HLL_P: u32 = 14;
@@ -39,11 +39,7 @@ fn hll_is_valid(data: &[u8]) -> bool {
 /// Get the register value at the given index
 fn hll_get_register(data: &[u8], index: usize) -> u8 {
     let offset = 5 + index; // skip header
-    if offset < data.len() {
-        data[offset]
-    } else {
-        0
-    }
+    if offset < data.len() { data[offset] } else { 0 }
 }
 
 /// Set the register value at the given index, returns true if value changed
@@ -138,11 +134,13 @@ async fn check_hll_type(engine: &StorageEngine, key: &[u8]) -> Result<(), Comman
             // If it exists as string, verify it's either empty-ish or valid HLL data
             if key_type == "string"
                 && let Some(data) = engine.get(key).await?
-                    && !data.is_empty() && !hll_is_valid(&data) {
-                        return Err(CommandError::InvalidArgument(
-                            "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
-                        ));
-                    }
+                && !data.is_empty()
+                && !hll_is_valid(&data)
+            {
+                return Err(CommandError::InvalidArgument(
+                    "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
+                ));
+            }
             Ok(())
         }
         _ => Err(CommandError::WrongType),
@@ -310,12 +308,7 @@ mod tests {
         // PFADD with elements
         let result = pfadd(
             &engine,
-            &[
-                b"hll".to_vec(),
-                b"a".to_vec(),
-                b"b".to_vec(),
-                b"c".to_vec(),
-            ],
+            &[b"hll".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
         )
         .await
         .unwrap();
@@ -324,12 +317,7 @@ mod tests {
         // Adding same elements again should return 0
         let result = pfadd(
             &engine,
-            &[
-                b"hll".to_vec(),
-                b"a".to_vec(),
-                b"b".to_vec(),
-                b"c".to_vec(),
-            ],
+            &[b"hll".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
         )
         .await
         .unwrap();
@@ -368,12 +356,7 @@ mod tests {
         // Add elements
         pfadd(
             &engine,
-            &[
-                b"hll".to_vec(),
-                b"a".to_vec(),
-                b"b".to_vec(),
-                b"c".to_vec(),
-            ],
+            &[b"hll".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
         )
         .await
         .unwrap();
@@ -393,19 +376,13 @@ mod tests {
         let engine = setup().await;
 
         // Add different elements to two HLLs
-        pfadd(
-            &engine,
-            &[b"hll1".to_vec(), b"a".to_vec(), b"b".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"hll1".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        pfadd(
-            &engine,
-            &[b"hll2".to_vec(), b"b".to_vec(), b"c".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"hll2".to_vec(), b"b".to_vec(), b"c".to_vec()])
+            .await
+            .unwrap();
 
         // Union count should be approximately 3 (a, b, c)
         let result = pfcount(&engine, &[b"hll1".to_vec(), b"hll2".to_vec()])
@@ -431,19 +408,13 @@ mod tests {
         let engine = setup().await;
 
         // Add elements to two HLLs
-        pfadd(
-            &engine,
-            &[b"hll1".to_vec(), b"a".to_vec(), b"b".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"hll1".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
-        pfadd(
-            &engine,
-            &[b"hll2".to_vec(), b"c".to_vec(), b"d".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"hll2".to_vec(), b"c".to_vec(), b"d".to_vec()])
+            .await
+            .unwrap();
 
         // Merge into destination
         let result = pfmerge(
@@ -468,19 +439,13 @@ mod tests {
         let engine = setup().await;
 
         // Create dest with some elements
-        pfadd(
-            &engine,
-            &[b"dest".to_vec(), b"x".to_vec(), b"y".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"dest".to_vec(), b"x".to_vec(), b"y".to_vec()])
+            .await
+            .unwrap();
 
-        pfadd(
-            &engine,
-            &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec()],
-        )
-        .await
-        .unwrap();
+        pfadd(&engine, &[b"src".to_vec(), b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
 
         // Merge - dest should retain its existing elements plus src
         let result = pfmerge(&engine, &[b"dest".to_vec(), b"src".to_vec()])
@@ -549,9 +514,7 @@ mod tests {
         }
         pfadd(&engine, &args).await.unwrap();
 
-        let result = pfcount(&engine, &[b"hll_accuracy".to_vec()])
-            .await
-            .unwrap();
+        let result = pfcount(&engine, &[b"hll_accuracy".to_vec()]).await.unwrap();
         if let RespValue::Integer(count) = result {
             // HLL should be within ~2% of the true count for 1000 elements
             // Allow generous margin for small register sets
@@ -584,9 +547,7 @@ mod tests {
             pfadd(&engine, &args).await.unwrap();
         }
 
-        let result = pfcount(&engine, &[b"hll_large".to_vec()])
-            .await
-            .unwrap();
+        let result = pfcount(&engine, &[b"hll_large".to_vec()]).await.unwrap();
         if let RespValue::Integer(count) = result {
             // Allow 5% error for 10000 elements
             let lower = 9500;

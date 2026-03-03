@@ -1,5 +1,5 @@
 use std::env;
-use tracing::{info, warn, error, debug, Level, enabled};
+use tracing::{Level, debug, enabled, error, info, warn};
 
 /// Log system information useful for debugging
 #[allow(dead_code)]
@@ -17,22 +17,39 @@ pub fn log_system_info() {
                     if parts.len() >= 2 {
                         if let Ok(mem_kb) = parts[1].parse::<u64>() {
                             Some(mem_kb / 1024)
-                        } else { None }
-                    } else { None }
-                } else { None }
-            } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
             if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
-                if let Ok(mem_bytes) = String::from_utf8_lossy(&output.stdout).trim().parse::<u64>() {
+                if let Ok(mem_bytes) = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u64>()
+                {
                     Some(mem_bytes / 1024 / 1024)
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        { None }
+        {
+            None
+        }
     };
 
     if let Some(mem) = mem_mb {
@@ -52,12 +69,27 @@ pub fn log_memory_stats(current_memory: usize, max_memory: usize) {
     };
 
     // Use structured logging fields
-    let memory_info = format!("{:.2} MB / {:.2} MB ({:.1}%)", mem_mb, max_mem_mb, percentage);
+    let memory_info = format!(
+        "{:.2} MB / {:.2} MB ({:.1}%)",
+        mem_mb, max_mem_mb, percentage
+    );
 
     if percentage > 80.0 {
-        warn!(current_mb = mem_mb, max_mb = max_mem_mb, usage_percent = percentage, "High memory usage: {}", memory_info);
+        warn!(
+            current_mb = mem_mb,
+            max_mb = max_mem_mb,
+            usage_percent = percentage,
+            "High memory usage: {}",
+            memory_info
+        );
     } else {
-        info!(current_mb = mem_mb, max_mb = max_mem_mb, usage_percent = percentage, "Memory usage: {}", memory_info);
+        info!(
+            current_mb = mem_mb,
+            max_mb = max_mem_mb,
+            usage_percent = percentage,
+            "Memory usage: {}",
+            memory_info
+        );
     }
 }
 
@@ -75,10 +107,10 @@ pub fn log_protocol_data(client_addr: &str, direction: &str, data: &[u8], is_raw
     if !enabled!(Level::DEBUG) {
         return;
     }
-    
+
     // Determine if we should log the full content or just the size
     const MAX_LOG_SIZE: usize = 1024; // Only log up to 1KB in regular debug mode
-    
+
     if is_raw {
         // For raw data, just log the size and first few bytes as hex
         let preview_size = std::cmp::min(data.len(), 32); // First 32 bytes
@@ -87,7 +119,7 @@ pub fn log_protocol_data(client_addr: &str, direction: &str, data: &[u8], is_raw
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<String>>()
             .join(" ");
-        
+
         debug!(
             client_addr = %client_addr,
             direction = %direction,
@@ -98,8 +130,12 @@ pub fn log_protocol_data(client_addr: &str, direction: &str, data: &[u8], is_raw
     } else if data.len() > MAX_LOG_SIZE {
         // For large data, log the size and a preview
         let truncated_data = String::from_utf8_lossy(&data[..MAX_LOG_SIZE]);
-        let preview = format!("{} [truncated {} bytes]", truncated_data, data.len() - MAX_LOG_SIZE);
-        
+        let preview = format!(
+            "{} [truncated {} bytes]",
+            truncated_data,
+            data.len() - MAX_LOG_SIZE
+        );
+
         debug!(
             client_addr = %client_addr,
             direction = %direction,
@@ -110,7 +146,7 @@ pub fn log_protocol_data(client_addr: &str, direction: &str, data: &[u8], is_raw
     } else {
         // For reasonably sized data, log the full content
         let data_str = String::from_utf8_lossy(data);
-        
+
         debug!(
             client_addr = %client_addr,
             direction = %direction,
@@ -119,4 +155,4 @@ pub fn log_protocol_data(client_addr: &str, direction: &str, data: &[u8], is_raw
             "Protocol data"
         );
     }
-} 
+}

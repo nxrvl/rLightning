@@ -1,8 +1,8 @@
+use rlightning::networking::client::Client;
+use rlightning::networking::resp::RespValue;
+use rlightning::networking::server::Server;
 /// Simple test for 50KB value to isolate the issue
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use rlightning::networking::resp::RespValue;
-use rlightning::networking::client::Client;
-use rlightning::networking::server::Server;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -13,8 +13,7 @@ async fn test_50kb_value_simple() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19010));
     let storage = Arc::new(StorageEngine::new(config));
-    let server = Server::new(addr, Arc::clone(&storage))
-        .with_buffer_size(1024 * 1024); // 1MB buffer
+    let server = Server::new(addr, Arc::clone(&storage)).with_buffer_size(1024 * 1024); // 1MB buffer
 
     let _server_handle = tokio::spawn(async move {
         let _ = server.start().await;
@@ -31,7 +30,9 @@ async fn test_50kb_value_simple() {
     let value_str = String::from_utf8_lossy(&value);
 
     println!("Sending 50KB SET command");
-    let result = client.send_command_str("SET", &["testkey", &value_str]).await;
+    let result = client
+        .send_command_str("SET", &["testkey", &value_str])
+        .await;
 
     println!("Result: {:?}", result);
 

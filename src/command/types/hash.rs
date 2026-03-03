@@ -146,10 +146,7 @@ pub async fn hmget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let fields: Vec<&[u8]> = args[1..].iter().map(|f| f.as_slice()).collect();
     let values = engine.hash_mget(key, &fields)?;
 
-    let result: Vec<RespValue> = values
-        .into_iter()
-        .map(RespValue::BulkString)
-        .collect();
+    let result: Vec<RespValue> = values.into_iter().map(RespValue::BulkString).collect();
     Ok(RespValue::Array(Some(result)))
 }
 
@@ -161,9 +158,11 @@ pub async fn hincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 
     let key = &args[0];
     let field = &args[1];
-    let increment = String::from_utf8_lossy(&args[2]).parse::<i64>().map_err(|_| {
-        CommandError::InvalidArgument("value is not an integer or out of range".to_string())
-    })?;
+    let increment = String::from_utf8_lossy(&args[2])
+        .parse::<i64>()
+        .map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
 
     let new_val = engine.hash_incr_by(key, field, increment)?;
     Ok(RespValue::Integer(new_val))
@@ -177,9 +176,9 @@ pub async fn hincrbyfloat(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRe
 
     let key = &args[0];
     let field = &args[1];
-    let increment = String::from_utf8_lossy(&args[2]).parse::<f64>().map_err(|_| {
-        CommandError::InvalidArgument("value is not a valid float".to_string())
-    })?;
+    let increment = String::from_utf8_lossy(&args[2])
+        .parse::<f64>()
+        .map_err(|_| CommandError::InvalidArgument("value is not a valid float".to_string()))?;
 
     let new_val_str = engine.hash_incr_by_float(key, field, increment)?;
     Ok(RespValue::BulkString(Some(new_val_str.into_bytes())))
@@ -238,16 +237,19 @@ pub async fn hrandfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         return Ok(RespValue::BulkString(Some(fields[idx].0.clone())));
     }
 
-    let count_val = String::from_utf8_lossy(&args[1]).parse::<i64>().map_err(|_| {
-        CommandError::NotANumber
-    })?;
+    let count_val = String::from_utf8_lossy(&args[1])
+        .parse::<i64>()
+        .map_err(|_| CommandError::NotANumber)?;
 
     let with_values = if args.len() == 3 {
         let opt = String::from_utf8_lossy(&args[2]).to_uppercase();
         if opt == "WITHVALUES" {
             true
         } else {
-            return Err(CommandError::InvalidArgument(format!("Unsupported option: {}", opt)));
+            return Err(CommandError::InvalidArgument(format!(
+                "Unsupported option: {}",
+                opt
+            )));
         }
     } else {
         false
@@ -314,9 +316,13 @@ pub async fn hscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 if i + 1 >= args.len() {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
-                count = String::from_utf8_lossy(&args[i + 1]).parse::<usize>().map_err(|_| {
-                    CommandError::InvalidArgument("COUNT must be a positive integer".to_string())
-                })?;
+                count = String::from_utf8_lossy(&args[i + 1])
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        CommandError::InvalidArgument(
+                            "COUNT must be a positive integer".to_string(),
+                        )
+                    })?;
                 i += 2;
             }
             _ => {
@@ -376,25 +382,36 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Test HSET
-        let result = hset(&engine, &[
-            b"hash1".to_vec(), b"field1".to_vec(), b"value1".to_vec(),
-        ]).await.unwrap();
+        let result = hset(
+            &engine,
+            &[b"hash1".to_vec(), b"field1".to_vec(), b"value1".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
 
         // Set another field
-        let result = hset(&engine, &[
-            b"hash1".to_vec(), b"field2".to_vec(), b"value2".to_vec(),
-        ]).await.unwrap();
+        let result = hset(
+            &engine,
+            &[b"hash1".to_vec(), b"field2".to_vec(), b"value2".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // New field
 
         // Update existing field
-        let result = hset(&engine, &[
-            b"hash1".to_vec(), b"field1".to_vec(), b"new_value".to_vec(),
-        ]).await.unwrap();
+        let result = hset(
+            &engine,
+            &[b"hash1".to_vec(), b"field1".to_vec(), b"new_value".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Existing field
 
         // Test HGET
-        let result = hget(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hash1".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value".to_vec())));
 
         // Test HGETALL
@@ -432,18 +449,26 @@ mod tests {
         }
 
         // Test HEXISTS
-        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Exists
 
-        let result = hexists(&engine, &[b"hash1".to_vec(), b"nonexistent".to_vec()]).await.unwrap();
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"nonexistent".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0)); // Does not exist
 
         // Test HDEL
-        let result = hdel(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hdel(&engine, &[b"hash1".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // Deleted 1 field
 
         // Verify field is gone
-        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hexists(&engine, &[b"hash1".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Integer(0)); // No longer exists
     }
 
@@ -453,41 +478,68 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Test HMSET with multiple fields
-        let result = hmset(&engine, &[
-            b"hmset_hash".to_vec(),
-            b"field1".to_vec(), b"value1".to_vec(),
-            b"field2".to_vec(), b"value2".to_vec(),
-            b"field3".to_vec(), b"value3".to_vec(),
-        ]).await.unwrap();
+        let result = hmset(
+            &engine,
+            &[
+                b"hmset_hash".to_vec(),
+                b"field1".to_vec(),
+                b"value1".to_vec(),
+                b"field2".to_vec(),
+                b"value2".to_vec(),
+                b"field3".to_vec(),
+                b"value3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // Verify fields were set
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
 
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value2".to_vec())));
 
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
 
         // Test HMSET with existing fields (should overwrite)
-        let result = hmset(&engine, &[
-            b"hmset_hash".to_vec(),
-            b"field1".to_vec(), b"new_value1".to_vec(),
-            b"field2".to_vec(), b"new_value2".to_vec(),
-        ]).await.unwrap();
+        let result = hmset(
+            &engine,
+            &[
+                b"hmset_hash".to_vec(),
+                b"field1".to_vec(),
+                b"new_value1".to_vec(),
+                b"field2".to_vec(),
+                b"new_value2".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // Verify fields were updated
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value1".to_vec())));
 
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field2".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"new_value2".to_vec())));
 
         // Field3 should be unchanged
-        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"hmset_hash".to_vec(), b"field3".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
     }
 
@@ -497,37 +549,62 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Test HSET with multiple fields in a single command
-        let result = hset(&engine, &[
-            b"multi_hash".to_vec(),
-            b"field1".to_vec(), b"value1".to_vec(),
-            b"field2".to_vec(), b"value2".to_vec(),
-            b"field3".to_vec(), b"value3".to_vec(),
-        ]).await.unwrap();
+        let result = hset(
+            &engine,
+            &[
+                b"multi_hash".to_vec(),
+                b"field1".to_vec(),
+                b"value1".to_vec(),
+                b"field2".to_vec(),
+                b"value2".to_vec(),
+                b"field3".to_vec(),
+                b"value3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(3)); // 3 new fields
 
         // Verify fields were set
-        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value1".to_vec())));
 
-        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field2".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field2".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value2".to_vec())));
 
-        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field3".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field3".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value3".to_vec())));
 
         // Update a few fields
-        let result = hset(&engine, &[
-            b"multi_hash".to_vec(),
-            b"field1".to_vec(), b"updated1".to_vec(),
-            b"field4".to_vec(), b"value4".to_vec(),
-        ]).await.unwrap();
+        let result = hset(
+            &engine,
+            &[
+                b"multi_hash".to_vec(),
+                b"field1".to_vec(),
+                b"updated1".to_vec(),
+                b"field4".to_vec(),
+                b"value4".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(result, RespValue::Integer(1)); // 1 new field, 1 updated field
 
         // Verify updates
-        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"updated1".to_vec())));
 
-        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field4".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"multi_hash".to_vec(), b"field4".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"value4".to_vec())));
     }
 
@@ -536,18 +613,30 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"myhash".to_vec(),
-            b"f1".to_vec(), b"v1".to_vec(),
-            b"f2".to_vec(), b"v2".to_vec(),
-            b"f3".to_vec(), b"v3".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"myhash".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+                b"f3".to_vec(),
+                b"v3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HRANDFIELD with no count - returns single field name
         let result = hrandfield(&engine, &[b"myhash".to_vec()]).await.unwrap();
         if let RespValue::BulkString(Some(field)) = result {
             let s = String::from_utf8_lossy(&field);
-            assert!(s == "f1" || s == "f2" || s == "f3", "Got unexpected field: {}", s);
+            assert!(
+                s == "f1" || s == "f2" || s == "f3",
+                "Got unexpected field: {}",
+                s
+            );
         } else {
             panic!("Expected BulkString");
         }
@@ -558,15 +647,25 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"myhash2".to_vec(),
-            b"f1".to_vec(), b"v1".to_vec(),
-            b"f2".to_vec(), b"v2".to_vec(),
-            b"f3".to_vec(), b"v3".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"myhash2".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+                b"f3".to_vec(),
+                b"v3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HRANDFIELD with positive count 2 - returns 2 unique fields
-        let result = hrandfield(&engine, &[b"myhash2".to_vec(), b"2".to_vec()]).await.unwrap();
+        let result = hrandfield(&engine, &[b"myhash2".to_vec(), b"2".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             let mut seen = HashSet::new();
@@ -588,16 +687,26 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"myhash3".to_vec(),
-            b"f1".to_vec(), b"v1".to_vec(),
-            b"f2".to_vec(), b"v2".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"myhash3".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HRANDFIELD count 2 WITHVALUES
-        let result = hrandfield(&engine, &[
-            b"myhash3".to_vec(), b"2".to_vec(), b"WITHVALUES".to_vec(),
-        ]).await.unwrap();
+        let result = hrandfield(
+            &engine,
+            &[b"myhash3".to_vec(), b"2".to_vec(), b"WITHVALUES".to_vec()],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 4); // 2 fields * 2 (field + value)
         } else {
@@ -610,13 +719,17 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"myhash4".to_vec(),
-            b"f1".to_vec(), b"v1".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[b"myhash4".to_vec(), b"f1".to_vec(), b"v1".to_vec()],
+        )
+        .await
+        .unwrap();
 
         // Negative count: can return repeats
-        let result = hrandfield(&engine, &[b"myhash4".to_vec(), b"-5".to_vec()]).await.unwrap();
+        let result = hrandfield(&engine, &[b"myhash4".to_vec(), b"-5".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 5);
         } else {
@@ -634,7 +747,9 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(None));
 
         // With count on nonexistent key
-        let result = hrandfield(&engine, &[b"nokey".to_vec(), b"3".to_vec()]).await.unwrap();
+        let result = hrandfield(&engine, &[b"nokey".to_vec(), b"3".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
     }
 
@@ -643,15 +758,25 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"scanhash".to_vec(),
-            b"name".to_vec(), b"Alice".to_vec(),
-            b"age".to_vec(), b"30".to_vec(),
-            b"city".to_vec(), b"NYC".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"scanhash".to_vec(),
+                b"name".to_vec(),
+                b"Alice".to_vec(),
+                b"age".to_vec(),
+                b"30".to_vec(),
+                b"city".to_vec(),
+                b"NYC".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HSCAN cursor 0
-        let result = hscan(&engine, &[b"scanhash".to_vec(), b"0".to_vec()]).await.unwrap();
+        let result = hscan(&engine, &[b"scanhash".to_vec(), b"0".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2); // cursor + array
             if let RespValue::BulkString(Some(cursor)) = &items[0] {
@@ -668,18 +793,33 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        hset(&engine, &[
-            b"scanhash2".to_vec(),
-            b"name".to_vec(), b"Bob".to_vec(),
-            b"nickname".to_vec(), b"Bobby".to_vec(),
-            b"age".to_vec(), b"25".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"scanhash2".to_vec(),
+                b"name".to_vec(),
+                b"Bob".to_vec(),
+                b"nickname".to_vec(),
+                b"Bobby".to_vec(),
+                b"age".to_vec(),
+                b"25".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HSCAN with MATCH n*
-        let result = hscan(&engine, &[
-            b"scanhash2".to_vec(), b"0".to_vec(),
-            b"MATCH".to_vec(), b"n*".to_vec(),
-        ]).await.unwrap();
+        let result = hscan(
+            &engine,
+            &[
+                b"scanhash2".to_vec(),
+                b"0".to_vec(),
+                b"MATCH".to_vec(),
+                b"n*".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::Array(Some(fv_pairs)) = &items[1] {
                 // Should match "name" and "nickname"
@@ -693,7 +833,9 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        let result = hscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()]).await.unwrap();
+        let result = hscan(&engine, &[b"nokey".to_vec(), b"0".to_vec()])
+            .await
+            .unwrap();
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::BulkString(Some(cursor)) = &items[0] {
                 assert_eq!(cursor, b"0");
@@ -711,18 +853,30 @@ mod tests {
 
         // Add many fields
         for i in 0..15 {
-            hset(&engine, &[
-                b"bighash".to_vec(),
-                format!("field{:02}", i).into_bytes(),
-                format!("value{}", i).into_bytes(),
-            ]).await.unwrap();
+            hset(
+                &engine,
+                &[
+                    b"bighash".to_vec(),
+                    format!("field{:02}", i).into_bytes(),
+                    format!("value{}", i).into_bytes(),
+                ],
+            )
+            .await
+            .unwrap();
         }
 
         // HSCAN with COUNT 5
-        let result = hscan(&engine, &[
-            b"bighash".to_vec(), b"0".to_vec(),
-            b"COUNT".to_vec(), b"5".to_vec(),
-        ]).await.unwrap();
+        let result = hscan(
+            &engine,
+            &[
+                b"bighash".to_vec(),
+                b"0".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
         if let RespValue::Array(Some(items)) = result {
             if let RespValue::BulkString(Some(cursor)) = &items[0] {
                 let cursor_val: u64 = String::from_utf8_lossy(cursor).parse().unwrap();
@@ -741,19 +895,31 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Set a string key with composite name that looks like old hash format
-        engine.set(b"mykey:field1".to_vec(), b"string_value".to_vec(), None).await.unwrap();
+        engine
+            .set(b"mykey:field1".to_vec(), b"string_value".to_vec(), None)
+            .await
+            .unwrap();
 
         // Set a hash key with the same base name
-        hset(&engine, &[
-            b"mykey".to_vec(), b"field1".to_vec(), b"hash_value".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"mykey".to_vec(),
+                b"field1".to_vec(),
+                b"hash_value".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // The string key should still be accessible and unchanged
         let string_val = engine.get(b"mykey:field1").await.unwrap();
         assert_eq!(string_val, Some(b"string_value".to_vec()));
 
         // The hash field should be independent
-        let result = hget(&engine, &[b"mykey".to_vec(), b"field1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"mykey".to_vec(), b"field1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"hash_value".to_vec())));
 
         // TYPE should correctly identify them
@@ -770,12 +936,20 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Set multiple fields
-        hset(&engine, &[
-            b"test_hash".to_vec(),
-            b"a".to_vec(), b"1".to_vec(),
-            b"b".to_vec(), b"2".to_vec(),
-            b"c".to_vec(), b"3".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"test_hash".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+                b"2".to_vec(),
+                b"c".to_vec(),
+                b"3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // HGETALL should return all 3 field-value pairs
         let result = hgetall(&engine, &[b"test_hash".to_vec()]).await.unwrap();
@@ -783,7 +957,9 @@ mod tests {
             assert_eq!(items.len(), 6);
             let mut map = std::collections::HashMap::new();
             for i in (0..items.len()).step_by(2) {
-                if let (RespValue::BulkString(Some(k)), RespValue::BulkString(Some(v))) = (&items[i], &items[i + 1]) {
+                if let (RespValue::BulkString(Some(k)), RespValue::BulkString(Some(v))) =
+                    (&items[i], &items[i + 1])
+                {
                     map.insert(k.clone(), v.clone());
                 }
             }
@@ -801,19 +977,29 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         // Create a hash with multiple fields
-        hset(&engine, &[
-            b"del_hash".to_vec(),
-            b"f1".to_vec(), b"v1".to_vec(),
-            b"f2".to_vec(), b"v2".to_vec(),
-            b"f3".to_vec(), b"v3".to_vec(),
-        ]).await.unwrap();
+        hset(
+            &engine,
+            &[
+                b"del_hash".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+                b"f3".to_vec(),
+                b"v3".to_vec(),
+            ],
+        )
+        .await
+        .unwrap();
 
         // DEL should remove the entire hash as a single key
         let deleted = engine.del(b"del_hash").await.unwrap();
         assert!(deleted);
 
         // All fields should be gone
-        let result = hget(&engine, &[b"del_hash".to_vec(), b"f1".to_vec()]).await.unwrap();
+        let result = hget(&engine, &[b"del_hash".to_vec(), b"f1".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
         let result = hlen(&engine, &[b"del_hash".to_vec()]).await.unwrap();
@@ -832,7 +1018,9 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let field = format!("field{}", i).into_bytes();
                 let value = format!("value{}", i).into_bytes();
-                hset(&eng, &[b"concurrent_hash".to_vec(), field, value]).await.unwrap();
+                hset(&eng, &[b"concurrent_hash".to_vec(), field, value])
+                    .await
+                    .unwrap();
             }));
         }
 
@@ -848,7 +1036,9 @@ mod tests {
         for i in 0..10 {
             let field = format!("field{}", i).into_bytes();
             let expected = format!("value{}", i).into_bytes();
-            let result = hget(&engine, &[b"concurrent_hash".to_vec(), field]).await.unwrap();
+            let result = hget(&engine, &[b"concurrent_hash".to_vec(), field])
+                .await
+                .unwrap();
             assert_eq!(result, RespValue::BulkString(Some(expected)));
         }
     }

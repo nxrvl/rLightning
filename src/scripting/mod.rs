@@ -92,7 +92,10 @@ impl ScriptingEngine {
     /// Check which SHA1 hashes exist in the script cache
     pub fn script_exists(&self, sha1s: &[String]) -> Vec<bool> {
         let cache = self.script_cache.read().unwrap_or_else(|e| e.into_inner());
-        sha1s.iter().map(|s| cache.contains_key(s.as_str())).collect()
+        sha1s
+            .iter()
+            .map(|s| cache.contains_key(s.as_str()))
+            .collect()
     }
 
     /// Clear all cached scripts
@@ -128,7 +131,15 @@ impl ScriptingEngine {
         let kill_flag = Arc::clone(&self.kill_requested);
 
         let result = tokio::task::spawn_blocking(move || {
-            redis_api::execute_in_lua(&script, keys, args, &handler, &handle, read_only, Some(kill_flag))
+            redis_api::execute_in_lua(
+                &script,
+                keys,
+                args,
+                &handler,
+                &handle,
+                read_only,
+                Some(kill_flag),
+            )
         })
         .await;
 
@@ -158,11 +169,17 @@ impl ScriptingEngine {
     ) -> CommandResult {
         // Find the library containing this function
         let library_code = {
-            let index = self.function_index.read().unwrap_or_else(|e| e.into_inner());
-            let lib_name = index.get(func_name).ok_or_else(|| {
-                CommandError::InternalError("ERR Function not found".to_string())
-            })?;
-            let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
+            let index = self
+                .function_index
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let lib_name = index
+                .get(func_name)
+                .ok_or_else(|| CommandError::InternalError("ERR Function not found".to_string()))?;
+            let libs = self
+                .function_libraries
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             let lib = libs.get(lib_name.as_str()).ok_or_else(|| {
                 CommandError::InternalError("ERR Function library not found".to_string())
             })?;
@@ -230,7 +247,10 @@ impl ScriptingEngine {
 
         // Check if library already exists
         {
-            let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
+            let libs = self
+                .function_libraries
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if libs.contains_key(&lib_name) && !replace {
                 return Err(CommandError::InternalError(format!(
                     "ERR Library '{}' already exists",
@@ -255,8 +275,14 @@ impl ScriptingEngine {
         // Acquire both locks in the same scope (index first, then libs) to match
         // function_delete/function_flush ordering and prevent TOCTOU races
         {
-            let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
-            let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
+            let mut index = self
+                .function_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut libs = self
+                .function_libraries
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
 
             // Remove old library's functions from index if replacing
             if let Some(old_lib) = libs.get(&lib_name) {
@@ -268,12 +294,13 @@ impl ScriptingEngine {
             // Check for conflicts with other libraries
             for func in &functions {
                 if let Some(existing_lib) = index.get(&func.name)
-                    && *existing_lib != lib_name {
-                        return Err(CommandError::InternalError(format!(
-                            "ERR Function {} already exists in library {}",
-                            func.name, existing_lib
-                        )));
-                    }
+                    && *existing_lib != lib_name
+                {
+                    return Err(CommandError::InternalError(format!(
+                        "ERR Function {} already exists in library {}",
+                        func.name, existing_lib
+                    )));
+                }
             }
 
             // Register functions
@@ -300,8 +327,14 @@ impl ScriptingEngine {
     pub fn function_delete(&self, library_name: &str) -> Result<(), CommandError> {
         // Acquire locks in the same order as function_load (index first, then libs)
         // to prevent AB-BA deadlock
-        let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
-        let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
+        let mut index = self
+            .function_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut libs = self
+            .function_libraries
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         if let Some(lib) = libs.remove(library_name) {
             for func in &lib.functions {
@@ -319,8 +352,14 @@ impl ScriptingEngine {
     pub fn function_flush(&self) {
         // Acquire locks in the same order as function_load/function_delete (index first, then libs)
         // to prevent AB-BA deadlock
-        let mut index = self.function_index.write().unwrap_or_else(|e| e.into_inner());
-        let mut libs = self.function_libraries.write().unwrap_or_else(|e| e.into_inner());
+        let mut index = self
+            .function_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut libs = self
+            .function_libraries
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         index.clear();
         libs.clear();
     }
@@ -330,14 +369,18 @@ impl ScriptingEngine {
         &self,
         library_pattern: Option<&str>,
     ) -> Vec<(String, String, Vec<FunctionInfo>)> {
-        let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
+        let libs = self
+            .function_libraries
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
 
         for (name, lib) in libs.iter() {
             if let Some(pat) = library_pattern
-                && !name.contains(pat) {
-                    continue;
-                }
+                && !name.contains(pat)
+            {
+                continue;
+            }
             result.push((name.clone(), lib.engine.clone(), lib.functions.clone()));
         }
 
@@ -346,7 +389,10 @@ impl ScriptingEngine {
 
     /// Dump all function libraries as serialized data
     pub fn function_dump(&self) -> Vec<u8> {
-        let libs = self.function_libraries.read().unwrap_or_else(|e| e.into_inner());
+        let libs = self
+            .function_libraries
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let serializable: Vec<(&str, &str)> = libs
             .iter()
             .map(|(name, lib)| (name.as_str(), lib.code.as_str()))
@@ -394,13 +440,9 @@ impl ScriptingEngine {
         let script = std::str::from_utf8(&args[0])
             .map_err(|_| CommandError::InvalidArgument("invalid script encoding".to_string()))?;
 
-        let numkeys: usize = String::from_utf8_lossy(&args[1])
-            .parse()
-            .map_err(|_| {
-                CommandError::InvalidArgument(
-                    "value is not an integer or out of range".to_string(),
-                )
-            })?;
+        let numkeys: usize = String::from_utf8_lossy(&args[1]).parse().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
 
         if args.len() < 2 + numkeys {
             return Err(CommandError::InvalidArgument(
@@ -436,13 +478,9 @@ impl ScriptingEngine {
             CommandError::InternalError("NOSCRIPT No matching script. Please use EVAL.".to_string())
         })?;
 
-        let numkeys: usize = String::from_utf8_lossy(&args[1])
-            .parse()
-            .map_err(|_| {
-                CommandError::InvalidArgument(
-                    "value is not an integer or out of range".to_string(),
-                )
-            })?;
+        let numkeys: usize = String::from_utf8_lossy(&args[1]).parse().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
 
         if args.len() < 2 + numkeys {
             return Err(CommandError::InvalidArgument(
@@ -656,13 +694,9 @@ impl ScriptingEngine {
 
         let func_name = String::from_utf8_lossy(&args[0]).to_string();
 
-        let numkeys: usize = String::from_utf8_lossy(&args[1])
-            .parse()
-            .map_err(|_| {
-                CommandError::InvalidArgument(
-                    "value is not an integer or out of range".to_string(),
-                )
-            })?;
+        let numkeys: usize = String::from_utf8_lossy(&args[1]).parse().map_err(|_| {
+            CommandError::InvalidArgument("value is not an integer or out of range".to_string())
+        })?;
 
         if args.len() < 2 + numkeys {
             return Err(CommandError::InvalidArgument(
@@ -681,8 +715,8 @@ impl ScriptingEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::storage::engine::{StorageConfig, StorageEngine};
+    use std::sync::Arc;
 
     fn create_engine() -> Arc<StorageEngine> {
         StorageEngine::new(StorageConfig::default())
@@ -741,11 +775,7 @@ mod tests {
         let scripting = ScriptingEngine::new();
 
         let result = scripting
-            .handle_eval(
-                &handler,
-                &[b"return 42".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_eval(&handler, &[b"return 42".to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
@@ -767,10 +797,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"hello world".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"hello world".to_vec())));
     }
 
     #[tokio::test]
@@ -805,11 +832,7 @@ mod tests {
         let scripting = ScriptingEngine::new();
 
         let result = scripting
-            .handle_eval(
-                &handler,
-                &[b"return nil".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_eval(&handler, &[b"return nil".to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
@@ -823,22 +846,14 @@ mod tests {
         let scripting = ScriptingEngine::new();
 
         let result = scripting
-            .handle_eval(
-                &handler,
-                &[b"return true".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_eval(&handler, &[b"return true".to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
         assert_eq!(result, RespValue::Integer(1));
 
         let result = scripting
-            .handle_eval(
-                &handler,
-                &[b"return false".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_eval(&handler, &[b"return false".to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
@@ -854,10 +869,7 @@ mod tests {
         let result = scripting
             .handle_eval(
                 &handler,
-                &[
-                    b"return redis.status_reply('OK')".to_vec(),
-                    b"0".to_vec(),
-                ],
+                &[b"return redis.status_reply('OK')".to_vec(), b"0".to_vec()],
                 false,
             )
             .await
@@ -929,11 +941,7 @@ mod tests {
         let result = scripting
             .handle_eval(
                 &handler,
-                &[
-                    b"return ARGV[1]".to_vec(),
-                    b"0".to_vec(),
-                    b"myarg".to_vec(),
-                ],
+                &[b"return ARGV[1]".to_vec(), b"0".to_vec(), b"myarg".to_vec()],
                 false,
             )
             .await
@@ -965,10 +973,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"myvalue".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
     }
 
     #[tokio::test]
@@ -1129,11 +1134,7 @@ mod tests {
 
         // numkeys > available args
         let result = scripting
-            .handle_eval(
-                &handler,
-                &[b"return 1".to_vec(), b"5".to_vec()],
-                false,
-            )
+            .handle_eval(&handler, &[b"return 1".to_vec(), b"5".to_vec()], false)
             .await;
 
         assert!(result.is_err());
@@ -1178,18 +1179,11 @@ mod tests {
         // Now use EVALSHA
         let sha1 = ScriptingEngine::compute_sha1(script);
         let result = scripting
-            .handle_evalsha(
-                &handler,
-                &[sha1.as_bytes().to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_evalsha(&handler, &[sha1.as_bytes().to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"cached".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"cached".to_vec())));
     }
 
     #[tokio::test]
@@ -1203,18 +1197,11 @@ mod tests {
 
         // EVALSHA
         let result = scripting
-            .handle_evalsha(
-                &handler,
-                &[sha1.as_bytes().to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_evalsha(&handler, &[sha1.as_bytes().to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"loaded".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"loaded".to_vec())));
     }
 
     #[tokio::test]
@@ -1268,10 +1255,7 @@ mod tests {
 
         assert_eq!(
             result,
-            RespValue::Array(Some(vec![
-                RespValue::Integer(1),
-                RespValue::Integer(0),
-            ]))
+            RespValue::Array(Some(vec![RespValue::Integer(1), RespValue::Integer(0),]))
         );
     }
 
@@ -1281,9 +1265,7 @@ mod tests {
         let sha1 = scripting.load_script("return 1");
         assert!(scripting.get_script(&sha1).is_some());
 
-        scripting
-            .handle_script(&[b"FLUSH".to_vec()])
-            .unwrap();
+        scripting.handle_script(&[b"FLUSH".to_vec()]).unwrap();
 
         assert!(scripting.get_script(&sha1).is_none());
     }
@@ -1369,11 +1351,7 @@ mod tests {
         scripting.function_load(code, false).unwrap();
 
         let result = scripting
-            .handle_fcall(
-                &handler,
-                &[b"myfunc".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_fcall(&handler, &[b"myfunc".to_vec(), b"0".to_vec()], false)
             .await
             .unwrap();
 
@@ -1406,10 +1384,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"myvalue".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"myvalue".to_vec())));
     }
 
     #[tokio::test]
@@ -1419,11 +1394,7 @@ mod tests {
         let scripting = ScriptingEngine::new();
 
         let result = scripting
-            .handle_fcall(
-                &handler,
-                &[b"nonexistent".to_vec(), b"0".to_vec()],
-                false,
-            )
+            .handle_fcall(&handler, &[b"nonexistent".to_vec(), b"0".to_vec()], false)
             .await;
 
         assert!(result.is_err());
@@ -1452,9 +1423,7 @@ mod tests {
         // SHA1 of "Hello World" = "0a4d55a8d778e5022fab701977c5d840bbc486d0"
         assert_eq!(
             result,
-            RespValue::BulkString(Some(
-                b"0a4d55a8d778e5022fab701977c5d840bbc486d0".to_vec()
-            ))
+            RespValue::BulkString(Some(b"0a4d55a8d778e5022fab701977c5d840bbc486d0".to_vec()))
         );
     }
 
@@ -1591,10 +1560,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"greater".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"greater".to_vec())));
     }
 
     #[tokio::test]

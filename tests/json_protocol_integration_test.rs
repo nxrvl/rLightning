@@ -1,12 +1,12 @@
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::time::Duration;
-use serde_json::{json, Value};
 use tokio::time;
 
 use rlightning::networking::client::Client;
 use rlightning::networking::resp::RespValue;
 use rlightning::networking::server::Server;
-use rlightning::storage::engine::{StorageEngine, StorageConfig};
+use rlightning::storage::engine::{StorageConfig, StorageEngine};
 
 // Helper function to start a server and return its address and a connected client
 async fn setup_server_client(port_offset: u16) -> (SocketAddr, Client) {
@@ -17,28 +17,28 @@ async fn setup_server_client(port_offset: u16) -> (SocketAddr, Client) {
     // Use a unique port for each test
     let port = 17000 + port_offset;
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    
+
     // Create a server
     let server = Server::new(addr, storage);
-    
+
     // Start the server in a background task
     tokio::spawn(async move {
         server.start().await.unwrap();
     });
-    
+
     // Allow some time for the server to start
     time::sleep(Duration::from_millis(200)).await;
-    
+
     // Connect a client
     let client = Client::connect(addr).await.unwrap();
-    
+
     (addr, client)
 }
 
 // Helper function to create a large JSON document similar to the one in the logs
 fn create_large_json() -> Value {
     let mut chapters = Vec::new();
-    
+
     // Create 50 chapters to make it large
     for i in 1..=50 {
         chapters.push(json!({
@@ -56,7 +56,7 @@ fn create_large_json() -> Value {
             }
         }));
     }
-    
+
     json!({
         "book_id": 12345,
         "title": "The Complete Guide to Large JSON Documents",
@@ -82,7 +82,7 @@ fn create_large_json() -> Value {
                 "comment": "Excellent comprehensive guide with detailed examples and clear explanations."
             },
             {
-                "reviewer": "Bob Smith", 
+                "reviewer": "Bob Smith",
                 "rating": 4,
                 "comment": "Very helpful resource, though some sections could be more concise."
             },
@@ -105,61 +105,73 @@ fn create_large_json() -> Value {
 #[tokio::test]
 async fn test_large_json_integration() {
     let (addr, mut client) = setup_server_client(0).await;
-    
+
     // Create a large JSON document
     let large_json = create_large_json();
     let json_str = large_json.to_string();
-    
+
     println!("JSON document size: {} bytes", json_str.len());
-    assert!(json_str.len() > 5000, "JSON should be at least 5KB for this test");
-    
+    assert!(
+        json_str.len() > 5000,
+        "JSON should be at least 5KB for this test"
+    );
+
     let key = "large_document:12345";
-    
+
     // Test JSON.SET command
-    let set_response = client.send_command(vec![
-        b"JSON.SET".to_vec(),
-        key.as_bytes().to_vec(),
-        b".".to_vec(),
-        json_str.as_bytes().to_vec(),
-    ]).await.unwrap();
-    
+    let set_response = client
+        .send_command(vec![
+            b"JSON.SET".to_vec(),
+            key.as_bytes().to_vec(),
+            b".".to_vec(),
+            json_str.as_bytes().to_vec(),
+        ])
+        .await
+        .unwrap();
+
     match set_response {
         RespValue::SimpleString(s) if s == "OK" => {
             println!("✓ JSON.SET successful for large document");
-        },
+        }
         _ => panic!("JSON.SET failed: {:?}", set_response),
     }
-    
+
     // Test JSON.GET command
-    let get_response = client.send_command(vec![
-        b"JSON.GET".to_vec(),
-        key.as_bytes().to_vec(),
-        b".".to_vec(),
-    ]).await.unwrap();
-    
+    let get_response = client
+        .send_command(vec![
+            b"JSON.GET".to_vec(),
+            key.as_bytes().to_vec(),
+            b".".to_vec(),
+        ])
+        .await
+        .unwrap();
+
     match get_response {
         RespValue::BulkString(Some(data)) => {
             let retrieved_json_str = String::from_utf8_lossy(&data);
             println!("Retrieved JSON size: {} bytes", retrieved_json_str.len());
-            
+
             // Parse the retrieved JSON
-            let retrieved_json: Value = serde_json::from_str(&retrieved_json_str)
-                .expect("Retrieved JSON should be valid");
-            
+            let retrieved_json: Value =
+                serde_json::from_str(&retrieved_json_str).expect("Retrieved JSON should be valid");
+
             // Verify the structure and content
             assert_eq!(retrieved_json["book_id"], 12345);
-            assert_eq!(retrieved_json["title"], "The Complete Guide to Large JSON Documents");
+            assert_eq!(
+                retrieved_json["title"],
+                "The Complete Guide to Large JSON Documents"
+            );
             assert_eq!(retrieved_json["total_chapters"], 50);
             assert!(retrieved_json["chapters"].is_array());
             assert_eq!(retrieved_json["chapters"].as_array().unwrap().len(), 50);
-            
+
             // Verify some nested data
             assert_eq!(retrieved_json["book_metadata"]["isbn"], "978-0123456789");
             assert_eq!(retrieved_json["availability"]["price"], 49.99);
             assert!(retrieved_json["reviews"].as_array().unwrap().len() == 3);
-            
+
             println!("✓ JSON.GET successful and data integrity verified");
-        },
+        }
         _ => panic!("JSON.GET failed: {:?}", get_response),
     }
 }
@@ -167,7 +179,7 @@ async fn test_large_json_integration() {
 #[tokio::test]
 async fn test_json_path_operations() {
     let (addr, mut client) = setup_server_client(1).await;
-    
+
     let key = "test_path_ops";
     let json_data = json!({
         "users": [
@@ -180,24 +192,30 @@ async fn test_json_path_operations() {
             "last_updated": "2024-01-15T10:30:00Z"
         }
     });
-    
+
     // Set the initial JSON
-    let set_response = client.send_command(vec![
-        b"JSON.SET".to_vec(),
-        key.as_bytes().to_vec(),
-        b".".to_vec(),
-        json_data.to_string().as_bytes().to_vec(),
-    ]).await.unwrap();
-    
+    let set_response = client
+        .send_command(vec![
+            b"JSON.SET".to_vec(),
+            key.as_bytes().to_vec(),
+            b".".to_vec(),
+            json_data.to_string().as_bytes().to_vec(),
+        ])
+        .await
+        .unwrap();
+
     assert!(matches!(set_response, RespValue::SimpleString(ref s) if s == "OK"));
-    
+
     // Test getting a specific path
-    let get_users_response = client.send_command(vec![
-        b"JSON.GET".to_vec(),
-        key.as_bytes().to_vec(),
-        b".users".to_vec(),
-    ]).await.unwrap();
-    
+    let get_users_response = client
+        .send_command(vec![
+            b"JSON.GET".to_vec(),
+            key.as_bytes().to_vec(),
+            b".users".to_vec(),
+        ])
+        .await
+        .unwrap();
+
     match get_users_response {
         RespValue::BulkString(Some(data)) => {
             let users_json_str = String::from_utf8_lossy(&data);
@@ -205,7 +223,7 @@ async fn test_json_path_operations() {
             assert!(users.is_array());
             assert_eq!(users.as_array().unwrap().len(), 3);
             println!("✓ JSON.GET with path successful");
-        },
+        }
         _ => panic!("JSON.GET with path failed: {:?}", get_users_response),
     }
 }
@@ -213,44 +231,52 @@ async fn test_json_path_operations() {
 #[tokio::test]
 async fn test_json_error_handling() {
     let (addr, mut client) = setup_server_client(2).await;
-    
+
     // Test setting invalid JSON
     let invalid_json = r#"{"incomplete": true, "missing_end":"#;
     let key = "test_invalid";
-    
-    let set_response = client.send_command(vec![
-        b"JSON.SET".to_vec(),
-        key.as_bytes().to_vec(),
-        b".".to_vec(),
-        invalid_json.as_bytes().to_vec(),
-    ]).await.unwrap();
-    
+
+    let set_response = client
+        .send_command(vec![
+            b"JSON.SET".to_vec(),
+            key.as_bytes().to_vec(),
+            b".".to_vec(),
+            invalid_json.as_bytes().to_vec(),
+        ])
+        .await
+        .unwrap();
+
     // Should return an error for invalid JSON
     match set_response {
         RespValue::Error(err_msg) => {
             println!("✓ Correctly rejected invalid JSON: {}", err_msg);
-            assert!(err_msg.to_lowercase().contains("json") || err_msg.to_lowercase().contains("parse"));
-        },
+            assert!(
+                err_msg.to_lowercase().contains("json") || err_msg.to_lowercase().contains("parse")
+            );
+        }
         _ => {
             // Some implementations might accept it and store as string
             println!("Implementation stored invalid JSON - checking if retrievable");
         }
     }
-    
+
     // Test getting from non-existent key
-    let get_response = client.send_command(vec![
-        b"JSON.GET".to_vec(),
-        b"non_existent_key".to_vec(),
-        b".".to_vec(),
-    ]).await.unwrap();
-    
+    let get_response = client
+        .send_command(vec![
+            b"JSON.GET".to_vec(),
+            b"non_existent_key".to_vec(),
+            b".".to_vec(),
+        ])
+        .await
+        .unwrap();
+
     match get_response {
         RespValue::BulkString(None) => {
             println!("✓ Correctly returned null for non-existent key");
-        },
+        }
         RespValue::Error(_) => {
             println!("✓ Correctly returned error for non-existent key");
-        },
+        }
         _ => {
             println!("Note: Implementation returned: {:?}", get_response);
         }

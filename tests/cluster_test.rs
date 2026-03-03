@@ -1,17 +1,16 @@
 /// Integration tests for Redis Cluster support
 /// Tests cluster slot calculation, topology management, CLUSTER subcommands,
 /// redirections, slot migration, and failover scenarios.
-
 mod test_utils;
 
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use rlightning::cluster::slot::{CLUSTER_SLOTS, SlotRange, key_hash_slot};
 use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole};
-use rlightning::cluster::slot::{CLUSTER_SLOTS, key_hash_slot, SlotRange};
-use rlightning::command::handler::CommandHandler;
 use rlightning::command::Command;
+use rlightning::command::handler::CommandHandler;
 use rlightning::networking::resp::RespValue;
 use rlightning::networking::server::Server;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
@@ -124,10 +123,7 @@ async fn test_cluster_add_all_slots() {
 
     let state = mgr.state().read().await;
     assert_eq!(state.slots_assigned, CLUSTER_SLOTS);
-    assert_eq!(
-        format!("{}", state.cluster_state),
-        "ok"
-    );
+    assert_eq!(format!("{}", state.cluster_state), "ok");
 }
 
 #[tokio::test]
@@ -155,12 +151,7 @@ async fn test_cluster_replicate() {
 
     let state = mgr.state().read().await;
     let my_id = state.my_id.clone();
-    let other_id = state
-        .nodes
-        .keys()
-        .find(|k| **k != my_id)
-        .unwrap()
-        .clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
     drop(state);
 
     // Try to replicate (should fail since we have no slots, but role change should work)
@@ -269,12 +260,7 @@ async fn test_cluster_setslot_migration() {
 
     let state = mgr.state().read().await;
     let my_id = state.my_id.clone();
-    let other_id = state
-        .nodes
-        .keys()
-        .find(|k| **k != my_id)
-        .unwrap()
-        .clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
     drop(state);
 
     // Assign slot 100 to ourselves
@@ -306,12 +292,7 @@ async fn test_cluster_setslot_importing() {
 
     let state = mgr.state().read().await;
     let my_id = state.my_id.clone();
-    let other_id = state
-        .nodes
-        .keys()
-        .find(|k| **k != my_id)
-        .unwrap()
-        .clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
     drop(state);
 
     // Start importing slot 200 from other node
@@ -406,12 +387,7 @@ async fn test_cluster_redirect_moved() {
 
     let state = mgr.state().read().await;
     let my_id = state.my_id.clone();
-    let other_id = state
-        .nodes
-        .keys()
-        .find(|k| **k != my_id)
-        .unwrap()
-        .clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
     drop(state);
 
     // Assign slot 12182 (where "foo" lives) to the other node
@@ -469,12 +445,7 @@ async fn test_cluster_manual_failover() {
 
     let state = mgr.state().read().await;
     let my_id = state.my_id.clone();
-    let other_id = state
-        .nodes
-        .keys()
-        .find(|k| **k != my_id)
-        .unwrap()
-        .clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
     drop(state);
 
     // Give the other node some slots
@@ -506,7 +477,9 @@ async fn test_cluster_command_info_disabled() {
     let (storage, _) = create_cluster_env();
 
     // Without a cluster manager, CLUSTER INFO shows disabled
-    let result = cluster_command(&storage, &[b"INFO".to_vec()], None).await.unwrap();
+    let result = cluster_command(&storage, &[b"INFO".to_vec()], None)
+        .await
+        .unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let info = String::from_utf8(data).unwrap();
         assert!(info.contains("cluster_enabled:0"));
@@ -527,7 +500,9 @@ async fn test_cluster_command_info_enabled() {
     mgr.add_slots(&all_slots).await.unwrap();
 
     // With a cluster manager, CLUSTER INFO shows enabled
-    let result = cluster_command(&storage, &[b"INFO".to_vec()], Some(&mgr)).await.unwrap();
+    let result = cluster_command(&storage, &[b"INFO".to_vec()], Some(&mgr))
+        .await
+        .unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let info = String::from_utf8(data).unwrap();
         assert!(info.contains("cluster_enabled:1"));
@@ -543,7 +518,9 @@ async fn test_cluster_command_keyslot() {
     use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
 
-    let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"foo".to_vec()], None).await.unwrap();
+    let result = cluster_command(&storage, &[b"KEYSLOT".to_vec(), b"foo".to_vec()], None)
+        .await
+        .unwrap();
     assert_eq!(result, RespValue::Integer(12182));
 }
 
@@ -552,7 +529,9 @@ async fn test_cluster_command_help() {
     use rlightning::command::types::cluster::cluster_command;
     let (storage, _) = create_cluster_env();
 
-    let result = cluster_command(&storage, &[b"HELP".to_vec()], None).await.unwrap();
+    let result = cluster_command(&storage, &[b"HELP".to_vec()], None)
+        .await
+        .unwrap();
     if let RespValue::Array(Some(lines)) = result {
         assert!(lines.len() > 5);
     } else {
@@ -567,7 +546,9 @@ async fn test_cluster_command_nodes_enabled() {
     let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
     mgr.init(addr).await;
 
-    let result = cluster_command(&storage, &[b"NODES".to_vec()], Some(&mgr)).await.unwrap();
+    let result = cluster_command(&storage, &[b"NODES".to_vec()], Some(&mgr))
+        .await
+        .unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let nodes = String::from_utf8(data).unwrap();
         assert!(nodes.contains("myself,master"));
@@ -583,7 +564,9 @@ async fn test_cluster_command_myid_enabled() {
     let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
     mgr.init(addr).await;
 
-    let result = cluster_command(&storage, &[b"MYID".to_vec()], Some(&mgr)).await.unwrap();
+    let result = cluster_command(&storage, &[b"MYID".to_vec()], Some(&mgr))
+        .await
+        .unwrap();
     if let RespValue::BulkString(Some(data)) = result {
         let id = String::from_utf8(data).unwrap();
         assert_eq!(id.len(), 40);
@@ -837,12 +820,12 @@ async fn test_cluster_info_via_server_enabled() {
     let (addr, _cluster) = setup_cluster_server(900).await.unwrap();
     let mut client = create_client(addr).await.unwrap();
 
-    let response = client
-        .send_command_str("CLUSTER", &["INFO"])
-        .await
-        .unwrap();
+    let response = client.send_command_str("CLUSTER", &["INFO"]).await.unwrap();
     let info = resp_string(&response);
-    assert!(info.contains("cluster_enabled:1"), "CLUSTER INFO should show enabled");
+    assert!(
+        info.contains("cluster_enabled:1"),
+        "CLUSTER INFO should show enabled"
+    );
     assert!(info.contains("cluster_known_nodes:1"), "Should know 1 node");
 }
 
@@ -851,10 +834,7 @@ async fn test_cluster_myid_via_server() {
     let (addr, _cluster) = setup_cluster_server(901).await.unwrap();
     let mut client = create_client(addr).await.unwrap();
 
-    let response = client
-        .send_command_str("CLUSTER", &["MYID"])
-        .await
-        .unwrap();
+    let response = client.send_command_str("CLUSTER", &["MYID"]).await.unwrap();
     let id = resp_string(&response);
     assert_eq!(id.len(), 40, "Node ID should be 40 hex chars");
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
@@ -870,7 +850,10 @@ async fn test_cluster_nodes_via_server() {
         .await
         .unwrap();
     let nodes = resp_string(&response);
-    assert!(nodes.contains("myself,master"), "Should show self as master");
+    assert!(
+        nodes.contains("myself,master"),
+        "Should show self as master"
+    );
 }
 
 #[tokio::test]

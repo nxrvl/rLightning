@@ -1,31 +1,21 @@
 /// Test for large value support (bug report: values > 9004 bytes fail)
 /// This test reproduces the issue where SET operations fail with protocol errors
 /// when the value size exceeds 9004 bytes.
-
 use bytes::BytesMut;
 use rlightning::networking::resp::RespValue;
+use rlightning::networking::server::Server;
 use rlightning::storage::engine::StorageEngine;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use rlightning::networking::server::Server;
-use std::net::SocketAddr;
 
 #[tokio::test]
 async fn test_large_values_various_sizes() {
     // Test various sizes around the reported 9004 byte limit
     let test_sizes = vec![
-        5000,
-        8000,
-        9000,
-        9004,  // Reported max working size
-        9005,  // First failing size
-        9010,
-        9050,
-        10000,
-        50000,
-        100000,
-        500000,
-        1_000_000,  // 1MB
+        5000, 8000, 9000, 9004, // Reported max working size
+        9005, // First failing size
+        9010, 9050, 10000, 50000, 100000, 500000, 1_000_000, // 1MB
     ];
 
     for size in test_sizes {
@@ -84,7 +74,10 @@ async fn test_set_get_large_value(value_size: usize) -> Result<(), Box<dyn std::
     command.extend_from_slice(b"\r\n");
 
     println!("Sending command of total size: {} bytes", command.len());
-    println!("Command header: {:?}", String::from_utf8_lossy(&command[0..50.min(command.len())]));
+    println!(
+        "Command header: {:?}",
+        String::from_utf8_lossy(&command[0..50.min(command.len())])
+    );
 
     // Send the SET command
     stream.write_all(&command).await?;
@@ -156,14 +149,25 @@ fn test_resp_parsing_large_bulk_string() {
 
         match result {
             Ok(Some(RespValue::BulkString(Some(data)))) => {
-                assert_eq!(data.len(), size, "Parsed data size mismatch for {} bytes", size);
+                assert_eq!(
+                    data.len(),
+                    size,
+                    "Parsed data size mismatch for {} bytes",
+                    size
+                );
                 println!("✓ RESP parsing successful for {} bytes", size);
             }
             Ok(None) => {
-                println!("✗ RESP parsing returned None (incomplete) for {} bytes", size);
+                println!(
+                    "✗ RESP parsing returned None (incomplete) for {} bytes",
+                    size
+                );
             }
             Ok(other) => {
-                println!("✗ RESP parsing returned unexpected type for {} bytes: {:?}", size, other);
+                println!(
+                    "✗ RESP parsing returned unexpected type for {} bytes: {:?}",
+                    size, other
+                );
             }
             Err(e) => {
                 println!("✗ RESP parsing failed for {} bytes: {}", size, e);

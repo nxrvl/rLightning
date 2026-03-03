@@ -1,20 +1,20 @@
 #![allow(dead_code)]
 
+pub mod client;
 pub mod config;
 pub mod error;
-pub mod client;
 pub mod server;
 #[cfg(test)]
 mod tests;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock, Notify};
+use tokio::sync::{Notify, RwLock, mpsc};
 use uuid::Uuid;
 
-use crate::networking::resp::{RespValue, RespCommand};
+use crate::networking::resp::{RespCommand, RespValue};
 use crate::storage::engine::StorageEngine;
 
 /// Replication manager that handles all replication operations.
@@ -204,7 +204,9 @@ impl ReplicationManager {
             backlog: Arc::new(RwLock::new(ReplicationBacklog::new(backlog_size))),
             replica_senders: Arc::new(RwLock::new(Vec::new())),
             master_replid: Arc::new(RwLock::new(generate_replid())),
-            master_replid2: Arc::new(RwLock::new("0000000000000000000000000000000000000000".to_string())),
+            master_replid2: Arc::new(RwLock::new(
+                "0000000000000000000000000000000000000000".to_string(),
+            )),
             master_repl_offset: Arc::new(AtomicU64::new(0)),
             second_repl_offset: Arc::new(AtomicU64::new(-1i64 as u64)),
             read_only: Arc::new(AtomicBool::new(false)),
@@ -216,15 +218,21 @@ impl ReplicationManager {
     pub async fn init(&self) -> Result<(), error::ReplicationError> {
         // If we're configured as a replica, connect to the master
         if let Some(master_host) = &self.config.master_host
-            && let Some(master_port) = self.config.master_port {
-                self.connect_to_master(master_host.clone(), master_port).await?;
-            }
+            && let Some(master_port) = self.config.master_port
+        {
+            self.connect_to_master(master_host.clone(), master_port)
+                .await?;
+        }
 
         Ok(())
     }
 
     /// Connect to a master server (become a replica)
-    pub async fn connect_to_master(&self, host: String, port: u16) -> Result<(), error::ReplicationError> {
+    pub async fn connect_to_master(
+        &self,
+        host: String,
+        port: u16,
+    ) -> Result<(), error::ReplicationError> {
         // Update our state to be a replica
         {
             let mut state = self.state.write().await;
@@ -238,12 +246,8 @@ impl ReplicationManager {
         self.read_only.store(true, Ordering::SeqCst);
 
         // Create a replication client and connect to the master
-        let client = client::ReplicationClient::new(
-            self.engine.clone(),
-            host,
-            port,
-            self.state.clone(),
-        );
+        let client =
+            client::ReplicationClient::new(self.engine.clone(), host, port, self.state.clone());
 
         // Start the replication client in a background task
         tokio::spawn(async move {
@@ -291,7 +295,8 @@ impl ReplicationManager {
         }
 
         // Update master offset
-        self.master_repl_offset.fetch_add(serialized.len() as u64, Ordering::SeqCst);
+        self.master_repl_offset
+            .fetch_add(serialized.len() as u64, Ordering::SeqCst);
 
         // Send to all connected replicas using try_send to avoid blocking
         // the write path if a replica's channel buffer is full
@@ -302,7 +307,10 @@ impl ReplicationManager {
             match sender.tx.try_send(serialized.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!("Replica {} channel full, disconnecting to force resync", sender.id);
+                    tracing::warn!(
+                        "Replica {} channel full, disconnecting to force resync",
+                        sender.id
+                    );
                     failed_ids.push(sender.id.clone());
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -319,12 +327,19 @@ impl ReplicationManager {
             senders.retain(|s| !failed_ids.contains(&s.id));
 
             let mut state = self.state.write().await;
-            state.connected_replicas.retain(|r| !failed_ids.contains(&r.id));
+            state
+                .connected_replicas
+                .retain(|r| !failed_ids.contains(&r.id));
         }
     }
 
     /// Register a new replica and return a receiver for commands
-    pub async fn register_replica(&self, id: String, host: String, port: u16) -> mpsc::Receiver<Vec<u8>> {
+    pub async fn register_replica(
+        &self,
+        id: String,
+        host: String,
+        port: u16,
+    ) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel(1000);
         let offset = Arc::new(AtomicU64::new(0));
 
@@ -413,7 +428,8 @@ impl ReplicationManager {
     /// Count replicas that have acknowledged at least the given offset
     async fn count_replicas_at_offset(&self, target_offset: u64) -> usize {
         let senders = self.replica_senders.read().await;
-        senders.iter()
+        senders
+            .iter()
             .filter(|s| s.offset.load(Ordering::SeqCst) >= target_offset)
             .count()
     }
@@ -458,7 +474,11 @@ impl ReplicationManager {
     }
 
     /// Handle REPLICAOF/SLAVEOF command
-    pub async fn handle_replicaof(&self, host: &str, port_str: &str) -> Result<RespValue, error::ReplicationError> {
+    pub async fn handle_replicaof(
+        &self,
+        host: &str,
+        port_str: &str,
+    ) -> Result<RespValue, error::ReplicationError> {
         if host.eq_ignore_ascii_case("NO") && port_str.eq_ignore_ascii_case("ONE") {
             // REPLICAOF NO ONE - become a master
             self.disconnect_from_master().await?;
@@ -476,10 +496,14 @@ impl ReplicationManager {
     pub async fn handle_failover(&self) -> Result<RespValue, error::ReplicationError> {
         let state = self.state.read().await;
         if state.role != ReplicationRole::Master {
-            return Ok(RespValue::Error("ERR FAILOVER requires the server to be a master".to_string()));
+            return Ok(RespValue::Error(
+                "ERR FAILOVER requires the server to be a master".to_string(),
+            ));
         }
         if state.connected_replicas.is_empty() {
-            return Ok(RespValue::Error("ERR FAILOVER requires connected replicas".to_string()));
+            return Ok(RespValue::Error(
+                "ERR FAILOVER requires connected replicas".to_string(),
+            ));
         }
         drop(state);
 
@@ -565,7 +589,12 @@ impl ReplicationManager {
     fn serialize_command(command: &RespCommand) -> Vec<u8> {
         let mut parts = Vec::with_capacity(1 + command.args.len());
         parts.push(RespValue::BulkString(Some(command.name.clone())));
-        parts.extend(command.args.iter().map(|arg| RespValue::BulkString(Some(arg.clone()))));
+        parts.extend(
+            command
+                .args
+                .iter()
+                .map(|arg| RespValue::BulkString(Some(arg.clone()))),
+        );
 
         let cmd_array = RespValue::Array(Some(parts));
         cmd_array.serialize().unwrap_or_default()
@@ -573,25 +602,109 @@ impl ReplicationManager {
 
     /// Check if a command is a write command that should be propagated to replicas
     pub fn is_write_command(cmd_name: &str) -> bool {
-        matches!(cmd_name,
-            "set" | "setnx" | "setex" | "psetex" | "mset" | "msetnx" | "getset" | "getex" | "getdel" |
-            "append" | "setrange" | "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" |
-            "del" | "unlink" | "expire" | "pexpire" | "expireat" | "pexpireat" | "persist" |
-            "rename" | "renamenx" | "copy" | "move" | "sort" |
-            "lpush" | "rpush" | "lpushx" | "rpushx" | "lpop" | "rpop" | "linsert" | "lset" | "ltrim" | "lmove" | "lmpop" |
-            "lrem" | "rpoplpush" | "blpop" | "brpop" | "blmove" | "blmpop" |
-            "hset" | "hdel" | "hmset" | "hincrby" | "hincrbyfloat" | "hsetnx" |
-            "sadd" | "srem" | "spop" | "smove" | "sinterstore" | "sunionstore" | "sdiffstore" |
-            "zadd" | "zrem" | "zincrby" | "zinterstore" | "zunionstore" | "zdiffstore" | "zmpop" |
-            "zpopmin" | "zpopmax" | "zrangestore" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" |
-            "bzpopmin" | "bzpopmax" | "bzmpop" |
-            "setbit" | "bitop" | "bitfield" |
-            "pfadd" | "pfmerge" |
-            "geoadd" | "geosearchstore" | "georadius" | "georadiusbymember" |
-            "xadd" | "xtrim" | "xdel" | "xgroup" | "xack" | "xclaim" | "xautoclaim" | "xreadgroup" |
-            "flushall" | "flushdb" | "swapdb" | "select" |
-            "restore" |
-            "json.set" | "json.del" | "json.arrappend" | "json.arrtrim" | "json.numincrby"
+        matches!(
+            cmd_name,
+            "set"
+                | "setnx"
+                | "setex"
+                | "psetex"
+                | "mset"
+                | "msetnx"
+                | "getset"
+                | "getex"
+                | "getdel"
+                | "append"
+                | "setrange"
+                | "incr"
+                | "decr"
+                | "incrby"
+                | "decrby"
+                | "incrbyfloat"
+                | "del"
+                | "unlink"
+                | "expire"
+                | "pexpire"
+                | "expireat"
+                | "pexpireat"
+                | "persist"
+                | "rename"
+                | "renamenx"
+                | "copy"
+                | "move"
+                | "sort"
+                | "lpush"
+                | "rpush"
+                | "lpushx"
+                | "rpushx"
+                | "lpop"
+                | "rpop"
+                | "linsert"
+                | "lset"
+                | "ltrim"
+                | "lmove"
+                | "lmpop"
+                | "lrem"
+                | "rpoplpush"
+                | "blpop"
+                | "brpop"
+                | "blmove"
+                | "blmpop"
+                | "hset"
+                | "hdel"
+                | "hmset"
+                | "hincrby"
+                | "hincrbyfloat"
+                | "hsetnx"
+                | "sadd"
+                | "srem"
+                | "spop"
+                | "smove"
+                | "sinterstore"
+                | "sunionstore"
+                | "sdiffstore"
+                | "zadd"
+                | "zrem"
+                | "zincrby"
+                | "zinterstore"
+                | "zunionstore"
+                | "zdiffstore"
+                | "zmpop"
+                | "zpopmin"
+                | "zpopmax"
+                | "zrangestore"
+                | "zremrangebyrank"
+                | "zremrangebyscore"
+                | "zremrangebylex"
+                | "bzpopmin"
+                | "bzpopmax"
+                | "bzmpop"
+                | "setbit"
+                | "bitop"
+                | "bitfield"
+                | "pfadd"
+                | "pfmerge"
+                | "geoadd"
+                | "geosearchstore"
+                | "georadius"
+                | "georadiusbymember"
+                | "xadd"
+                | "xtrim"
+                | "xdel"
+                | "xgroup"
+                | "xack"
+                | "xclaim"
+                | "xautoclaim"
+                | "xreadgroup"
+                | "flushall"
+                | "flushdb"
+                | "swapdb"
+                | "select"
+                | "restore"
+                | "json.set"
+                | "json.del"
+                | "json.arrappend"
+                | "json.arrtrim"
+                | "json.numincrby"
         )
     }
 }

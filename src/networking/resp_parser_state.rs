@@ -35,9 +35,13 @@ impl StatefulRespParser {
 
     /// Parse buffer with state awareness to prevent treating data as commands
     #[allow(dead_code)]
-    pub fn parse_with_state(&mut self, buffer: &mut BytesMut) -> Result<Option<crate::networking::resp::RespValue>, crate::networking::resp::RespError> {
-        use crate::networking::resp::{RespValue, RespError};
-        
+    pub fn parse_with_state(
+        &mut self,
+        buffer: &mut BytesMut,
+    ) -> Result<Option<crate::networking::resp::RespValue>, crate::networking::resp::RespError>
+    {
+        use crate::networking::resp::{RespError, RespValue};
+
         if buffer.is_empty() {
             return Ok(None);
         }
@@ -61,7 +65,8 @@ impl StatefulRespParser {
                             String::from_utf8_lossy(&buffer[0..buffer.len()])
                         };
                         Err(RespError::InvalidFormatDetails(format!(
-                            "Invalid command start in command mode: {}", preview
+                            "Invalid command start in command mode: {}",
+                            preview
                         )))
                     }
                 }
@@ -75,8 +80,8 @@ impl StatefulRespParser {
                     Ok(Some(RespValue::BulkString(Some(data))))
                 } else {
                     // Still waiting for more data
-                    self.state = ParserState::ReadingData { 
-                        remaining_bytes: remaining_bytes - buffer.len() 
+                    self.state = ParserState::ReadingData {
+                        remaining_bytes: remaining_bytes - buffer.len(),
                     };
                     let _data = buffer.split_to(buffer.len()).to_vec();
                     Err(RespError::Incomplete)
@@ -111,13 +116,13 @@ impl StatefulRespParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
     use crate::networking::resp::RespValue;
+    use bytes::BytesMut;
 
     #[test]
     fn test_state_parser_commands() {
         let mut parser = StatefulRespParser::new();
-        
+
         // Valid command
         let mut buffer = BytesMut::from("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
         let result = parser.parse_with_state(&mut buffer);
@@ -128,12 +133,12 @@ mod tests {
     #[test]
     fn test_state_parser_rejects_data_in_command_mode() {
         let mut parser = StatefulRespParser::new();
-        
+
         // Invalid data that looks like stored content
         let mut buffer = BytesMut::from("B64JSON:W3...");
         let result = parser.parse_with_state(&mut buffer);
         assert!(result.is_err());
-        
+
         // Should contain error about invalid command start
         let error = result.unwrap_err();
         assert!(error.to_string().contains("Invalid command start"));

@@ -39,7 +39,9 @@ fn send_command(stream: &mut TcpStream, cmd: &str) -> String {
     std::thread::sleep(Duration::from_millis(100));
 
     let mut buf = vec![0u8; 8192];
-    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
     match stream.read(&mut buf) {
         Ok(n) => String::from_utf8_lossy(&buf[..n]).to_string(),
         Err(_) => String::new(),
@@ -49,7 +51,9 @@ fn send_command(stream: &mut TcpStream, cmd: &str) -> String {
 /// Read all available data from a stream (non-blocking with timeout)
 fn read_all(stream: &mut TcpStream) -> String {
     let mut buf = vec![0u8; 16384];
-    stream.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
     let mut result = String::new();
     loop {
         match stream.read(&mut buf) {
@@ -81,13 +85,21 @@ mod tests {
 
         // Connection 1: subscriber
         let mut sub_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        sub_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        sub_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        sub_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        sub_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Connection 2: observer (for CLIENT LIST)
         let mut obs_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        obs_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        obs_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        obs_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        obs_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Subscribe to 3 channels on the subscriber connection
         let subscribe_cmd = resp_cmd(&["SUBSCRIBE", "chan1", "chan2", "chan3"]);
@@ -114,11 +126,19 @@ mod tests {
             if line.contains("sub=3") {
                 found_sub3 = true;
                 // Also verify psub=0 on the same line
-                assert!(line.contains("psub=0"), "Expected psub=0 on subscriber line, got: {}", line);
+                assert!(
+                    line.contains("psub=0"),
+                    "Expected psub=0 on subscriber line, got: {}",
+                    line
+                );
                 break;
             }
         }
-        assert!(found_sub3, "Expected to find a client with sub=3 in CLIENT LIST output: {:?}", lines);
+        assert!(
+            found_sub3,
+            "Expected to find a client with sub=3 in CLIENT LIST output: {:?}",
+            lines
+        );
     }
 
     #[test]
@@ -128,13 +148,21 @@ mod tests {
 
         // Connection 1: pattern subscriber
         let mut sub_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        sub_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        sub_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        sub_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        sub_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Connection 2: observer
         let mut obs_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        obs_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        obs_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        obs_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        obs_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // PSUBSCRIBE to 2 patterns
         let psubscribe_cmd = resp_cmd(&["PSUBSCRIBE", "news.*", "events.*"]);
@@ -154,11 +182,19 @@ mod tests {
             if line.contains("psub=2") {
                 found_psub2 = true;
                 // Also verify sub=0 since we only did PSUBSCRIBE
-                assert!(line.contains("sub=0"), "Expected sub=0 on pattern subscriber line, got: {}", line);
+                assert!(
+                    line.contains("sub=0"),
+                    "Expected sub=0 on pattern subscriber line, got: {}",
+                    line
+                );
                 break;
             }
         }
-        assert!(found_psub2, "Expected to find a client with psub=2 in CLIENT LIST output: {:?}", lines);
+        assert!(
+            found_psub2,
+            "Expected to find a client with psub=2 in CLIENT LIST output: {:?}",
+            lines
+        );
     }
 
     #[test]
@@ -168,13 +204,21 @@ mod tests {
 
         // Connection 1: subscriber with both channels and patterns
         let mut sub_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        sub_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        sub_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        sub_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        sub_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Connection 2: observer
         let mut obs_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        obs_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        obs_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        obs_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        obs_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // SUBSCRIBE to 2 channels
         let subscribe_cmd = resp_cmd(&["SUBSCRIBE", "chan1", "chan2"]);
@@ -203,7 +247,11 @@ mod tests {
                 break;
             }
         }
-        assert!(found_mixed, "Expected to find a client with sub=2 psub=1 in CLIENT LIST output: {:?}", lines);
+        assert!(
+            found_mixed,
+            "Expected to find a client with sub=2 psub=1 in CLIENT LIST output: {:?}",
+            lines
+        );
     }
 
     #[test]
@@ -213,13 +261,21 @@ mod tests {
 
         // Connection 1: subscriber
         let mut sub_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        sub_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        sub_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        sub_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        sub_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Connection 2: observer
         let mut obs_conn = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        obs_conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        obs_conn.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+        obs_conn
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        obs_conn
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Subscribe to 3 channels
         let subscribe_cmd = resp_cmd(&["SUBSCRIBE", "chan1", "chan2", "chan3"]);
@@ -231,7 +287,11 @@ mod tests {
         // Verify sub=3
         let client_list_cmd = resp_cmd(&["CLIENT", "LIST"]);
         let response = send_command(&mut obs_conn, &client_list_cmd);
-        assert!(response.contains("sub=3"), "Expected sub=3 before unsubscribe, got: {}", response);
+        assert!(
+            response.contains("sub=3"),
+            "Expected sub=3 before unsubscribe, got: {}",
+            response
+        );
 
         // Unsubscribe from 1 channel
         let unsub_cmd = resp_cmd(&["UNSUBSCRIBE", "chan2"]);
@@ -242,6 +302,10 @@ mod tests {
 
         // Verify sub=2
         let response = send_command(&mut obs_conn, &client_list_cmd);
-        assert!(response.contains("sub=2"), "Expected sub=2 after unsubscribe from 1 channel, got: {}", response);
+        assert!(
+            response.contains("sub=2"),
+            "Expected sub=2 after unsubscribe from 1 channel, got: {}",
+            response
+        );
     }
 }

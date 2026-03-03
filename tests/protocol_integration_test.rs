@@ -1,8 +1,8 @@
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::server::Server;
 use rlightning::storage::engine::StorageEngine;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -27,9 +27,7 @@ async fn test_server_handles_json_like_data() {
     let server = Server::new(addr, storage);
 
     // Start server
-    let server_handle = tokio::spawn(async move {
-        server.start().await
-    });
+    let server_handle = tokio::spawn(async move { server.start().await });
 
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(200)).await;
