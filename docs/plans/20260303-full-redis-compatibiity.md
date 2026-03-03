@@ -578,18 +578,18 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/js-client/tests/scripting_advanced.js`
 - Create: `tests/docker-compat/python-client/tests/scripting_advanced.py`
 
-- [ ] **EVAL_return_types**: Test Lua returning string, integer, table, nil, boolean, error
-- [ ] **EVAL_redis_call**: Lua calling redis.call('SET', KEYS[1], ARGV[1])
-- [ ] **EVAL_redis_pcall**: Lua calling redis.pcall() with error handling
-- [ ] **EVALSHA_cached**: SCRIPT LOAD, then EVALSHA, verify execution
-- [ ] **SCRIPT_EXISTS**: SCRIPT LOAD, SCRIPT EXISTS with SHA, verify true
-- [ ] **SCRIPT_FLUSH**: Load scripts, SCRIPT FLUSH, verify NOSCRIPT on EVALSHA
-- [ ] **FUNCTION_LOAD**: Load Lua function library (Redis 7.0 FUNCTION LOAD)
-- [ ] **FCALL_basic**: FCALL loaded function, verify execution
-- [ ] **EVAL_KEYS_ARGV**: Verify KEYS and ARGV arrays passed correctly
-- [ ] **EVAL_error_handling**: Verify error propagation from Lua to client
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **EVAL_return_types**: Test Lua returning string, integer, table, nil, boolean, error
+- [x] **EVAL_redis_call**: Lua calling redis.call('SET', KEYS[1], ARGV[1])
+- [x] **EVAL_redis_pcall**: Lua calling redis.pcall() with error handling
+- [x] **EVALSHA_cached**: SCRIPT LOAD, then EVALSHA, verify execution
+- [x] **SCRIPT_EXISTS**: SCRIPT LOAD, SCRIPT EXISTS with SHA, verify true
+- [x] **SCRIPT_FLUSH**: Load scripts, SCRIPT FLUSH, verify NOSCRIPT on EVALSHA
+- [x] **FUNCTION_LOAD**: Load Lua function library (Redis 7.0 FUNCTION LOAD)
+- [x] **FCALL_basic**: FCALL loaded function, verify execution
+- [x] **EVAL_KEYS_ARGV**: Verify KEYS and ARGV arrays passed correctly
+- [x] **EVAL_error_handling**: Verify error propagation from Lua to client
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 
