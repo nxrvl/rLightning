@@ -318,6 +318,9 @@ impl RespValue {
     /// Convert a RESP2-style response to RESP3 format based on the command name.
     /// This is the central RESP3 adaptation point: command handlers always produce RESP2
     /// values, and this method upgrades them for RESP3 clients.
+    ///
+    /// For subcommand-based commands, `command_name` should be the compound name
+    /// (e.g. "xinfo stream", "command docs") built by `Server::build_resp3_command_name`.
     pub fn convert_for_resp3(self, command_name: &str) -> RespValue {
         match self {
             // Null conversions: RESP2 null bulk string/array -> RESP3 Null
@@ -342,17 +345,85 @@ impl RespValue {
 
             // Commands that return key-value flat arrays -> RESP3 Map
             RespValue::Array(Some(items)) if Self::is_map_command(command_name) && items.len() % 2 == 0 => {
-                let mut pairs = Vec::with_capacity(items.len() / 2);
-                let mut iter = items.into_iter();
-                while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
-                    pairs.push((k, v));
-                }
-                RespValue::Map(pairs)
+                Self::flat_array_to_map_vec(items)
             }
 
             // Commands that return member arrays -> RESP3 Set
             RespValue::Array(Some(items)) if Self::is_set_command(command_name) => {
                 RespValue::Set(items)
+            }
+
+            // Commands that return array of maps (each inner array -> map):
+            // XINFO GROUPS, XINFO CONSUMERS
+            RespValue::Array(Some(items)) if Self::is_array_of_maps_command(command_name) => {
+                let converted: Vec<RespValue> = items
+                    .into_iter()
+                    .map(Self::flat_array_to_map)
+                    .collect();
+                RespValue::Array(Some(converted))
+            }
+
+            // HSCAN/ZSCAN: [cursor, flat-kv-array] -> [cursor, map]
+            RespValue::Array(Some(items)) if Self::is_scan_map_command(command_name) && items.len() == 2 => {
+                let mut items = items;
+                let data = items.pop().unwrap();
+                let cursor = items.pop().unwrap();
+                RespValue::Array(Some(vec![cursor, Self::flat_array_to_map(data)]))
+            }
+
+            // SSCAN: [cursor, array] -> [cursor, set]
+            RespValue::Array(Some(items)) if command_name == "sscan" && items.len() == 2 => {
+                let mut items = items;
+                let data = items.pop().unwrap();
+                let cursor = items.pop().unwrap();
+                let set_val = if let RespValue::Array(Some(inner)) = data {
+                    RespValue::Set(inner)
+                } else {
+                    data
+                };
+                RespValue::Array(Some(vec![cursor, set_val]))
+            }
+
+            // XRANGE/XREVRANGE: convert each stream entry's field-values to Map
+            // [[id, [f1, v1, f2, v2]], ...] -> [[id, Map{f1:v1, f2:v2}], ...]
+            RespValue::Array(Some(items)) if Self::is_stream_entry_command(command_name) => {
+                let converted: Vec<RespValue> = items
+                    .into_iter()
+                    .map(Self::convert_stream_entry)
+                    .collect();
+                RespValue::Array(Some(converted))
+            }
+
+            // XREAD/XREADGROUP: outer array of [name, entries] pairs -> Map,
+            // plus convert each entry's field-values to Map
+            // [[name, [[id, [f,v,...]], ...]], ...] -> Map{name: [[id, Map], ...]}
+            RespValue::Array(Some(items)) if Self::is_stream_read_command(command_name) => {
+                let mut pairs = Vec::with_capacity(items.len());
+                for item in items {
+                    if let RespValue::Array(Some(mut pair)) = item {
+                        if pair.len() == 2 {
+                            let entries = pair.pop().unwrap();
+                            let stream_name = pair.pop().unwrap();
+                            let converted_entries = if let RespValue::Array(Some(entry_items)) = entries {
+                                RespValue::Array(Some(
+                                    entry_items
+                                        .into_iter()
+                                        .map(Self::convert_stream_entry)
+                                        .collect(),
+                                ))
+                            } else {
+                                entries
+                            };
+                            pairs.push((stream_name, converted_entries));
+                        } else {
+                            // Unexpected structure, keep as-is
+                            pairs.push((RespValue::Array(Some(pair)), RespValue::Null));
+                        }
+                    } else {
+                        pairs.push((item, RespValue::Null));
+                    }
+                }
+                RespValue::Map(pairs)
             }
 
             // Note: EXEC inner sub-result conversion is handled in server.rs
@@ -363,29 +434,87 @@ impl RespValue {
         }
     }
 
+    /// Convert a flat array of alternating key-value pairs to a Map.
+    /// If the value is not an even-length array, return it unchanged.
+    fn flat_array_to_map(value: RespValue) -> RespValue {
+        if let RespValue::Array(Some(inner)) = value {
+            if inner.len() % 2 == 0 {
+                Self::flat_array_to_map_vec(inner)
+            } else {
+                RespValue::Array(Some(inner))
+            }
+        } else {
+            value
+        }
+    }
+
+    /// Convert a Vec of alternating key-value items into a Map.
+    fn flat_array_to_map_vec(items: Vec<RespValue>) -> RespValue {
+        let mut pairs = Vec::with_capacity(items.len() / 2);
+        let mut iter = items.into_iter();
+        while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+            pairs.push((k, v));
+        }
+        RespValue::Map(pairs)
+    }
+
+    /// Convert a stream entry [id, [field, value, ...]] to [id, Map{field: value, ...}]
+    fn convert_stream_entry(entry: RespValue) -> RespValue {
+        if let RespValue::Array(Some(mut items)) = entry {
+            if items.len() == 2 {
+                let fields = items.pop().unwrap();
+                let id = items.pop().unwrap();
+                RespValue::Array(Some(vec![id, Self::flat_array_to_map(fields)]))
+            } else {
+                RespValue::Array(Some(items))
+            }
+        } else {
+            entry
+        }
+    }
+
     /// Check if a command returns key-value pairs that should be a RESP3 Map.
-    /// Only commands that always return key-value pair responses belong here.
-    /// Sorted set commands (zrange etc.) return flat arrays or score-interleaved arrays
-    /// depending on WITHSCORES flag, so they must NOT be converted to Map.
-    /// Stream commands (xrange etc.) return nested entry arrays, not key-value maps.
+    /// Only commands that always return flat key-value pair responses belong here.
     fn is_map_command(cmd: &str) -> bool {
-        matches!(cmd,
-            "hgetall" | "config"
+        matches!(
+            cmd,
+            "hgetall" | "config" | "xinfo stream" | "command docs"
         )
+    }
+
+    /// Check if a command returns an array where each element is a flat kv array -> Map
+    fn is_array_of_maps_command(cmd: &str) -> bool {
+        matches!(cmd, "xinfo groups" | "xinfo consumers")
+    }
+
+    /// Check if a command returns [cursor, flat-kv-array] where the data part -> Map
+    fn is_scan_map_command(cmd: &str) -> bool {
+        matches!(cmd, "hscan" | "zscan")
+    }
+
+    /// Check if a command returns stream entries that need field-value -> Map conversion
+    fn is_stream_entry_command(cmd: &str) -> bool {
+        matches!(cmd, "xrange" | "xrevrange")
+    }
+
+    /// Check if a command returns stream read results (outer array -> Map, entries -> Map)
+    fn is_stream_read_command(cmd: &str) -> bool {
+        matches!(cmd, "xread" | "xreadgroup")
     }
 
     /// Check if a command returns a set of members that should be a RESP3 Set
     fn is_set_command(cmd: &str) -> bool {
-        matches!(cmd,
+        matches!(
+            cmd,
             "smembers" | "sinter" | "sunion" | "sdiff"
         )
     }
 
     /// Check if a command returns a float value that should be a RESP3 Double
     fn is_double_command(cmd: &str) -> bool {
-        matches!(cmd,
-            "zscore" | "zincrby" | "geodist" | "incrbyfloat" |
-            "hincrbyfloat"
+        matches!(
+            cmd,
+            "zscore" | "zincrby" | "geodist" | "incrbyfloat" | "hincrbyfloat"
         )
     }
 
@@ -2071,5 +2200,301 @@ mod tests {
         ]));
         let bytes = arr.serialize().unwrap();
         assert!(bytes.starts_with(b"*2\r\n"));
+    }
+
+    #[test]
+    fn test_resp3_xinfo_stream_map_conversion() {
+        // XINFO STREAM returns flat kv array -> Map in RESP3
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"length".to_vec())),
+            RespValue::Integer(5),
+            RespValue::BulkString(Some(b"groups".to_vec())),
+            RespValue::Integer(1),
+        ]));
+        let converted = value.convert_for_resp3("xinfo stream");
+        match converted {
+            RespValue::Map(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"length".to_vec())));
+                assert_eq!(pairs[0].1, RespValue::Integer(5));
+                assert_eq!(pairs[1].0, RespValue::BulkString(Some(b"groups".to_vec())));
+                assert_eq!(pairs[1].1, RespValue::Integer(1));
+            }
+            other => panic!("Expected Map for 'xinfo stream', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resp3_xinfo_groups_array_of_maps() {
+        // XINFO GROUPS returns array where each element is a flat kv array -> Array of Maps
+        let value = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"name".to_vec())),
+                RespValue::BulkString(Some(b"group1".to_vec())),
+                RespValue::BulkString(Some(b"consumers".to_vec())),
+                RespValue::Integer(2),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"name".to_vec())),
+                RespValue::BulkString(Some(b"group2".to_vec())),
+                RespValue::BulkString(Some(b"consumers".to_vec())),
+                RespValue::Integer(1),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("xinfo groups");
+        if let RespValue::Array(Some(items)) = converted {
+            assert_eq!(items.len(), 2);
+            // Each inner element should be a Map
+            for item in &items {
+                assert!(matches!(item, RespValue::Map(_)), "Expected Map, got {:?}", item);
+            }
+            if let RespValue::Map(pairs) = &items[0] {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"group1".to_vec())));
+            }
+        } else {
+            panic!("Expected Array of Maps for 'xinfo groups'");
+        }
+    }
+
+    #[test]
+    fn test_resp3_xinfo_consumers_array_of_maps() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"name".to_vec())),
+                RespValue::BulkString(Some(b"consumer1".to_vec())),
+                RespValue::BulkString(Some(b"pending".to_vec())),
+                RespValue::Integer(3),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("xinfo consumers");
+        if let RespValue::Array(Some(items)) = converted {
+            assert_eq!(items.len(), 1);
+            assert!(matches!(&items[0], RespValue::Map(pairs) if pairs.len() == 2));
+        } else {
+            panic!("Expected Array of Maps for 'xinfo consumers'");
+        }
+    }
+
+    #[test]
+    fn test_resp3_hscan_cursor_map() {
+        // HSCAN returns [cursor, [f1, v1, f2, v2]] -> [cursor, Map{f1:v1, f2:v2}]
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"0".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"field1".to_vec())),
+                RespValue::BulkString(Some(b"val1".to_vec())),
+                RespValue::BulkString(Some(b"field2".to_vec())),
+                RespValue::BulkString(Some(b"val2".to_vec())),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("hscan");
+        if let RespValue::Array(Some(items)) = converted {
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0], RespValue::BulkString(Some(b"0".to_vec())));
+            if let RespValue::Map(pairs) = &items[1] {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"field1".to_vec())));
+                assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"val1".to_vec())));
+            } else {
+                panic!("Expected Map as second element of HSCAN result");
+            }
+        } else {
+            panic!("Expected Array for HSCAN result");
+        }
+    }
+
+    #[test]
+    fn test_resp3_zscan_cursor_map() {
+        // ZSCAN returns [cursor, [member1, score1, member2, score2]] -> [cursor, Map]
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"0".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"alice".to_vec())),
+                RespValue::BulkString(Some(b"100".to_vec())),
+                RespValue::BulkString(Some(b"bob".to_vec())),
+                RespValue::BulkString(Some(b"200".to_vec())),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("zscan");
+        if let RespValue::Array(Some(items)) = converted {
+            assert_eq!(items.len(), 2);
+            if let RespValue::Map(pairs) = &items[1] {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"alice".to_vec())));
+                assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"100".to_vec())));
+            } else {
+                panic!("Expected Map as second element of ZSCAN result");
+            }
+        } else {
+            panic!("Expected Array for ZSCAN result");
+        }
+    }
+
+    #[test]
+    fn test_resp3_sscan_cursor_set() {
+        // SSCAN returns [cursor, [m1, m2]] -> [cursor, Set[m1, m2]]
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"0".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"alice".to_vec())),
+                RespValue::BulkString(Some(b"bob".to_vec())),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("sscan");
+        if let RespValue::Array(Some(items)) = converted {
+            assert_eq!(items.len(), 2);
+            if let RespValue::Set(members) = &items[1] {
+                assert_eq!(members.len(), 2);
+            } else {
+                panic!("Expected Set as second element of SSCAN result");
+            }
+        } else {
+            panic!("Expected Array for SSCAN result");
+        }
+    }
+
+    #[test]
+    fn test_resp3_xrange_stream_entry_map() {
+        // XRANGE returns [[id, [f1, v1, f2, v2]], ...] -> [[id, Map{f1:v1, f2:v2}], ...]
+        let value = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"1-0".to_vec())),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"name".to_vec())),
+                    RespValue::BulkString(Some(b"alice".to_vec())),
+                    RespValue::BulkString(Some(b"age".to_vec())),
+                    RespValue::BulkString(Some(b"30".to_vec())),
+                ])),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"2-0".to_vec())),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"name".to_vec())),
+                    RespValue::BulkString(Some(b"bob".to_vec())),
+                ])),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("xrange");
+        if let RespValue::Array(Some(entries)) = converted {
+            assert_eq!(entries.len(), 2);
+            // First entry
+            if let RespValue::Array(Some(entry)) = &entries[0] {
+                assert_eq!(entry.len(), 2);
+                assert_eq!(entry[0], RespValue::BulkString(Some(b"1-0".to_vec())));
+                if let RespValue::Map(pairs) = &entry[1] {
+                    assert_eq!(pairs.len(), 2);
+                    assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"name".to_vec())));
+                    assert_eq!(pairs[0].1, RespValue::BulkString(Some(b"alice".to_vec())));
+                } else {
+                    panic!("Expected Map for entry field-values");
+                }
+            } else {
+                panic!("Expected Array for stream entry");
+            }
+        } else {
+            panic!("Expected Array for XRANGE result");
+        }
+    }
+
+    #[test]
+    fn test_resp3_xrevrange_stream_entry_map() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"5-0".to_vec())),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"k".to_vec())),
+                    RespValue::BulkString(Some(b"v".to_vec())),
+                ])),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("xrevrange");
+        if let RespValue::Array(Some(entries)) = converted {
+            if let RespValue::Array(Some(entry)) = &entries[0] {
+                assert!(matches!(&entry[1], RespValue::Map(pairs) if pairs.len() == 1));
+            } else {
+                panic!("Expected converted stream entry");
+            }
+        } else {
+            panic!("Expected Array for XREVRANGE result");
+        }
+    }
+
+    #[test]
+    fn test_resp3_xread_map_with_entry_maps() {
+        // XREAD returns [[name, [[id, [f, v]], ...]], ...] -> Map{name: [[id, Map], ...]}
+        let value = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"stream1".to_vec())),
+                RespValue::Array(Some(vec![
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(b"1-0".to_vec())),
+                        RespValue::Array(Some(vec![
+                            RespValue::BulkString(Some(b"field".to_vec())),
+                            RespValue::BulkString(Some(b"value".to_vec())),
+                        ])),
+                    ])),
+                ])),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("xread");
+        if let RespValue::Map(pairs) = converted {
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"stream1".to_vec())));
+            // Inner entries should have Map field-values
+            if let RespValue::Array(Some(entries)) = &pairs[0].1 {
+                if let RespValue::Array(Some(entry)) = &entries[0] {
+                    assert!(matches!(&entry[1], RespValue::Map(_)));
+                } else {
+                    panic!("Expected entry array");
+                }
+            } else {
+                panic!("Expected entries array");
+            }
+        } else {
+            panic!("Expected Map for XREAD result, got {:?}", converted);
+        }
+    }
+
+    #[test]
+    fn test_resp3_command_docs_map_conversion() {
+        // COMMAND DOCS returns alternating cmd-name + doc-array pairs -> Map
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"get".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"summary".to_vec())),
+                RespValue::BulkString(Some(b"The GET command".to_vec())),
+            ])),
+        ]));
+        let converted = value.convert_for_resp3("command docs");
+        match converted {
+            RespValue::Map(pairs) => {
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].0, RespValue::BulkString(Some(b"get".to_vec())));
+            }
+            other => panic!("Expected Map for 'command docs', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resp3_empty_xrange_stays_empty() {
+        // Empty XRANGE result should stay as empty array
+        let value = RespValue::Array(Some(vec![]));
+        let converted = value.convert_for_resp3("xrange");
+        assert_eq!(converted, RespValue::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn test_resp3_unknown_command_passthrough() {
+        // Unknown command names pass through unchanged
+        let value = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+            RespValue::BulkString(Some(b"b".to_vec())),
+        ]));
+        let converted = value.convert_for_resp3("randomcmd");
+        assert_eq!(converted, RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"a".to_vec())),
+            RespValue::BulkString(Some(b"b".to_vec())),
+        ])));
     }
 }

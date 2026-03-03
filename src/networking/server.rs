@@ -1143,7 +1143,8 @@ impl Server {
                                 let converted: Vec<RespValue> = items.into_iter()
                                     .zip(queued_for_repl.iter())
                                     .map(|(item, cmd)| {
-                                        let sub_cmd = cmd.name.to_lowercase();
+                                        let base = cmd.name.to_lowercase();
+                                        let sub_cmd = Self::build_resp3_command_name(&base, &cmd.args);
                                         item.convert_for_resp3(&sub_cmd)
                                     })
                                     .collect();
@@ -1156,7 +1157,8 @@ impl Server {
                             response.convert_for_resp3("exec")
                         }
                     } else {
-                        response.convert_for_resp3(&cmd_lower)
+                        let resp3_cmd = Self::build_resp3_command_name(&cmd_lower, &cmd.args);
+                        response.convert_for_resp3(&resp3_cmd)
                     }
                 } else {
                     response
@@ -1691,6 +1693,27 @@ impl Server {
     }
 
     /// Helper function to serialize and send an error response to a split socket writer
+    /// Build a compound command name for RESP3 conversion.
+    /// For subcommand-based commands (XINFO STREAM, COMMAND DOCS, etc.),
+    /// returns "base subcmd"; otherwise returns just the base command name.
+    fn build_resp3_command_name(cmd_lower: &str, args: &[Vec<u8>]) -> String {
+        match cmd_lower {
+            "xinfo" | "command" | "object" | "memory" | "client" | "cluster"
+            | "slowlog" | "latency" | "debug" => {
+                if let Some(sub) = args.first() {
+                    format!(
+                        "{} {}",
+                        cmd_lower,
+                        String::from_utf8_lossy(sub).to_lowercase()
+                    )
+                } else {
+                    cmd_lower.to_string()
+                }
+            }
+            _ => cmd_lower.to_string(),
+        }
+    }
+
     async fn send_error_to_writer(
         writer: &mut tokio::net::tcp::OwnedWriteHalf,
         error_message: String,
