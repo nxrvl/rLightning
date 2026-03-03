@@ -467,18 +467,18 @@ New Docker-based comparison test category testing persistence behavior against r
 - Create: `tests/docker-compat/python-client/tests/memory.py`
 - Modify: `tests/docker-compat/docker-compose.yml` (add memory-limited test container)
 
-- [ ] **MEMORY_USAGE_basic**: SET key, verify MEMORY USAGE returns reasonable byte count
-- [ ] **MEMORY_USAGE_types**: Test MEMORY USAGE for string, hash, list, set, zset
-- [ ] **MEMORY_DOCTOR**: Run MEMORY DOCTOR, verify response format
-- [ ] **INFO_memory_section**: Verify INFO memory section contains used_memory, used_memory_peak, maxmemory
-- [ ] **CONFIG_maxmemory**: CONFIG SET maxmemory 1mb, fill beyond limit, verify OOM error or eviction
-- [ ] **CONFIG_maxmemory_policy**: Test allkeys-lru, volatile-lru, allkeys-random, noeviction policies
-- [ ] **OBJECT_ENCODING**: Verify encoding changes based on data size (listpack→hashtable, etc.)
-- [ ] **OBJECT_REFCOUNT**: Verify OBJECT REFCOUNT returns integer
-- [ ] **OBJECT_IDLETIME**: SET key, wait, verify OBJECT IDLETIME reflects elapsed time
-- [ ] **OBJECT_FREQ**: Verify OBJECT FREQ returns LFU frequency counter
-- [ ] Implement in all 3 languages
-- [ ] Run full comparison suite
+- [x] **MEMORY_USAGE_basic**: SET key, verify MEMORY USAGE returns reasonable byte count
+- [x] **MEMORY_USAGE_types**: Test MEMORY USAGE for string, hash, list, set, zset
+- [x] **MEMORY_DOCTOR**: Run MEMORY DOCTOR, verify response format
+- [x] **INFO_memory_section**: Verify INFO memory section contains used_memory, used_memory_peak, maxmemory
+- [x] **CONFIG_maxmemory**: CONFIG SET maxmemory 1mb, fill beyond limit, verify OOM error or eviction
+- [x] **CONFIG_maxmemory_policy**: Test allkeys-lru, volatile-lru, allkeys-random, noeviction policies
+- [x] **OBJECT_ENCODING**: Verify encoding changes based on data size (listpack→hashtable, etc.)
+- [x] **OBJECT_REFCOUNT**: Verify OBJECT REFCOUNT returns integer
+- [x] **OBJECT_IDLETIME**: SET key, wait, verify OBJECT IDLETIME reflects elapsed time
+- [x] **OBJECT_FREQ**: Verify OBJECT FREQ returns LFU frequency counter
+- [x] Implement in all 3 languages
+- [x] Run full comparison suite
 
 ---
 
