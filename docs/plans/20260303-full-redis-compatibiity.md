@@ -173,10 +173,10 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** `set_with_type_preserve_ttl()` (~line 653) reads TTL in one DashMap lookup, then calls `set_with_type()` in a separate operation. Between them, the key could be modified or deleted.
 
-- [ ] Rewrite to use single DashMap entry operation (read TTL + write value atomically)
-- [ ] Audit remaining callers after Tasks 6-8 (most should be eliminated by atomic_modify migration)
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Rewrite to use single DashMap entry operation (read TTL + write value atomically)
+- [x] Audit remaining callers after Tasks 6-8 (most should be eliminated by atomic_modify migration)
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
