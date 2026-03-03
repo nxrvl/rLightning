@@ -238,11 +238,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** AOF rewrite emits XADD commands for stream entries but does not persist consumer groups, PEL (pending entry list), or consumer state. On reload, all consumer group state is lost.
 
-- [ ] After XADD commands in `aof_rewrite_commands_for_item()`, emit `XGROUP CREATE key groupname id` for each consumer group
-- [ ] Emit `XCLAIM key groupname consumer 0 id` for each pending entry in each consumer's PEL
-- [ ] Write test: create stream with consumer groups + pending entries, trigger AOF rewrite, reload, verify consumer group state survives
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] After XADD commands in `aof_rewrite_commands_for_item()`, emit `XGROUP CREATE key groupname id` for each consumer group
+- [x] Emit `XCLAIM key groupname consumer 0 id` for each pending entry in each consumer's PEL
+- [x] Write test: create stream with consumer groups + pending entries, trigger AOF rewrite, reload, verify consumer group state survives
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

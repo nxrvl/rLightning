@@ -615,6 +615,32 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
                     }
                     commands.push(args);
                 }
+
+                // Emit XGROUP CREATE for each consumer group
+                for group in stream.groups.values() {
+                    commands.push(vec![
+                        b"XGROUP".to_vec(),
+                        b"CREATE".to_vec(),
+                        key.to_vec(),
+                        group.name.as_bytes().to_vec(),
+                        group.last_delivered_id.to_string().into_bytes(),
+                        b"MKSTREAM".to_vec(),
+                    ]);
+
+                    // Emit XCLAIM with FORCE for each pending entry to restore consumer PEL state.
+                    // FORCE is needed because entries are not yet in the PEL after XGROUP CREATE.
+                    for pending in group.pel.values() {
+                        commands.push(vec![
+                            b"XCLAIM".to_vec(),
+                            key.to_vec(),
+                            group.name.as_bytes().to_vec(),
+                            pending.consumer.as_bytes().to_vec(),
+                            b"0".to_vec(),
+                            pending.id.to_string().into_bytes(),
+                            b"FORCE".to_vec(),
+                        ]);
+                    }
+                }
             }
         }
     }
@@ -1444,5 +1470,244 @@ mod tests {
         aof.load().await.unwrap();
         assert_eq!(engine.get(b"k1").await.unwrap(), Some(b"v1".to_vec()));
         assert_eq!(engine.get(b"k2").await.unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn test_aof_rewrite_stream_consumer_groups() {
+        use crate::storage::stream::{
+            ConsumerGroup, PendingEntry, StreamConsumer, StreamData, StreamEntry, StreamEntryId,
+        };
+        use std::collections::{BTreeMap, HashMap};
+
+        let key = b"mystream".to_vec();
+        let mut stream = StreamData::new();
+
+        // Add two entries
+        let entry1 = StreamEntry {
+            id: StreamEntryId::new(1000, 0),
+            fields: vec![(b"field1".to_vec(), b"value1".to_vec())],
+        };
+        let entry2 = StreamEntry {
+            id: StreamEntryId::new(2000, 0),
+            fields: vec![(b"field2".to_vec(), b"value2".to_vec())],
+        };
+        stream.entries.insert(entry1.id.clone(), entry1);
+        stream.entries.insert(entry2.id.clone(), entry2);
+        stream.last_id = StreamEntryId::new(2000, 0);
+
+        // Create a consumer group with pending entries
+        let mut pel = BTreeMap::new();
+        pel.insert(
+            StreamEntryId::new(1000, 0),
+            PendingEntry {
+                id: StreamEntryId::new(1000, 0),
+                consumer: "consumer1".to_string(),
+                delivery_time: 12345,
+                delivery_count: 1,
+            },
+        );
+        pel.insert(
+            StreamEntryId::new(2000, 0),
+            PendingEntry {
+                id: StreamEntryId::new(2000, 0),
+                consumer: "consumer2".to_string(),
+                delivery_time: 12346,
+                delivery_count: 2,
+            },
+        );
+
+        let mut consumers = HashMap::new();
+        consumers.insert(
+            "consumer1".to_string(),
+            StreamConsumer {
+                name: "consumer1".to_string(),
+                seen_time: 12345,
+                pending: vec![StreamEntryId::new(1000, 0)],
+            },
+        );
+        consumers.insert(
+            "consumer2".to_string(),
+            StreamConsumer {
+                name: "consumer2".to_string(),
+                seen_time: 12346,
+                pending: vec![StreamEntryId::new(2000, 0)],
+            },
+        );
+
+        let group = ConsumerGroup {
+            name: "mygroup".to_string(),
+            last_delivered_id: StreamEntryId::new(2000, 0),
+            consumers,
+            pel,
+            entries_read: Some(2),
+        };
+        stream.groups.insert("mygroup".to_string(), group);
+
+        let item = make_item(bincode::serialize(&stream).unwrap(), RedisDataType::Stream);
+        let cmds = aof_rewrite_commands_for_item(&key, &item);
+
+        // Should have: 2 XADD + 1 XGROUP CREATE + 2 XCLAIM = 5 commands
+        assert_eq!(cmds.len(), 5);
+
+        // First two: XADD commands
+        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(cmds[1][0], b"XADD");
+
+        // Third: XGROUP CREATE
+        assert_eq!(cmds[2][0], b"XGROUP");
+        assert_eq!(cmds[2][1], b"CREATE");
+        assert_eq!(cmds[2][2], b"mystream");
+        assert_eq!(cmds[2][3], b"mygroup");
+        assert_eq!(cmds[2][4], b"2000-0");
+        assert_eq!(cmds[2][5], b"MKSTREAM");
+
+        // Fourth and fifth: XCLAIM commands with FORCE (order from BTreeMap iteration)
+        assert_eq!(cmds[3][0], b"XCLAIM");
+        assert_eq!(cmds[3][1], b"mystream");
+        assert_eq!(cmds[3][2], b"mygroup");
+        // consumer name for entry 1000-0
+        assert_eq!(cmds[3][3], b"consumer1");
+        assert_eq!(cmds[3][4], b"0");
+        assert_eq!(cmds[3][5], b"1000-0");
+        assert_eq!(cmds[3][6], b"FORCE");
+
+        assert_eq!(cmds[4][0], b"XCLAIM");
+        assert_eq!(cmds[4][1], b"mystream");
+        assert_eq!(cmds[4][2], b"mygroup");
+        assert_eq!(cmds[4][3], b"consumer2");
+        assert_eq!(cmds[4][4], b"0");
+        assert_eq!(cmds[4][5], b"2000-0");
+        assert_eq!(cmds[4][6], b"FORCE");
+    }
+
+    #[tokio::test]
+    async fn test_aof_rewrite_stream_consumer_group_round_trip() {
+        use crate::storage::stream::StreamData;
+
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+
+        // Build AOF with XADD, XGROUP CREATE, XREADGROUP (to create pending entries), then XCLAIM
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                // Add entries to stream
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"mystream".to_vec(),
+                        b"1-0".to_vec(),
+                        b"field1".to_vec(),
+                        b"value1".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"mystream".to_vec(),
+                        b"2-0".to_vec(),
+                        b"field2".to_vec(),
+                        b"value2".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"mystream".to_vec(),
+                        b"3-0".to_vec(),
+                        b"field3".to_vec(),
+                        b"value3".to_vec(),
+                    ],
+                },
+                // Create consumer group starting at 0
+                RespCommand {
+                    name: b"XGROUP".to_vec(),
+                    args: vec![
+                        b"CREATE".to_vec(),
+                        b"mystream".to_vec(),
+                        b"mygroup".to_vec(),
+                        b"0".to_vec(),
+                    ],
+                },
+                // Read entries via consumer group (creates pending entries)
+                RespCommand {
+                    name: b"XREADGROUP".to_vec(),
+                    args: vec![
+                        b"GROUP".to_vec(),
+                        b"mygroup".to_vec(),
+                        b"consumer1".to_vec(),
+                        b"COUNT".to_vec(),
+                        b"2".to_vec(),
+                        b"STREAMS".to_vec(),
+                        b"mystream".to_vec(),
+                        b">".to_vec(),
+                    ],
+                },
+            ],
+        );
+
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path.clone());
+        aof.load().await.unwrap();
+
+        // Verify initial state: stream with group and pending entries
+        let val = engine.get(b"mystream").await.unwrap().expect("stream should exist");
+        let stream: StreamData = bincode::deserialize(&val).unwrap();
+        assert_eq!(stream.entries.len(), 3, "should have 3 entries");
+        assert!(stream.groups.contains_key("mygroup"), "should have consumer group");
+        let group = &stream.groups["mygroup"];
+        assert!(!group.pel.is_empty(), "should have pending entries after XREADGROUP");
+        let pending_count = group.pel.len();
+
+        // Now do AOF rewrite: engine → new AOF commands
+        let rewrite_path = dir.path().join("rewrite.aof");
+        {
+            use std::io::Write;
+            let mut file = File::create(&rewrite_path).unwrap();
+            // Snapshot DB 0 and generate rewrite commands
+            let snapshot = engine.snapshot_db(0).await.unwrap();
+            for (key, item) in snapshot.iter() {
+                let cmds = aof_rewrite_commands_for_item(key, item);
+                for cmd in cmds {
+                    let total = cmd.len();
+                    write!(file, "*{}\r\n", total).unwrap();
+                    for arg in &cmd {
+                        write!(file, "${}\r\n", arg.len()).unwrap();
+                        file.write_all(arg).unwrap();
+                        write!(file, "\r\n").unwrap();
+                    }
+                }
+            }
+            file.flush().unwrap();
+        }
+
+        // Load rewritten AOF into a fresh engine
+        let engine2 = create_test_engine();
+        let aof2 = AofPersistence::new(engine2.clone(), rewrite_path);
+        aof2.load().await.unwrap();
+
+        // Verify the consumer group state survived the round-trip
+        let val2 = engine2
+            .get(b"mystream")
+            .await
+            .unwrap()
+            .expect("stream should exist after rewrite reload");
+        let stream2: StreamData = bincode::deserialize(&val2).unwrap();
+        assert_eq!(stream2.entries.len(), 3, "entries should survive rewrite");
+        assert!(
+            stream2.groups.contains_key("mygroup"),
+            "consumer group should survive rewrite"
+        );
+        let group2 = &stream2.groups["mygroup"];
+        assert_eq!(
+            group2.pel.len(),
+            pending_count,
+            "pending entries should survive rewrite"
+        );
+        // Verify consumer exists
+        assert!(
+            group2.consumers.contains_key("consumer1"),
+            "consumer should be recreated via XCLAIM"
+        );
     }
 }
