@@ -101,6 +101,161 @@ services:
     profiles:
       - replication
 
+  # Redis Cluster nodes (3 masters)
+  redis-cluster-1:
+    image: redis:7-alpine
+    container_name: compat-test-redis-cluster-1
+    ports:
+      - "${REDIS_CLUSTER_PORT_1:-6403}:6379"
+    networks:
+      - compat-test
+    command: >
+      redis-server
+      --requirepass test_password
+      --masterauth test_password
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-hostname redis-cluster-1
+      --save ""
+      --appendonly no
+      --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    profiles:
+      - cluster
+    tmpfs:
+      - /data
+
+  redis-cluster-2:
+    image: redis:7-alpine
+    container_name: compat-test-redis-cluster-2
+    ports:
+      - "${REDIS_CLUSTER_PORT_2:-6404}:6379"
+    networks:
+      - compat-test
+    command: >
+      redis-server
+      --requirepass test_password
+      --masterauth test_password
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-hostname redis-cluster-2
+      --save ""
+      --appendonly no
+      --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    profiles:
+      - cluster
+    tmpfs:
+      - /data
+
+  redis-cluster-3:
+    image: redis:7-alpine
+    container_name: compat-test-redis-cluster-3
+    ports:
+      - "${REDIS_CLUSTER_PORT_3:-6405}:6379"
+    networks:
+      - compat-test
+    command: >
+      redis-server
+      --requirepass test_password
+      --masterauth test_password
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-hostname redis-cluster-3
+      --save ""
+      --appendonly no
+      --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    profiles:
+      - cluster
+    tmpfs:
+      - /data
+
+  # rLightning Cluster nodes (3 masters)
+  rlightning-cluster-1:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-cluster-1
+    ports:
+      - "${RLIGHTNING_CLUSTER_PORT_1:-6406}:6379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-cluster-1.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - cluster
+
+  rlightning-cluster-2:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-cluster-2
+    ports:
+      - "${RLIGHTNING_CLUSTER_PORT_2:-6407}:6379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-cluster-2.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - cluster
+
+  rlightning-cluster-3:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: rlightning:compat-test
+    container_name: compat-test-rlightning-cluster-3
+    ports:
+      - "${RLIGHTNING_CLUSTER_PORT_3:-6408}:6379"
+    networks:
+      - compat-test
+    volumes:
+      - ./config/rlightning-cluster-3.toml:/etc/rlightning/config.toml:ro
+    command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6379' 2>/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - cluster
+
   # Go test client (go-redis/redis v9)
   go-client:
     build:

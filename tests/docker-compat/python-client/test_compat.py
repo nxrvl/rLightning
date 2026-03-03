@@ -30,6 +30,7 @@ import tests.acl
 import tests.blocking
 import tests.memory
 import tests.replication
+import tests.cluster
 import tests.python_specific
 
 
