@@ -10,6 +10,8 @@ use tracing::{debug, error, info, warn};
 use crate::networking::resp::RespValue;
 // Removed unused import: RespCommand
 use crate::storage::engine::StorageEngine;
+use crate::command::Command;
+use crate::command::transaction::{TransactionState, handle_exec};
 use crate::replication::{ReplicationState, MasterLinkStatus};
 // Removed unused import: ReplicationRole
 use crate::replication::error::ReplicationError;
@@ -205,11 +207,14 @@ impl ReplicationClient {
     async fn process_commands(&self, socket: &mut TcpStream) -> Result<(), ReplicationError> {
         let mut buffer = BytesMut::with_capacity(self.buffer_size);
         let mut current_db: usize = 0;
-        
+        // Transaction buffering: when we receive MULTI from master, buffer commands
+        // until EXEC or DISCARD so they execute atomically on the replica.
+        let mut tx_buffer: Option<Vec<Command>> = None;
+
         loop {
             // Read data from the master
             let read_result = socket.read_buf(&mut buffer).await;
-            
+
             match read_result {
                 Ok(0) => {
                     // Connection closed by master
@@ -224,20 +229,22 @@ impl ReplicationClient {
                     return Err(ReplicationError::Io(e));
                 }
             }
-            
+
             // Process complete RESP messages
             while !buffer.is_empty() {
                 match RespValue::parse(&mut buffer) {
                     Ok(Some(value)) => {
                         debug!("Received command from master: {:?}", value);
-                        
+
                         // Convert to a command
                         match crate::command::parser::parse_command(value) {
                             Ok(cmd) => {
                                 debug!("Processing command from master: {:?}", cmd);
-                                
+
+                                let cmd_name_lower = cmd.name.to_lowercase();
+
                                 // Track SELECT commands to maintain correct database context
-                                if cmd.name.eq_ignore_ascii_case("SELECT")
+                                if cmd_name_lower == "select"
                                     && let Some(db_arg) = cmd.args.first()
                                     && let Ok(db_str) = std::str::from_utf8(db_arg)
                                     && let Ok(db_idx) = db_str.parse::<usize>()
@@ -245,13 +252,59 @@ impl ReplicationClient {
                                     current_db = db_idx;
                                     debug!("Replication: switched to database {}", current_db);
                                 }
-                                
-                                // Execute the command with the tracked database index
-                                let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
-                                if let Err(e) = cmd_handler.process(cmd, current_db).await {
-                                    error!("Error processing command from master: {}", e);
+
+                                // Handle MULTI/EXEC/DISCARD for transaction atomicity
+                                match cmd_name_lower.as_str() {
+                                    "multi" => {
+                                        debug!("Replication: entering MULTI transaction buffer");
+                                        tx_buffer = Some(Vec::new());
+                                    }
+                                    "exec" => {
+                                        if let Some(commands) = tx_buffer.take() {
+                                            debug!("Replication: executing EXEC with {} buffered commands", commands.len());
+                                            let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
+                                            let mut tx_state = TransactionState::new();
+                                            // Set up the transaction state: mark as in_multi and queue commands
+                                            tx_state.in_multi = true;
+                                            for buffered_cmd in commands {
+                                                tx_state.queue.push(buffered_cmd);
+                                            }
+                                            // Execute the transaction atomically using the existing handler
+                                            match handle_exec(&mut tx_state, &cmd_handler, &self.engine, current_db).await {
+                                                Ok(_) => {
+                                                    debug!("Replication: MULTI/EXEC transaction applied successfully");
+                                                }
+                                                Err(e) => {
+                                                    error!("Error executing replicated transaction: {}", e);
+                                                }
+                                            }
+                                        } else {
+                                            warn!("Replication: received EXEC without prior MULTI, ignoring");
+                                        }
+                                    }
+                                    "discard" => {
+                                        if tx_buffer.is_some() {
+                                            debug!("Replication: DISCARD received, aborting transaction buffer");
+                                            tx_buffer = None;
+                                        } else {
+                                            warn!("Replication: received DISCARD without prior MULTI, ignoring");
+                                        }
+                                    }
+                                    _ => {
+                                        if let Some(ref mut buf) = tx_buffer {
+                                            // Inside MULTI block: buffer the command
+                                            debug!("Replication: buffering command in MULTI block: {}", cmd_name_lower);
+                                            buf.push(cmd);
+                                        } else {
+                                            // Normal command outside transaction
+                                            let cmd_handler = crate::command::handler::CommandHandler::new(self.engine.clone());
+                                            if let Err(e) = cmd_handler.process(cmd, current_db).await {
+                                                error!("Error processing command from master: {}", e);
+                                            }
+                                        }
+                                    }
                                 }
-                                
+
                                 // Update replication offset
                                 let mut state = self.state.write().await;
                                 state.replication_offset += 1;
