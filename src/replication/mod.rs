@@ -588,7 +588,7 @@ impl ReplicationManager {
             "setbit" | "bitop" | "bitfield" |
             "pfadd" | "pfmerge" |
             "geoadd" | "geosearchstore" | "georadius" | "georadiusbymember" |
-            "xadd" | "xtrim" | "xdel" | "xgroup" | "xack" | "xclaim" | "xautoclaim" |
+            "xadd" | "xtrim" | "xdel" | "xgroup" | "xack" | "xclaim" | "xautoclaim" | "xreadgroup" |
             "flushall" | "flushdb" | "swapdb" | "select" |
             "restore" |
             "json.set" | "json.del" | "json.arrappend" | "json.arrtrim" | "json.numincrby"

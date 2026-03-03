@@ -1710,4 +1710,116 @@ mod tests {
             "consumer should be recreated via XCLAIM"
         );
     }
+
+    #[tokio::test]
+    async fn test_aof_xreadgroup_persistence_round_trip() {
+        use crate::storage::stream::StreamData;
+
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+
+        // Write AOF with XADD entries, XGROUP CREATE, and XREADGROUP to create consumer state
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                // Add entries
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"events".to_vec(),
+                        b"1-0".to_vec(),
+                        b"type".to_vec(),
+                        b"login".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"events".to_vec(),
+                        b"2-0".to_vec(),
+                        b"type".to_vec(),
+                        b"logout".to_vec(),
+                    ],
+                },
+                RespCommand {
+                    name: b"XADD".to_vec(),
+                    args: vec![
+                        b"events".to_vec(),
+                        b"3-0".to_vec(),
+                        b"type".to_vec(),
+                        b"purchase".to_vec(),
+                    ],
+                },
+                // Create consumer group
+                RespCommand {
+                    name: b"XGROUP".to_vec(),
+                    args: vec![
+                        b"CREATE".to_vec(),
+                        b"events".to_vec(),
+                        b"processors".to_vec(),
+                        b"0".to_vec(),
+                    ],
+                },
+                // XREADGROUP: consumer reads entries, creating PEL entries
+                RespCommand {
+                    name: b"XREADGROUP".to_vec(),
+                    args: vec![
+                        b"GROUP".to_vec(),
+                        b"processors".to_vec(),
+                        b"worker1".to_vec(),
+                        b"COUNT".to_vec(),
+                        b"2".to_vec(),
+                        b"STREAMS".to_vec(),
+                        b"events".to_vec(),
+                        b">".to_vec(),
+                    ],
+                },
+            ],
+        );
+
+        // Load AOF into first engine
+        let engine1 = create_test_engine();
+        let aof1 = AofPersistence::new(engine1.clone(), aof_path.clone());
+        aof1.load().await.unwrap();
+
+        // Verify consumer state after initial load
+        let val1 = engine1.get(b"events").await.unwrap().expect("stream should exist");
+        let stream1: StreamData = bincode::deserialize(&val1).unwrap();
+        assert_eq!(stream1.entries.len(), 3, "should have 3 stream entries");
+        let group1 = &stream1.groups["processors"];
+        assert_eq!(group1.pel.len(), 2, "should have 2 pending entries from XREADGROUP");
+        assert!(
+            group1.consumers.contains_key("worker1"),
+            "worker1 consumer should exist"
+        );
+        let worker1 = &group1.consumers["worker1"];
+        assert_eq!(
+            worker1.pending.len(),
+            2,
+            "worker1 should have 2 pending IDs"
+        );
+
+        // Now reload from the same AOF into a fresh engine to verify persistence
+        let engine2 = create_test_engine();
+        let aof2 = AofPersistence::new(engine2.clone(), aof_path);
+        aof2.load().await.unwrap();
+
+        let val2 = engine2.get(b"events").await.unwrap().expect("stream should exist after reload");
+        let stream2: StreamData = bincode::deserialize(&val2).unwrap();
+        assert_eq!(stream2.entries.len(), 3, "entries survive reload");
+        assert!(
+            stream2.groups.contains_key("processors"),
+            "consumer group survives reload"
+        );
+        let group2 = &stream2.groups["processors"];
+        assert_eq!(
+            group2.pel.len(),
+            2,
+            "pending entries survive reload"
+        );
+        assert!(
+            group2.consumers.contains_key("worker1"),
+            "consumer survives reload"
+        );
+    }
 }
