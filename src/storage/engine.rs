@@ -1290,7 +1290,11 @@ impl StorageEngine {
         KeyLockGuard { _guards: guards }
     }
 
-    /// Process a command (for AOF replay)
+    /// Bootstrap fallback for AOF replay — handles a limited subset of commands.
+    /// The primary replay path now uses `CommandHandler::process()` for full coverage.
+    /// This method is retained for compatibility with existing tests and as a
+    /// lightweight fallback that doesn't require a full CommandHandler instance.
+    #[allow(dead_code)]
     pub async fn process_command(&self, command: &RespCommand) -> StorageResult<()> {
         let upper_name: Vec<u8> = command.name.iter().map(|b| b.to_ascii_uppercase()).collect();
 
