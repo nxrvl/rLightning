@@ -333,13 +333,13 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** RDB/AOF persistence only operates on DB 0. Data in databases 1-15 is lost on restart.
 
-- [ ] AOF writer: prefix command batches with `SELECT db_index` when command targets non-zero database
-- [ ] AOF replay: handle SELECT commands to route replayed commands to correct database (Task 12 may partially solve this)
-- [ ] RDB save: iterate all 16 databases, write DB selector marker per database
-- [ ] RDB load: handle DB selector markers, restore to correct databases
-- [ ] Write test: SET keys in DB 0 and DB 3, save (RDB + AOF), restart, verify both databases restored
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] AOF writer: prefix command batches with `SELECT db_index` when command targets non-zero database
+- [x] AOF replay: handle SELECT commands to route replayed commands to correct database (Task 12 may partially solve this)
+- [x] RDB save: iterate all 16 databases, write DB selector marker per database
+- [x] RDB load: handle DB selector markers, restore to correct databases
+- [x] Write test: SET keys in DB 0 and DB 3, save (RDB + AOF), restart, verify both databases restored
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
