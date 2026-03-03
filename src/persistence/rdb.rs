@@ -735,4 +735,68 @@ mod tests {
         let result = rdb2.load().await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_rdb_save_load_multi_db() {
+        use crate::storage::engine::CURRENT_DB_INDEX;
+
+        let engine = create_test_engine();
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        drop(temp);
+
+        // Set keys in DB 0
+        engine.set(b"db0_key".to_vec(), b"db0_value".to_vec(), None).await.unwrap();
+
+        // Set keys in DB 3
+        CURRENT_DB_INDEX.scope(3, async {
+            engine.set(b"db3_key".to_vec(), b"db3_value".to_vec(), None).await.unwrap();
+            engine.set(b"db3_another".to_vec(), b"another_value".to_vec(), None).await.unwrap();
+        }).await;
+
+        // Set keys in DB 7 with TTL
+        CURRENT_DB_INDEX.scope(7, async {
+            engine.set(b"db7_key".to_vec(), b"db7_value".to_vec(), Some(Duration::from_secs(3600))).await.unwrap();
+        }).await;
+
+        // Save
+        let rdb = RdbPersistence::new(engine.clone(), path.clone());
+        rdb.save().await.unwrap();
+
+        // Load into a new engine
+        let engine2 = create_test_engine();
+        let rdb2 = RdbPersistence::new(engine2.clone(), path);
+        rdb2.load().await.unwrap();
+
+        // Verify DB 0
+        let val = engine2.get(b"db0_key").await.unwrap();
+        assert_eq!(val, Some(b"db0_value".to_vec()));
+
+        // Verify DB 0 does NOT have DB 3's keys
+        let val = engine2.get(b"db3_key").await.unwrap();
+        assert_eq!(val, None);
+
+        // Verify DB 3
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine2.get(b"db3_key").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"db3_value".to_vec()));
+
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine2.get(b"db3_another").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"another_value".to_vec()));
+
+        // Verify DB 3 does NOT have DB 0's keys
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine2.get(b"db0_key").await.unwrap()
+        }).await;
+        assert_eq!(val, None);
+
+        // Verify DB 7 (with TTL)
+        let val = CURRENT_DB_INDEX.scope(7, async {
+            engine2.get(b"db7_key").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"db7_value".to_vec()));
+    }
 }

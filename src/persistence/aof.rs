@@ -1822,4 +1822,141 @@ mod tests {
             "consumer survives reload"
         );
     }
+
+    #[tokio::test]
+    async fn test_aof_multi_db_persistence() {
+        use crate::storage::engine::CURRENT_DB_INDEX;
+
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+
+        // Write an AOF file with commands targeting multiple databases
+        write_resp_commands_to_file(
+            &aof_path,
+            &[
+                // DB 0: SET db0_key db0_value
+                RespCommand {
+                    name: b"SELECT".to_vec(),
+                    args: vec![b"0".to_vec()],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"db0_key".to_vec(), b"db0_value".to_vec()],
+                },
+                // DB 3: SET db3_key db3_value, SET db3_another another_value
+                RespCommand {
+                    name: b"SELECT".to_vec(),
+                    args: vec![b"3".to_vec()],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"db3_key".to_vec(), b"db3_value".to_vec()],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"db3_another".to_vec(), b"another_value".to_vec()],
+                },
+                // Back to DB 0: SET db0_second second_value
+                RespCommand {
+                    name: b"SELECT".to_vec(),
+                    args: vec![b"0".to_vec()],
+                },
+                RespCommand {
+                    name: b"SET".to_vec(),
+                    args: vec![b"db0_second".to_vec(), b"second_value".to_vec()],
+                },
+            ],
+        );
+
+        // Load into engine
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine.clone(), aof_path);
+        aof.load().await.unwrap();
+
+        // Verify DB 0 keys
+        let val = engine.get(b"db0_key").await.unwrap();
+        assert_eq!(val, Some(b"db0_value".to_vec()));
+
+        let val = engine.get(b"db0_second").await.unwrap();
+        assert_eq!(val, Some(b"second_value".to_vec()));
+
+        // Verify DB 0 does NOT have DB 3's keys
+        let val = engine.get(b"db3_key").await.unwrap();
+        assert_eq!(val, None, "DB 3 key should not be in DB 0");
+
+        // Verify DB 3 keys
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine.get(b"db3_key").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"db3_value".to_vec()));
+
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine.get(b"db3_another").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"another_value".to_vec()));
+
+        // Verify DB 3 does NOT have DB 0's keys
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine.get(b"db0_key").await.unwrap()
+        }).await;
+        assert_eq!(val, None, "DB 0 key should not be in DB 3");
+    }
+
+    #[tokio::test]
+    async fn test_aof_rewrite_multi_db_round_trip() {
+        use crate::storage::engine::CURRENT_DB_INDEX;
+
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+
+        // Create engine with data in multiple databases
+        let engine = create_test_engine();
+
+        // DB 0
+        engine.set(b"key0".to_vec(), b"val0".to_vec(), None).await.unwrap();
+
+        // DB 3
+        CURRENT_DB_INDEX.scope(3, async {
+            engine.set(b"key3".to_vec(), b"val3".to_vec(), None).await.unwrap();
+        }).await;
+
+        // DB 7
+        CURRENT_DB_INDEX.scope(7, async {
+            engine.set(b"key7".to_vec(), b"val7".to_vec(), None).await.unwrap();
+        }).await;
+
+        // Rewrite AOF
+        let aof = AofPersistence::new(engine.clone(), aof_path.clone());
+        aof.rewrite().await.unwrap();
+
+        // Load into a fresh engine and verify
+        let engine2 = create_test_engine();
+        let aof2 = AofPersistence::new(engine2.clone(), aof_path);
+        aof2.load().await.unwrap();
+
+        // DB 0
+        let val = engine2.get(b"key0").await.unwrap();
+        assert_eq!(val, Some(b"val0".to_vec()));
+
+        // DB 3
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine2.get(b"key3").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"val3".to_vec()));
+
+        // DB 7
+        let val = CURRENT_DB_INDEX.scope(7, async {
+            engine2.get(b"key7").await.unwrap()
+        }).await;
+        assert_eq!(val, Some(b"val7".to_vec()));
+
+        // Cross-DB isolation
+        let val = engine2.get(b"key3").await.unwrap();
+        assert_eq!(val, None, "DB 3 key should not be in DB 0");
+
+        let val = CURRENT_DB_INDEX.scope(3, async {
+            engine2.get(b"key0").await.unwrap()
+        }).await;
+        assert_eq!(val, None, "DB 0 key should not be in DB 3");
+    }
 }
