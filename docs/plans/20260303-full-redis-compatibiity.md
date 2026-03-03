@@ -126,12 +126,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** All 11 list commands use get→deserialize→modify→serialize→set pattern with separate `engine.get()` and `engine.set_with_type_preserve_ttl()`. Race condition under concurrent access.
 
-- [ ] **Push operations**: LPUSH, RPUSH, LPUSHX, RPUSHX — `atomic_modify()` with `Vec<Vec<u8>>` deserialization
-- [ ] **Pop operations**: LPOP, RPOP — `atomic_modify()`, remove from front/back, handle count argument
-- [ ] **Modify operations**: LTRIM, LSET, LREM, LINSERT, LMOVE — `atomic_modify()` for each
-- [ ] Write concurrent tests: parallel LPUSH/RPUSH from multiple tasks, verify final list length = sum of all pushes
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] **Push operations**: LPUSH, RPUSH, LPUSHX, RPUSHX — `atomic_modify()` with `Vec<Vec<u8>>` deserialization
+- [x] **Pop operations**: LPOP, RPOP — `atomic_modify()`, remove from front/back, handle count argument
+- [x] **Modify operations**: LTRIM, LSET, LREM, LINSERT, LMOVE — `atomic_modify()` for each
+- [x] Write concurrent tests: parallel LPUSH/RPUSH from multiple tasks, verify final list length = sum of all pushes
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
