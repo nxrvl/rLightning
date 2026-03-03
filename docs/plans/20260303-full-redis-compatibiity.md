@@ -369,11 +369,11 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** Some commands that should return RESP3 Map type in RESP3 mode still return plain arrays.
 
-- [ ] Audit all commands returning key-value pairs (XINFO STREAM, XINFO GROUPS, COMMAND INFO, CLIENT INFO, SLOWLOG GET, etc.)
-- [ ] Add `convert_for_resp3()` support for remaining commands
-- [ ] Write test: connect with HELLO 3, verify Map responses for applicable commands
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Audit all commands returning key-value pairs (XINFO STREAM, XINFO GROUPS, COMMAND INFO, CLIENT INFO, SLOWLOG GET, etc.)
+- [x] Add `convert_for_resp3()` support for remaining commands
+- [x] Write test: connect with HELLO 3, verify Map responses for applicable commands
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
