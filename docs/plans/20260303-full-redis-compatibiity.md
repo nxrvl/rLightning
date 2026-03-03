@@ -350,15 +350,15 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** `get_encoding()` (~line 1669) returns "listpack" for all collection types regardless of size.
 
-- [ ] Add size-based heuristics matching Redis behavior:
+- [x] Add size-based heuristics matching Redis behavior:
   - String: integer value → "int", <=44 bytes → "embstr", else "raw"
   - List: <=128 elements && all <=64 bytes → "listpack", else "quicklist"
   - Set: <=128 elements && all <=64 bytes → "listpack", else "hashtable"
   - Hash: <=128 fields && all <=64 bytes → "listpack", else "hashtable"
   - ZSet: <=128 elements && all <=64 bytes → "listpack", else "skiplist"
-- [ ] Write tests: create small/large collections, verify OBJECT ENCODING returns correct values
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Write tests: create small/large collections, verify OBJECT ENCODING returns correct values
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

@@ -1270,6 +1270,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_object_encoding_collections_small() {
+        use crate::storage::item::RedisDataType;
+        use std::collections::{HashMap, HashSet};
+
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Small list (<=128 elements, all <=64 bytes) -> "listpack"
+        let small_list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        engine
+            .set_with_type(b"small_list".to_vec(), bincode::serialize(&small_list).unwrap(), RedisDataType::List, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"small_list".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
+
+        // Small set (<=128 elements, all <=64 bytes) -> "listpack"
+        let mut small_set: HashSet<Vec<u8>> = HashSet::new();
+        small_set.insert(b"x".to_vec());
+        small_set.insert(b"y".to_vec());
+        engine
+            .set_with_type(b"small_set".to_vec(), bincode::serialize(&small_set).unwrap(), RedisDataType::Set, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"small_set".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
+
+        // Small hash (<=128 fields, all <=64 bytes) -> "listpack"
+        let mut small_hash: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        small_hash.insert(b"field1".to_vec(), b"val1".to_vec());
+        small_hash.insert(b"field2".to_vec(), b"val2".to_vec());
+        engine
+            .set_with_type(b"small_hash".to_vec(), bincode::serialize(&small_hash).unwrap(), RedisDataType::Hash, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"small_hash".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
+
+        // Small zset (<=128 elements, all <=64 bytes) -> "listpack"
+        use crate::command::types::sorted_set::SortedSetData;
+        let mut small_zset = SortedSetData::new();
+        small_zset.insert(1.0, b"mem1".to_vec());
+        small_zset.insert(2.0, b"mem2".to_vec());
+        engine
+            .set_with_type(b"small_zset".to_vec(), bincode::serialize(&small_zset).unwrap(), RedisDataType::ZSet, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"small_zset".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_object_encoding_collections_large() {
+        use crate::storage::item::RedisDataType;
+        use std::collections::{HashMap, HashSet};
+
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Large list (>128 elements) -> "quicklist"
+        let large_list: Vec<Vec<u8>> = (0..200).map(|i| format!("item{}", i).into_bytes()).collect();
+        engine
+            .set_with_type(b"large_list".to_vec(), bincode::serialize(&large_list).unwrap(), RedisDataType::List, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"large_list".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"quicklist".to_vec())));
+
+        // Large set (>128 elements) -> "hashtable"
+        let large_set: HashSet<Vec<u8>> = (0..200).map(|i| format!("item{}", i).into_bytes()).collect();
+        engine
+            .set_with_type(b"large_set".to_vec(), bincode::serialize(&large_set).unwrap(), RedisDataType::Set, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"large_set".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
+
+        // Large hash (>128 fields) -> "hashtable"
+        let mut large_hash: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        for i in 0..200 {
+            large_hash.insert(format!("f{}", i).into_bytes(), format!("v{}", i).into_bytes());
+        }
+        engine
+            .set_with_type(b"large_hash".to_vec(), bincode::serialize(&large_hash).unwrap(), RedisDataType::Hash, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"large_hash".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
+
+        // Large zset (>128 elements) -> "skiplist"
+        use crate::command::types::sorted_set::SortedSetData;
+        let mut large_zset = SortedSetData::new();
+        for i in 0..200 {
+            large_zset.insert(i as f64, format!("m{}", i).into_bytes());
+        }
+        engine
+            .set_with_type(b"large_zset".to_vec(), bincode::serialize(&large_zset).unwrap(), RedisDataType::ZSet, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"large_zset".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"skiplist".to_vec())));
+
+        // List with large element (>64 bytes) -> "quicklist"
+        let list_big_elem: Vec<Vec<u8>> = vec!["a".repeat(100).into_bytes()];
+        engine
+            .set_with_type(b"list_big_elem".to_vec(), bincode::serialize(&list_big_elem).unwrap(), RedisDataType::List, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"list_big_elem".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"quicklist".to_vec())));
+
+        // Set with large element (>64 bytes) -> "hashtable"
+        let mut set_big_elem: HashSet<Vec<u8>> = HashSet::new();
+        set_big_elem.insert("a".repeat(100).into_bytes());
+        engine
+            .set_with_type(b"set_big_elem".to_vec(), bincode::serialize(&set_big_elem).unwrap(), RedisDataType::Set, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"set_big_elem".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
+
+        // Hash with large value (>64 bytes) -> "hashtable"
+        let mut hash_big_val: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        hash_big_val.insert(b"k".to_vec(), "a".repeat(100).into_bytes());
+        engine
+            .set_with_type(b"hash_big_val".to_vec(), bincode::serialize(&hash_big_val).unwrap(), RedisDataType::Hash, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"hash_big_val".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
+
+        // Hash with large key (>64 bytes) -> "hashtable"
+        let mut hash_big_key: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        hash_big_key.insert("k".repeat(100).into_bytes(), b"v".to_vec());
+        engine
+            .set_with_type(b"hash_big_key".to_vec(), bincode::serialize(&hash_big_key).unwrap(), RedisDataType::Hash, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"hash_big_key".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
+
+        // ZSet with large member (>64 bytes) -> "skiplist"
+        let mut zset_big_mem = SortedSetData::new();
+        zset_big_mem.insert(1.0, "m".repeat(100).into_bytes());
+        engine
+            .set_with_type(b"zset_big_mem".to_vec(), bincode::serialize(&zset_big_mem).unwrap(), RedisDataType::ZSet, None)
+            .await
+            .unwrap();
+        let result = object(&engine, &[b"ENCODING".to_vec(), b"zset_big_mem".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"skiplist".to_vec())));
+    }
+
+    #[tokio::test]
     async fn test_object_refcount() {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
