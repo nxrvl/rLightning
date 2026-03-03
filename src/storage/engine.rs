@@ -744,18 +744,70 @@ impl StorageEngine {
     /// Set a key-value pair preserving the existing TTL if present.
     /// Use this for collection-type modifications (lists, sets, sorted sets, streams, geo)
     /// where updating the value should not reset the key's expiration.
+    ///
+    /// This implementation uses a single DashMap entry operation to atomically
+    /// read the existing TTL and write the new value, avoiding TOCTOU races.
     pub async fn set_with_type_preserve_ttl(&self, key: Vec<u8>, value: Vec<u8>, data_type: RedisDataType) -> StorageResult<()> {
-        // Read existing TTL before overwriting
-        let existing_ttl = if let Some(entry) = self.active_db().get(&key) {
-            if entry.value().is_expired() {
-                None
-            } else {
-                entry.value().ttl()
+        // Check size limits
+        if key.len() > self.config.max_key_size {
+            return Err(StorageError::ValueTooLarge);
+        }
+
+        if value.len() > self.config.max_value_size {
+            return Err(StorageError::ValueTooLarge);
+        }
+
+        let required_size = Self::calculate_size(&key, &value);
+
+        // Ensure we have enough memory
+        self.maybe_evict(required_size).await?;
+
+        let mut item = StorageItem::new_with_type(value, data_type);
+
+        // Single DashMap entry operation: read existing TTL + write new value atomically
+        let (is_new_key, preserved_expires_at) = match self.active_db().entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                // Read TTL from existing entry while holding the shard lock
+                let existing_expires_at = if !entry.get().is_expired() {
+                    entry.get().expires_at
+                } else {
+                    None
+                };
+
+                // Preserve the existing expiration on the new item
+                item.expires_at = existing_expires_at;
+
+                let old_size = Self::calculate_size(entry.key(), &entry.get().value);
+                if old_size > 0 {
+                    self.current_memory.fetch_sub(old_size as u64, Ordering::AcqRel);
+                }
+                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                entry.insert(item);
+                self.bump_key_version(&key);
+                (false, existing_expires_at)
             }
-        } else {
-            None
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                self.current_memory.fetch_add(required_size as u64, Ordering::AcqRel);
+                let _ref = entry.insert(item);
+                self.bump_key_version(&key);
+                (true, None)
+            }
         };
-        self.set_with_type(key, value, data_type, existing_ttl).await
+
+        // Re-add to expiration queue if TTL was preserved (ensures queue consistency)
+        if let Some(expires_at) = preserved_expires_at {
+            self.add_to_expiration_queue(key.clone(), expires_at).await;
+        }
+
+        // Update prefix index and key count for new keys
+        if is_new_key {
+            self.update_prefix_indices(&key, true).await;
+            self.key_count.fetch_add(1, Ordering::AcqRel);
+        }
+        // Increment write counters
+        self.increment_write_counters().await;
+
+        Ok(())
     }
 
     /// Get a value from the storage engine
@@ -3141,4 +3193,148 @@ mod tests {
         let mem = storage.get_used_memory();
         assert_eq!(mem, 0, "Memory should be 0 after setting and deleting all keys");
     }
-} 
+
+    #[tokio::test]
+    async fn test_set_with_type_preserve_ttl_atomic() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Set a key with a TTL
+        let ttl = Duration::from_secs(300);
+        storage
+            .set_with_type(
+                b"ttl_key".to_vec(),
+                b"original_value".to_vec(),
+                RedisDataType::ZSet,
+                Some(ttl),
+            )
+            .await
+            .unwrap();
+
+        // Verify TTL exists
+        let remaining = storage.ttl(b"ttl_key").await.unwrap();
+        assert!(remaining.is_some(), "Key should have a TTL");
+        assert!(remaining.unwrap().as_secs() > 200, "TTL should be close to 300s");
+
+        // Now overwrite value with set_with_type_preserve_ttl
+        storage
+            .set_with_type_preserve_ttl(
+                b"ttl_key".to_vec(),
+                b"new_value".to_vec(),
+                RedisDataType::ZSet,
+            )
+            .await
+            .unwrap();
+
+        // Value should be updated
+        let val = storage.get(b"ttl_key").await.unwrap();
+        assert_eq!(val, Some(b"new_value".to_vec()));
+
+        // TTL should be preserved
+        let remaining = storage.ttl(b"ttl_key").await.unwrap();
+        assert!(remaining.is_some(), "TTL should be preserved after update");
+        assert!(remaining.unwrap().as_secs() > 200, "TTL should still be close to 300s");
+    }
+
+    #[tokio::test]
+    async fn test_set_with_type_preserve_ttl_no_existing_ttl() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Set a key without TTL
+        storage
+            .set_with_type(
+                b"no_ttl_key".to_vec(),
+                b"original".to_vec(),
+                RedisDataType::ZSet,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Overwrite with preserve_ttl - should have no TTL since original had none
+        storage
+            .set_with_type_preserve_ttl(
+                b"no_ttl_key".to_vec(),
+                b"updated".to_vec(),
+                RedisDataType::ZSet,
+            )
+            .await
+            .unwrap();
+
+        let val = storage.get(b"no_ttl_key").await.unwrap();
+        assert_eq!(val, Some(b"updated".to_vec()));
+
+        let remaining = storage.ttl(b"no_ttl_key").await.unwrap();
+        assert!(remaining.is_none(), "Key should not have TTL");
+    }
+
+    #[tokio::test]
+    async fn test_set_with_type_preserve_ttl_new_key() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Call preserve_ttl on a key that doesn't exist yet
+        storage
+            .set_with_type_preserve_ttl(
+                b"brand_new_key".to_vec(),
+                b"value".to_vec(),
+                RedisDataType::ZSet,
+            )
+            .await
+            .unwrap();
+
+        let val = storage.get(b"brand_new_key").await.unwrap();
+        assert_eq!(val, Some(b"value".to_vec()));
+
+        let remaining = storage.ttl(b"brand_new_key").await.unwrap();
+        assert!(remaining.is_none(), "New key should not have TTL");
+    }
+
+    #[tokio::test]
+    async fn test_set_with_type_preserve_ttl_concurrent() {
+        let config = StorageConfig::default();
+        let storage = Arc::new(StorageEngine::new(config));
+
+        // Set a key with TTL
+        let ttl = Duration::from_secs(300);
+        storage
+            .set_with_type(
+                b"concurrent_ttl".to_vec(),
+                b"initial".to_vec(),
+                RedisDataType::ZSet,
+                Some(ttl),
+            )
+            .await
+            .unwrap();
+
+        // Concurrently update the value multiple times with preserve_ttl
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let s = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                let value = format!("value_{}", i).into_bytes();
+                s.set_with_type_preserve_ttl(
+                    b"concurrent_ttl".to_vec(),
+                    value,
+                    RedisDataType::ZSet,
+                )
+                .await
+                .unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Key should still exist with some value
+        let val = storage.get(b"concurrent_ttl").await.unwrap();
+        assert!(val.is_some(), "Key should exist after concurrent updates");
+
+        // TTL should still be preserved
+        let remaining = storage.ttl(b"concurrent_ttl").await.unwrap();
+        assert!(remaining.is_some(), "TTL should be preserved after concurrent updates");
+        assert!(remaining.unwrap().as_secs() > 200, "TTL should still be close to 300s");
+    }
+}
