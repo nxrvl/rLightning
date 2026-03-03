@@ -32,6 +32,7 @@ import tests.memory
 import tests.replication
 import tests.cluster
 import tests.sentinel
+import tests.streams_advanced
 import tests.python_specific
 
 
