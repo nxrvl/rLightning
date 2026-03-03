@@ -93,13 +93,13 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** SETRANGE, GETEX, GETDEL, GET have TOCTOU race conditions — separate `engine.get()` then `engine.set()` allows concurrent modification between read and write.
 
-- [ ] **SETRANGE** (lines 373-422): Replace get→modify→set with `atomic_modify()` that checks type, pads, overwrites range, returns new length
-- [ ] **GETEX** (lines 659-752): Create `atomic_get_with_expire()` or use `atomic_modify()` to read value and set/clear TTL in one lock hold
-- [ ] **GETDEL**: Verify it uses existing `atomic_getdel()` primitive; fix if not
-- [ ] **GET**: Replace separate type-check + value-read with single DashMap lookup
-- [ ] Write concurrent tests: multiple tokio tasks doing SETRANGE on overlapping ranges simultaneously
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] **SETRANGE** (lines 373-422): Replace get→modify→set with `atomic_modify()` that checks type, pads, overwrites range, returns new length
+- [x] **GETEX** (lines 659-752): Create `atomic_get_set_expiry()` to read value and set/clear TTL in one lock hold
+- [x] **GETDEL**: Verified it uses existing `atomic_getdel()` primitive — already correct
+- [x] **GET**: Replace separate type-check + value-read with single `atomic_read()` DashMap lookup
+- [x] Write concurrent tests: multiple tokio tasks doing SETRANGE on overlapping ranges simultaneously
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
