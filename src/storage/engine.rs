@@ -210,11 +210,20 @@ impl StorageEngine {
     fn start_expiration_task(engine: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = engine.expiration_timer.write().await;
+            let mut metadata_cleanup_counter: u64 = 0;
             
             loop {
                 interval.tick().await;
                 // Use priority queue for efficient expiration + probabilistic sampling
                 engine.process_expired_keys().await;
+                
+                // Periodically clean up stale key_versions and key_locks entries
+                // to prevent unbounded memory growth from WATCH/transaction metadata
+                metadata_cleanup_counter += 1;
+                if metadata_cleanup_counter >= 60 {
+                    metadata_cleanup_counter = 0;
+                    engine.cleanup_stale_metadata();
+                }
             }
         });
     }
@@ -474,6 +483,92 @@ impl StorageEngine {
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                 }
             }
+        }
+    }
+
+    /// Clean up stale entries in key_versions and key_locks DashMaps.
+    /// Removes entries for keys that no longer exist in any database.
+    /// For key_locks, only removes entries where no one is holding the lock
+    /// (Arc strong_count == 1, meaning only the DashMap holds a reference).
+    /// Called periodically from the background expiration task.
+    fn cleanup_stale_metadata(&self) {
+        // Phase 1: Clean up key_versions
+        // Collect stale keys first to avoid holding DashMap shard locks while checking data stores
+        let stale_versions: Vec<Vec<u8>> = self.key_versions.iter()
+            .filter(|entry| {
+                let scoped_key = entry.key();
+                // Extract db_index and original key from the scoped key
+                if scoped_key.len() < 8 {
+                    return true; // Malformed key, remove it
+                }
+                let db_index_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or([0; 8]);
+                let db_index = u64::from_le_bytes(db_index_bytes) as usize;
+                let original_key = &scoped_key[8..];
+
+                if db_index >= NUM_DATABASES {
+                    return true; // Invalid db_index, remove it
+                }
+
+                // Check if key exists in the corresponding database
+                let db = self.get_db_by_index(db_index);
+                !db.contains_key(original_key)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_versions {
+            // Double-check before removing: the key might have been re-created
+            // between our scan and this removal
+            let scoped_key = &key;
+            if scoped_key.len() >= 8 {
+                let db_index_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or([0; 8]);
+                let db_index = u64::from_le_bytes(db_index_bytes) as usize;
+                let original_key = &scoped_key[8..];
+                if db_index < NUM_DATABASES {
+                    let db = self.get_db_by_index(db_index);
+                    if !db.contains_key(original_key) {
+                        self.key_versions.remove(scoped_key);
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Clean up key_locks
+        // Only remove lock entries where no one is holding the mutex
+        // (Arc strong_count == 1 means only the DashMap holds a reference)
+        let stale_locks: Vec<Vec<u8>> = self.key_locks.iter()
+            .filter(|entry| {
+                let scoped_key = entry.key();
+                let arc = entry.value();
+
+                // If someone is holding the lock, don't remove it
+                if Arc::strong_count(arc) > 1 {
+                    return false;
+                }
+
+                // Extract db_index and original key from the scoped key
+                if scoped_key.len() < 8 {
+                    return true; // Malformed key, remove it
+                }
+                let db_index_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or([0; 8]);
+                let db_index = u64::from_le_bytes(db_index_bytes) as usize;
+                let original_key = &scoped_key[8..];
+
+                if db_index >= NUM_DATABASES {
+                    return true; // Invalid db_index, remove it
+                }
+
+                // Check if key exists in the corresponding database
+                let db = self.get_db_by_index(db_index);
+                !db.contains_key(original_key)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_locks {
+            // Use remove_if pattern: only remove if the Arc is still unshared
+            // This prevents removing a lock that was just acquired by another task
+            self.key_locks.remove_if(&key, |_, arc| Arc::strong_count(arc) == 1);
         }
     }
     
@@ -1138,6 +1233,24 @@ impl StorageEngine {
     pub fn get_key_version_for_db(&self, key: &[u8], db_index: usize) -> u64 {
         let scoped = Self::db_scoped_key(db_index, key);
         self.key_versions.get(&scoped).map(|v| *v).unwrap_or(0)
+    }
+
+    /// Get the number of entries in the key_versions map (for testing/monitoring)
+    #[cfg(test)]
+    pub fn key_versions_len(&self) -> usize {
+        self.key_versions.len()
+    }
+
+    /// Get the number of entries in the key_locks map (for testing/monitoring)
+    #[cfg(test)]
+    pub fn key_locks_len(&self) -> usize {
+        self.key_locks.len()
+    }
+
+    /// Trigger metadata cleanup (exposed for testing)
+    #[cfg(test)]
+    pub fn trigger_metadata_cleanup(&self) {
+        self.cleanup_stale_metadata();
     }
 
     /// Check if the current task is inside a MULTI/EXEC transaction execution.
@@ -3336,5 +3449,141 @@ mod tests {
         let remaining = storage.ttl(b"concurrent_ttl").await.unwrap();
         assert!(remaining.is_some(), "TTL should be preserved after concurrent updates");
         assert!(remaining.unwrap().as_secs() > 200, "TTL should still be close to 300s");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_stale_metadata() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Create many keys and WATCH them (bump their versions)
+        let num_keys = 10_000;
+        for i in 0..num_keys {
+            let key = format!("watched_key_{}", i).into_bytes();
+            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            // Bump key version to simulate WATCH
+            storage.bump_key_version(&key);
+        }
+
+        // Also create some key_locks entries by using lock_keys
+        for i in 0..100 {
+            let key = format!("locked_key_{}", i).into_bytes();
+            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            // Lock and immediately release to populate key_locks map
+            let _guard = storage.lock_keys(&[key]).await;
+            // guard drops here, releasing the lock
+        }
+
+        // Verify maps have entries
+        assert!(storage.key_versions_len() >= num_keys,
+            "key_versions should have at least {} entries, got {}", num_keys, storage.key_versions_len());
+        assert!(storage.key_locks_len() >= 100,
+            "key_locks should have at least 100 entries, got {}", storage.key_locks_len());
+
+        // Delete all keys from data store
+        for i in 0..num_keys {
+            let key = format!("watched_key_{}", i).into_bytes();
+            storage.del(&key).await.unwrap();
+        }
+        for i in 0..100 {
+            let key = format!("locked_key_{}", i).into_bytes();
+            storage.del(&key).await.unwrap();
+        }
+
+        // Before cleanup, maps should still have entries
+        assert!(storage.key_versions_len() >= num_keys,
+            "key_versions should still have entries before cleanup");
+        assert!(storage.key_locks_len() >= 100,
+            "key_locks should still have entries before cleanup");
+
+        // Run cleanup
+        storage.trigger_metadata_cleanup();
+
+        // After cleanup, maps should be much smaller (ideally empty for these keys)
+        assert!(storage.key_versions_len() < num_keys / 2,
+            "key_versions should have shrunk significantly, got {}", storage.key_versions_len());
+        assert!(storage.key_locks_len() < 50,
+            "key_locks should have shrunk significantly, got {}", storage.key_locks_len());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_preserves_active_keys() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Create keys that will remain
+        for i in 0..100 {
+            let key = format!("active_key_{}", i).into_bytes();
+            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage.bump_key_version(&key);
+        }
+
+        // Create keys that will be deleted
+        for i in 0..100 {
+            let key = format!("stale_key_{}", i).into_bytes();
+            storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+            storage.bump_key_version(&key);
+        }
+
+        // Delete only the stale keys
+        for i in 0..100 {
+            let key = format!("stale_key_{}", i).into_bytes();
+            storage.del(&key).await.unwrap();
+        }
+
+        let versions_before = storage.key_versions_len();
+        assert!(versions_before >= 200, "Should have at least 200 version entries");
+
+        // Run cleanup
+        storage.trigger_metadata_cleanup();
+
+        // Active keys should still have their versions
+        let versions_after = storage.key_versions_len();
+        assert!(versions_after >= 100,
+            "Should still have at least 100 active version entries, got {}", versions_after);
+        assert!(versions_after < versions_before,
+            "Should have fewer entries after cleanup ({} should be < {})", versions_after, versions_before);
+
+        // Verify active keys still have valid versions (non-zero since we bumped them)
+        for i in 0..100 {
+            let key = format!("active_key_{}", i).into_bytes();
+            let version = storage.get_key_version(&key);
+            assert!(version > 0, "Active key {} should have non-zero version", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_skips_held_locks() {
+        let config = StorageConfig::default();
+        let storage = Arc::new(StorageEngine::new(config));
+
+        // Create a key and acquire its lock
+        let key = b"held_key".to_vec();
+        storage.set(key.clone(), b"value".to_vec(), None).await.unwrap();
+
+        // Acquire lock (don't drop the guard)
+        let guard = storage.lock_keys(&[key.clone()]).await;
+
+        // Delete the key from data store while lock is held
+        storage.del(&key).await.unwrap();
+
+        let locks_before = storage.key_locks_len();
+        assert!(locks_before >= 1, "Should have at least 1 lock entry");
+
+        // Run cleanup - should NOT remove the held lock
+        storage.trigger_metadata_cleanup();
+
+        let locks_after = storage.key_locks_len();
+        assert!(locks_after >= 1,
+            "Held lock should not be removed by cleanup, got {} locks", locks_after);
+
+        // Now drop the guard
+        drop(guard);
+
+        // Run cleanup again - now it should be removable
+        storage.trigger_metadata_cleanup();
+
+        // The lock for the deleted key should now be cleaned up
+        // (it might still be there if there are other entries, but at least it's eligible)
     }
 }
