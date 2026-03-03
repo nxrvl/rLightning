@@ -187,12 +187,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** `key_versions` (line 149) and `key_locks` (line 154) DashMaps grow forever. Every WATCH'd or transacted key gets an entry that is never removed. Memory leak over time.
 
-- [ ] Add `cleanup_stale_metadata()` method that removes entries for keys not in the main data store
-- [ ] Call from existing periodic background task (alongside expiration sweep), every 60 seconds
-- [ ] Guard against race: only remove if no active WATCH or pending transaction references the key
-- [ ] Write test: create 10K keys, WATCH them, delete all, verify maps shrink after cleanup cycle
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Add `cleanup_stale_metadata()` method that removes entries for keys not in the main data store
+- [x] Call from existing periodic background task (alongside expiration sweep), every 60 seconds
+- [x] Guard against race: only remove if no active WATCH or pending transaction references the key
+- [x] Write test: create 10K keys, WATCH them, delete all, verify maps shrink after cleanup cycle
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
