@@ -142,12 +142,12 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** SADD, SREM, SPOP, SMOVE use same load-modify-save pattern as lists.
 
-- [ ] SADD, SREM: `atomic_modify()` with `HashSet<Vec<u8>>` deserialization
-- [ ] SPOP: `atomic_modify()` with random element removal
-- [ ] SMOVE: Use `lock_keys()` for both source and dest keys (cross-key atomic operation)
-- [ ] Write concurrent tests: parallel SADD from multiple tasks, verify final set cardinality
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] SADD, SREM: `atomic_modify()` with `HashSet<Vec<u8>>` deserialization
+- [x] SPOP: `atomic_modify()` with random element removal
+- [x] SMOVE: Use `lock_keys()` for both source and dest keys (cross-key atomic operation)
+- [x] Write concurrent tests: parallel SADD from multiple tasks, verify final set cardinality
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 
