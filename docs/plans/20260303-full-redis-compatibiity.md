@@ -384,10 +384,10 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** GEORADIUS STORE and GEOSEARCHSTORE destination keys not extracted for transaction key locking (~line 1060).
 
-- [ ] Add destination key extraction logic for GEORADIUS STORE and GEOSEARCHSTORE in the cluster slot / tx key extraction code
-- [ ] Write test: WATCH + MULTI + GEOSEARCHSTORE with destination key, verify transaction integrity
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Add destination key extraction logic for GEORADIUS STORE and GEOSEARCHSTORE in the cluster slot / tx key extraction code
+- [x] Write test: WATCH + MULTI + GEOSEARCHSTORE with destination key, verify transaction integrity
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

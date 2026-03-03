@@ -1076,6 +1076,27 @@ impl Server {
                             vec![]
                         }
                     }
+                    // GEOSEARCHSTORE: args[0] dest, args[1] source
+                    "geosearchstore" => {
+                        let mut keys: Vec<&[u8]> = Vec::new();
+                        if !cmd.args.is_empty() { keys.push(cmd.args[0].as_slice()); }
+                        if cmd.args.len() > 1 { keys.push(cmd.args[1].as_slice()); }
+                        keys
+                    }
+                    // GEORADIUS/GEORADIUSBYMEMBER: args[0] source, may have STORE/STOREDIST dest
+                    "georadius" | "georadius_ro" | "georadiusbymember" | "georadiusbymember_ro" => {
+                        let mut keys: Vec<&[u8]> = Vec::new();
+                        if !cmd.args.is_empty() { keys.push(cmd.args[0].as_slice()); }
+                        for i in 1..cmd.args.len() {
+                            if (cmd.args[i].eq_ignore_ascii_case(b"STORE")
+                                || cmd.args[i].eq_ignore_ascii_case(b"STOREDIST"))
+                                && let Some(dest) = cmd.args.get(i + 1)
+                            {
+                                keys.push(dest.as_slice());
+                            }
+                        }
+                        keys
+                    }
                     _ => vec![],
                 };
                 if cluster_mgr.check_cross_slot(&key_refs) {

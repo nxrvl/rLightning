@@ -107,11 +107,27 @@ fn extract_keys_from_command(cmd: &Command) -> Vec<Vec<u8>> {
             }
         }
 
-        // ZRANGESTORE: args[0] dest, args[1] source
+        // ZRANGESTORE/GEOSEARCHSTORE: args[0] dest, args[1] source
         "zrangestore" | "geosearchstore" => {
             let mut keys = Vec::new();
             if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
             if cmd.args.len() > 1 { keys.push(cmd.args[1].clone()); }
+            keys
+        }
+
+        // GEORADIUS/GEORADIUSBYMEMBER: args[0] is source key, may have STORE/STOREDIST dest key
+        "georadius" | "georadius_ro" | "georadiusbymember" | "georadiusbymember_ro" => {
+            let mut keys = Vec::new();
+            if !cmd.args.is_empty() { keys.push(cmd.args[0].clone()); }
+            // Scan options for STORE/STOREDIST destination key
+            for i in 1..cmd.args.len() {
+                if (cmd.args[i].eq_ignore_ascii_case(b"STORE")
+                    || cmd.args[i].eq_ignore_ascii_case(b"STOREDIST"))
+                    && let Some(dest) = cmd.args.get(i + 1)
+                {
+                    keys.push(dest.clone());
+                }
+            }
             keys
         }
 
@@ -1319,6 +1335,110 @@ mod tests {
         assert_eq!(
             extract_keys_from_command(&cmd),
             vec![b"dest".to_vec(), b"zset1".to_vec(), b"zset2".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_geosearchstore() {
+        // GEOSEARCHSTORE dest source FROMLONLAT ...
+        let cmd = Command {
+            name: "GEOSEARCHSTORE".to_string(),
+            args: vec![
+                b"destkey".to_vec(),
+                b"srckey".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"2.35".to_vec(),
+                b"48.86".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"destkey".to_vec(), b"srckey".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_georadius_with_store() {
+        // GEORADIUS key lon lat radius unit STORE dest
+        let cmd = Command {
+            name: "GEORADIUS".to_string(),
+            args: vec![
+                b"mygeo".to_vec(),
+                b"2.35".to_vec(),
+                b"48.86".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+                b"STORE".to_vec(),
+                b"destkey".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"mygeo".to_vec(), b"destkey".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_georadius_with_storedist() {
+        // GEORADIUS key lon lat radius unit STOREDIST dest
+        let cmd = Command {
+            name: "GEORADIUS".to_string(),
+            args: vec![
+                b"mygeo".to_vec(),
+                b"2.35".to_vec(),
+                b"48.86".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+                b"STOREDIST".to_vec(),
+                b"distkey".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"mygeo".to_vec(), b"distkey".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_georadius_no_store() {
+        // GEORADIUS key lon lat radius unit (no STORE)
+        let cmd = Command {
+            name: "GEORADIUS".to_string(),
+            args: vec![
+                b"mygeo".to_vec(),
+                b"2.35".to_vec(),
+                b"48.86".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"mygeo".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_keys_georadiusbymember_with_store() {
+        // GEORADIUSBYMEMBER key member radius unit STORE dest
+        let cmd = Command {
+            name: "GEORADIUSBYMEMBER".to_string(),
+            args: vec![
+                b"mygeo".to_vec(),
+                b"Paris".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+                b"STORE".to_vec(),
+                b"nearby".to_vec(),
+            ],
+        };
+        assert_eq!(
+            extract_keys_from_command(&cmd),
+            vec![b"mygeo".to_vec(), b"nearby".to_vec()]
         );
     }
 }
