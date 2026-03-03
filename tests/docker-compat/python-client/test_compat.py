@@ -28,6 +28,7 @@ import tests.server
 import tests.persistence
 import tests.acl
 import tests.blocking
+import tests.memory
 import tests.python_specific
 
 
