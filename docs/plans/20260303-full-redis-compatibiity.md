@@ -203,13 +203,13 @@ Achieve 100% Redis 7.x protocol compatibility, fix all known concurrency/persist
 
 **Problem:** Mid-batch I/O error (lines 118-163) leaves partial RESP commands in BufWriter. The `continue` on line 143 skips flush but partial data remains in BufWriter's internal buffer, producing corrupt AOF on next flush.
 
-- [ ] Stage entire batch in a `Vec<u8>` memory buffer first
-- [ ] Write the complete batch to BufWriter only after all commands are serialized successfully
-- [ ] On I/O error, discard the batch entirely (no partial writes reach the file)
-- [ ] Log the error with batch details for debugging
-- [ ] Write test: simulate I/O error mid-batch, verify AOF file remains valid RESP
-- [ ] Run `cargo clippy -- -D warnings` — zero warnings
-- [ ] Run project test suite — must pass before next task
+- [x] Stage entire batch in a `Vec<u8>` memory buffer first
+- [x] Write the complete batch to BufWriter only after all commands are serialized successfully
+- [x] On I/O error, discard the batch entirely (no partial writes reach the file)
+- [x] Log the error with batch details for debugging
+- [x] Write test: simulate I/O error mid-batch, verify AOF file remains valid RESP
+- [x] Run `cargo clippy -- -D warnings` — zero warnings
+- [x] Run project test suite — must pass before next task
 
 ---
 

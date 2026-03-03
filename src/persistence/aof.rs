@@ -116,33 +116,61 @@ impl AofPersistence {
                 tokio::select! {
                     // Handle new entries
                     Some(entry) = writer_rx.recv() => {
-                        // Serialize and write all commands in this batch atomically
-                        let mut total_written = 0u64;
-                        let mut write_error = false;
-                        for command in entry.commands {
+                        // Stage entire batch in a memory buffer before writing.
+                        // This prevents partial RESP commands from reaching the file
+                        // if serialization or I/O fails mid-batch.
+                        let mut batch_buf: Vec<u8> = Vec::new();
+                        let mut serialization_failed = false;
+                        let batch_len = entry.commands.len();
+
+                        for command in &entry.commands {
                             let resp_cmd = RespValue::Array(Some(
                                 std::iter::once(RespValue::BulkString(Some(command.name.clone())))
-                                    .chain(command.args.into_iter().map(|arg| RespValue::BulkString(Some(arg))))
+                                    .chain(command.args.iter().cloned().map(|arg| RespValue::BulkString(Some(arg))))
                                     .collect()
                             ));
 
-                            let serialized = match resp_cmd.serialize() {
-                                Ok(data) => data,
+                            match resp_cmd.serialize() {
+                                Ok(data) => batch_buf.extend_from_slice(&data),
                                 Err(e) => {
-                                    error!(command = ?resp_cmd, "Failed to serialize command for AOF: {:?}", e);
-                                    continue;
+                                    error!(
+                                        command_name = ?command.name,
+                                        batch_size = batch_len,
+                                        "Failed to serialize command for AOF, discarding entire batch: {:?}", e
+                                    );
+                                    serialization_failed = true;
+                                    break;
                                 }
-                            };
-
-                            if let Err(e) = writer.write_all(&serialized).await {
-                                error!(path = ?path, "Failed to write to AOF file: {:?}", e);
-                                write_error = true;
-                                break;
                             }
-                            total_written += serialized.len() as u64;
                         }
 
-                        if write_error {
+                        // If any command failed to serialize, discard the entire batch
+                        if serialization_failed {
+                            continue;
+                        }
+
+                        // Write the complete, pre-validated batch to BufWriter
+                        let total_written = batch_buf.len() as u64;
+                        if let Err(e) = writer.write_all(&batch_buf).await {
+                            error!(
+                                path = ?path,
+                                batch_size = batch_len,
+                                batch_bytes = total_written,
+                                "Failed to write batch to AOF file, discarding batch: {:?}", e
+                            );
+                            // Re-create the writer to discard any partial data
+                            // that BufWriter may have buffered before the error.
+                            match TokioFile::options()
+                                .create(true)
+                                .append(true)
+                                .open(&path).await {
+                                Ok(file) => {
+                                    writer = TokioBufWriter::with_capacity(BUFFER_SIZE, file);
+                                }
+                                Err(reopen_err) => {
+                                    error!(path = ?path, "Failed to reopen AOF file after write error: {:?}", reopen_err);
+                                }
+                            }
                             continue;
                         }
 
@@ -965,5 +993,106 @@ mod tests {
         let zset_val = engine.get(b"zs").await.unwrap().unwrap();
         let loaded_zset: SortedSetData = bincode::deserialize(&zset_val).unwrap();
         assert_eq!(loaded_zset.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_aof_batch_write_produces_valid_resp() {
+        // Test that a batch of commands is written as complete, valid RESP
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test.aof");
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine, aof_path.clone());
+
+        // Write a batch of 3 SET commands
+        let commands = vec![
+            RespCommand { name: b"SET".to_vec(), args: vec![b"key1".to_vec(), b"val1".to_vec()] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"key2".to_vec(), b"val2".to_vec()] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"key3".to_vec(), b"val3".to_vec()] },
+        ];
+        aof.append_commands_batch(commands, AofSyncPolicy::Always).await.unwrap();
+
+        // Give the writer task time to process and flush
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Read the AOF file and verify it contains valid RESP
+        let content = std::fs::read(&aof_path).unwrap();
+        assert!(!content.is_empty(), "AOF file should not be empty");
+
+        // Parse the file as RESP - each command should be a complete RESP array
+        let file = File::open(&aof_path).unwrap();
+        let reader = BufReader::new(file);
+        let mut parser = resp_parser::RespParser::new(reader);
+
+        let mut cmd_count = 0;
+        while let Ok(Some(value)) = parser.next() {
+            // Each entry should be an Array
+            if let RespValue::Array(Some(parts)) = value {
+                assert!(parts.len() >= 2, "Each command should have name + at least 1 arg");
+                cmd_count += 1;
+            } else {
+                panic!("Expected RESP Array, got something else");
+            }
+        }
+        assert_eq!(cmd_count, 3, "All 3 commands should be in the AOF file");
+    }
+
+    #[tokio::test]
+    async fn test_aof_batch_atomicity_multiple_batches() {
+        // Test that multiple batches are independently atomic
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test_multi.aof");
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine, aof_path.clone());
+
+        // Write two separate batches
+        let batch1 = vec![
+            RespCommand { name: b"SET".to_vec(), args: vec![b"a".to_vec(), b"1".to_vec()] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"b".to_vec(), b"2".to_vec()] },
+        ];
+        let batch2 = vec![
+            RespCommand { name: b"SET".to_vec(), args: vec![b"c".to_vec(), b"3".to_vec()] },
+        ];
+        aof.append_commands_batch(batch1, AofSyncPolicy::Always).await.unwrap();
+        aof.append_commands_batch(batch2, AofSyncPolicy::Always).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Parse and verify all 3 commands are present as valid RESP
+        let file = File::open(&aof_path).unwrap();
+        let reader = BufReader::new(file);
+        let mut parser = resp_parser::RespParser::new(reader);
+
+        let mut cmd_count = 0;
+        while let Ok(Some(_)) = parser.next() {
+            cmd_count += 1;
+        }
+        assert_eq!(cmd_count, 3, "All commands from both batches should be in the AOF");
+    }
+
+    #[tokio::test]
+    async fn test_aof_batch_reload_integrity() {
+        // Test that data written through AOF batch writer can be replayed correctly
+        let dir = tempfile::tempdir().unwrap();
+        let aof_path = dir.path().join("test_reload.aof");
+        let engine = create_test_engine();
+        let aof = AofPersistence::new(engine, aof_path.clone());
+
+        // Write a batch with various commands
+        let commands = vec![
+            RespCommand { name: b"SET".to_vec(), args: vec![b"mykey".to_vec(), b"myvalue".to_vec()] },
+            RespCommand { name: b"SET".to_vec(), args: vec![b"counter".to_vec(), b"42".to_vec()] },
+        ];
+        aof.append_commands_batch(commands, AofSyncPolicy::Always).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create a fresh engine and reload from the AOF
+        let engine2 = create_test_engine();
+        let aof2 = AofPersistence::new(engine2.clone(), aof_path);
+        aof2.load().await.unwrap();
+
+        // Verify the data was correctly restored
+        assert_eq!(engine2.get(b"mykey").await.unwrap(), Some(b"myvalue".to_vec()));
+        assert_eq!(engine2.get(b"counter").await.unwrap(), Some(b"42".to_vec()));
     }
 }
