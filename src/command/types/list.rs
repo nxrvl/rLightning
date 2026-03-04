@@ -26,6 +26,7 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
 
+    engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| {
         let mut list = match current {
             Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -58,6 +59,7 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
+    engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| {
         let mut list = match current {
             Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -488,6 +490,7 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
 
+    engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
             let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -517,6 +520,7 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
+    engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
             let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -552,6 +556,7 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         return Err(CommandError::InvalidArgument("syntax error".to_string()));
     }
 
+    engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
             let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -591,6 +596,7 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
     let element = args[2].clone();
 
+    engine.check_write_memory(0).await?;
     engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
             let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
@@ -957,6 +963,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     // Push to destination using atomic_modify
+    engine.check_write_memory(0).await?;
     let elem_for_push = element.clone();
     engine.atomic_modify(destination, RedisDataType::List, |current| {
         let mut list = match current {

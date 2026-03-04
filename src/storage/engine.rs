@@ -791,6 +791,14 @@ impl StorageEngine {
         None
     }
 
+    /// Public pre-write memory check: ensures memory is under maxmemory before
+    /// a write that uses `atomic_modify` (which is synchronous and cannot call
+    /// async eviction internally). Call with estimated_additional=0 to match Redis
+    /// behavior (evict if already over limit before executing the write command).
+    pub async fn check_write_memory(&self, estimated_additional: usize) -> StorageResult<()> {
+        self.maybe_evict(estimated_additional).await
+    }
+
     /// Check if we need to evict items to make room
     async fn maybe_evict(&self, required_size: usize) -> StorageResult<()> {
         // Read the active max memory limit (may have been changed at runtime via CONFIG SET)
