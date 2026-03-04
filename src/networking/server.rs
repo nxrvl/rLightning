@@ -811,14 +811,9 @@ impl Server {
                         if let Ok(bytes) = response.serialize() {
                             response_buffer.extend_from_slice(&bytes);
                         }
-                        // Propagate SELECT to replicas so they track the current database
-                        if let Some(repl) = replication {
-                            let select_cmd = crate::networking::resp::RespCommand {
-                                name: b"SELECT".to_vec(),
-                                args: vec![idx.to_string().into_bytes()],
-                            };
-                            repl.propagate_command(&select_cmd).await;
-                        }
+                        // SELECT is propagated atomically with each write command
+                        // via propagate_commands_batch, not standalone, to prevent
+                        // interleaving from concurrent connections.
                     }
                     _ => {
                         let response = RespValue::Error("ERR DB index is out of range".to_string());
@@ -1338,39 +1333,47 @@ impl Server {
 
         match tx_result {
             Ok(response) => {
-                // Propagate write commands to replicas
+                // Propagate write commands to replicas using batch propagation
+                // to prevent interleaving from concurrent connections.
+                // Each batch is prefixed with SELECT to establish DB context.
                 if let Some(repl) = replication {
+                    let select_cmd = RespCommand {
+                        name: b"SELECT".to_vec(),
+                        args: vec![db_index.to_string().into_bytes()],
+                    };
                     if cmd_lower == "exec" {
                         if let RespValue::Array(Some(_)) = &response {
-                            // Wrap transaction commands with MULTI/EXEC so replicas
-                            // can replay them atomically.
-                            let multi_cmd = RespCommand {
-                                name: b"MULTI".to_vec(),
-                                args: vec![],
-                            };
-                            repl.propagate_command(&multi_cmd).await;
+                            // Bundle SELECT + MULTI + write commands + EXEC atomically
+                            let mut batch = vec![
+                                select_cmd,
+                                RespCommand {
+                                    name: b"MULTI".to_vec(),
+                                    args: vec![],
+                                },
+                            ];
                             for queued_cmd in &queued_for_repl {
                                 let qcmd_lower = queued_cmd.name.to_lowercase();
                                 if ReplicationManager::is_write_command(&qcmd_lower) {
-                                    let repl_cmd = RespCommand {
+                                    batch.push(RespCommand {
                                         name: queued_cmd.name.as_bytes().to_vec(),
                                         args: queued_cmd.args.clone(),
-                                    };
-                                    repl.propagate_command(&repl_cmd).await;
+                                    });
                                 }
                             }
-                            let exec_cmd = RespCommand {
+                            batch.push(RespCommand {
                                 name: b"EXEC".to_vec(),
                                 args: vec![],
-                            };
-                            repl.propagate_command(&exec_cmd).await;
+                            });
+                            repl.propagate_commands_batch(&batch).await;
                         }
                     } else if ReplicationManager::is_write_command(&cmd_lower) {
+                        // Bundle SELECT + write command atomically
                         let repl_cmd = RespCommand {
                             name: cmd.name.as_bytes().to_vec(),
                             args: cmd.args.clone(),
                         };
-                        repl.propagate_command(&repl_cmd).await;
+                        repl.propagate_commands_batch(&[select_cmd, repl_cmd])
+                            .await;
                     }
                 }
                 // RESP3 conversion
