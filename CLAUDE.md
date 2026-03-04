@@ -74,7 +74,7 @@ docker run -d -p 6379:6379 rlightning:latest
 
 ### Multi-Language Compatibility Tests
 
-The `tests/docker-compat/` directory contains a comprehensive multi-language compatibility test suite that tests rLightning against real Redis 7 using Go (go-redis/v9), JavaScript (ioredis), and Python (redis-py) client libraries. Each language implements ~231 tests across 24 categories.
+The `tests/docker-compat/` directory contains a comprehensive multi-language compatibility test suite that tests rLightning against real Redis 7 using Go (go-redis/v9), JavaScript (ioredis), and Python (redis-py) client libraries. Each language implements ~231 tests across 25 categories.
 
 ```bash
 # Run full suite end-to-end (local mode - uses local Go/Node/Python, Docker for servers)
@@ -95,7 +95,9 @@ REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD=test_password \
 python tests/docker-compat/report/generate-report.py --results-dir tests/docker-compat/results/
 ```
 
-**Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Lua Scripting Advanced, Streams, Streams Advanced, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands, ACL & Security, Blocking Commands, Memory Management & Eviction, Persistence (RDB/AOF), Replication, Cluster Mode, Sentinel
+**Test Categories:** Connection & Auth, Strings, Hashes, Lists, Sets, Sorted Sets, Key Management, Transactions, Pub/Sub, Pipelining, Lua Scripting, Lua Scripting Advanced, Streams, Streams Advanced, Advanced Types (Bitmap/HLL/Geo), Edge Cases, Server Commands, ACL & Security, Blocking Commands, Memory Management & Eviction, Persistence (RDB/AOF), Replication, Cluster Mode, Sentinel, Language-Specific (Go/JS/Python)
+
+**Known Incompatibilities:** See `tests/docker-compat/KNOWN-INCOMPATIBILITIES.txt` for the current list of known behavioral differences between rLightning and Redis 7.
 
 ### Benchmarking
 

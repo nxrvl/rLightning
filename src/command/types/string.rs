@@ -186,6 +186,12 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Single DashMap lookup: type check + value read atomically
     let value = engine.atomic_read(key, RedisDataType::String, |data| Ok(data.cloned()))?;
 
+    // Trigger lazy expiration: if the key returned None but still exists in the DB,
+    // it was expired and should be cleaned up now
+    if value.is_none() {
+        engine.lazy_expire(key).await;
+    }
+
     Ok(RespValue::BulkString(value))
 }
 
