@@ -711,9 +711,10 @@ fn is_replay_skip_command(upper_name: &str) -> bool {
         upper_name,
         // Transaction markers — commands within the transaction are logged individually
         "MULTI" | "EXEC" | "DISCARD" |
-        // Blocking commands — would deadlock or alter state incorrectly during replay
-        "BLPOP" | "BRPOP" | "BLMOVE" | "BLMPOP" |
-        "BZPOPMIN" | "BZPOPMAX" | "BZMPOP" |
+        // Note: blocking commands (BLPOP, BRPOP, etc.) are converted to non-blocking
+        // equivalents (LPOP, RPOP, etc.) at the AOF logging point in server.rs,
+        // so they never appear in the AOF as blocking variants.
+        //
         // Pub/Sub — no subscribers exist during replay
         "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" |
         "SSUBSCRIBE" | "SUNSUBSCRIBE" | "PUBLISH" | "SPUBLISH" |
