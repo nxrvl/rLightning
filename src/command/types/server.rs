@@ -590,45 +590,52 @@ mod tests {
     async fn test_config_set_get_roundtrip() {
         let engine = StorageEngine::new(StorageConfig::default());
 
-        // CONFIG SET a custom param then CONFIG GET it back
-        let set_args = vec![b"my-custom-param".to_vec(), b"hello-world".to_vec()];
+        // CONFIG SET a known runtime param then CONFIG GET it back
+        let set_args = vec![b"hz".to_vec(), b"15".to_vec()];
         let result = config_set(&engine, &set_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
-        let get_args = vec![b"GET".to_vec(), b"my-custom-param".to_vec()];
+        let get_args = vec![b"GET".to_vec(), b"hz".to_vec()];
         let result = config(&engine, &get_args).await.unwrap();
         let pairs = extract_config_pairs(result);
         assert_eq!(pairs.len(), 1);
-        assert_eq!(
-            pairs[0],
-            ("my-custom-param".to_string(), "hello-world".to_string())
-        );
+        assert_eq!(pairs[0], ("hz".to_string(), "15".to_string()));
     }
 
     #[tokio::test]
     async fn test_config_set_get_multiple() {
         let engine = StorageEngine::new(StorageConfig::default());
 
-        // CONFIG SET multiple params at once
+        // CONFIG SET multiple known params at once
         let set_args = vec![
-            b"param-a".to_vec(),
-            b"val-a".to_vec(),
-            b"param-b".to_vec(),
-            b"val-b".to_vec(),
+            b"hz".to_vec(),
+            b"20".to_vec(),
+            b"timeout".to_vec(),
+            b"300".to_vec(),
         ];
         let result = config_set(&engine, &set_args).await.unwrap();
         assert_eq!(result, RespValue::SimpleString("OK".to_string()));
 
         // Retrieve each
-        let get_args = vec![b"GET".to_vec(), b"param-a".to_vec()];
+        let get_args = vec![b"GET".to_vec(), b"hz".to_vec()];
         let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].1, "val-a");
+        assert_eq!(pairs[0].1, "20");
 
-        let get_args = vec![b"GET".to_vec(), b"param-b".to_vec()];
+        let get_args = vec![b"GET".to_vec(), b"timeout".to_vec()];
         let pairs = extract_config_pairs(config(&engine, &get_args).await.unwrap());
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].1, "val-b");
+        assert_eq!(pairs[0].1, "300");
+    }
+
+    #[tokio::test]
+    async fn test_config_set_unknown_param_rejected() {
+        let engine = StorageEngine::new(StorageConfig::default());
+
+        // CONFIG SET with an unknown parameter should return an error
+        let set_args = vec![b"nonexistent-param".to_vec(), b"value".to_vec()];
+        let result = config_set(&engine, &set_args).await.unwrap();
+        assert!(matches!(result, RespValue::Error(_)));
     }
 
     #[tokio::test]

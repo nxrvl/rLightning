@@ -1367,13 +1367,20 @@ impl Server {
                             repl.propagate_commands_batch(&batch).await;
                         }
                     } else if ReplicationManager::is_write_command(&cmd_lower) {
-                        // Bundle SELECT + write command atomically
-                        let repl_cmd = RespCommand {
-                            name: cmd.name.as_bytes().to_vec(),
-                            args: cmd.args.clone(),
+                        // Convert blocking commands to non-blocking equivalents
+                        // to avoid stalling the replication stream on replicas.
+                        let repl_cmd = if is_blocking_write_command(&cmd_lower) {
+                            convert_blocking_to_nonblocking(cmd, &response)
+                        } else {
+                            Some(RespCommand {
+                                name: cmd.name.as_bytes().to_vec(),
+                                args: cmd.args.clone(),
+                            })
                         };
-                        repl.propagate_commands_batch(&[select_cmd, repl_cmd])
-                            .await;
+                        if let Some(repl_cmd) = repl_cmd {
+                            repl.propagate_commands_batch(&[select_cmd, repl_cmd])
+                                .await;
+                        }
                     }
                 }
                 // RESP3 conversion
@@ -1490,8 +1497,8 @@ impl Server {
                 let name = bytes_to_string(&args[1]).map_err(|_| {
                     NetworkError::Serialization("Invalid UTF-8 in client name".to_string())
                 })?;
-                // Redis disallows spaces in client names
-                if name.contains(' ') {
+                // Redis disallows spaces, newlines, and control characters in client names
+                if name.chars().any(|c| c == ' ' || c.is_control()) {
                     return Ok(RespValue::Error(
                         "ERR Client names cannot contain spaces, newlines or special characters."
                             .to_string(),
@@ -1720,13 +1727,21 @@ impl Server {
             && !is_auth_command
             && ReplicationManager::is_write_command(cmd_lower)
         {
-            let resp_cmd = RespCommand {
-                name: cmd.name.as_bytes().to_vec(),
-                args: cmd.args.clone(),
+            // Convert blocking commands to non-blocking equivalents for AOF.
+            // Blocking commands (BLPOP, BRPOP, etc.) would deadlock during replay,
+            // so we log the equivalent non-blocking mutation (LPOP, RPOP, etc.).
+            let aof_cmd = if is_blocking_write_command(cmd_lower) {
+                convert_blocking_to_nonblocking(cmd, &result)
+            } else {
+                Some(RespCommand {
+                    name: cmd.name.as_bytes().to_vec(),
+                    args: cmd.args.clone(),
+                })
             };
-            if let Err(e) = persistence_mgr
-                .log_command_for_db(resp_cmd, aof_sync_policy, db_index)
-                .await
+            if let Some(resp_cmd) = aof_cmd
+                && let Err(e) = persistence_mgr
+                    .log_command_for_db(resp_cmd, aof_sync_policy, db_index)
+                    .await
             {
                 error!(client_addr = %client_addr_str, command = ?cmd.name, error = ?e, "Failed to log command to AOF");
                 // Command already executed; log the error but don't fail the response
@@ -2512,7 +2527,7 @@ impl Server {
                         );
                     }
                     let name = String::from_utf8_lossy(&args[i + 1]).to_string();
-                    if name.contains(' ') {
+                    if name.chars().any(|c| c == ' ' || c.is_control()) {
                         return (
                             RespValue::Error("ERR Client names cannot contain spaces, newlines or special characters.".to_string()),
                             current_version,
@@ -2589,6 +2604,102 @@ impl Server {
 
         (response, new_version)
     }
+}
+
+/// Convert a blocking command to its non-blocking equivalent for AOF logging
+/// and replication propagation. Returns None if the command timed out (nil result,
+/// no mutation to persist). This matches Redis behavior where the replication stream
+/// and AOF use non-blocking equivalents of blocking commands.
+fn convert_blocking_to_nonblocking(cmd: &Command, result: &RespValue) -> Option<RespCommand> {
+    let cmd_upper = cmd.name.to_uppercase();
+    match cmd_upper.as_str() {
+        "BLPOP" | "BRPOP" => {
+            // Result: Array(Some([key, value])) on success, Array(None) on timeout
+            if let RespValue::Array(Some(items)) = result
+                && items.len() >= 2
+                && let RespValue::BulkString(Some(key)) = &items[0]
+            {
+                let name = if cmd_upper == "BLPOP" {
+                    b"LPOP".to_vec()
+                } else {
+                    b"RPOP".to_vec()
+                };
+                return Some(RespCommand {
+                    name,
+                    args: vec![key.clone()],
+                });
+            }
+            None
+        }
+        "BLMOVE" => {
+            // BLMOVE src dst LEFT|RIGHT LEFT|RIGHT timeout
+            // -> LMOVE src dst LEFT|RIGHT LEFT|RIGHT (drop last arg = timeout)
+            if !matches!(result, RespValue::BulkString(None) | RespValue::Null)
+                && cmd.args.len() >= 5
+            {
+                return Some(RespCommand {
+                    name: b"LMOVE".to_vec(),
+                    args: cmd.args[..4].to_vec(),
+                });
+            }
+            None
+        }
+        "BLMPOP" => {
+            // BLMPOP timeout numkeys key... LEFT|RIGHT [COUNT count]
+            // -> LMPOP numkeys key... LEFT|RIGHT [COUNT count] (drop first arg = timeout)
+            if let RespValue::Array(Some(items)) = result
+                && !items.is_empty()
+                && cmd.args.len() >= 2
+            {
+                return Some(RespCommand {
+                    name: b"LMPOP".to_vec(),
+                    args: cmd.args[1..].to_vec(),
+                });
+            }
+            None
+        }
+        "BZPOPMIN" | "BZPOPMAX" => {
+            // Result: Array(Some([key, member, score])) on success
+            if let RespValue::Array(Some(items)) = result
+                && items.len() >= 3
+                && let RespValue::BulkString(Some(key)) = &items[0]
+            {
+                let name = if cmd_upper == "BZPOPMIN" {
+                    b"ZPOPMIN".to_vec()
+                } else {
+                    b"ZPOPMAX".to_vec()
+                };
+                return Some(RespCommand {
+                    name,
+                    args: vec![key.clone()],
+                });
+            }
+            None
+        }
+        "BZMPOP" => {
+            // BZMPOP timeout numkeys key... MIN|MAX [COUNT count]
+            // -> ZMPOP numkeys key... MIN|MAX [COUNT count] (drop first arg = timeout)
+            if let RespValue::Array(Some(items)) = result
+                && !items.is_empty()
+                && cmd.args.len() >= 2
+            {
+                return Some(RespCommand {
+                    name: b"ZMPOP".to_vec(),
+                    args: cmd.args[1..].to_vec(),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Check if a command is a blocking variant that needs conversion for AOF/replication.
+fn is_blocking_write_command(cmd_lower: &str) -> bool {
+    matches!(
+        cmd_lower,
+        "blpop" | "brpop" | "blmove" | "blmpop" | "bzpopmin" | "bzpopmax" | "bzmpop"
+    )
 }
 
 #[cfg(test)]

@@ -417,10 +417,32 @@ impl StorageEngine {
                     "ERR CONFIG SET requirepass is not supported at runtime. Use ACL SETUSER to manage authentication.".to_string()
                 )
             }
-            _ => {
+            // Known runtime-configurable parameters that we store but don't need
+            // special handling for (Redis accepts these via CONFIG SET)
+            "hz" | "timeout" | "tcp-keepalive" | "tcp-backlog" | "databases"
+            | "appendonly" | "appendfsync" | "save" | "no-appendfsync-on-rewrite"
+            | "auto-aof-rewrite-percentage" | "auto-aof-rewrite-min-size"
+            | "aof-use-rdb-preamble" | "slowlog-log-slower-than" | "slowlog-max-len"
+            | "latency-monitor-threshold" | "notify-keyspace-events"
+            | "list-max-ziplist-size" | "list-compress-depth"
+            | "set-max-intset-entries" | "zset-max-ziplist-entries"
+            | "zset-max-ziplist-value" | "hash-max-ziplist-entries"
+            | "hash-max-ziplist-value" | "hll-sparse-max-bytes"
+            | "stream-node-max-bytes" | "stream-node-max-entries"
+            | "activedefrag" | "active-defrag-enabled"
+            | "lazyfree-lazy-eviction" | "lazyfree-lazy-expire"
+            | "lazyfree-lazy-server-del" | "lazyfree-lazy-user-del"
+            | "replica-lazy-flush" | "lfu-log-factor" | "lfu-decay-time"
+            | "maxmemory-samples" | "min-replicas-to-write" | "min-replicas-max-lag"
+            | "replica-read-only" | "repl-backlog-size" | "repl-backlog-ttl"
+            | "cluster-node-timeout" | "cluster-migration-barrier"
+            | "close-on-oom" | "proto-max-bulk-len" | "lua-time-limit"
+            | "loglevel" | "maxclients" | "dir" | "dbfilename"
+            | "rdbcompression" | "rdbchecksum" | "stop-writes-on-bgsave-error" => {
                 self.runtime_config.insert(key, value.to_string());
                 Ok(())
             }
+            _ => Err(format!("ERR Unsupported CONFIG parameter: {}", param)),
         }
     }
 
