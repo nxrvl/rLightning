@@ -405,6 +405,7 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         entries.push((score, member));
     }
 
+    engine.check_write_memory(0).await?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |current| {
         let mut ss: SortedSet = match current {
             Some(data) => {
@@ -632,6 +633,7 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
 
     let entry_count = dest_entries.len() as i64;
 
+    engine.check_write_memory(0).await?;
     engine.atomic_modify(dest, RedisDataType::ZSet, |_current| {
         // Overwrite destination entirely with search results
         if dest_entries.is_empty() {

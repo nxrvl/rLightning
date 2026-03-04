@@ -29,6 +29,7 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         unique_members.insert(member.clone());
     }
 
+    engine.check_write_memory(0).await?;
     let new_count = engine.atomic_modify(key, RedisDataType::Set, |current| {
         let mut set = match current {
             Some(data) => bincode::deserialize::<HashSet<Vec<u8>>>(data)
@@ -591,6 +592,7 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     // Add to destination using atomic_modify
+    engine.check_write_memory(0).await?;
     let member_clone = member.clone();
     engine.atomic_modify(destination, RedisDataType::Set, |current| {
         let mut set = match current {

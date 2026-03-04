@@ -404,6 +404,7 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     }
 
     // Atomic read-modify-write: type check, pad, overwrite, preserve TTL
+    engine.check_write_memory(0).await?;
     let new_len = engine.atomic_modify(&key, RedisDataType::String, |current| {
         let mut val = current.map(|v| v.clone()).unwrap_or_default();
 
