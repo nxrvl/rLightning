@@ -30,7 +30,7 @@ def test_advanced(r, prefix):
         try:
             r.set(k, "foobar")
             n = r.bitcount(k)
-            assert_true(n > 0, "BITCOUNT should be positive for 'foobar'")
+            assert_equal_int(26, n)
         finally:
             r.delete(k)
     results.append(run_test("BITCOUNT", cat, t_bitcount))
@@ -43,7 +43,7 @@ def test_advanced(r, prefix):
             r.set(k1, "abc")
             r.set(k2, "def")
             n = r.bitop("AND", dest, k1, k2)
-            assert_true(n > 0, "BITOP AND should return positive length")
+            assert_equal_int(3, n)
         finally:
             r.delete(k1, k2, dest)
     results.append(run_test("BITOP", cat, t_bitop))

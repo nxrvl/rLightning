@@ -21,7 +21,7 @@ register('advanced_types', async (redis, prefix) => {
     const k = key(prefix, 'bm:count');
     await redis.set(k, 'foobar');
     const n = await redis.bitcount(k);
-    assertTrue(n > 0, "BITCOUNT should be positive for 'foobar'");
+    assertEqualInt(26, n);
     await redis.del(k);
   }));
 
@@ -32,7 +32,7 @@ register('advanced_types', async (redis, prefix) => {
     await redis.set(k1, 'abc');
     await redis.set(k2, 'def');
     const n = await redis.bitop('AND', dest, k1, k2);
-    assertTrue(n > 0, 'BITOP AND should return positive length');
+    assertEqualInt(3, n);
     await redis.del(k1, k2, dest);
   }));
 

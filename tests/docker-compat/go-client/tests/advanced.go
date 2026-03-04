@@ -46,7 +46,7 @@ func testAdvancedTypes(ctx context.Context, rdb *redis.Client, prefix string) []
 		if err != nil {
 			return err
 		}
-		return AssertTrue(n > 0, "BITCOUNT should be positive for 'foobar'")
+		return AssertEqualInt64(26, n)
 	}))
 
 	results = append(results, RunTest("BITOP", cat, func() error {
@@ -60,7 +60,7 @@ func testAdvancedTypes(ctx context.Context, rdb *redis.Client, prefix string) []
 		if err != nil {
 			return err
 		}
-		return AssertTrue(n > 0, "BITOP AND should return positive length")
+		return AssertEqualInt64(3, n)
 	}))
 
 	results = append(results, RunTest("BITPOS", cat, func() error {

@@ -172,7 +172,7 @@ def test_memory(r, prefix):
             r.set(k, "testvalue")
             idletime = r.object("idletime", k)
             assert_true(isinstance(idletime, int), f"OBJECT IDLETIME should return int, got {type(idletime)}")
-            assert_true(idletime >= 0, f"OBJECT IDLETIME should be >= 0, got {idletime}")
+            assert_equal_int(0, idletime)
         finally:
             r.delete(k)
     results.append(run_test("OBJECT_IDLETIME", cat, t_object_idletime))
@@ -192,7 +192,7 @@ def test_memory(r, prefix):
 
             freq = r.object("freq", k)
             assert_true(isinstance(freq, int), f"OBJECT FREQ should return int, got {type(freq)}")
-            assert_true(freq >= 0, f"OBJECT FREQ should be >= 0, got {freq}")
+            assert_true(freq > 0, f"OBJECT FREQ should be > 0 after access, got {freq}")
         finally:
             r.config_set("maxmemory-policy", orig_policy)
             r.delete(k)

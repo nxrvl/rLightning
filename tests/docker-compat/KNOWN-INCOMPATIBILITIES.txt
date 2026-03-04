@@ -8,7 +8,7 @@ Reference: Redis 7 (redis:7-alpine)
 Overall: All previously known incompatibilities have been resolved.
 
 Previously resolved issues:
-  1. GEOHASH accuracy - Fixed in Task 2 (interleave bit order corrected)
+  1. GEOHASH accuracy - Fixed in Task 2 (standard latitude range [-90,90] used for string encoding)
   2. Pipeline error isolation - Fixed in Task 1 (CommandError caught per-command)
   3. CONFIG SET/GET - Fixed in Task 3 (runtime_config DashMap store added)
 
