@@ -167,7 +167,7 @@ impl RespValue {
                 // Format Redis errors with standard prefix if needed
                 // Redis error types: the first word before a space is the error type
                 // Known error types that must NOT get an ERR prefix
-                let known_prefixes = [
+                const KNOWN_PREFIXES: &[&str] = &[
                     "ERR ",
                     "WRONGTYPE ",
                     "NOPERM ",
@@ -189,7 +189,7 @@ impl RespValue {
                     "UNKILLABLE ",
                 ];
                 let error_str =
-                    if known_prefixes.iter().any(|p| s.starts_with(p)) || s.contains(':') {
+                    if KNOWN_PREFIXES.iter().any(|p| s.starts_with(p)) || s.contains(':') {
                         // Already has a standard prefix or is a categorized error (e.g. "OOM:message")
                         s.clone()
                     } else {

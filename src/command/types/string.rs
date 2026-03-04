@@ -141,15 +141,6 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         ));
     }
 
-    // For large values, add debug logging
-    if value.len() > 10240 {
-        tracing::debug!(
-            "SET command with large value: key length={}, value length={}",
-            key.len(),
-            value.len()
-        );
-    }
-
     // Use atomic set_with_options for NX/XX/GET/KEEPTTL - single atomic operation
     match engine
         .set_with_options(key, value, ttl, nx, xx, get_old, keepttl)
@@ -161,15 +152,8 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
         SetResult::Ok => Ok(RespValue::SimpleString("OK".to_string())),
         SetResult::NotSet => {
-            // NX/XX condition not met
-            if get_old {
-                // SET ... NX GET on existing key returns the old value via OldValue above,
-                // but if NX fails and GET is set, set_with_options returns OldValue.
-                // This branch handles plain NX/XX without GET.
-                Ok(RespValue::BulkString(None))
-            } else {
-                Ok(RespValue::BulkString(None))
-            }
+            // NX/XX condition not met — return nil
+            Ok(RespValue::BulkString(None))
         }
     }
 }

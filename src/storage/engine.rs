@@ -354,7 +354,7 @@ impl StorageEngine {
         results
     }
 
-    /// Set a runtime config value. Returns true if the value was set successfully.
+    /// Set a runtime config value. Returns Ok(()) if the value was set successfully.
     /// For `maxmemory-policy`, also updates the actual eviction policy in the engine config.
     pub fn config_set(&self, param: &str, value: &str) -> Result<(), String> {
         let key = param.to_lowercase();
