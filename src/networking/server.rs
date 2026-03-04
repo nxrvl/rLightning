@@ -811,6 +811,14 @@ impl Server {
                         if let Ok(bytes) = response.serialize() {
                             response_buffer.extend_from_slice(&bytes);
                         }
+                        // Propagate SELECT to replicas so they track the current database
+                        if let Some(repl) = replication {
+                            let select_cmd = crate::networking::resp::RespCommand {
+                                name: b"SELECT".to_vec(),
+                                args: vec![idx.to_string().into_bytes()],
+                            };
+                            repl.propagate_command(&select_cmd).await;
+                        }
                     }
                     _ => {
                         let response = RespValue::Error("ERR DB index is out of range".to_string());

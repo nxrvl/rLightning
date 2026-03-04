@@ -206,7 +206,13 @@ impl StorageEngine {
         }
 
         let initial_policy = config.eviction_policy.to_u8();
-        let initial_max_memory = config.max_memory;
+        // In Redis, maxmemory 0 means "no memory limit". Normalize to usize::MAX
+        // to match the CONFIG SET path behavior.
+        let initial_max_memory = if config.max_memory == 0 {
+            usize::MAX
+        } else {
+            config.max_memory
+        };
         let engine = Arc::new(Self {
             data: DashMap::with_capacity(1024), // Starting with a reasonable capacity
             config,
