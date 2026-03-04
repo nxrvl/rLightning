@@ -282,8 +282,12 @@ impl ReplicationClient {
 
                                 let cmd_name_lower = cmd.name.to_lowercase();
 
-                                // Track SELECT commands to maintain correct database context
+                                // Track SELECT commands to maintain correct database context.
+                                // Only update current_db outside MULTI blocks; inside MULTI,
+                                // SELECT is buffered and handled during EXEC with per-command
+                                // DB routing to ensure commands execute in the correct database.
                                 if cmd_name_lower == "select"
+                                    && tx_buffer.is_none()
                                     && let Some(db_arg) = cmd.args.first()
                                     && let Ok(db_str) = std::str::from_utf8(db_arg)
                                     && let Ok(db_idx) = db_str.parse::<usize>()
