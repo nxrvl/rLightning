@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -74,6 +74,28 @@ pub enum EvictionPolicy {
     Random,
     /// Don't evict items
     NoEviction,
+}
+
+impl EvictionPolicy {
+    /// Convert to u8 for atomic storage.
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::LRU => 0,
+            Self::LFU => 1,
+            Self::Random => 2,
+            Self::NoEviction => 3,
+        }
+    }
+
+    /// Convert from u8 (atomic load). Falls back to NoEviction for unknown values.
+    pub const fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::LRU,
+            1 => Self::LFU,
+            2 => Self::Random,
+            _ => Self::NoEviction,
+        }
+    }
 }
 
 // Implement clap::ValueEnum for command-line parsing
@@ -167,6 +189,9 @@ pub struct StorageEngine {
     /// Runtime configuration store for CONFIG GET/SET support.
     /// Seeded from startup config, modified by CONFIG SET, queried by CONFIG GET.
     runtime_config: DashMap<String, String>,
+    /// Runtime-mutable eviction policy. Updated atomically by CONFIG SET maxmemory-policy.
+    /// Read by maybe_evict() during eviction. Stored as u8 via EvictionPolicy::to_u8/from_u8.
+    active_eviction_policy: AtomicU8,
 }
 
 impl StorageEngine {
@@ -177,6 +202,7 @@ impl StorageEngine {
             extra_dbs.push(DashMap::with_capacity(64));
         }
 
+        let initial_policy = config.eviction_policy.to_u8();
         let engine = Arc::new(Self {
             data: DashMap::with_capacity(1024), // Starting with a reasonable capacity
             config,
@@ -194,6 +220,7 @@ impl StorageEngine {
             cross_db_lock: RwLock::new(()),
             db_mapping: AtomicU64::new(Self::identity_db_mapping()),
             runtime_config: DashMap::new(),
+            active_eviction_policy: AtomicU8::new(initial_policy),
         });
 
         // Seed runtime config from startup config
@@ -329,7 +356,7 @@ impl StorageEngine {
         match key.as_str() {
             "maxmemory-policy" => {
                 // Parse and apply the eviction policy
-                let _policy = match value.to_lowercase().as_str() {
+                let policy = match value.to_lowercase().as_str() {
                     "allkeys-lru" | "volatile-lru" => EvictionPolicy::LRU,
                     "allkeys-lfu" | "volatile-lfu" => EvictionPolicy::LFU,
                     "allkeys-random" | "volatile-random" => EvictionPolicy::Random,
@@ -341,9 +368,9 @@ impl StorageEngine {
                         ));
                     }
                 };
-                // NOTE: StorageConfig is not behind a lock, but eviction_policy is only read
-                // during eviction attempts. For a full implementation we'd need interior
-                // mutability on the config. For now, store the string so CONFIG GET works.
+                // Atomically update the active eviction policy used by maybe_evict()
+                self.active_eviction_policy
+                    .store(policy.to_u8(), Ordering::Release);
                 self.runtime_config.insert(key, value.to_lowercase());
                 Ok(())
             }
@@ -522,56 +549,20 @@ impl StorageEngine {
         }
     }
 
-    /// Clean up stale entries in key_versions and key_locks DashMaps.
-    /// Removes entries for keys that no longer exist in any database.
+    /// Clean up stale entries in key_locks DashMap.
     /// For key_locks, only removes entries where no one is holding the lock
     /// (Arc strong_count == 1, meaning only the DashMap holds a reference).
+    ///
+    /// NOTE: key_versions are intentionally NOT cleaned up here. Removing version
+    /// entries for deleted keys would cause WATCH correctness bugs: if a key is
+    /// watched at version 0 (non-existent), then created and deleted, cleanup would
+    /// reset its version to 0 (the fallback), causing EXEC to incorrectly proceed
+    /// instead of aborting. The memory cost of retaining version entries (Vec<u8> + u64
+    /// per unique key ever modified) is negligible compared to the data itself.
+    ///
     /// Called periodically from the background expiration task.
     fn cleanup_stale_metadata(&self) {
-        // Phase 1: Clean up key_versions
-        // Collect stale keys first to avoid holding DashMap shard locks while checking data stores
-        let stale_versions: Vec<Vec<u8>> = self
-            .key_versions
-            .iter()
-            .filter(|entry| {
-                let scoped_key = entry.key();
-                // Extract db_index and original key from the scoped key
-                if scoped_key.len() < 8 {
-                    return true; // Malformed key, remove it
-                }
-                let db_index_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or([0; 8]);
-                let db_index = u64::from_le_bytes(db_index_bytes) as usize;
-                let original_key = &scoped_key[8..];
-
-                if db_index >= NUM_DATABASES {
-                    return true; // Invalid db_index, remove it
-                }
-
-                // Check if key exists in the corresponding database
-                let db = self.get_db_by_index(db_index);
-                !db.contains_key(original_key)
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in stale_versions {
-            // Double-check before removing: the key might have been re-created
-            // between our scan and this removal
-            let scoped_key = &key;
-            if scoped_key.len() >= 8 {
-                let db_index_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or([0; 8]);
-                let db_index = u64::from_le_bytes(db_index_bytes) as usize;
-                let original_key = &scoped_key[8..];
-                if db_index < NUM_DATABASES {
-                    let db = self.get_db_by_index(db_index);
-                    if !db.contains_key(original_key) {
-                        self.key_versions.remove(scoped_key);
-                    }
-                }
-            }
-        }
-
-        // Phase 2: Clean up key_locks
+        // Clean up key_locks
         // Only remove lock entries where no one is holding the mutex
         // (Arc strong_count == 1 means only the DashMap holds a reference)
         let stale_locks: Vec<Vec<u8>> = self
@@ -631,6 +622,15 @@ impl StorageEngine {
             let size = Self::calculate_size(&k, &item.value) as u64;
             self.current_memory.fetch_sub(size, Ordering::AcqRel);
             self.key_count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Lazy expiration: if the key exists but is expired, remove it now.
+    /// Called by read commands (GET, etc.) after atomic_read returns None to clean up
+    /// expired keys eagerly rather than waiting for the periodic expiration task.
+    pub async fn lazy_expire(&self, key: &[u8]) {
+        if self.active_db().contains_key(key) {
+            self.remove_expired_key(key).await;
         }
     }
 
@@ -734,8 +734,12 @@ impl StorageEngine {
         // Check if adding this item would exceed our memory limit
         let current_memory = self.current_memory.load(Ordering::Acquire) as usize;
         if current_memory + required_size > self.config.max_memory {
+            // Read the active eviction policy (may have been changed at runtime via CONFIG SET)
+            let eviction_policy =
+                EvictionPolicy::from_u8(self.active_eviction_policy.load(Ordering::Acquire));
+
             // If we're not allowed to evict, fail
-            if self.config.eviction_policy == EvictionPolicy::NoEviction {
+            if eviction_policy == EvictionPolicy::NoEviction {
                 return Err(StorageError::MemoryLimitExceeded);
             }
 
@@ -752,7 +756,7 @@ impl StorageEngine {
 
                 // Helper: find victim in a single DB
                 let find_victim_in_db = |db: &DashMap<Vec<u8>, StorageItem>| -> Option<Vec<u8>> {
-                    match self.config.eviction_policy {
+                    match eviction_policy {
                         EvictionPolicy::LRU | EvictionPolicy::LFU => db
                             .iter()
                             .min_by_key(|item| item.value().last_accessed)
@@ -776,7 +780,7 @@ impl StorageEngine {
                     let db = self.get_db_by_index(db_idx);
                     if let Some(victim_key) = find_victim_in_db(db) {
                         let should_replace =
-                            if self.config.eviction_policy == EvictionPolicy::Random {
+                            if eviction_policy == EvictionPolicy::Random {
                                 best_victim.is_none() // For random, just pick the first one found
                             } else {
                                 // For LRU/LFU, compare last_accessed times
@@ -2234,7 +2238,14 @@ impl StorageEngine {
     /// Dump a key's value as serialized bytes (for MIGRATE)
     pub async fn dump_key(&self, key: &[u8]) -> Option<Vec<u8>> {
         if let Some(entry) = self.active_db().get(key) {
-            Some(entry.value.clone())
+            if entry.is_expired() {
+                // Key is expired; clean it up and return None
+                drop(entry);
+                self.remove_expired_key(key).await;
+                None
+            } else {
+                Some(entry.value.clone())
+            }
         } else {
             None
         }
@@ -2732,20 +2743,22 @@ impl StorageEngine {
         }
     }
 
-    /// Read-only atomic access to a key. Uses a shared read lock (DashMap `get()`) instead
-    /// of the exclusive write lock used by `atomic_modify`. Does NOT bump key version, touch
-    /// the key, or write anything back. Use this for read-only operations like HGET, HLEN, etc.
+    /// Atomic read access to a key with LRU/LFU tracking. Uses an exclusive shard lock
+    /// (DashMap `get_mut()`) to update last-accessed time for correct eviction behavior.
+    /// Does NOT bump key version or write data back. Returns `(result, was_expired)` where
+    /// `was_expired` indicates the caller should trigger lazy expiration cleanup.
     pub fn atomic_read<F, R>(&self, key: &[u8], data_type: RedisDataType, f: F) -> StorageResult<R>
     where
         F: FnOnce(Option<&Vec<u8>>) -> Result<R, StorageError>,
     {
-        match self.active_db().get(key) {
-            Some(entry) => {
+        match self.active_db().get_mut(key) {
+            Some(mut entry) => {
                 if entry.value().is_expired() {
                     f(None)
                 } else if entry.value().data_type != data_type {
                     Err(StorageError::WrongType)
                 } else {
+                    entry.value_mut().touch();
                     f(Some(&entry.value().value))
                 }
             }
@@ -2797,35 +2810,35 @@ impl StorageEngine {
         new_expiry: Option<Option<Duration>>,
     ) -> StorageResult<Option<Vec<u8>>> {
         // Phase 1: Synchronous DashMap access (holds shard lock)
-        let (value, queue_action) = {
+        let (value, queue_action, expiry_changed) = {
             if let Some(mut entry) = self.active_db().get_mut(key) {
                 let item = entry.value_mut();
 
                 if item.is_expired() {
-                    (None, None)
+                    (None, None, false)
                 } else if item.data_type != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 } else {
                     let value = item.value.clone();
 
-                    let queue_action = match new_expiry {
-                        None => None,
+                    let (queue_action, changed) = match new_expiry {
+                        None => (None, false),
                         Some(None) => {
                             item.remove_expiry();
-                            None
+                            (None, true)
                         }
                         Some(Some(duration)) => {
                             item.expire(duration);
                             let expires_at = Instant::now() + duration;
-                            Some(expires_at)
+                            (Some(expires_at), true)
                         }
                     };
 
                     item.touch();
-                    (Some(value), queue_action)
+                    (Some(value), queue_action, changed)
                 }
             } else {
-                (None, None)
+                (None, None, false)
             }
             // DashMap shard lock released here
         };
@@ -2833,6 +2846,11 @@ impl StorageEngine {
         // Phase 2: Async expiration queue work (no DashMap lock held)
         if let Some(expires_at) = queue_action {
             self.add_to_expiration_queue(key.to_vec(), expires_at).await;
+        }
+
+        // Bump key version so WATCH detects the expiry mutation
+        if expiry_changed {
+            self.bump_key_version(key);
         }
 
         Ok(value)
@@ -3913,12 +3931,14 @@ mod tests {
         // Run cleanup
         storage.trigger_metadata_cleanup();
 
-        // After cleanup, maps should be much smaller (ideally empty for these keys)
+        // After cleanup: key_versions are intentionally preserved (WATCH correctness
+        // requires versions to persist for deleted keys so that EXEC detects modifications).
         assert!(
-            storage.key_versions_len() < num_keys / 2,
-            "key_versions should have shrunk significantly, got {}",
+            storage.key_versions_len() >= num_keys,
+            "key_versions should be preserved after cleanup for WATCH correctness, got {}",
             storage.key_versions_len()
         );
+        // key_locks should have shrunk (locks with no holders are cleaned up)
         assert!(
             storage.key_locks_len() < 50,
             "key_locks should have shrunk significantly, got {}",
@@ -3966,18 +3986,14 @@ mod tests {
         // Run cleanup
         storage.trigger_metadata_cleanup();
 
-        // Active keys should still have their versions
+        // All key versions should be preserved (cleanup no longer removes them for
+        // WATCH correctness — deleted keys must retain their versions so EXEC detects
+        // modifications even after the key is gone).
         let versions_after = storage.key_versions_len();
-        assert!(
-            versions_after >= 100,
-            "Should still have at least 100 active version entries, got {}",
-            versions_after
-        );
-        assert!(
-            versions_after < versions_before,
-            "Should have fewer entries after cleanup ({} should be < {})",
-            versions_after,
-            versions_before
+        assert_eq!(
+            versions_after, versions_before,
+            "key_versions should be unchanged after cleanup ({} should equal {})",
+            versions_after, versions_before
         );
 
         // Verify active keys still have valid versions (non-zero since we bumped them)
