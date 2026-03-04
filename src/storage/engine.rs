@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -192,6 +192,9 @@ pub struct StorageEngine {
     /// Runtime-mutable eviction policy. Updated atomically by CONFIG SET maxmemory-policy.
     /// Read by maybe_evict() during eviction. Stored as u8 via EvictionPolicy::to_u8/from_u8.
     active_eviction_policy: AtomicU8,
+    /// Runtime-mutable max memory limit. Updated atomically by CONFIG SET maxmemory.
+    /// Read by maybe_evict() during eviction. 0 means use config.max_memory (startup default).
+    active_max_memory: AtomicUsize,
 }
 
 impl StorageEngine {
@@ -203,6 +206,7 @@ impl StorageEngine {
         }
 
         let initial_policy = config.eviction_policy.to_u8();
+        let initial_max_memory = config.max_memory;
         let engine = Arc::new(Self {
             data: DashMap::with_capacity(1024), // Starting with a reasonable capacity
             config,
@@ -221,6 +225,7 @@ impl StorageEngine {
             db_mapping: AtomicU64::new(Self::identity_db_mapping()),
             runtime_config: DashMap::new(),
             active_eviction_policy: AtomicU8::new(initial_policy),
+            active_max_memory: AtomicUsize::new(initial_max_memory),
         });
 
         // Seed runtime config from startup config
@@ -354,6 +359,18 @@ impl StorageEngine {
     pub fn config_set(&self, param: &str, value: &str) -> Result<(), String> {
         let key = param.to_lowercase();
         match key.as_str() {
+            "maxmemory" => {
+                // Parse memory value (supports plain bytes or suffixes like kb, mb, gb)
+                let bytes = Self::parse_memory_value(value).map_err(|_| {
+                    format!(
+                        "ERR Invalid argument '{}' for CONFIG SET 'maxmemory'",
+                        value
+                    )
+                })?;
+                self.active_max_memory.store(bytes, Ordering::Release);
+                self.runtime_config.insert(key, value.to_string());
+                Ok(())
+            }
             "maxmemory-policy" => {
                 // Parse and apply the eviction policy
                 let policy = match value.to_lowercase().as_str() {
@@ -379,6 +396,21 @@ impl StorageEngine {
                 Ok(())
             }
         }
+    }
+
+    /// Parse a memory value string (e.g. "100mb", "1gb", "1048576") into bytes.
+    fn parse_memory_value(value: &str) -> Result<usize, ()> {
+        let s = value.trim().to_lowercase();
+        if let Ok(bytes) = s.parse::<usize>() {
+            return Ok(bytes);
+        }
+        // Try suffixes: kb, mb, gb
+        for (suffix, multiplier) in &[("gb", 1024 * 1024 * 1024), ("mb", 1024 * 1024), ("kb", 1024)] {
+            if let Some(num_str) = s.strip_suffix(suffix) {
+                return num_str.trim().parse::<usize>().map(|n| n * multiplier).map_err(|_| ());
+            }
+        }
+        Err(())
     }
 
     /// Extract the physical database index for a given logical index from the packed mapping.
@@ -731,9 +763,11 @@ impl StorageEngine {
 
     /// Check if we need to evict items to make room
     async fn maybe_evict(&self, required_size: usize) -> StorageResult<()> {
+        // Read the active max memory limit (may have been changed at runtime via CONFIG SET)
+        let max_memory = self.active_max_memory.load(Ordering::Acquire);
         // Check if adding this item would exceed our memory limit
         let current_memory = self.current_memory.load(Ordering::Acquire) as usize;
-        if current_memory + required_size > self.config.max_memory {
+        if current_memory + required_size > max_memory {
             // Read the active eviction policy (may have been changed at runtime via CONFIG SET)
             let eviction_policy =
                 EvictionPolicy::from_u8(self.active_eviction_policy.load(Ordering::Acquire));
@@ -745,7 +779,7 @@ impl StorageEngine {
 
             // Evict items until we have enough space (search across all databases)
             while self.current_memory.load(Ordering::Acquire) as usize + required_size
-                > self.config.max_memory
+                > max_memory
             {
                 // Check if there are any items to evict across all DBs
                 let total_keys: usize =
@@ -1233,6 +1267,9 @@ impl StorageEngine {
 
         // Bump flush epoch only for the flushed database (not other DBs)
         self.flush_epochs[db_idx].fetch_add(1, Ordering::SeqCst);
+
+        // Increment write counters so BGSAVE thresholds detect the flush
+        self.increment_write_counters().await;
 
         Ok(())
     }
