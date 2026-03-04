@@ -307,8 +307,8 @@ func testMemory(ctx context.Context, rdb *redis.Client, prefix string) []TestRes
 		if !ok {
 			return fmt.Errorf("OBJECT IDLETIME should return integer, got %T: %v", result, result)
 		}
-		// Idle time should be 0 or small right after set (in seconds)
-		return AssertTrue(idletime >= 0, fmt.Sprintf("OBJECT IDLETIME should be >= 0, got %d", idletime))
+		// Idle time should be 0 right after set (in seconds)
+		return AssertEqualInt64(0, idletime)
 	}))
 
 	// OBJECT_FREQ: Verify OBJECT FREQ returns LFU frequency counter
@@ -349,7 +349,7 @@ func testMemory(ctx context.Context, rdb *redis.Client, prefix string) []TestRes
 		if !ok {
 			return fmt.Errorf("OBJECT FREQ should return integer, got %T: %v", result, result)
 		}
-		return AssertTrue(freq >= 0, fmt.Sprintf("OBJECT FREQ should be >= 0, got %d", freq))
+		return AssertTrue(freq > 0, fmt.Sprintf("OBJECT FREQ should be > 0 after access, got %d", freq))
 	}))
 
 	return results

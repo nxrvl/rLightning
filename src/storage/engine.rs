@@ -367,8 +367,13 @@ impl StorageEngine {
                         value
                     )
                 })?;
-                self.active_max_memory.store(bytes, Ordering::Release);
-                self.runtime_config.insert(key, value.to_string());
+                // In Redis, maxmemory 0 means "no memory limit". Represent this as
+                // usize::MAX so that maybe_evict() never triggers eviction.
+                let effective = if bytes == 0 { usize::MAX } else { bytes };
+                self.active_max_memory.store(effective, Ordering::Release);
+                // Store the normalized byte count (not the raw string) so CONFIG GET
+                // returns a numeric value matching Redis behavior.
+                self.runtime_config.insert(key, bytes.to_string());
                 Ok(())
             }
             "maxmemory-policy" => {
@@ -407,7 +412,11 @@ impl StorageEngine {
         // Try suffixes: kb, mb, gb
         for (suffix, multiplier) in &[("gb", 1024 * 1024 * 1024), ("mb", 1024 * 1024), ("kb", 1024)] {
             if let Some(num_str) = s.strip_suffix(suffix) {
-                return num_str.trim().parse::<usize>().map(|n| n * multiplier).map_err(|_| ());
+                return num_str
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| ())
+                    .and_then(|n| n.checked_mul(*multiplier).ok_or(()));
             }
         }
         Err(())

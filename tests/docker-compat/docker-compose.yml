@@ -359,7 +359,7 @@ services:
     networks:
       - compat-test
     volumes:
-      - ./config/rlightning-sentinel-1.toml:/etc/rlightning/config.toml:ro
+      - ./config/rlightning-sentinel.toml:/etc/rlightning/config.toml:ro
     command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
     depends_on:
       rlightning:
@@ -386,7 +386,7 @@ services:
     networks:
       - compat-test
     volumes:
-      - ./config/rlightning-sentinel-2.toml:/etc/rlightning/config.toml:ro
+      - ./config/rlightning-sentinel.toml:/etc/rlightning/config.toml:ro
     command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
     depends_on:
       rlightning:
@@ -413,7 +413,7 @@ services:
     networks:
       - compat-test
     volumes:
-      - ./config/rlightning-sentinel-3.toml:/etc/rlightning/config.toml:ro
+      - ./config/rlightning-sentinel.toml:/etc/rlightning/config.toml:ro
     command: ["rlightning", "--config", "/etc/rlightning/config.toml"]
     depends_on:
       rlightning:

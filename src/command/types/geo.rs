@@ -48,7 +48,7 @@ fn geohash_decode(hash: u64) -> (f64, f64) {
     (lon, lat)
 }
 
-/// Interleave bits: even bit positions for x (longitude), odd for y (latitude).
+/// Interleave bits: odd bit positions for x (longitude), even for y (latitude).
 fn interleave(x: u64, y: u64) -> u64 {
     let mut result: u64 = 0;
     for i in 0..GEO_STEP_MAX {

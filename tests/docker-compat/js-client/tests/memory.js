@@ -170,7 +170,7 @@ register('memory', async (redis, prefix) => {
     try {
       await redis.set(k, 'testvalue');
       const idletime = await redis.object('IDLETIME', k);
-      assertTrue(Number(idletime) >= 0, `OBJECT IDLETIME should be >= 0, got ${idletime}`);
+      assertEqualInt(0, Number(idletime));
     } finally {
       await redis.del(k);
     }
@@ -192,7 +192,7 @@ register('memory', async (redis, prefix) => {
       await sleep(50);
 
       const freq = await redis.object('FREQ', k);
-      assertTrue(Number(freq) >= 0, `OBJECT FREQ should be >= 0, got ${freq}`);
+      assertTrue(Number(freq) > 0, `OBJECT FREQ should be > 0 after access, got ${freq}`);
     } finally {
       await redis.config('SET', 'maxmemory-policy', origPolicy);
       await redis.del(k);
