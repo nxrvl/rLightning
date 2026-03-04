@@ -478,11 +478,33 @@ pub async fn handle_exec(
     // Execute all queued commands while holding locks.
     // Set IN_TRANSACTION so nested lock_keys calls (e.g. from MSETNX) are no-ops,
     // avoiding deadlocks since EXEC already holds all necessary locks.
+    // Track effective_db to handle SELECT inside transactions: SELECT changes
+    // the database context for subsequent commands within the transaction.
     let results = IN_TRANSACTION
         .scope(true, async {
             let mut results = Vec::with_capacity(commands.len());
+            let mut effective_db = db_index;
             for cmd in commands {
-                match handler.process(cmd, db_index).await {
+                if cmd.name.eq_ignore_ascii_case("select") {
+                    // Handle SELECT inside transaction: validate via handler, then
+                    // update effective_db for subsequent commands.
+                    let db_arg = cmd.args.first().cloned();
+                    match handler.process(cmd, effective_db).await {
+                        Ok(response) => {
+                            // Validation passed; update effective_db from the argument
+                            if let Some(arg) = db_arg
+                                && let Ok(s) = std::str::from_utf8(&arg)
+                                && let Ok(idx) = s.parse::<usize>()
+                            {
+                                effective_db = idx;
+                            }
+                            results.push(response);
+                        }
+                        Err(e) => results.push(RespValue::Error(e.to_string())),
+                    }
+                    continue;
+                }
+                match handler.process(cmd, effective_db).await {
                     Ok(response) => results.push(response),
                     Err(e) => results.push(RespValue::Error(e.to_string())),
                 }
