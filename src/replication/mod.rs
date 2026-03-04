@@ -279,16 +279,31 @@ impl ReplicationManager {
     /// Propagate a write command to all connected replicas.
     /// Called by the server after processing a write command.
     pub async fn propagate_command(&self, command: &RespCommand) {
+        self.propagate_commands_batch(std::slice::from_ref(command)).await;
+    }
+
+    /// Propagate multiple commands atomically to all connected replicas.
+    /// All commands are serialized together and written to the backlog under
+    /// a single lock, preventing interleaving from concurrent connections.
+    /// Used to bundle SELECT + write command or SELECT + MULTI/EXEC blocks.
+    pub async fn propagate_commands_batch(&self, commands: &[RespCommand]) {
+        if commands.is_empty() {
+            return;
+        }
+
         let state = self.state.read().await;
         if state.role != ReplicationRole::Master {
             return;
         }
         drop(state);
 
-        // Serialize the command to RESP format
-        let serialized = Self::serialize_command(command);
+        // Serialize all commands into a single buffer
+        let mut serialized = Vec::new();
+        for cmd in commands {
+            serialized.extend_from_slice(&Self::serialize_command(cmd));
+        }
 
-        // Add to backlog
+        // Add to backlog atomically (single lock acquisition)
         {
             let mut backlog = self.backlog.write().await;
             backlog.append(&serialized);

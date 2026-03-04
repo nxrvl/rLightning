@@ -402,6 +402,21 @@ impl StorageEngine {
                 self.runtime_config.insert(key, value.to_lowercase());
                 Ok(())
             }
+            // Immutable parameters that cannot be changed at runtime
+            "bind" | "port" | "tls-port" | "tls-cert-file" | "tls-key-file"
+            | "tls-ca-cert-file" | "daemonize" | "pidfile" | "logfile" => {
+                Err(format!(
+                    "ERR Unsupported CONFIG parameter: {}",
+                    param
+                ))
+            }
+            // Security parameters that require SecurityManager updates which
+            // CONFIG SET cannot perform - reject to avoid silent misconfiguration
+            "requirepass" => {
+                Err(
+                    "ERR CONFIG SET requirepass is not supported at runtime. Use ACL SETUSER to manage authentication.".to_string()
+                )
+            }
             _ => {
                 self.runtime_config.insert(key, value.to_string());
                 Ok(())
