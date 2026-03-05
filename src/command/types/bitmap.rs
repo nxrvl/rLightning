@@ -490,6 +490,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let results = engine.atomic_modify(key, RedisDataType::String, |current| {
         let mut bitmap = current.as_ref().map(|v| (*v).clone()).unwrap_or_default();
         let mut results: Vec<RespValue> = Vec::new();
+        let mut modified = false;
 
         for op in &ops {
             match op {
@@ -506,6 +507,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
                     bitfield_set(&mut bitmap, encoding, *offset, *value);
                     results.push(RespValue::Integer(old_val));
+                    modified = true;
                 }
                 BitfieldOp::IncrBy {
                     encoding,
@@ -520,6 +522,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                             ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
                             bitfield_set(&mut bitmap, encoding, *offset, new_val);
                             results.push(RespValue::Integer(new_val));
+                            modified = true;
                         }
                         None => {
                             // OVERFLOW FAIL - don't change, push nil
@@ -530,7 +533,12 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             }
         }
 
-        Ok((Some(bitmap), results))
+        if modified {
+            Ok((Some(bitmap), results))
+        } else {
+            // No actual mutation: preserve existing key state (don't create phantom keys)
+            Ok((current.as_ref().map(|v| (*v).clone()), results))
+        }
     })?;
 
     Ok(RespValue::Array(Some(results)))
