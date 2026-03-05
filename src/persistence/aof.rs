@@ -109,6 +109,11 @@ impl AofPersistence {
             // Create a buffered writer
             let mut writer = TokioBufWriter::with_capacity(BUFFER_SIZE, file);
 
+            // Track whether the writer is in a valid state. Set to false when a
+            // reopen fails after an I/O error, preventing the next iteration from
+            // flushing stale partial data from the old BufWriter.
+            let mut writer_valid = true;
+
             // Periodically fsync for EverySecond policy
             let mut fsync_interval = time::interval(Duration::from_secs(1));
             fsync_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -120,6 +125,33 @@ impl AofPersistence {
                 tokio::select! {
                     // Handle new entries
                     Some(entry) = writer_rx.recv() => {
+                        // If the writer was poisoned by a prior failed reopen,
+                        // try to recover before processing any new batches.
+                        if !writer_valid {
+                            match TokioFile::options()
+                                .create(true)
+                                .append(true)
+                                .open(&path).await {
+                                Ok(file) => {
+                                    // Recover file_size from the reopened handle.
+                                    match file.metadata().await {
+                                        Ok(meta) => {
+                                            *file_size.write().await = meta.len();
+                                        }
+                                        Err(me) => {
+                                            error!(path = ?path, "Failed to recover AOF file size from reopened handle: {:?}", me);
+                                        }
+                                    }
+                                    writer = TokioBufWriter::with_capacity(BUFFER_SIZE, file);
+                                    writer_valid = true;
+                                }
+                                Err(e) => {
+                                    error!(path = ?path, "AOF writer still poisoned, cannot reopen file — discarding batch: {:?}", e);
+                                    continue;
+                                }
+                            }
+                        }
+
                         // Stage entire batch in a memory buffer before writing.
                         // This prevents partial RESP commands from reaching the file
                         // if serialization or I/O fails mid-batch.
@@ -153,7 +185,55 @@ impl AofPersistence {
                             continue;
                         }
 
-                        // Write the complete, pre-validated batch to BufWriter
+                        // Flush any previously buffered data to disk before recording
+                        // the pre-write size. BufWriter may hold unflushed data from
+                        // prior batches, making file_size ahead of the actual on-disk
+                        // position. Flushing first ensures set_len won't zero-extend
+                        // the file on error.
+                        if let Err(e) = writer.flush().await {
+                            error!(path = ?path, "Failed to flush AOF buffer before batch write: {:?}", e);
+                            // The BufWriter may hold unflushed data, making the in-memory
+                            // file_size counter ahead of actual on-disk bytes. Recover the
+                            // real file size and recreate the writer to avoid stale-size
+                            // truncation hazards on subsequent write failures.
+                            let mut size_recovered = false;
+                            match tokio::fs::metadata(&path).await {
+                                Ok(meta) => {
+                                    *file_size.write().await = meta.len();
+                                    size_recovered = true;
+                                }
+                                Err(me) => {
+                                    error!(path = ?path, "Failed to stat AOF file after flush failure: {:?}", me);
+                                }
+                            }
+                            match TokioFile::options()
+                                .create(true)
+                                .append(true)
+                                .open(&path).await {
+                                Ok(file) => {
+                                    // If metadata() failed above, recover file size from the
+                                    // reopened handle to avoid stale pre_write_size on later errors.
+                                    if !size_recovered {
+                                        match file.metadata().await {
+                                            Ok(meta) => {
+                                                *file_size.write().await = meta.len();
+                                            }
+                                            Err(me) => {
+                                                error!(path = ?path, "Failed to recover AOF file size from reopened handle: {:?}", me);
+                                            }
+                                        }
+                                    }
+                                    writer = TokioBufWriter::with_capacity(BUFFER_SIZE, file);
+                                }
+                                Err(reopen_err) => {
+                                    error!(path = ?path, "Failed to reopen AOF file after flush failure: {:?}", reopen_err);
+                                    writer_valid = false;
+                                }
+                            }
+                            continue;
+                        }
+                        // Record pre-write file size so we can truncate on partial failure.
+                        let pre_write_size = *file_size.read().await;
                         let total_written = batch_buf.len() as u64;
                         if let Err(e) = writer.write_all(&batch_buf).await {
                             error!(
@@ -164,6 +244,20 @@ impl AofPersistence {
                             );
                             // Re-create the writer to discard any partial data
                             // that BufWriter may have buffered before the error.
+                            // Truncate the file to the pre-write size to remove any
+                            // partial bytes that BufWriter may have flushed to disk.
+                            match TokioFile::options()
+                                .write(true)
+                                .open(&path).await {
+                                Ok(truncate_file) => {
+                                    if let Err(te) = truncate_file.set_len(pre_write_size).await {
+                                        error!(path = ?path, "Failed to truncate AOF file after partial write: {:?}", te);
+                                    }
+                                }
+                                Err(te) => {
+                                    error!(path = ?path, "Failed to open AOF file for truncation: {:?}", te);
+                                }
+                            }
                             match TokioFile::options()
                                 .create(true)
                                 .append(true)
@@ -173,6 +267,7 @@ impl AofPersistence {
                                 }
                                 Err(reopen_err) => {
                                     error!(path = ?path, "Failed to reopen AOF file after write error: {:?}", reopen_err);
+                                    writer_valid = false;
                                 }
                             }
                             continue;
@@ -197,7 +292,7 @@ impl AofPersistence {
 
                     // Handle periodic fsync (for EverySecond policy)
                     _ = fsync_interval.tick() => {
-                        if need_fsync {
+                        if need_fsync && writer_valid {
                             // Flush the buffer
                             if let Err(e) = writer.flush().await {
                                 error!(path = ?path, "Failed to flush AOF buffer during periodic fsync: {:?}", e);

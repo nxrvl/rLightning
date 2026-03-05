@@ -821,6 +821,20 @@ impl StorageEngine {
         self.maybe_evict(estimated_additional).await
     }
 
+    /// Validate that all key-value pairs satisfy size limits.
+    /// Returns an error on the first pair that exceeds max_key_size or max_value_size.
+    pub fn validate_kv_sizes(&self, pairs: &[(Vec<u8>, Vec<u8>)]) -> StorageResult<()> {
+        for (key, value) in pairs {
+            if key.len() > self.config.max_key_size {
+                return Err(StorageError::ValueTooLarge);
+            }
+            if value.len() > self.config.max_value_size {
+                return Err(StorageError::ValueTooLarge);
+            }
+        }
+        Ok(())
+    }
+
     /// Check if we need to evict items to make room
     async fn maybe_evict(&self, required_size: usize) -> StorageResult<()> {
         // Read the active max memory limit (may have been changed at runtime via CONFIG SET)
@@ -935,6 +949,34 @@ impl StorageEngine {
         data_type: RedisDataType,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
+        self.set_with_type_inner(key, value, data_type, ttl, true)
+            .await
+    }
+
+    /// Set a key-value pair, skipping per-key eviction checks.
+    /// Caller must have already performed a best-effort memory check via
+    /// `check_write_memory` for the total batch size. Used by MSET to prevent
+    /// partial writes that would violate its all-or-nothing guarantee.
+    pub async fn set_preevicted(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    ) -> StorageResult<()> {
+        self.set_with_type_inner(key, value, RedisDataType::String, ttl, false)
+            .await
+    }
+
+    /// Inner implementation for set operations.
+    /// When `do_evict` is false, skips the per-key `maybe_evict` call.
+    async fn set_with_type_inner(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        data_type: RedisDataType,
+        ttl: Option<Duration>,
+        do_evict: bool,
+    ) -> StorageResult<()> {
         // Check size limits
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
@@ -958,8 +1000,10 @@ impl StorageEngine {
 
         let required_size = Self::calculate_size(&key, &value);
 
-        // Ensure we have enough memory
-        self.maybe_evict(required_size).await?;
+        // Ensure we have enough memory (skipped when caller pre-checked for batch)
+        if do_evict {
+            self.maybe_evict(required_size).await?;
+        }
 
         // Create a new item with explicit type
         let mut item = StorageItem::new_with_type(value, data_type);

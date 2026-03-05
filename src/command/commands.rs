@@ -204,13 +204,8 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    // If TTL is None (negative), we need to delete the key
-    if ttl.is_none() {
-        let deleted = engine.del(&key).await?;
-        return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
-    }
-
-    // Apply condition flags
+    // Apply condition flags before any TTL change (including deletion on negative TTL).
+    // Redis checks NX/XX/GT/LT before deciding whether to delete on negative values.
     if nx || xx || gt || lt {
         let current_ttl = engine.ttl(&key).await?;
         let has_expiry = current_ttl.is_some();
@@ -223,18 +218,32 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
         if gt
             && let Some(current) = current_ttl
-            && let Some(new_ttl) = &ttl
-            && *new_ttl <= current
         {
-            return Ok(RespValue::Integer(0));
+            // Negative TTL (None) is always less than any positive current TTL,
+            // so GT condition fails — don't delete.
+            if let Some(new_ttl) = &ttl
+                && *new_ttl <= current
+            {
+                return Ok(RespValue::Integer(0));
+            }
         }
         if lt
             && let Some(current) = current_ttl
-            && let Some(new_ttl) = &ttl
-            && *new_ttl >= current
         {
-            return Ok(RespValue::Integer(0));
+            // Negative TTL (None) is always less than any positive current TTL,
+            // so LT condition passes — allow deletion below.
+            if let Some(new_ttl) = &ttl
+                && *new_ttl >= current
+            {
+                return Ok(RespValue::Integer(0));
+            }
         }
+    }
+
+    // If TTL is None (negative), delete the key
+    if ttl.is_none() {
+        let deleted = engine.del(&key).await?;
+        return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
     }
 
     match engine.expire(&key, ttl).await? {
