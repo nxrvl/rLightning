@@ -1885,9 +1885,9 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
                     src_ss
                         .entries
                         .iter()
+                        .rev()
                         .skip(si)
                         .take(rlen)
-                        .rev()
                         .map(|(s, m)| (s.0, m.clone()))
                         .collect()
                 } else {
@@ -2147,9 +2147,9 @@ pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
                     if rev {
                         ss.entries
                             .iter()
+                            .rev()
                             .skip(si)
                             .take(rlen)
-                            .rev()
                             .map(|(s, m)| (s.0, m.clone()))
                             .collect()
                     } else {
