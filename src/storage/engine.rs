@@ -2715,6 +2715,9 @@ impl StorageEngine {
     /// If the key doesn't exist, it is created with value 0 before incrementing.
     /// Returns the new value after increment.
     pub fn atomic_incr_float(&self, key: &[u8], delta: f64) -> StorageResult<f64> {
+        if delta.is_nan() || delta.is_infinite() {
+            return Err(StorageError::NotAFloat);
+        }
         use dashmap::mapref::entry::Entry;
         match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {

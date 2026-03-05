@@ -571,6 +571,14 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
+    // Lock source + destination for cross-key atomicity when STORE is used
+    let _guard = if let Some(ref sk) = store_key {
+        let lock_keys: Vec<Vec<u8>> = vec![key.clone(), sk.clone()];
+        Some(engine.lock_keys(&lock_keys).await)
+    } else {
+        None
+    };
+
     // Get the value and determine type
     if !engine.exists(key).await? {
         if let Some(store) = store_key {
