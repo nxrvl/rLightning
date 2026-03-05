@@ -459,21 +459,30 @@ pub async fn handle_exec(
         ));
     }
 
-    // Check if any watched keys were modified (optimistic locking)
+    // Collect all keys from queued commands AND watched keys for locking.
+    // Watched keys must be included in the lock set to prevent TOCTOU:
+    // without locking watched keys, a concurrent writer can modify them
+    // between the WATCH check and command execution.
+    let commands: Vec<Command> = state.queue.drain(..).collect();
+    let watched_keys: Vec<Vec<u8>> = state
+        .watched_keys
+        .keys()
+        .map(|(_, k)| k.clone())
+        .collect();
+    let all_keys: Vec<Vec<u8>> = commands
+        .iter()
+        .flat_map(extract_keys_from_command)
+        .chain(watched_keys.into_iter())
+        .collect();
+
+    // Lock all keys (command + watched) in sorted order to prevent deadlocks
+    let _lock_guard = engine.lock_keys(&all_keys).await;
+
+    // Check watched keys AFTER acquiring locks to close the TOCTOU window
     if state.check_watched_keys(engine) {
         state.reset();
         return Ok(RespValue::BulkString(None)); // nil = transaction aborted due to WATCH
     }
-
-    // Collect all keys from queued commands for locking
-    let commands: Vec<Command> = state.queue.drain(..).collect();
-    let all_keys: Vec<Vec<u8>> = commands
-        .iter()
-        .flat_map(extract_keys_from_command)
-        .collect();
-
-    // Lock all keys in sorted order to prevent deadlocks and ensure isolation
-    let _lock_guard = engine.lock_keys(&all_keys).await;
 
     // Execute all queued commands while holding locks.
     // Set IN_TRANSACTION so nested lock_keys calls (e.g. from MSETNX) are no-ops,

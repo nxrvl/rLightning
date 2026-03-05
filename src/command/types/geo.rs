@@ -678,13 +678,23 @@ pub async fn georadius(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         ));
     }
 
+    // Parse options first to check for STORE keys
+    let (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key) =
+        parse_georadius_options(&args[5..])?;
+
+    // Lock source + destination for cross-key atomicity when STORE is used
+    let dest_key = store_key.as_ref().or(storedist_key.as_ref());
+    let _guard = if let Some(dk) = dest_key {
+        let lock_keys: Vec<Vec<u8>> = vec![key.clone(), dk.clone()];
+        Some(engine.lock_keys(&lock_keys).await)
+    } else {
+        None
+    };
+
     let ss = match load_sorted_set(engine, key).await? {
         Some(ss) => ss,
         None => return Ok(RespValue::Array(Some(vec![]))),
     };
-
-    let (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key) =
-        parse_georadius_options(&args[5..])?;
 
     let radius_m = unit_to_meters(radius, &unit);
     let shape = SearchShape::Radius(radius_m);
@@ -728,6 +738,19 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
         ));
     }
 
+    // Parse options first to check for STORE keys
+    let (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key) =
+        parse_georadius_options(&args[4..])?;
+
+    // Lock source + destination for cross-key atomicity when STORE is used
+    let dest_key = store_key.as_ref().or(storedist_key.as_ref());
+    let _guard = if let Some(dk) = dest_key {
+        let lock_keys: Vec<Vec<u8>> = vec![key.clone(), dk.clone()];
+        Some(engine.lock_keys(&lock_keys).await)
+    } else {
+        None
+    };
+
     let ss = match load_sorted_set(engine, key).await? {
         Some(ss) => ss,
         None => return Ok(RespValue::Array(Some(vec![]))),
@@ -738,9 +761,6 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
         CommandError::InvalidArgument("could not decode requested zset member".to_string())
     })?;
     let (lon, lat) = geohash_decode(member_entry.0 as u64);
-
-    let (sort, count, any, withcoord, withdist, withhash, store_key, storedist_key) =
-        parse_georadius_options(&args[4..])?;
 
     let radius_m = unit_to_meters(radius, &unit);
     let shape = SearchShape::Radius(radius_m);

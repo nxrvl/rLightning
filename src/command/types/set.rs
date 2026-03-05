@@ -316,6 +316,12 @@ pub async fn sinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let destination = &args[0];
     let keys = &args[1..];
 
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_keys: Vec<Vec<u8>> = std::iter::once(destination.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_keys).await;
+
     // Get the first set
     let mut result = get_set(engine, &keys[0]).await?;
 
@@ -373,6 +379,12 @@ pub async fn sunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let destination = &args[0];
     let keys = &args[1..];
 
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_keys: Vec<Vec<u8>> = std::iter::once(destination.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_keys).await;
+
     let mut result = HashSet::new();
 
     // Union all sets
@@ -429,6 +441,12 @@ pub async fn sdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
     let destination = &args[0];
     let keys = &args[1..];
+
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_keys: Vec<Vec<u8>> = std::iter::once(destination.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_keys).await;
 
     // Get the first set
     let mut result = get_set(engine, &keys[0]).await?;

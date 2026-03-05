@@ -1027,6 +1027,12 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
     let (weights, aggregate, _, _) = parse_weights_aggregate(args, 2 + numkeys, numkeys)?;
 
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_lock_keys: Vec<Vec<u8>> = std::iter::once(dest.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_lock_keys).await;
+
     let mut sets: Vec<SortedSetData> = Vec::with_capacity(numkeys);
     for key in &keys {
         match load_sorted_set_readonly(engine, key)? {
@@ -1076,6 +1082,12 @@ pub async fn zunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
     let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
     let (weights, aggregate, _, _) = parse_weights_aggregate(args, 2 + numkeys, numkeys)?;
+
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_lock_keys: Vec<Vec<u8>> = std::iter::once(dest.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_lock_keys).await;
 
     let mut member_scores: HashMap<Vec<u8>, f64> = HashMap::new();
     for (idx, key) in keys.iter().enumerate() {
@@ -1250,6 +1262,13 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         return Err(CommandError::WrongNumberOfArguments);
     }
     let keys: Vec<Vec<u8>> = args[2..2 + numkeys].to_vec();
+
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let all_lock_keys: Vec<Vec<u8>> = std::iter::once(dest.clone())
+        .chain(keys.iter().cloned())
+        .collect();
+    let _guard = engine.lock_keys(&all_lock_keys).await;
+
     let first_set = match load_sorted_set_readonly(engine, &keys[0])? {
         Some(ss) => ss,
         None => {
@@ -1744,6 +1763,10 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let src = &args[1];
     let min_str = bytes_to_string(&args[2])?;
     let max_str = bytes_to_string(&args[3])?;
+
+    // Lock source + destination for cross-key atomicity
+    let all_lock_keys: Vec<Vec<u8>> = vec![dst.clone(), src.clone()];
+    let _guard = engine.lock_keys(&all_lock_keys).await;
 
     let mut by_score = false;
     let mut by_lex = false;
