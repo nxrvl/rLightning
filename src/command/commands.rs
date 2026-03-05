@@ -388,4 +388,83 @@ mod tests {
             "Wrong error message"
         );
     }
+
+    #[tokio::test]
+    async fn test_expire_gt_with_negative_ttl() {
+        let config = StorageConfig::default();
+        let storage = Arc::new(StorageEngine::new(config));
+
+        // Set a key with TTL
+        let key = b"gt_test".to_vec();
+        storage
+            .set(key.clone(), b"val".to_vec(), Some(Duration::from_secs(100)))
+            .await
+            .unwrap();
+
+        // EXPIRE key -1 GT: negative TTL is NOT greater than current 100s TTL → return 0, key survives
+        let args = vec![key.clone(), b"-1".to_vec(), b"GT".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0), "GT should block negative TTL when key has expiry");
+
+        // Key should still exist
+        let val = storage.get(&key).await.unwrap();
+        assert!(val.is_some(), "Key should survive EXPIRE -1 GT");
+
+        // EXPIRE key -1 LT: negative TTL IS less than current 100s TTL → return 1, key deleted
+        let args = vec![key.clone(), b"-1".to_vec(), b"LT".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1), "LT should allow negative TTL when key has expiry");
+
+        // Key should be deleted
+        let val = storage.get(&key).await.unwrap();
+        assert!(val.is_none(), "Key should be deleted by EXPIRE -1 LT");
+    }
+
+    #[tokio::test]
+    async fn test_expire_gt_with_positive_ttl() {
+        let config = StorageConfig::default();
+        let storage = Arc::new(StorageEngine::new(config));
+
+        // Set a key with TTL of 100 seconds
+        let key = b"gt_pos_test".to_vec();
+        storage
+            .set(key.clone(), b"val".to_vec(), Some(Duration::from_secs(100)))
+            .await
+            .unwrap();
+
+        // EXPIRE key 50 GT: 50 is NOT greater than 100 → return 0
+        let args = vec![key.clone(), b"50".to_vec(), b"GT".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0), "GT should block smaller TTL");
+
+        // EXPIRE key 200 GT: 200 IS greater than 100 → return 1
+        let args = vec![key.clone(), b"200".to_vec(), b"GT".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1), "GT should allow larger TTL");
+    }
+
+    #[tokio::test]
+    async fn test_expire_nx_xx_with_negative_ttl() {
+        let config = StorageConfig::default();
+        let storage = Arc::new(StorageEngine::new(config));
+
+        // Set a key with TTL
+        let key = b"nxxx_test".to_vec();
+        storage
+            .set(key.clone(), b"val".to_vec(), Some(Duration::from_secs(100)))
+            .await
+            .unwrap();
+
+        // EXPIRE key -1 NX: key has expiry → NX blocks → return 0, key survives
+        let args = vec![key.clone(), b"-1".to_vec(), b"NX".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0), "NX should block when key has expiry");
+        assert!(storage.get(&key).await.unwrap().is_some(), "Key should survive NX block");
+
+        // EXPIRE key -1 XX: key has expiry → XX passes → key deleted
+        let args = vec![key.clone(), b"-1".to_vec(), b"XX".to_vec()];
+        let result = expire(&storage, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(1), "XX should allow when key has expiry");
+        assert!(storage.get(&key).await.unwrap().is_none(), "Key should be deleted by XX + negative TTL");
+    }
 }
