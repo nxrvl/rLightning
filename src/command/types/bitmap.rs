@@ -2,6 +2,7 @@ use crate::command::utils::bytes_to_string;
 use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
+use crate::storage::item::RedisDataType;
 
 /// Check if a key has a non-string type (WRONGTYPE error).
 /// Uses get_raw_data_type to avoid false positives from legacy heuristic detection
@@ -45,33 +46,32 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         ));
     }
 
-    check_string_type(engine, key).await?;
-
     let byte_offset = (offset / 8) as usize;
     let bit_offset = 7 - (offset % 8) as u8; // Redis uses big-endian bit ordering
 
-    let mut bitmap = engine.get(key).await?.unwrap_or_default();
+    // Atomic read-modify-write: type check, expand, get old bit, set new bit, preserve TTL
+    let old_bit = engine.atomic_modify(key, RedisDataType::String, |current| {
+        let mut bitmap = current.cloned().unwrap_or_default();
 
-    // Expand bitmap if needed
-    if bitmap.len() <= byte_offset {
-        bitmap.resize(byte_offset + 1, 0);
-    }
+        // Expand bitmap if needed
+        if bitmap.len() <= byte_offset {
+            bitmap.resize(byte_offset + 1, 0);
+        }
 
-    // Get old bit value
-    let old_bit = (bitmap[byte_offset] >> bit_offset) & 1;
+        // Get old bit value
+        let old = (bitmap[byte_offset] >> bit_offset) & 1;
 
-    // Set new bit value
-    if bit_value == 1 {
-        bitmap[byte_offset] |= 1 << bit_offset;
-    } else {
-        bitmap[byte_offset] &= !(1 << bit_offset);
-    }
+        // Set new bit value
+        if bit_value == 1 {
+            bitmap[byte_offset] |= 1 << bit_offset;
+        } else {
+            bitmap[byte_offset] &= !(1 << bit_offset);
+        }
 
-    // Preserve TTL
-    let ttl = engine.ttl(key).await?;
-    engine.set(key.clone(), bitmap, ttl).await?;
+        Ok((Some(bitmap), old as i64))
+    })?;
 
-    Ok(RespValue::Integer(old_bit as i64))
+    Ok(RespValue::Integer(old_bit))
 }
 
 /// Redis GETBIT command - Returns the bit value at offset in the string value stored at key
@@ -379,6 +379,11 @@ pub async fn bitop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         ));
     }
 
+    // Lock all involved keys (sources + destination) for cross-key atomicity
+    let mut all_keys: Vec<Vec<u8>> = source_keys.iter().map(|k| k.to_vec()).collect();
+    all_keys.push(dest_key.clone());
+    let _lock = engine.lock_keys(&all_keys).await;
+
     // Validate all source keys are string type
     for k in source_keys {
         check_string_type(engine, k).await?;
@@ -455,7 +460,6 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     }
 
     let key = &args[0];
-    check_string_type(engine, key).await?;
 
     let ops = parse_bitfield_ops(&args[1..], false)?;
 
@@ -463,55 +467,60 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         return Ok(RespValue::Array(Some(vec![])));
     }
 
-    let mut bitmap = engine.get(key).await?.unwrap_or_default();
-    let mut results: Vec<RespValue> = Vec::new();
-    let mut modified = false;
+    // Atomic read-modify-write for entire BITFIELD operation
+    let results = engine.atomic_modify(key, RedisDataType::String, |current| {
+        let mut bitmap = current.as_ref().map(|v| (*v).clone()).unwrap_or_default();
+        let mut results: Vec<RespValue> = Vec::new();
+        let mut modified = false;
 
-    for op in &ops {
-        match op {
-            BitfieldOp::Get { encoding, offset } => {
-                let val = bitfield_get(&bitmap, encoding, *offset);
-                results.push(RespValue::Integer(val));
-            }
-            BitfieldOp::Set {
-                encoding,
-                offset,
-                value,
-            } => {
-                let old_val = bitfield_get(&bitmap, encoding, *offset);
-                ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
-                bitfield_set(&mut bitmap, encoding, *offset, *value);
-                results.push(RespValue::Integer(old_val));
-                modified = true;
-            }
-            BitfieldOp::IncrBy {
-                encoding,
-                offset,
-                increment,
-                overflow,
-            } => {
-                let old_val = bitfield_get(&bitmap, encoding, *offset);
-                let result = bitfield_incrby(old_val, *increment, encoding, *overflow);
-                match result {
-                    Some(new_val) => {
-                        ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
-                        bitfield_set(&mut bitmap, encoding, *offset, new_val);
-                        results.push(RespValue::Integer(new_val));
-                        modified = true;
-                    }
-                    None => {
-                        // OVERFLOW FAIL - don't change, push nil
-                        results.push(RespValue::BulkString(None));
+        for op in &ops {
+            match op {
+                BitfieldOp::Get { encoding, offset } => {
+                    let val = bitfield_get(&bitmap, encoding, *offset);
+                    results.push(RespValue::Integer(val));
+                }
+                BitfieldOp::Set {
+                    encoding,
+                    offset,
+                    value,
+                } => {
+                    let old_val = bitfield_get(&bitmap, encoding, *offset);
+                    ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
+                    bitfield_set(&mut bitmap, encoding, *offset, *value);
+                    results.push(RespValue::Integer(old_val));
+                    modified = true;
+                }
+                BitfieldOp::IncrBy {
+                    encoding,
+                    offset,
+                    increment,
+                    overflow,
+                } => {
+                    let old_val = bitfield_get(&bitmap, encoding, *offset);
+                    let result = bitfield_incrby(old_val, *increment, encoding, *overflow);
+                    match result {
+                        Some(new_val) => {
+                            ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
+                            bitfield_set(&mut bitmap, encoding, *offset, new_val);
+                            results.push(RespValue::Integer(new_val));
+                            modified = true;
+                        }
+                        None => {
+                            // OVERFLOW FAIL - don't change, push nil
+                            results.push(RespValue::BulkString(None));
+                        }
                     }
                 }
             }
         }
-    }
 
-    if modified {
-        let ttl = engine.ttl(key).await?;
-        engine.set(key.clone(), bitmap, ttl).await?;
-    }
+        if modified {
+            Ok((Some(bitmap), results))
+        } else {
+            // Return current value unchanged (None would delete the key)
+            Ok((current.map(|v| (*v).clone()), results))
+        }
+    })?;
 
     Ok(RespValue::Array(Some(results)))
 }
@@ -621,7 +630,11 @@ fn parse_offset(s: &str, encoding: &BitfieldEncoding) -> Result<u64, CommandErro
                 "ERR bit offset is not an integer or out of range".to_string(),
             )
         })?;
-        Ok(n * encoding.bits as u64)
+        Ok(n.checked_mul(encoding.bits as u64).ok_or_else(|| {
+            CommandError::InvalidArgument(
+                "ERR bit offset is not an integer or out of range".to_string(),
+            )
+        })?)
     } else {
         s.parse().map_err(|_| {
             CommandError::InvalidArgument(

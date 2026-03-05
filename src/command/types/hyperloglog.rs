@@ -155,48 +155,40 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let key = &args[0];
-    check_hll_type(engine, key).await?;
+    let elements = &args[1..];
 
-    // Get existing HLL or create new one
-    let mut hll_data = match engine.get(key).await? {
-        Some(data) if hll_is_valid(&data) => data,
-        Some(data) if data.is_empty() => hll_new_dense(),
-        Some(_) => {
-            return Err(CommandError::InvalidArgument(
-                "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
-            ));
+    // Atomic read-modify-write: type check, HLL register update, TTL preservation
+    let changed = engine.atomic_modify(key, RedisDataType::String, |current| {
+        let is_new = current.is_none();
+        let mut hll_data = match current {
+            Some(ref data) if hll_is_valid(data) => (*data).clone(),
+            Some(ref data) if data.is_empty() => hll_new_dense(),
+            Some(_) => {
+                return Err(crate::storage::error::StorageError::WrongType);
+            }
+            None => hll_new_dense(),
+        };
+
+        // If no elements provided, just ensure the key exists
+        if elements.is_empty() {
+            if is_new {
+                return Ok((Some(hll_data), 1i64));
+            }
+            return Ok((Some(hll_data), 0i64));
         }
-        None => hll_new_dense(),
-    };
 
-    // If no elements provided, just ensure the key exists
-    if args.len() == 1 {
-        // PFADD key (no elements) - create the key if it doesn't exist
-        if !engine.exists(key).await? {
-            let ttl = engine.ttl(key).await?;
-            engine
-                .set_with_type(key.clone(), hll_data, RedisDataType::String, ttl)
-                .await?;
-            return Ok(RespValue::Integer(1));
+        let mut changed = false;
+        for element in elements {
+            let (index, count) = hll_hash_element(element);
+            if hll_set_register(&mut hll_data, index, count) {
+                changed = true;
+            }
         }
-        return Ok(RespValue::Integer(0));
-    }
 
-    let mut changed = false;
-    for element in &args[1..] {
-        let (index, count) = hll_hash_element(element);
-        if hll_set_register(&mut hll_data, index, count) {
-            changed = true;
-        }
-    }
+        Ok((Some(hll_data), if changed { 1 } else { 0 }))
+    })?;
 
-    // Store updated HLL
-    let ttl = engine.ttl(key).await?;
-    engine
-        .set_with_type(key.clone(), hll_data, RedisDataType::String, ttl)
-        .await?;
-
-    Ok(RespValue::Integer(if changed { 1 } else { 0 }))
+    Ok(RespValue::Integer(changed))
 }
 
 /// Redis PFCOUNT command - Return the approximated cardinality of the set(s)
@@ -250,6 +242,10 @@ pub async fn pfmerge(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     }
 
     let dest_key = &args[0];
+
+    // Lock all involved keys for cross-key atomicity
+    let all_keys: Vec<Vec<u8>> = args.to_vec();
+    let _lock = engine.lock_keys(&all_keys).await;
 
     // Check dest key type
     check_hll_type(engine, dest_key).await?;

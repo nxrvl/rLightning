@@ -120,6 +120,9 @@ pub async fn rename(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
+    // Lock both keys for atomic get-set-del
+    let _lock = engine.lock_keys(&[key.clone(), new_key.clone()]).await;
+
     // Get the full item to preserve data type and TTL
     let item = match engine.get_item(&key).await? {
         Some(item) => item,
@@ -165,6 +168,9 @@ pub async fn renamenx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
         return Ok(RespValue::Integer(0));
     }
+
+    // Lock both keys for atomic exists-check + get + set + del
+    let _lock = engine.lock_keys(&[key.clone(), new_key.clone()]).await;
 
     // Check if the destination key already exists
     if engine.exists(&new_key).await? {

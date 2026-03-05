@@ -1351,15 +1351,17 @@ impl StorageEngine {
     pub async fn flush_db(&self) -> StorageResult<()> {
         let db = self.active_db();
         let db_idx = Self::current_db_idx();
-        let size: u64 = db
-            .iter()
-            .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
-            .sum();
         db.clear();
-        self.current_memory.fetch_sub(
-            size.min(self.current_memory.load(Ordering::Acquire)),
-            Ordering::AcqRel,
-        );
+        // Recalculate memory across all databases to avoid drift from concurrent writes
+        let total_memory: u64 = std::iter::once(&self.data)
+            .chain(self.extra_dbs.iter())
+            .map(|db| {
+                db.iter()
+                    .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
+                    .sum::<u64>()
+            })
+            .sum();
+        self.current_memory.store(total_memory, Ordering::Release);
         // Recalculate total key count across all databases
         let total: u64 =
             self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();

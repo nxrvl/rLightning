@@ -10,26 +10,22 @@ use crate::storage::item::RedisDataType;
 use crate::storage::stream::{ConsumerGroup, PendingEntry, StreamData, StreamEntryId};
 
 /// Helper: get stream data for multi-key read operations (XREAD, XREADGROUP).
-/// Uses engine.get() since atomic_modify is per-key and we need cross-key reads.
+/// Uses get_item() for single atomic DashMap lookup (value + type in one read).
 async fn get_stream_data(
     engine: &StorageEngine,
     key: &[u8],
 ) -> Result<Option<StreamData>, CommandError> {
     match engine
-        .get(key)
+        .get_item(key)
         .await
         .map_err(|e| CommandError::StorageError(e.to_string()))?
     {
-        Some(data) => {
-            let key_type = engine
-                .get_type(key)
-                .await
-                .map_err(|e| CommandError::StorageError(e.to_string()))?;
-            if key_type != "stream" {
+        Some(item) => {
+            if item.data_type != crate::storage::item::RedisDataType::Stream {
                 return Err(CommandError::WrongType);
             }
             let stream: StreamData =
-                bincode::deserialize(&data).map_err(|_| CommandError::WrongType)?;
+                bincode::deserialize(&item.value).map_err(|_| CommandError::WrongType)?;
             Ok(Some(stream))
         }
         None => Ok(None),
