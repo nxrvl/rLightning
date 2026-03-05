@@ -272,6 +272,9 @@ pub struct TransactionState {
     /// Per-database flush epochs recorded at WATCH time.
     /// Only databases that have watched keys are tracked.
     pub flush_epochs_at_watch: HashMap<usize, u64>,
+    /// After EXEC with SELECT, holds the final database index.
+    /// Not cleared by reset() - consumed by the caller after EXEC returns.
+    pub post_exec_db: Option<usize>,
 }
 
 impl Default for TransactionState {
@@ -290,6 +293,7 @@ impl TransactionState {
             has_command_errors: false,
             queued_errors: Vec::new(),
             flush_epochs_at_watch: HashMap::new(),
+            post_exec_db: None,
         }
     }
 
@@ -489,7 +493,7 @@ pub async fn handle_exec(
     // avoiding deadlocks since EXEC already holds all necessary locks.
     // Track effective_db to handle SELECT inside transactions: SELECT changes
     // the database context for subsequent commands within the transaction.
-    let results = IN_TRANSACTION
+    let (results, effective_db) = IN_TRANSACTION
         .scope(true, async {
             let mut results = Vec::with_capacity(commands.len());
             let mut effective_db = db_index;
@@ -518,9 +522,15 @@ pub async fn handle_exec(
                     Err(e) => results.push(RespValue::Error(e.to_string())),
                 }
             }
-            results
+            (results, effective_db)
         })
         .await;
+
+    // Store final effective_db so caller can update connection's db_index.
+    // In Redis, SELECT inside MULTI/EXEC permanently changes the connection's database.
+    if effective_db != db_index {
+        state.post_exec_db = Some(effective_db);
+    }
 
     // Clear transaction state (locks released when _lock_guard is dropped)
     state.reset();

@@ -1437,6 +1437,13 @@ impl Server {
             }
         }
 
+        // After EXEC completes (including AOF/replication), update the connection's
+        // database index if SELECT was used inside the transaction.
+        // In Redis, SELECT inside MULTI/EXEC permanently changes the connection's DB.
+        if let Some(new_db) = tx_state.post_exec_db.take() {
+            *db_index = new_db;
+        }
+
         Ok(DispatchAction::Continue)
     }
 

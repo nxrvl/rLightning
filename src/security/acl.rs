@@ -1601,7 +1601,7 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // SORT/SORT_RO - key at 0, optional STORE destination
         "sort" | "sort_ro" => {
             let mut keys = vec![0];
-            for i in 0..args.len() {
+            for i in 1..args.len() {
                 if String::from_utf8_lossy(&args[i]).eq_ignore_ascii_case("store")
                     && i + 1 < args.len()
                 {
@@ -1615,7 +1615,7 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         // GEORADIUS/GEORADIUSBYMEMBER - key at 0, optional STORE/STOREDIST destination
         "georadius" | "georadiusbymember" => {
             let mut keys = vec![0];
-            for i in 0..args.len() {
+            for i in 1..args.len() {
                 let arg = String::from_utf8_lossy(&args[i]).to_uppercase();
                 if (arg == "STORE" || arg == "STOREDIST") && i + 1 < args.len() {
                     keys.push(i + 1);

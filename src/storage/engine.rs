@@ -3086,6 +3086,17 @@ impl StorageEngine {
 
     /// Set a field only if it does NOT exist. Returns true if the field was set.
     pub fn hash_set_nx(&self, key: &[u8], field: &[u8], value: &[u8]) -> StorageResult<bool> {
+        // Fast path: if the field already exists, return false without bumping
+        // key version (avoids spurious WATCH invalidation on no-op).
+        let field_exists = self.atomic_read(key, RedisDataType::Hash, |existing| {
+            Ok(Self::hash_deserialize(existing).contains_key(field))
+        })?;
+        if field_exists {
+            return Ok(false);
+        }
+        // Field doesn't exist (or key doesn't exist) - use atomic_modify to add it.
+        // Re-check inside the closure to handle the race where another client
+        // added the same field between our read and this modify.
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
             let mut map = Self::hash_deserialize(existing.as_deref());
             if map.contains_key(field) {
