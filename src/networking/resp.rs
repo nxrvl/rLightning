@@ -892,6 +892,12 @@ fn calculate_resp_size(buffer: &[u8]) -> Option<usize> {
                 return Some(crlf_pos + 2);
             }
 
+            // Reject absurdly large bulk strings (Redis limit is 512 MB)
+            // to prevent usize overflow on 32-bit targets
+            if length > 512 * 1024 * 1024 {
+                return Some(crlf_pos + 2);
+            }
+
             let total_size = crlf_pos + 2 + length as usize + 2;
             if buffer.len() >= total_size {
                 Some(total_size)
