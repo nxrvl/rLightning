@@ -234,8 +234,12 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
 
         // Geo commands
         "geoadd" | "geosearchstore" => vec![CommandCategory::Write, CommandCategory::Geo],
-        "geodist" | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember" => {
+        "geodist" | "geohash" | "geopos" | "geosearch" => {
             vec![CommandCategory::Read, CommandCategory::Geo]
+        }
+        // GEORADIUS/GEORADIUSBYMEMBER can write with STORE/STOREDIST option
+        "georadius" | "georadiusbymember" => {
+            vec![CommandCategory::Write, CommandCategory::Geo]
         }
 
         // Stream commands
@@ -245,8 +249,17 @@ pub fn get_command_categories(cmd: &str) -> Vec<CommandCategory> {
         "xlen" | "xrange" | "xrevrange" | "xinfo" | "xpending" => {
             vec![CommandCategory::Read, CommandCategory::Stream]
         }
-        "xread" | "xreadgroup" => {
+        "xread" => {
             vec![
+                CommandCategory::Read,
+                CommandCategory::Stream,
+                CommandCategory::Blocking,
+            ]
+        }
+        // XREADGROUP mutates consumer group state (creates consumers, advances delivery cursor)
+        "xreadgroup" => {
+            vec![
+                CommandCategory::Write,
                 CommandCategory::Read,
                 CommandCategory::Stream,
                 CommandCategory::Blocking,
@@ -1557,7 +1570,7 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         | "decr" | "incrby" | "decrby" | "incrbyfloat" | "append" | "strlen" | "getrange"
         | "setrange" | "substr" | "type" | "expire" | "pexpire" | "expireat" | "pexpireat"
         | "persist" | "ttl" | "pttl" | "expiretime" | "pexpiretime" | "object" | "dump"
-        | "restore" | "sort" | "sort_ro" | "lpush" | "rpush" | "lpushx" | "rpushx" | "linsert"
+        | "restore" | "lpush" | "rpush" | "lpushx" | "rpushx" | "linsert"
         | "lset" | "ltrim" | "lpop" | "rpop" | "lrange" | "lindex" | "llen" | "lpos" | "hset"
         | "hget" | "hgetall" | "hdel" | "hexists" | "hmset" | "hkeys" | "hvals" | "hlen"
         | "hmget" | "hincrby" | "hincrbyfloat" | "hsetnx" | "hstrlen" | "hrandfield" | "hscan"
@@ -1569,7 +1582,7 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
         | "xadd" | "xlen" | "xrange" | "xrevrange" | "xtrim" | "xdel" | "xinfo" | "xgroup"
         | "xack" | "xpending" | "xclaim" | "xautoclaim" | "setbit" | "getbit" | "bitcount"
         | "bitpos" | "bitfield" | "bitfield_ro" | "pfadd" | "pfcount" | "geoadd" | "geodist"
-        | "geohash" | "geopos" | "geosearch" | "georadius" | "georadiusbymember" | "json.get"
+        | "geohash" | "geopos" | "geosearch" | "json.get"
         | "jsonget" | "get_json" | "getjson" | "json.set" | "jsonset" | "set_json" | "setjson"
         | "json.type" | "jsontype" | "json.del" | "jsondel" | "json.resp" | "jsonresp"
         | "json.arrappend" | "jsonarrappend" | "json.arrtrim" | "jsonarrtrim" | "json.objkeys"
@@ -1583,6 +1596,32 @@ pub fn get_key_indices(cmd: &str, args: &[Vec<u8>]) -> Vec<usize> {
             } else {
                 vec![0]
             }
+        }
+
+        // SORT/SORT_RO - key at 0, optional STORE destination
+        "sort" | "sort_ro" => {
+            let mut keys = vec![0];
+            for i in 0..args.len() {
+                if String::from_utf8_lossy(&args[i]).eq_ignore_ascii_case("store")
+                    && i + 1 < args.len()
+                {
+                    keys.push(i + 1);
+                    break;
+                }
+            }
+            keys
+        }
+
+        // GEORADIUS/GEORADIUSBYMEMBER - key at 0, optional STORE/STOREDIST destination
+        "georadius" | "georadiusbymember" => {
+            let mut keys = vec![0];
+            for i in 0..args.len() {
+                let arg = String::from_utf8_lossy(&args[i]).to_uppercase();
+                if (arg == "STORE" || arg == "STOREDIST") && i + 1 < args.len() {
+                    keys.push(i + 1);
+                }
+            }
+            keys
         }
 
         // Multi-key commands where all args are keys
