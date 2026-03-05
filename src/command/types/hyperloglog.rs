@@ -200,33 +200,33 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     }
 
     if args.len() == 1 {
-        // Single key
+        // Single key - atomic type check + read in one DashMap hold
         let key = &args[0];
-        check_hll_type(engine, key).await?;
-
-        match engine.get(key).await? {
-            Some(data) if hll_is_valid(&data) => Ok(RespValue::Integer(hll_count(&data))),
-            Some(data) if data.is_empty() => Ok(RespValue::Integer(0)),
-            Some(_) => Err(CommandError::InvalidArgument(
-                "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
-            )),
-            None => Ok(RespValue::Integer(0)),
-        }
+        let count = engine.atomic_read(key, RedisDataType::String, |data| {
+            match data {
+                Some(d) if hll_is_valid(d) => Ok(hll_count(d)),
+                Some(d) if d.is_empty() => Ok(0),
+                Some(_) => Err(crate::storage::error::StorageError::WrongType),
+                None => Ok(0),
+            }
+        })?;
+        Ok(RespValue::Integer(count))
     } else {
-        // Multiple keys - merge and count
+        // Multiple keys - atomic type check + read per key
         let mut merged = hll_new_dense();
 
         for key in args {
-            check_hll_type(engine, key).await?;
-
-            if let Some(data) = engine.get(key).await? {
-                if hll_is_valid(&data) {
-                    hll_merge(&mut merged, &data);
-                } else if !data.is_empty() {
-                    return Err(CommandError::InvalidArgument(
-                        "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
-                    ));
-                }
+            let data_opt: Option<Vec<u8>> =
+                engine.atomic_read(key, RedisDataType::String, |data| {
+                    match data {
+                        Some(d) if hll_is_valid(d) => Ok(Some(d.clone())),
+                        Some(d) if d.is_empty() => Ok(None),
+                        Some(_) => Err(crate::storage::error::StorageError::WrongType),
+                        None => Ok(None),
+                    }
+                })?;
+            if let Some(data) = data_opt {
+                hll_merge(&mut merged, &data);
             }
         }
 

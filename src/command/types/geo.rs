@@ -693,7 +693,14 @@ pub async fn georadius(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     let ss = match load_sorted_set(engine, key).await? {
         Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
+        None => {
+            // When STORE is used on empty source, Redis deletes destination and returns 0
+            if let Some(sk) = store_key.as_ref().or(storedist_key.as_ref()) {
+                let _ = engine.del(sk).await;
+                return Ok(RespValue::Integer(0));
+            }
+            return Ok(RespValue::Array(Some(vec![])));
+        }
     };
 
     let radius_m = unit_to_meters(radius, &unit);
@@ -753,7 +760,14 @@ pub async fn georadiusbymember(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
 
     let ss = match load_sorted_set(engine, key).await? {
         Some(ss) => ss,
-        None => return Ok(RespValue::Array(Some(vec![]))),
+        None => {
+            // When STORE is used on empty source, Redis deletes destination and returns 0
+            if let Some(sk) = store_key.as_ref().or(storedist_key.as_ref()) {
+                let _ = engine.del(sk).await;
+                return Ok(RespValue::Integer(0));
+            }
+            return Ok(RespValue::Array(Some(vec![])));
+        }
     };
 
     // Find member position
