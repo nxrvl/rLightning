@@ -467,11 +467,29 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         return Ok(RespValue::Array(Some(vec![])));
     }
 
-    // Atomic read-modify-write for entire BITFIELD operation
+    // Check if all ops are read-only (GET only) to avoid spurious write side-effects
+    let all_readonly = ops.iter().all(|op| matches!(op, BitfieldOp::Get { .. }));
+
+    if all_readonly {
+        // Use atomic_read to avoid version bumps and write counter increments
+        let results = engine.atomic_read(key, RedisDataType::String, |current| {
+            let bitmap = current.cloned().unwrap_or_default();
+            let mut results: Vec<RespValue> = Vec::new();
+            for op in &ops {
+                if let BitfieldOp::Get { encoding, offset } = op {
+                    let val = bitfield_get(&bitmap, encoding, *offset);
+                    results.push(RespValue::Integer(val));
+                }
+            }
+            Ok(results)
+        })?;
+        return Ok(RespValue::Array(Some(results)));
+    }
+
+    // Atomic read-modify-write for BITFIELD operations with SET/INCRBY
     let results = engine.atomic_modify(key, RedisDataType::String, |current| {
         let mut bitmap = current.as_ref().map(|v| (*v).clone()).unwrap_or_default();
         let mut results: Vec<RespValue> = Vec::new();
-        let mut modified = false;
 
         for op in &ops {
             match op {
@@ -488,7 +506,6 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                     ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
                     bitfield_set(&mut bitmap, encoding, *offset, *value);
                     results.push(RespValue::Integer(old_val));
-                    modified = true;
                 }
                 BitfieldOp::IncrBy {
                     encoding,
@@ -503,7 +520,6 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
                             ensure_bitmap_size(&mut bitmap, *offset + encoding.bits as u64);
                             bitfield_set(&mut bitmap, encoding, *offset, new_val);
                             results.push(RespValue::Integer(new_val));
-                            modified = true;
                         }
                         None => {
                             // OVERFLOW FAIL - don't change, push nil
@@ -514,12 +530,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             }
         }
 
-        if modified {
-            Ok((Some(bitmap), results))
-        } else {
-            // Return current value unchanged (None would delete the key)
-            Ok((current.map(|v| (*v).clone()), results))
-        }
+        Ok((Some(bitmap), results))
     })?;
 
     Ok(RespValue::Array(Some(results)))
