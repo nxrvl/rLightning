@@ -720,6 +720,10 @@ impl ReplicationManager {
                 | "json.arrappend"
                 | "json.arrtrim"
                 | "json.numincrby"
+                | "eval"
+                | "evalsha"
+                | "fcall"
+                | "function"
         )
     }
 }
