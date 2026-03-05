@@ -219,12 +219,14 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         if gt
             && let Some(current) = current_ttl
         {
-            // Negative TTL (None) is always less than any positive current TTL,
-            // so GT condition fails — don't delete.
-            if let Some(new_ttl) = &ttl
-                && *new_ttl <= current
-            {
-                return Ok(RespValue::Integer(0));
+            match &ttl {
+                // Negative TTL (None) is always less than any positive current TTL,
+                // so GT condition fails — don't delete.
+                None => return Ok(RespValue::Integer(0)),
+                Some(new_ttl) if *new_ttl <= current => {
+                    return Ok(RespValue::Integer(0));
+                }
+                _ => {}
             }
         }
         if lt
