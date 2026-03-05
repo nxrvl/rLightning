@@ -216,12 +216,31 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         .map(|i| args[i].clone())
         .collect();
 
+    // Pre-validate all key/value sizes so that individual set() calls
+    // cannot fail on size checks after we've already written some keys.
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..args.len())
+        .step_by(2)
+        .map(|i| (args[i].clone(), args[i + 1].clone()))
+        .collect();
+    engine.validate_kv_sizes(&pairs)?;
+
     // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions/MSETNX
     let _guard = engine.lock_keys(&keys).await;
 
+    // Check memory for the total batch size while holding key locks.
+    // This narrows the TOCTOU window vs checking before lock acquisition.
+    // Note: this is a best-effort check, not a reservation — concurrent writes
+    // to *other* keys can still consume memory between this check and the
+    // inserts below, which is inherent to the concurrent architecture.
+    let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
+    engine.check_write_memory(estimated_size).await?;
+
+    // Skip per-key eviction checks since we just checked the total batch size.
+    // This prevents partial writes (some keys set, some rejected) which would
+    // violate MSET's all-or-nothing guarantee.
     for i in (0..args.len()).step_by(2) {
         engine
-            .set(args[i].clone(), args[i + 1].clone(), None)
+            .set_preevicted(args[i].clone(), args[i + 1].clone(), None)
             .await?;
     }
 
@@ -295,40 +314,30 @@ pub async fn append(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis STRLEN command - Get the length of the value stored in a key
+/// Uses atomic_read for thread-safe single-lookup type check + value read
 pub async fn strlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let key = args[0].clone();
+    let key = &args[0];
 
-    // Check if the key exists and get its type
-    let key_type = engine.get_type(&key).await?;
+    // Single DashMap lookup: type check + length read atomically
+    let len = engine.atomic_read(key, RedisDataType::String, |data| {
+        Ok(data.map(|v| v.len() as i64).unwrap_or(0))
+    })?;
 
-    // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list"
-        || key_type == "set"
-        || key_type == "zset"
-        || key_type == "hash"
-        || key_type == "stream"
-    {
-        return Err(CommandError::WrongType);
-    }
-
-    // Get the value length
-    match engine.get(&key).await? {
-        Some(value) => Ok(RespValue::Integer(value.len() as i64)),
-        None => Ok(RespValue::Integer(0)),
-    }
+    Ok(RespValue::Integer(len))
 }
 
 /// Redis GETRANGE command - Get a substring of the string stored at a key
+/// Uses atomic_read for thread-safe single-lookup type check + value read
 pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let key = args[0].clone();
+    let key = &args[0];
 
     // Parse start and end positions
     let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
@@ -339,41 +348,31 @@ pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         CommandError::InvalidArgument("End position is not a valid integer".to_string())
     })?;
 
-    // Check if the key exists and get its type
-    let key_type = engine.get_type(&key).await?;
+    // Single DashMap lookup: type check + substring extraction atomically
+    let result = engine.atomic_read(key, RedisDataType::String, |data| {
+        let value = match data {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
 
-    // If the key has a specific collection type, return WRONGTYPE error
-    if key_type == "list"
-        || key_type == "set"
-        || key_type == "zset"
-        || key_type == "hash"
-        || key_type == "stream"
-    {
-        return Err(CommandError::WrongType);
-    }
+        let len = value.len() as i64;
 
-    // Get the value
-    let value = match engine.get(&key).await? {
-        Some(data) => data,
-        None => return Ok(RespValue::BulkString(Some(Vec::new()))),
-    };
+        // Handle negative indices (Python-style)
+        let norm_start = if start < 0 { len + start } else { start };
+        let norm_end = if end < 0 { len + end } else { end };
 
-    let len = value.len() as i64;
+        // Clamp to valid range
+        let start_idx = std::cmp::max(0, norm_start) as usize;
+        let end_idx = std::cmp::min(len - 1, norm_end) as usize;
 
-    // Handle negative indices (Python-style)
-    let norm_start = if start < 0 { len + start } else { start };
-    let norm_end = if end < 0 { len + end } else { end };
+        // Extract substring
+        if start_idx >= value.len() || norm_start > norm_end {
+            return Ok(Vec::new());
+        }
 
-    // Clamp to valid range
-    let start_idx = std::cmp::max(0, norm_start) as usize;
-    let end_idx = std::cmp::min(len - 1, norm_end) as usize;
+        Ok(value[start_idx..=std::cmp::min(end_idx, value.len() - 1)].to_vec())
+    })?;
 
-    // Extract substring
-    if start_idx >= value.len() || norm_start > norm_end {
-        return Ok(RespValue::BulkString(Some(Vec::new())));
-    }
-
-    let result = value[start_idx..=std::cmp::min(end_idx, value.len() - 1)].to_vec();
     Ok(RespValue::BulkString(Some(result)))
 }
 
@@ -605,13 +604,8 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         }
     }
 
-    // If TTL is None, we need to delete the key
-    if ttl.is_none() {
-        let deleted = engine.del(&key).await?;
-        return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
-    }
-
-    // Apply condition flags
+    // Apply condition flags before any TTL change (including deletion on negative TTL).
+    // Redis checks NX/XX/GT/LT before deciding whether to delete on negative values.
     if nx || xx || gt || lt {
         let current_ttl = engine.ttl(&key).await?;
         let has_expiry = current_ttl.is_some();
@@ -624,18 +618,32 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         }
         if gt
             && let Some(current) = current_ttl
-            && let Some(new_ttl) = &ttl
-            && *new_ttl <= current
         {
-            return Ok(RespValue::Integer(0));
+            // Negative TTL (None) is always less than any positive current TTL,
+            // so GT condition fails — don't delete.
+            if let Some(new_ttl) = &ttl
+                && *new_ttl <= current
+            {
+                return Ok(RespValue::Integer(0));
+            }
         }
         if lt
             && let Some(current) = current_ttl
-            && let Some(new_ttl) = &ttl
-            && *new_ttl >= current
         {
-            return Ok(RespValue::Integer(0));
+            // Negative TTL (None) is always less than any positive current TTL,
+            // so LT condition passes — allow deletion below.
+            if let Some(new_ttl) = &ttl
+                && *new_ttl >= current
+            {
+                return Ok(RespValue::Integer(0));
+            }
         }
+    }
+
+    // If TTL is None, we need to delete the key
+    if ttl.is_none() {
+        let deleted = engine.del(&key).await?;
+        return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
     }
 
     match engine.expire(&key, ttl).await? {

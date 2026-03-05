@@ -1336,7 +1336,11 @@ impl Server {
                 // Propagate write commands to replicas using batch propagation
                 // to prevent interleaving from concurrent connections.
                 // Each batch is prefixed with SELECT to establish DB context.
-                if let Some(repl) = replication {
+                // Only replicate commands that succeeded — skip error responses
+                // (e.g. WRONGTYPE) to avoid polluting the replication stream.
+                if let Some(repl) = replication
+                    && !matches!(&response, RespValue::Error(_))
+                {
                     let select_cmd = RespCommand {
                         name: b"SELECT".to_vec(),
                         args: vec![db_index.to_string().into_bytes()],
@@ -1721,10 +1725,12 @@ impl Server {
             Err(err) => return Ok(RespValue::Error(err.to_string())),
         };
 
-        // Log to AOF if persistence is enabled, command succeeded, and it's a write command
-        // Skip AUTH commands to avoid persisting passwords in the AOF file
+        // Log to AOF if persistence is enabled, command succeeded, and it's a write command.
+        // Skip AUTH commands to avoid persisting passwords in the AOF file.
+        // Skip error responses — failed writes (e.g. WRONGTYPE) must not be persisted.
         if let Some(persistence_mgr) = persistence
             && !is_auth_command
+            && !matches!(&result, RespValue::Error(_))
             && ReplicationManager::is_write_command(cmd_lower)
         {
             // Convert blocking commands to non-blocking equivalents for AOF.
