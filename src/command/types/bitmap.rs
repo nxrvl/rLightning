@@ -642,25 +642,34 @@ fn parse_encoding(s: &str) -> Result<BitfieldEncoding, CommandError> {
 }
 
 fn parse_offset(s: &str, encoding: &BitfieldEncoding) -> Result<u64, CommandError> {
-    if let Some(rest) = s.strip_prefix('#') {
+    let offset = if let Some(rest) = s.strip_prefix('#') {
         // Multiplied offset: #N means N * encoding.bits
         let n: u64 = rest.parse().map_err(|_| {
             CommandError::InvalidArgument(
                 "ERR bit offset is not an integer or out of range".to_string(),
             )
         })?;
-        Ok(n.checked_mul(encoding.bits as u64).ok_or_else(|| {
+        n.checked_mul(encoding.bits as u64).ok_or_else(|| {
             CommandError::InvalidArgument(
                 "ERR bit offset is not an integer or out of range".to_string(),
             )
-        })?)
+        })?
     } else {
         s.parse().map_err(|_| {
             CommandError::InvalidArgument(
                 "ERR bit offset is not an integer or out of range".to_string(),
             )
-        })
+        })?
+    };
+
+    // Redis limits bitmap offsets to 2^32 (512MB bitmap), same as SETBIT
+    if offset.saturating_add(encoding.bits as u64) > 4_294_967_296 {
+        return Err(CommandError::InvalidArgument(
+            "ERR bit offset is not an integer or out of range".to_string(),
+        ));
     }
+
+    Ok(offset)
 }
 
 fn parse_bitfield_ops(args: &[Vec<u8>], read_only: bool) -> Result<Vec<BitfieldOp>, CommandError> {
