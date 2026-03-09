@@ -39,6 +39,9 @@ pub struct StorageItem {
     /// When this item was last accessed
     #[serde(skip, default = "Instant::now")]
     pub last_accessed: Instant,
+    /// How many times this item has been accessed (for LFU eviction)
+    #[serde(skip)]
+    pub access_count: u64,
     /// When this item will expire (if set)
     #[serde(skip)]
     pub expires_at: Option<Instant>,
@@ -54,6 +57,7 @@ impl StorageItem {
             data_type: RedisDataType::String,
             created_at: now,
             last_accessed: now,
+            access_count: 0,
             expires_at: None,
         }
     }
@@ -67,6 +71,7 @@ impl StorageItem {
             data_type,
             created_at: now,
             last_accessed: now,
+            access_count: 0,
             expires_at: None,
         }
     }
@@ -92,9 +97,10 @@ impl StorageItem {
         })
     }
 
-    /// Update the item's access time
+    /// Update the item's access time and increment access counter
     pub fn touch(&mut self) {
         self.last_accessed = Instant::now();
+        self.access_count = self.access_count.saturating_add(1);
     }
 
     /// Set a new expiration time
