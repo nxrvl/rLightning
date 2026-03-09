@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::command::handler::CommandHandler;
 use crate::command::{Command, CommandError, CommandResult};
 use crate::networking::resp::RespValue;
-use crate::storage::engine::{IN_TRANSACTION, StorageEngine};
+use crate::storage::engine::{IN_TRANSACTION, NUM_DATABASES, StorageEngine};
 
 /// Extract all keys that a command will access from its arguments.
 /// Used by EXEC to collect keys for transaction-level locking.
@@ -469,19 +469,44 @@ pub async fn handle_exec(
     // without locking watched keys, a concurrent writer can modify them
     // between the WATCH check and command execution.
     let commands: Vec<Command> = state.queue.drain(..).collect();
-    let watched_keys: Vec<Vec<u8>> = state
+    // Watched keys retain their DB index so they are locked in the correct database.
+    // Without this, keys watched in other DBs (e.g. WATCH in DB 0, SELECT 1, MULTI/EXEC)
+    // would only be locked in the current DB, leaving a race window.
+    let watched_keys_with_db: Vec<(usize, Vec<u8>)> = state
         .watched_keys
         .keys()
-        .map(|(_, k)| k.clone())
+        .map(|(db, k)| (*db, k.clone()))
         .collect();
-    let all_keys: Vec<Vec<u8>> = commands
-        .iter()
-        .flat_map(extract_keys_from_command)
-        .chain(watched_keys.into_iter())
-        .collect();
+    // Track effective DB through queued commands: SELECT changes the DB context
+    // for subsequent commands, so each key must be scoped to the DB it will
+    // actually execute against. This also makes locking independent of the
+    // task-local CURRENT_DB_INDEX, which fixes replica-side locking where the
+    // task-local may not reflect the replica's tracked database.
+    let mut effective_db_for_keys = db_index;
+    let mut command_keys_with_db: Vec<(usize, Vec<u8>)> = Vec::new();
+    for cmd in &commands {
+        if cmd.name.eq_ignore_ascii_case("select") {
+            if cmd.args.len() == 1
+                && let Some(arg) = cmd.args.first()
+                && let Ok(s) = std::str::from_utf8(arg)
+                && let Ok(idx) = s.parse::<usize>()
+                && idx < NUM_DATABASES
+            {
+                effective_db_for_keys = idx;
+            }
+            continue;
+        }
+        for key in extract_keys_from_command(cmd) {
+            command_keys_with_db.push((effective_db_for_keys, key));
+        }
+    }
+    // Combine command keys (each scoped to its effective DB) with watched keys
+    command_keys_with_db.extend(watched_keys_with_db.iter().cloned());
 
-    // Lock all keys (command + watched) in sorted order to prevent deadlocks
-    let _lock_guard = engine.lock_keys(&all_keys).await;
+    // Lock all keys in sorted order to prevent deadlocks
+    let _lock_guard = engine
+        .lock_keys_multi_db(&[], &command_keys_with_db)
+        .await;
 
     // Check watched keys AFTER acquiring locks to close the TOCTOU window
     if state.check_watched_keys(engine) {
@@ -527,14 +552,15 @@ pub async fn handle_exec(
         })
         .await;
 
+    // Clear transaction state (locks released when _lock_guard is dropped)
+    state.reset();
+
     // Store final effective_db so caller can update connection's db_index.
     // In Redis, SELECT inside MULTI/EXEC permanently changes the connection's database.
+    // Must be set AFTER reset() since reset() clears post_exec_db.
     if effective_db != db_index {
         state.post_exec_db = Some(effective_db);
     }
-
-    // Clear transaction state (locks released when _lock_guard is dropped)
-    state.reset();
 
     Ok(RespValue::Array(Some(results)))
 }

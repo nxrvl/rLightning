@@ -1,17 +1,23 @@
 .vscode/
-
-target/
-.DS_Store
 .idea/
 .claude/
+
+target/
+rust_out
+
+.DS_Store
 html/
+
+# Dev/CI config files
 CLAUDE.md
 RELEASE_SETUP.md
-test-config.toml
 AGENTS.md
-.beads/
+test-config.toml
 
-# ralphex progress logs
-.ralphex/progress/
+# Tool-specific directories
+.beads/
+.ralphex/
 .serena/
+
+# Internal development docs
 docs/
