@@ -65,13 +65,19 @@ impl Ord for ExpirationEntry {
 #[derive(Default)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum EvictionPolicy {
-    /// Remove the least recently used item
+    /// Remove the least recently used item (all keys)
     #[default]
     LRU,
-    /// Remove the least frequently used item
+    /// Remove the least frequently used item (all keys)
     LFU,
-    /// Remove a random item
+    /// Remove a random item (all keys)
     Random,
+    /// Remove the least recently used item (only keys with TTL)
+    VolatileLRU,
+    /// Remove the least frequently used item (only keys with TTL)
+    VolatileLFU,
+    /// Remove a random item (only keys with TTL)
+    VolatileRandom,
     /// Don't evict items
     NoEviction,
 }
@@ -83,6 +89,9 @@ impl EvictionPolicy {
             Self::LRU => 0,
             Self::LFU => 1,
             Self::Random => 2,
+            Self::VolatileLRU => 4,
+            Self::VolatileLFU => 5,
+            Self::VolatileRandom => 6,
             Self::NoEviction => 3,
         }
     }
@@ -93,15 +102,34 @@ impl EvictionPolicy {
             0 => Self::LRU,
             1 => Self::LFU,
             2 => Self::Random,
+            4 => Self::VolatileLRU,
+            5 => Self::VolatileLFU,
+            6 => Self::VolatileRandom,
             _ => Self::NoEviction,
         }
+    }
+
+    /// Whether this policy only targets keys with an expiry (volatile-* policies).
+    pub const fn is_volatile(self) -> bool {
+        matches!(
+            self,
+            Self::VolatileLRU | Self::VolatileLFU | Self::VolatileRandom
+        )
     }
 }
 
 // Implement clap::ValueEnum for command-line parsing
 impl clap::ValueEnum for EvictionPolicy {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::LRU, Self::LFU, Self::Random, Self::NoEviction]
+        &[
+            Self::LRU,
+            Self::LFU,
+            Self::Random,
+            Self::VolatileLRU,
+            Self::VolatileLFU,
+            Self::VolatileRandom,
+            Self::NoEviction,
+        ]
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -109,6 +137,9 @@ impl clap::ValueEnum for EvictionPolicy {
             Self::LRU => clap::builder::PossibleValue::new("lru"),
             Self::LFU => clap::builder::PossibleValue::new("lfu"),
             Self::Random => clap::builder::PossibleValue::new("random"),
+            Self::VolatileLRU => clap::builder::PossibleValue::new("volatile-lru"),
+            Self::VolatileLFU => clap::builder::PossibleValue::new("volatile-lfu"),
+            Self::VolatileRandom => clap::builder::PossibleValue::new("volatile-random"),
             Self::NoEviction => clap::builder::PossibleValue::new("noeviction"),
         })
     }
@@ -286,6 +317,9 @@ impl StorageEngine {
             EvictionPolicy::LRU => "allkeys-lru",
             EvictionPolicy::LFU => "allkeys-lfu",
             EvictionPolicy::Random => "allkeys-random",
+            EvictionPolicy::VolatileLRU => "volatile-lru",
+            EvictionPolicy::VolatileLFU => "volatile-lfu",
+            EvictionPolicy::VolatileRandom => "volatile-random",
             EvictionPolicy::NoEviction => "noeviction",
         };
         self.runtime_config
@@ -385,9 +419,12 @@ impl StorageEngine {
             "maxmemory-policy" => {
                 // Parse and apply the eviction policy
                 let policy = match value.to_lowercase().as_str() {
-                    "allkeys-lru" | "volatile-lru" => EvictionPolicy::LRU,
-                    "allkeys-lfu" | "volatile-lfu" => EvictionPolicy::LFU,
-                    "allkeys-random" | "volatile-random" => EvictionPolicy::Random,
+                    "allkeys-lru" => EvictionPolicy::LRU,
+                    "allkeys-lfu" => EvictionPolicy::LFU,
+                    "allkeys-random" => EvictionPolicy::Random,
+                    "volatile-lru" => EvictionPolicy::VolatileLRU,
+                    "volatile-lfu" => EvictionPolicy::VolatileLFU,
+                    "volatile-random" => EvictionPolicy::VolatileRandom,
                     "noeviction" => EvictionPolicy::NoEviction,
                     _ => {
                         return Err(format!(
@@ -403,7 +440,7 @@ impl StorageEngine {
                 Ok(())
             }
             // Immutable parameters that cannot be changed at runtime
-            "bind" | "port" | "tls-port" | "tls-cert-file" | "tls-key-file"
+            "bind" | "port" | "databases" | "tls-port" | "tls-cert-file" | "tls-key-file"
             | "tls-ca-cert-file" | "daemonize" | "pidfile" | "logfile" => {
                 Err(format!(
                     "ERR Unsupported CONFIG parameter: {}",
@@ -419,7 +456,7 @@ impl StorageEngine {
             }
             // Known runtime-configurable parameters that we store but don't need
             // special handling for (Redis accepts these via CONFIG SET)
-            "hz" | "timeout" | "tcp-keepalive" | "tcp-backlog" | "databases"
+            "hz" | "timeout" | "tcp-keepalive" | "tcp-backlog"
             | "appendonly" | "appendfsync" | "save" | "no-appendfsync-on-rewrite"
             | "auto-aof-rewrite-percentage" | "auto-aof-rewrite-min-size"
             | "aof-use-rdb-preamble" | "slowlog-log-slower-than" | "slowlog-max-len"
@@ -863,19 +900,41 @@ impl StorageEngine {
                 }
 
                 // Helper: find victim in a single DB
+                let volatile_only = eviction_policy.is_volatile();
                 let find_victim_in_db = |db: &DashMap<Vec<u8>, StorageItem>| -> Option<Vec<u8>> {
                     match eviction_policy {
-                        EvictionPolicy::LRU | EvictionPolicy::LFU => db
+                        EvictionPolicy::LRU | EvictionPolicy::VolatileLRU => db
                             .iter()
+                            .filter(|item| !volatile_only || item.value().expires_at.is_some())
                             .min_by_key(|item| item.value().last_accessed)
                             .map(|item| item.key().clone()),
-                        EvictionPolicy::Random => {
-                            let len = db.len();
-                            if len == 0 {
-                                None
+                        EvictionPolicy::LFU | EvictionPolicy::VolatileLFU => db
+                            .iter()
+                            .filter(|item| !volatile_only || item.value().expires_at.is_some())
+                            .min_by_key(|item| item.value().access_count)
+                            .map(|item| item.key().clone()),
+                        EvictionPolicy::Random | EvictionPolicy::VolatileRandom => {
+                            if volatile_only {
+                                // For volatile-random, collect eligible keys and pick one
+                                let eligible: Vec<_> = db
+                                    .iter()
+                                    .filter(|item| item.value().expires_at.is_some())
+                                    .map(|item| item.key().clone())
+                                    .collect();
+                                if eligible.is_empty() {
+                                    None
+                                } else {
+                                    let idx = fastrand::usize(0..eligible.len());
+                                    Some(eligible[idx].clone())
+                                }
                             } else {
-                                let skip = fastrand::usize(0..len);
-                                db.iter().nth(skip).map(|item| item.key().clone())
+                                let len = db.len();
+                                if len == 0 {
+                                    None
+                                } else {
+                                    let skip = fastrand::usize(0..len);
+                                    db.iter().nth(skip).map(|item| item.key().clone())
+                                }
                             }
                         }
                         _ => None,
@@ -883,38 +942,54 @@ impl StorageEngine {
                 };
 
                 // Find the best victim across all databases
-                let mut best_victim: Option<(Vec<u8>, usize, Instant)> = None; // (key, db_idx, last_accessed)
+                // eviction_score: lower = more likely to be evicted
+                // For LRU: elapsed time (higher elapsed = older = lower score inverted via wrapping)
+                // For LFU: access_count directly (lower = evict first)
+                let mut best_victim: Option<(Vec<u8>, usize)> = None;
+                let mut best_score: Option<u64> = None;
+                let is_lfu = matches!(
+                    eviction_policy,
+                    EvictionPolicy::LFU | EvictionPolicy::VolatileLFU
+                );
                 for db_idx in 0..NUM_DATABASES {
                     let db = self.get_db_by_index(db_idx);
                     if let Some(victim_key) = find_victim_in_db(db) {
-                        let should_replace =
-                            if eviction_policy == EvictionPolicy::Random {
+                        let should_replace = if matches!(
+                            eviction_policy,
+                            EvictionPolicy::Random | EvictionPolicy::VolatileRandom
+                        ) {
                                 best_victim.is_none() // For random, just pick the first one found
-                            } else {
-                                // For LRU/LFU, compare last_accessed times
-                                if let Some(entry) = db.get(&victim_key) {
-                                    match &best_victim {
-                                        None => true,
-                                        Some((_, _, best_time)) => {
-                                            entry.value().last_accessed < *best_time
-                                        }
-                                    }
+                            } else if let Some(entry) = db.get(&victim_key) {
+                                let score = if is_lfu {
+                                    entry.value().access_count
                                 } else {
-                                    false
+                                    // For LRU: use elapsed nanos (higher = older = evict first)
+                                    // Invert so lower score = more evictable
+                                    u64::MAX - entry.value().last_accessed.elapsed().as_nanos() as u64
+                                };
+                                match best_score {
+                                    None => true,
+                                    Some(best) => score < best,
                                 }
+                            } else {
+                                false
                             };
                         if should_replace {
-                            let la = db
-                                .get(&victim_key)
-                                .map(|e| e.value().last_accessed)
-                                .unwrap_or(Instant::now());
-                            best_victim = Some((victim_key, db_idx, la));
+                            let score = db.get(&victim_key).map(|e| {
+                                if is_lfu {
+                                    e.value().access_count
+                                } else {
+                                    u64::MAX - e.value().last_accessed.elapsed().as_nanos() as u64
+                                }
+                            });
+                            best_score = score;
+                            best_victim = Some((victim_key, db_idx));
                         }
                     }
                 }
 
                 // Remove the victim from the correct database
-                if let Some((key, db_idx, _)) = best_victim {
+                if let Some((key, db_idx)) = best_victim {
                     let db = self.get_db_by_index(db_idx);
                     if let Some((k, item)) = db.remove(&key) {
                         let size = Self::calculate_size(&k, &item.value) as u64;
@@ -2281,7 +2356,13 @@ impl StorageEngine {
                 RedisDataType::Set => {
                     if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value)
                     {
-                        if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
+                        if set.len() <= 128
+                            && set
+                                .iter()
+                                .all(|el| std::str::from_utf8(el).map_or(false, |s| s.parse::<i64>().is_ok()))
+                        {
+                            "intset"
+                        } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
                             "listpack"
                         } else {
                             "hashtable"

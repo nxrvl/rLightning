@@ -1357,7 +1357,10 @@ impl Server {
                             ];
                             for queued_cmd in &queued_for_repl {
                                 let qcmd_lower = queued_cmd.name.to_lowercase();
-                                if ReplicationManager::is_write_command(&qcmd_lower) {
+                                // Include SELECT (for DB context) and write commands
+                                if qcmd_lower == "select"
+                                    || ReplicationManager::is_write_command(&qcmd_lower)
+                                {
                                     batch.push(RespCommand {
                                         name: queued_cmd.name.as_bytes().to_vec(),
                                         args: queued_cmd.args.clone(),
@@ -1697,7 +1700,10 @@ impl Server {
                     });
                     for queued_cmd in &queued_commands {
                         let qcmd_lower = queued_cmd.name.to_lowercase();
-                        if ReplicationManager::is_write_command(&qcmd_lower) {
+                        // Include SELECT (for DB context) and write commands
+                        if qcmd_lower == "select"
+                            || ReplicationManager::is_write_command(&qcmd_lower)
+                        {
                             batch.push(RespCommand {
                                 name: queued_cmd.name.as_bytes().to_vec(),
                                 args: queued_cmd.args.clone(),
@@ -2144,7 +2150,7 @@ impl Server {
     fn build_resp3_command_name(cmd_lower: &str, args: &[Vec<u8>]) -> String {
         match cmd_lower {
             "xinfo" | "command" | "object" | "memory" | "client" | "cluster" | "slowlog"
-            | "latency" | "debug" => {
+            | "latency" | "debug" | "config" => {
                 if let Some(sub) = args.first() {
                     format!(
                         "{} {}",

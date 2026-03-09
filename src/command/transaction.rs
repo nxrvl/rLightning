@@ -306,6 +306,7 @@ impl TransactionState {
         self.has_command_errors = false;
         self.queued_errors.clear();
         self.flush_epochs_at_watch.clear();
+        self.post_exec_db = None;
     }
 
     /// Check if any watched keys have been modified since WATCH was called

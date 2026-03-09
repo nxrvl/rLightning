@@ -509,7 +509,7 @@ impl RespValue {
     /// Check if a command returns key-value pairs that should be a RESP3 Map.
     /// Only commands that always return flat key-value pair responses belong here.
     fn is_map_command(cmd: &str) -> bool {
-        matches!(cmd, "hgetall" | "config" | "xinfo stream" | "command docs")
+        matches!(cmd, "hgetall" | "config get" | "xinfo stream" | "command docs")
     }
 
     /// Check if a command returns an array where each element is a flat kv array -> Map
@@ -2254,7 +2254,7 @@ mod tests {
             RespValue::BulkString(Some(b"maxmemory".to_vec())),
             RespValue::BulkString(Some(b"0".to_vec())),
         ]));
-        let converted = value.convert_for_resp3("config");
+        let converted = value.convert_for_resp3("config get");
         match converted {
             RespValue::Map(pairs) => {
                 assert_eq!(pairs.len(), 1);
