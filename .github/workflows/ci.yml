@@ -3,15 +3,23 @@ name: CI
 on:
   push:
     branches: [main]
+    tags-ignore:
+      - 'v*'
     paths-ignore:
       - '**.md'
       - 'site/**'
+      - 'docs/**'
+      - 'tests/docker-compat/**'
       - '.github/workflows/docs.yml'
+      - '.github/workflows/release.yml'
   pull_request:
     paths-ignore:
       - '**.md'
       - 'site/**'
+      - 'docs/**'
+      - 'tests/docker-compat/**'
       - '.github/workflows/docs.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 env:
