@@ -662,9 +662,14 @@ impl StorageEngine {
             // Remove expired keys found in this sample
             for key in keys_to_remove {
                 if let Some((k, item)) = db.remove(&key) {
-                    let size = Self::calculate_size(&k, &item.value) as u64;
-                    self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    if !item.is_expired() {
+                        // Key was refreshed concurrently — put it back
+                        db.insert(k, item);
+                    } else {
+                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
+                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    }
                 }
             }
         }
@@ -2359,7 +2364,7 @@ impl StorageEngine {
                         if set.len() <= 128
                             && set
                                 .iter()
-                                .all(|el| std::str::from_utf8(el).map_or(false, |s| s.parse::<i64>().is_ok()))
+                                .all(|el| std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok()))
                         {
                             "intset"
                         } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {

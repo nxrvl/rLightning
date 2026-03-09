@@ -27,6 +27,17 @@ impl CommandHandler {
         }
     }
 
+    /// Create a CommandHandler for replay/recovery contexts (AOF load, etc.)
+    /// Does NOT spawn a background cleanup task, avoiding leaked tasks when
+    /// the handler is short-lived.
+    pub fn new_for_replay(storage: Arc<StorageEngine>) -> Self {
+        CommandHandler {
+            storage,
+            blocking_mgr: Arc::new(BlockingManager::new()),
+            scripting: Arc::new(ScriptingEngine::new()),
+        }
+    }
+
     /// Start periodic cleanup of stale blocking manager entries
     fn start_blocking_cleanup_task(blocking_mgr: Arc<BlockingManager>) {
         tokio::spawn(async move {
