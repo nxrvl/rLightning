@@ -337,7 +337,9 @@ impl AofPersistence {
             // Create a CommandHandler for full command replay.
             // This routes through the same dispatch as live client commands,
             // ensuring all 400+ commands are properly handled during recovery.
-            let cmd_handler = CommandHandler::new(engine.clone());
+            // Uses new_for_replay to avoid spawning a background cleanup task
+            // that would leak when the handler is dropped after AOF load.
+            let cmd_handler = CommandHandler::new_for_replay(engine.clone());
 
             // Process each line
             let mut parser = resp_parser::RespParser::new(reader);
