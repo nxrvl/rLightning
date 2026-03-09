@@ -532,22 +532,26 @@ impl AofPersistence {
 
         debug!("Starting AOF rewrite to temporary file: {:?}", temp_path);
 
-        // Get a consistent snapshot of all databases
-        let all_dbs = match self.engine.snapshot_all_dbs().await {
-            Ok(data) => data,
-            Err(e) => {
-                error!("Failed to create snapshot for AOF rewrite: {:?}", e);
-                return Err(PersistenceError::AofRewriteFailed(e.to_string()));
-            }
-        };
-
-        // Mark rewrite as in progress
+        // Check if rewrite is already in progress before taking the
+        // expensive snapshot (which acquires cross_db_lock and clones all data).
         let mut in_progress = self.in_progress.lock().await;
         if *in_progress {
             debug!("AOF rewrite already in progress, skipping");
             return Ok(());
         }
         *in_progress = true;
+        drop(in_progress);
+
+        // Get a consistent snapshot of all databases
+        let all_dbs = match self.engine.snapshot_all_dbs().await {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Failed to create snapshot for AOF rewrite: {:?}", e);
+                // Reset in_progress on failure
+                *self.in_progress.lock().await = false;
+                return Err(PersistenceError::AofRewriteFailed(e.to_string()));
+            }
+        };
 
         // Spawn a blocking task for file operations
         let path = self.path.clone();
@@ -600,8 +604,14 @@ impl AofPersistence {
                 }
             }
 
-            // Ensure all data is flushed to disk
+            // Ensure all data is flushed and synced to disk before rename.
+            // flush() only pushes BufWriter's buffer to the OS;
+            // sync_all() ensures data reaches persistent storage.
             writer.flush().map_err(PersistenceError::Io)?;
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(PersistenceError::Io)?;
 
             // Rename temp file to target file atomically
             let rename_result = fs::rename(&temp_path, &path);
@@ -648,7 +658,7 @@ impl AofPersistence {
         };
 
         // Mark rewrite as complete
-        *in_progress = false;
+        *self.in_progress.lock().await = false;
 
         rewrite_result
     }

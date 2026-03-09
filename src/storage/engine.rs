@@ -959,35 +959,38 @@ impl StorageEngine {
                 for db_idx in 0..NUM_DATABASES {
                     let db = self.get_db_by_index(db_idx);
                     if let Some(victim_key) = find_victim_in_db(db) {
+                        // Compute score once and reuse to avoid TOCTOU race
+                        // from a second db.get() after releasing the shard lock.
+                        let victim_score = if matches!(
+                            eviction_policy,
+                            EvictionPolicy::Random | EvictionPolicy::VolatileRandom
+                        ) {
+                            None // Random doesn't use scores
+                        } else {
+                            db.get(&victim_key).map(|entry| {
+                                if is_lfu {
+                                    entry.value().access_count
+                                } else {
+                                    u64::MAX - entry.value().last_accessed.elapsed().as_nanos() as u64
+                                }
+                            })
+                        };
+
                         let should_replace = if matches!(
                             eviction_policy,
                             EvictionPolicy::Random | EvictionPolicy::VolatileRandom
                         ) {
-                                best_victim.is_none() // For random, just pick the first one found
-                            } else if let Some(entry) = db.get(&victim_key) {
-                                let score = if is_lfu {
-                                    entry.value().access_count
-                                } else {
-                                    // For LRU: use elapsed nanos (higher = older = evict first)
-                                    // Invert so lower score = more evictable
-                                    u64::MAX - entry.value().last_accessed.elapsed().as_nanos() as u64
-                                };
-                                match best_score {
-                                    None => true,
-                                    Some(best) => score < best,
-                                }
-                            } else {
-                                false
-                            };
+                            best_victim.is_none()
+                        } else if let Some(score) = victim_score {
+                            match best_score {
+                                None => true,
+                                Some(best) => score < best,
+                            }
+                        } else {
+                            false
+                        };
                         if should_replace {
-                            let score = db.get(&victim_key).map(|e| {
-                                if is_lfu {
-                                    e.value().access_count
-                                } else {
-                                    u64::MAX - e.value().last_accessed.elapsed().as_nanos() as u64
-                                }
-                            });
-                            best_score = score;
+                            best_score = victim_score;
                             best_victim = Some((victim_key, db_idx));
                         }
                     }
@@ -2361,7 +2364,8 @@ impl StorageEngine {
                 RedisDataType::Set => {
                     if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value)
                     {
-                        if set.len() <= 128
+                        // Redis 7 default: set-max-intset-entries = 512
+                        if set.len() <= 512
                             && set
                                 .iter()
                                 .all(|el| std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok()))
