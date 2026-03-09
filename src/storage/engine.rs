@@ -1617,6 +1617,48 @@ impl StorageEngine {
         KeyLockGuard { _guards: guards }
     }
 
+    /// Lock keys across multiple databases in sorted order for transaction isolation.
+    /// Each key is paired with its database index. Combined with single-DB keys scoped
+    /// to the current database. Used by EXEC to lock both command keys (current DB)
+    /// and WATCH keys (which may be in different DBs).
+    pub async fn lock_keys_multi_db(
+        &self,
+        current_db_keys: &[Vec<u8>],
+        db_scoped_pairs: &[(usize, Vec<u8>)],
+    ) -> KeyLockGuard {
+        if Self::in_transaction() {
+            return KeyLockGuard {
+                _guards: Vec::new(),
+            };
+        }
+
+        let db_idx = Self::current_db_idx();
+        let mut sorted_keys: Vec<Vec<u8>> = current_db_keys
+            .iter()
+            .map(|k| Self::db_scoped_key(db_idx, k))
+            .chain(
+                db_scoped_pairs
+                    .iter()
+                    .map(|(db, k)| Self::db_scoped_key(*db, k)),
+            )
+            .collect();
+        sorted_keys.sort();
+        sorted_keys.dedup();
+
+        let mut guards = Vec::with_capacity(sorted_keys.len());
+        for key in &sorted_keys {
+            let mutex = self
+                .key_locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .value()
+                .clone();
+            guards.push(mutex.lock_owned().await);
+        }
+
+        KeyLockGuard { _guards: guards }
+    }
+
     /// Bootstrap fallback for AOF replay — handles a limited subset of commands.
     /// The primary replay path now uses `CommandHandler::process()` for full coverage.
     /// This method is retained for compatibility with existing tests and as a

@@ -324,6 +324,11 @@ impl ReplicationClient {
                                             .await
                                             {
                                                 Ok(_) => {
+                                                    // Update current_db if SELECT was used inside the transaction
+                                                    if let Some(new_db) = tx_state.post_exec_db.take() {
+                                                        current_db = new_db;
+                                                        debug!("Replication: transaction changed database to {}", current_db);
+                                                    }
                                                     debug!(
                                                         "Replication: MULTI/EXEC transaction applied successfully"
                                                     );
