@@ -127,7 +127,7 @@ pub async fn rename(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let item = match engine.get_item(&key).await? {
         Some(item) => item,
         None => {
-            return Err(CommandError::InvalidArgument("Key not found".to_string()));
+            return Err(CommandError::InvalidArgument("no such key".to_string()));
         }
     };
 
