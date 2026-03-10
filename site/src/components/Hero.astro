@@ -1,0 +1,144 @@
+---
+---
+
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-badge">v2.0.0 &mdash; Redis 7.x Compatible</div>
+    <h1 class="hero-title">
+      Lightning-fast Redis,<br/>
+      <span class="hero-accent">built in Rust.</span>
+    </h1>
+    <p class="hero-desc">
+      rLightning is a high-performance, Redis 7.x compatible in-memory data store.
+      400+ commands, full persistence, cluster mode, Lua scripting, and ACL security.
+    </p>
+    <div class="hero-actions">
+      <a href="/docs/quick-start" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/altista-tech/rLightning" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+    <div class="hero-install">
+      <code>docker pull nxrvl/rlightning</code>
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero {
+    padding: calc(var(--header-height) + 4rem) 1.5rem 4rem;
+    text-align: center;
+    background: radial-gradient(ellipse at 50% 0%, var(--accent-glow) 0%, transparent 60%);
+  }
+
+  .hero-inner {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .hero-badge {
+    display: inline-block;
+    padding: 0.375rem 1rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    font-size: 0.8rem;
+    color: var(--accent);
+    font-weight: 500;
+    margin-bottom: 1.5rem;
+  }
+
+  .hero-title {
+    font-size: 3.25rem;
+    font-weight: 700;
+    line-height: 1.15;
+    margin-bottom: 1.25rem;
+    letter-spacing: -0.02em;
+  }
+
+  .hero-accent {
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-desc {
+    font-size: 1.15rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    margin-bottom: 2rem;
+    max-width: 580px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-bottom: 2.5rem;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    border-radius: var(--radius);
+    transition: all 0.2s;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover);
+    color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+  }
+
+  .btn-secondary {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+
+  .btn-secondary:hover {
+    background: var(--bg-card);
+    border-color: var(--border-hover);
+    color: var(--text-heading);
+    transform: translateY(-1px);
+  }
+
+  .hero-install {
+    display: inline-block;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.625rem 1.25rem;
+  }
+
+  .hero-install code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--green);
+    font-size: 0.9rem;
+  }
+
+  @media (max-width: 768px) {
+    .hero {
+      padding-top: calc(var(--header-height) + 2rem);
+    }
+    .hero-title {
+      font-size: 2rem;
+    }
+    .hero-actions {
+      flex-direction: column;
+      align-items: center;
+    }
+  }
+</style>

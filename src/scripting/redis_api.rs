@@ -546,7 +546,7 @@ fn redis_call_impl(
 /// - Redis error -> Lua table {err = message}
 pub fn resp_to_lua(lua: &Lua, resp: &RespValue) -> mlua::Result<Value> {
     match resp {
-        RespValue::Integer(n) => Ok(Value::Integer(*n)),
+        RespValue::Integer(n) => Ok(Value::Integer(*n as _)),
         RespValue::BulkString(Some(bytes)) => Ok(Value::String(lua.create_string(bytes)?)),
         RespValue::BulkString(None) => Ok(Value::Boolean(false)),
         RespValue::SimpleString(s) => {
@@ -596,7 +596,7 @@ pub fn resp_to_lua(lua: &Lua, resp: &RespValue) -> mlua::Result<Value> {
 /// - Lua table (array) -> Redis array
 pub fn lua_to_resp(value: &Value) -> RespValue {
     match value {
-        Value::Integer(n) => RespValue::Integer(*n),
+        Value::Integer(n) => RespValue::Integer(*n as i64),
         Value::Number(n) => RespValue::Integer(*n as i64),
         Value::String(s) => RespValue::BulkString(Some(s.as_bytes().to_vec())),
         Value::Boolean(true) => RespValue::Integer(1),
