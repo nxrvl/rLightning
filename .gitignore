@@ -20,4 +20,4 @@ test-config.toml
 .serena/
 
 # Internal development docs
-docs/
+/docs/
