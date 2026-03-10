@@ -3,9 +3,9 @@ name = "rlightning"
 version = "2.0.0"
 edition = "2024"
 description = "Redis-compatible in-memory key-value store focused on session management and caching"
-authors = ["Altista Tech"]
+authors = ["nxrvl"]
 license = "MIT"
-repository = "https://github.com/altista-tech/rLightning"
+repository = "https://github.com/nxrvl/rLightning"
 
 [dependencies]
 # Async runtime

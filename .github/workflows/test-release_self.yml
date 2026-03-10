@@ -1,11 +1,6 @@
 name: Test Release Build Self-Hosted Runner
 
 on:
-  pull_request:
-    paths:
-      - "Dockerfile"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/test-release.yml"
   workflow_dispatch:
 
 jobs:

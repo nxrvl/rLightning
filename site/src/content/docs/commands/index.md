@@ -36,4 +36,4 @@ rLightning supports both **RESP2** and **RESP3** protocols. Use the `HELLO` comm
 
 ## Command Compatibility
 
-All commands follow Redis 7.x semantics. For known behavioral differences, see the [Known Incompatibilities](https://github.com/altista-tech/rLightning/blob/main/tests/docker-compat/KNOWN-INCOMPATIBILITIES.txt) file in the repository.
+All commands follow Redis 7.x semantics. For known behavioral differences, see the [Known Incompatibilities](https://github.com/nxrvl/rLightning/blob/main/tests/docker-compat/KNOWN-INCOMPATIBILITIES.txt) file in the repository.

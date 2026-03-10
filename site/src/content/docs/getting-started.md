@@ -50,7 +50,7 @@ rlightning --port 6379
 Clone the repository and build with optimizations:
 
 ```bash
-git clone https://github.com/altista-tech/rLightning.git
+git clone https://github.com/nxrvl/rLightning.git
 cd rLightning
 cargo build --release
 ```

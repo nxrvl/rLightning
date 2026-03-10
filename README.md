@@ -1,9 +1,9 @@
 # rLightning ⚡
 
-[![Build Status](https://github.com/altista-tech/rLightning/workflows/CI/badge.svg)](https://github.com/altista-tech/rLightning/actions)
+[![Build Status](https://github.com/nxrvl/rLightning/workflows/CI/badge.svg)](https://github.com/nxrvl/rLightning/actions)
 [![Crates.io](https://img.shields.io/crates/v/rlightning.svg)](https://crates.io/crates/rlightning)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Docker](https://img.shields.io/docker/automated/altista/rlightning.svg)](https://hub.docker.com/r/altista/rlightning)
+[![Docker](https://img.shields.io/docker/automated/nxrvl/rlightning.svg)](https://hub.docker.com/r/nxrvl/rlightning)
 
 A high-performance, Redis 7.x compatible in-memory data store built from the ground up in Rust. Full protocol support, all data types, and blazing speed with memory safety guarantees.
 
@@ -27,7 +27,7 @@ A high-performance, Redis 7.x compatible in-memory data store built from the gro
 ### Using Docker (Recommended)
 
 ```bash
-docker run -d -p 6379:6379 altista/rlightning:latest
+docker run -d -p 6379:6379 nxrvl/rlightning:latest
 ```
 
 ### Using Cargo
@@ -44,7 +44,7 @@ rlightning
 
 ```bash
 # Clone and build
-git clone https://github.com/altista-tech/rLightning.git
+git clone https://github.com/nxrvl/rLightning.git
 cd rLightning
 cargo build --release
 
@@ -262,7 +262,7 @@ cargo bench --bench throughput_bench
 docker run -d \
   --name rlightning \
   -p 6379:6379 \
-  altista/rlightning:latest
+  nxrvl/rlightning:latest
 ```
 
 ### With Persistence
@@ -272,7 +272,7 @@ docker run -d \
   --name rlightning \
   -p 6379:6379 \
   -v /path/to/data:/data \
-  altista/rlightning:latest \
+  nxrvl/rlightning:latest \
   --persistence-mode hybrid \
   --rdb-path /data/dump.rdb \
   --aof-path /data/appendonly.aof
@@ -285,7 +285,7 @@ version: '3.8'
 
 services:
   rlightning:
-    image: altista/rlightning:latest
+    image: nxrvl/rlightning:latest
     ports:
       - "6379:6379"
     volumes:
@@ -308,7 +308,7 @@ rLightning is built with a modular architecture:
 - **Replication**: Async replication with automatic reconnection
 - **Security**: Authentication and authorization layer
 
-See the [Architecture Documentation](https://rlightning.io/architecture) for details.
+See the [Architecture Documentation](https://rlightning.mpanin.me/architecture) for details.
 
 ## Development
 
@@ -379,14 +379,14 @@ rLightning excels in:
 
 ## Documentation
 
-Full documentation is available at [rlightning.io](https://rlightning.io)
+Full documentation is available at [rlightning.mpanin.me](https://rlightning.mpanin.me)
 
-- [Getting Started Guide](https://rlightning.io/getting-started)
-- [Command Reference](https://rlightning.io/commands)
-- [Configuration Guide](https://rlightning.io/configuration)
-- [Replication Setup](https://rlightning.io/replication)
-- [Persistence Options](https://rlightning.io/persistence)
-- [Architecture Overview](https://rlightning.io/architecture)
+- [Getting Started Guide](https://rlightning.mpanin.me/getting-started)
+- [Command Reference](https://rlightning.mpanin.me/commands)
+- [Configuration Guide](https://rlightning.mpanin.me/configuration)
+- [Replication Setup](https://rlightning.mpanin.me/replication)
+- [Persistence Options](https://rlightning.mpanin.me/persistence)
+- [Architecture Overview](https://rlightning.mpanin.me/architecture)
 
 ## Contributing
 
@@ -410,11 +410,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- 📖 [Documentation](https://rlightning.io)
-- 🐛 [Issue Tracker](https://github.com/altista-tech/rLightning/issues)
-- 💬 [Discussions](https://github.com/altista-tech/rLightning/discussions)
-- 📧 Email: support@altista.tech
-
+- 📖 [Documentation](https://rlightning.mpanin.me)
+- 🐛 [Issue Tracker](https://github.com/nxrvl/rLightning/issues)
+- 💬 [Discussions](https://github.com/nxrvl/rLightning/discussions)
 ---
 
-Made with ⚡ by [Altista Tech](https://altista.tech)
+Made with ⚡ by [nxrvl](https://github.com/nxrvl)
