@@ -3,11 +3,6 @@ name: Deploy Documentation
 on:
   workflow_dispatch:
 
-env:
-  DEPLOY_HOST: mpanin.me
-  DEPLOY_USER: root
-  DEPLOY_PATH: /opt/rlightning.mpanin.me
-
 jobs:
   deploy:
     name: Build & Deploy
@@ -35,14 +30,14 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          echo "mpanin.me ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJtQ4Hz722NP7vj8kF37Q3tv+myrxuGV8dgVUhY4B+L4" >> ~/.ssh/known_hosts
+          echo "${{ secrets.DEPLOY_HOST_KEY }}" >> ~/.ssh/known_hosts
           cat >> ~/.ssh/config << EOF
-          Host mpanin.me
+          Host ${{ secrets.DEPLOY_HOST }}
             IdentityFile ~/.ssh/deploy_key
             StrictHostKeyChecking yes
           EOF
 
       - name: Deploy to server
         run: |
-          rsync -avz --delete site/dist/ ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/dist/
-          ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "cd ${{ env.DEPLOY_PATH }} && docker compose up --build -d"
+          rsync -avz --delete site/dist/ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/dist/
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cd ${{ secrets.DEPLOY_PATH }} && docker compose up --build -d"

@@ -6,6 +6,10 @@ description = "Redis-compatible in-memory key-value store focused on session man
 authors = ["nxrvl"]
 license = "MIT"
 repository = "https://github.com/nxrvl/rLightning"
+keywords = ["redis", "cache", "database", "key-value", "datastore"]
+categories = ["database", "caching"]
+homepage = "https://rlightning.mpanin.me"
+readme = "README.md"
 
 [dependencies]
 # Async runtime
