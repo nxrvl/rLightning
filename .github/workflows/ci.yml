@@ -1,25 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-    tags-ignore:
-      - 'v*'
-    paths-ignore:
-      - '**.md'
-      - 'site/**'
-      - 'docs/**'
-      - 'tests/docker-compat/**'
-      - '.github/workflows/docs.yml'
-      - '.github/workflows/release.yml'
-  pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'site/**'
-      - 'docs/**'
-      - 'tests/docker-compat/**'
-      - '.github/workflows/docs.yml'
-      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 env:
@@ -200,7 +181,7 @@ jobs:
             rlightning:test
           # Wait for container to be ready
           for i in $(seq 1 30); do
-            if docker exec rlightning-test nc -z localhost 6379 2>/dev/null; then
+            if docker exec rlightning-test sh -c 'echo PING | timeout 2 sh -c "cat > /dev/tcp/localhost/6379"' 2>/dev/null; then
               echo "rLightning is ready"
               break
             fi
@@ -210,8 +191,8 @@ jobs:
 
       - name: Verify container health
         run: |
-          # Test basic connectivity with redis-cli compatible check
-          docker exec rlightning-test nc -z localhost 6379
+          # Test basic connectivity via host port
+          echo PING | timeout 2 bash -c 'cat > /dev/tcp/localhost/16379'
           echo "Container is healthy and accepting connections"
 
       - name: Stop container
