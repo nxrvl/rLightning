@@ -1,30 +1,16 @@
-name: Documentation
+name: Deploy Documentation
 
 on:
-  push:
-    branches:
-      - main
-    tags-ignore:
-      - 'v*'
-    paths:
-      - 'site/**'
-      - 'README.md'
-      - 'Dockerfile.site'
-      - '.github/workflows/docs.yml'
-  pull_request:
-    paths:
-      - 'site/**'
-      - 'README.md'
-      - 'Dockerfile.site'
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/docs
+  DEPLOY_HOST: mpanin.me
+  DEPLOY_USER: root
+  DEPLOY_PATH: /opt/rlightning.mpanin.me
 
 jobs:
-  build-docs:
-    name: Build Documentation
+  deploy:
+    name: Build & Deploy
     runs-on: ubuntu-latest
 
     steps:
@@ -44,54 +30,19 @@ jobs:
       - name: Build site
         run: cd site && npm run build
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: documentation-site
-          path: site/dist/
-          retention-days: 7
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "mpanin.me ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJtQ4Hz722NP7vj8kF37Q3tv+myrxuGV8dgVUhY4B+L4" >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config << EOF
+          Host mpanin.me
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+          EOF
 
-  build-docker-image:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: build-docs
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.site
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+      - name: Deploy to server
+        run: |
+          rsync -avz --delete site/dist/ ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/dist/
+          ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "cd ${{ env.DEPLOY_PATH }} && docker compose up --build -d"
