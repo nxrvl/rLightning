@@ -596,6 +596,7 @@ pub fn resp_to_lua(lua: &Lua, resp: &RespValue) -> mlua::Result<Value> {
 /// - Lua table (array) -> Redis array
 pub fn lua_to_resp(value: &Value) -> RespValue {
     match value {
+        #[allow(clippy::unnecessary_cast)]
         Value::Integer(n) => RespValue::Integer(*n as i64),
         Value::Number(n) => RespValue::Integer(*n as i64),
         Value::String(s) => RespValue::BulkString(Some(s.as_bytes().to_vec())),

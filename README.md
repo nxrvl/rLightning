@@ -308,7 +308,7 @@ rLightning is built with a modular architecture:
 - **Replication**: Async replication with automatic reconnection
 - **Security**: Authentication and authorization layer
 
-See the [Architecture Documentation](https://rlightning.mpanin.me/architecture) for details.
+See the [Architecture Documentation](https://rlightning.mpanin.me/docs/architecture) for details.
 
 ## Development
 
@@ -381,12 +381,13 @@ rLightning excels in:
 
 Full documentation is available at [rlightning.mpanin.me](https://rlightning.mpanin.me)
 
-- [Getting Started Guide](https://rlightning.mpanin.me/getting-started)
-- [Command Reference](https://rlightning.mpanin.me/commands)
-- [Configuration Guide](https://rlightning.mpanin.me/configuration)
-- [Replication Setup](https://rlightning.mpanin.me/replication)
-- [Persistence Options](https://rlightning.mpanin.me/persistence)
-- [Architecture Overview](https://rlightning.mpanin.me/architecture)
+- [Getting Started Guide](https://rlightning.mpanin.me/docs/getting-started)
+- [Quick Start](https://rlightning.mpanin.me/docs/quick-start)
+- [Command Reference](https://rlightning.mpanin.me/docs/commands)
+- [Configuration Guide](https://rlightning.mpanin.me/docs/configuration)
+- [Docker Deployment](https://rlightning.mpanin.me/docs/docker)
+- [Architecture Overview](https://rlightning.mpanin.me/docs/architecture)
+- [Benchmarks](https://rlightning.mpanin.me/docs/benchmarks)
 
 ## Contributing
 
@@ -410,7 +411,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- 📖 [Documentation](https://rlightning.mpanin.me)
+- 📖 [Documentation](https://rlightning.mpanin.me/docs/getting-started)
 - 🐛 [Issue Tracker](https://github.com/nxrvl/rLightning/issues)
 - 💬 [Discussions](https://github.com/nxrvl/rLightning/discussions)
 ---

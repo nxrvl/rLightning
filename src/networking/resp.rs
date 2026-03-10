@@ -509,7 +509,10 @@ impl RespValue {
     /// Check if a command returns key-value pairs that should be a RESP3 Map.
     /// Only commands that always return flat key-value pair responses belong here.
     fn is_map_command(cmd: &str) -> bool {
-        matches!(cmd, "hgetall" | "config get" | "xinfo stream" | "command docs")
+        matches!(
+            cmd,
+            "hgetall" | "config get" | "xinfo stream" | "command docs"
+        )
     }
 
     /// Check if a command returns an array where each element is a flat kv array -> Map

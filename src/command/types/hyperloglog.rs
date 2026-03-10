@@ -202,13 +202,11 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     if args.len() == 1 {
         // Single key - atomic type check + read in one DashMap hold
         let key = &args[0];
-        let count = engine.atomic_read(key, RedisDataType::String, |data| {
-            match data {
-                Some(d) if hll_is_valid(d) => Ok(hll_count(d)),
-                Some(d) if d.is_empty() => Ok(0),
-                Some(_) => Err(crate::storage::error::StorageError::WrongType),
-                None => Ok(0),
-            }
+        let count = engine.atomic_read(key, RedisDataType::String, |data| match data {
+            Some(d) if hll_is_valid(d) => Ok(hll_count(d)),
+            Some(d) if d.is_empty() => Ok(0),
+            Some(_) => Err(crate::storage::error::StorageError::WrongType),
+            None => Ok(0),
         })?;
         Ok(RespValue::Integer(count))
     } else {
@@ -217,13 +215,11 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 
         for key in args {
             let data_opt: Option<Vec<u8>> =
-                engine.atomic_read(key, RedisDataType::String, |data| {
-                    match data {
-                        Some(d) if hll_is_valid(d) => Ok(Some(d.clone())),
-                        Some(d) if d.is_empty() => Ok(None),
-                        Some(_) => Err(crate::storage::error::StorageError::WrongType),
-                        None => Ok(None),
-                    }
+                engine.atomic_read(key, RedisDataType::String, |data| match data {
+                    Some(d) if hll_is_valid(d) => Ok(Some(d.clone())),
+                    Some(d) if d.is_empty() => Ok(None),
+                    Some(_) => Err(crate::storage::error::StorageError::WrongType),
+                    None => Ok(None),
                 })?;
             if let Some(data) = data_opt {
                 hll_merge(&mut merged, &data);

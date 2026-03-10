@@ -1385,8 +1385,7 @@ impl Server {
                             })
                         };
                         if let Some(repl_cmd) = repl_cmd {
-                            repl.propagate_commands_batch(&[select_cmd, repl_cmd])
-                                .await;
+                            repl.propagate_commands_batch(&[select_cmd, repl_cmd]).await;
                         }
                     }
                 }

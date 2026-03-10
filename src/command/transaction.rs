@@ -504,9 +504,7 @@ pub async fn handle_exec(
     command_keys_with_db.extend(watched_keys_with_db.iter().cloned());
 
     // Lock all keys in sorted order to prevent deadlocks
-    let _lock_guard = engine
-        .lock_keys_multi_db(&[], &command_keys_with_db)
-        .await;
+    let _lock_guard = engine.lock_keys_multi_db(&[], &command_keys_with_db).await;
 
     // Check watched keys AFTER acquiring locks to close the TOCTOU window
     if state.check_watched_keys(engine) {

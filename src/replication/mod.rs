@@ -279,7 +279,8 @@ impl ReplicationManager {
     /// Propagate a write command to all connected replicas.
     /// Called by the server after processing a write command.
     pub async fn propagate_command(&self, command: &RespCommand) {
-        self.propagate_commands_batch(std::slice::from_ref(command)).await;
+        self.propagate_commands_batch(std::slice::from_ref(command))
+            .await;
     }
 
     /// Propagate multiple commands atomically to all connected replicas.

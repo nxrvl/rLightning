@@ -490,7 +490,11 @@ impl StorageEngine {
             return Ok(bytes);
         }
         // Try suffixes: kb, mb, gb
-        for (suffix, multiplier) in &[("gb", 1024 * 1024 * 1024), ("mb", 1024 * 1024), ("kb", 1024)] {
+        for (suffix, multiplier) in &[
+            ("gb", 1024 * 1024 * 1024),
+            ("mb", 1024 * 1024),
+            ("kb", 1024),
+        ] {
             if let Some(num_str) = s.strip_suffix(suffix) {
                 return num_str
                     .trim()
@@ -894,8 +898,7 @@ impl StorageEngine {
             }
 
             // Evict items until we have enough space (search across all databases)
-            while self.current_memory.load(Ordering::Acquire) as usize + required_size
-                > max_memory
+            while self.current_memory.load(Ordering::Acquire) as usize + required_size > max_memory
             {
                 // Check if there are any items to evict across all DBs
                 let total_keys: usize =
@@ -971,7 +974,8 @@ impl StorageEngine {
                                 if is_lfu {
                                     entry.value().access_count
                                 } else {
-                                    u64::MAX - entry.value().last_accessed.elapsed().as_nanos() as u64
+                                    u64::MAX
+                                        - entry.value().last_accessed.elapsed().as_nanos() as u64
                                 }
                             })
                         };
@@ -2408,9 +2412,9 @@ impl StorageEngine {
                     {
                         // Redis 7 default: set-max-intset-entries = 512
                         if set.len() <= 512
-                            && set
-                                .iter()
-                                .all(|el| std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok()))
+                            && set.iter().all(|el| {
+                                std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok())
+                            })
                         {
                             "intset"
                         } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {

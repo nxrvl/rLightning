@@ -216,9 +216,7 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt
-            && let Some(current) = current_ttl
-        {
+        if gt && let Some(current) = current_ttl {
             match &ttl {
                 // Negative TTL (None) is always less than any positive current TTL,
                 // so GT condition fails — don't delete.
@@ -229,9 +227,7 @@ pub async fn expire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 _ => {}
             }
         }
-        if lt
-            && let Some(current) = current_ttl
-        {
+        if lt && let Some(current) = current_ttl {
             // Negative TTL (None) is always less than any positive current TTL,
             // so LT condition passes — allow deletion below.
             if let Some(new_ttl) = &ttl
@@ -404,7 +400,11 @@ mod tests {
         // EXPIRE key -1 GT: negative TTL is NOT greater than current 100s TTL → return 0, key survives
         let args = vec![key.clone(), b"-1".to_vec(), b"GT".to_vec()];
         let result = expire(&storage, &args).await.unwrap();
-        assert_eq!(result, RespValue::Integer(0), "GT should block negative TTL when key has expiry");
+        assert_eq!(
+            result,
+            RespValue::Integer(0),
+            "GT should block negative TTL when key has expiry"
+        );
 
         // Key should still exist
         let val = storage.get(&key).await.unwrap();
@@ -413,7 +413,11 @@ mod tests {
         // EXPIRE key -1 LT: negative TTL IS less than current 100s TTL → return 1, key deleted
         let args = vec![key.clone(), b"-1".to_vec(), b"LT".to_vec()];
         let result = expire(&storage, &args).await.unwrap();
-        assert_eq!(result, RespValue::Integer(1), "LT should allow negative TTL when key has expiry");
+        assert_eq!(
+            result,
+            RespValue::Integer(1),
+            "LT should allow negative TTL when key has expiry"
+        );
 
         // Key should be deleted
         let val = storage.get(&key).await.unwrap();
@@ -458,13 +462,27 @@ mod tests {
         // EXPIRE key -1 NX: key has expiry → NX blocks → return 0, key survives
         let args = vec![key.clone(), b"-1".to_vec(), b"NX".to_vec()];
         let result = expire(&storage, &args).await.unwrap();
-        assert_eq!(result, RespValue::Integer(0), "NX should block when key has expiry");
-        assert!(storage.get(&key).await.unwrap().is_some(), "Key should survive NX block");
+        assert_eq!(
+            result,
+            RespValue::Integer(0),
+            "NX should block when key has expiry"
+        );
+        assert!(
+            storage.get(&key).await.unwrap().is_some(),
+            "Key should survive NX block"
+        );
 
         // EXPIRE key -1 XX: key has expiry → XX passes → key deleted
         let args = vec![key.clone(), b"-1".to_vec(), b"XX".to_vec()];
         let result = expire(&storage, &args).await.unwrap();
-        assert_eq!(result, RespValue::Integer(1), "XX should allow when key has expiry");
-        assert!(storage.get(&key).await.unwrap().is_none(), "Key should be deleted by XX + negative TTL");
+        assert_eq!(
+            result,
+            RespValue::Integer(1),
+            "XX should allow when key has expiry"
+        );
+        assert!(
+            storage.get(&key).await.unwrap().is_none(),
+            "Key should be deleted by XX + negative TTL"
+        );
     }
 }

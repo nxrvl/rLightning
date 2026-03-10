@@ -616,9 +616,7 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         if xx && !has_expiry {
             return Ok(RespValue::Integer(0));
         }
-        if gt
-            && let Some(current) = current_ttl
-        {
+        if gt && let Some(current) = current_ttl {
             match &ttl {
                 // Negative TTL (None) is always less than any positive current TTL,
                 // so GT condition fails — don't delete.
@@ -629,9 +627,7 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
                 _ => {}
             }
         }
-        if lt
-            && let Some(current) = current_ttl
-        {
+        if lt && let Some(current) = current_ttl {
             // Negative TTL (None) is always less than any positive current TTL,
             // so LT condition passes — allow deletion below.
             if let Some(new_ttl) = &ttl

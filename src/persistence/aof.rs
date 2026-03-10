@@ -608,10 +608,7 @@ impl AofPersistence {
             // flush() only pushes BufWriter's buffer to the OS;
             // sync_all() ensures data reaches persistent storage.
             writer.flush().map_err(PersistenceError::Io)?;
-            writer
-                .get_ref()
-                .sync_all()
-                .map_err(PersistenceError::Io)?;
+            writer.get_ref().sync_all().map_err(PersistenceError::Io)?;
 
             // Rename temp file to target file atomically
             let rename_result = fs::rename(&temp_path, &path);
