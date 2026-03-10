@@ -11,9 +11,9 @@ env:
   IMAGE_NAME: nxrvl/rlightning
 
 jobs:
+  # Job 1: Run tests
   test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -51,67 +51,79 @@ jobs:
 
             [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-  notify-start:
+  # Job 2: Cross-compile binaries for all platforms (native speed, no QEMU)
+  build-binaries:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            platform_tag: amd64
+            cross_packages: ""
+            linker: ""
+            cc: ""
+          - target: aarch64-unknown-linux-gnu
+            platform_tag: arm64
+            cross_packages: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
+            linker: "aarch64-linux-gnu-gcc"
+            cc: "aarch64-linux-gnu-gcc"
+          - target: armv7-unknown-linux-gnueabihf
+            platform_tag: armv7
+            cross_packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"
+            linker: "arm-linux-gnueabihf-gcc"
+            cc: "arm-linux-gnueabihf-gcc"
+
     steps:
-      - name: Notify release start
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Notify build start
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_TO }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            🚀 **Release Build Started - ${{ github.ref_name }}**
+            🔨 **Building ${{ matrix.platform_tag }}** - ${{ github.ref_name }}
 
-            **Repository:** ${{ github.repository }}
-            **Version:** ${{ github.ref_name }}
-            **Commit:** `${{ github.sha }}`
+            Target: `${{ matrix.target }}`
+            Mode: ${{ matrix.cross_packages && 'cross-compilation' || 'native' }}
 
-            ✅ All tests passed
-            🔨 Starting Docker builds...
+      - name: Install cross-compilation toolchain
+        if: matrix.cross_packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.cross_packages }}
 
-            **Build stages:**
-            1️⃣ Pre-build dependencies cache
-            2️⃣ Build platform images (amd64, arm64, armv7)
-            3️⃣ Create multi-arch manifest
-            4️⃣ Create GitHub release
-
-            [View Build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-  prebuild-deps:
-    needs: notify-start
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+          targets: ${{ matrix.target }}
 
-      - name: Build and cache dependencies
-        uses: docker/build-push-action@v5
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          context: .
-          target: builder
-          platforms: linux/amd64
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps,mode=max
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
+          shared-key: "release-${{ matrix.platform_tag }}"
+          cache-on-failure: true
 
-      - name: Notify prebuild complete
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker || '' }}
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.linker || '' }}
+          CC: ${{ matrix.cc || 'gcc' }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform_tag }}
+          path: target/${{ matrix.target }}/release/rlightning
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Notify build complete
         if: success()
         uses: appleboy/telegram-action@v1.0.0
         with:
@@ -119,12 +131,9 @@ jobs:
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ✅ **Dependencies Cached - ${{ github.ref_name }}**
+            ✅ **${{ matrix.platform_tag }} binary built** - ${{ github.ref_name }}
 
-            Build cache updated successfully.
-            Starting platform builds...
-
-      - name: Notify prebuild failure
+      - name: Notify build failure
         if: failure()
         uses: appleboy/telegram-action@v1.0.0
         with:
@@ -132,14 +141,13 @@ jobs:
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            ❌ **Dependencies Cache Failed - ${{ github.ref_name }}**
-
-            Failed to build dependencies cache.
+            ❌ **${{ matrix.platform_tag }} Build Failed** - ${{ github.ref_name }}
 
             [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
+  # Job 3: Build Docker images from pre-built binaries (fast — no Rust compilation in Docker)
   build-images:
-    needs: prebuild-deps
+    needs: build-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -159,16 +167,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Notify platform build start
-        uses: appleboy/telegram-action@v1.0.0
+      - name: Download binary
+        uses: actions/download-artifact@v4
         with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          format: markdown
-          message: |
-            🔨 **Building ${{ matrix.platform_tag }}** - ${{ github.ref_name }}
+          name: binary-${{ matrix.platform_tag }}
+          path: docker-context/
 
-            Platform: `${{ matrix.platform }}`
+      - name: Prepare Docker context
+        run: chmod +x docker-context/rlightning
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -196,18 +202,16 @@ jobs:
         id: build
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: docker-context/
+          file: ./Dockerfile.release
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform_tag }}
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-deps
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform_tag }},mode=max
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
 
       - name: Export digest
         run: |
@@ -223,36 +227,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Notify platform build complete
-        if: success()
-        uses: appleboy/telegram-action@v1.0.0
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          format: markdown
-          message: |
-            ✅ **${{ matrix.platform_tag }} Build Complete** - ${{ github.ref_name }}
-
-            **Image:** `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}`
-
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.platform_tag }}
-            ```
-
-      - name: Notify platform build failure
-        if: failure()
-        uses: appleboy/telegram-action@v1.0.0
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          format: markdown
-          message: |
-            ❌ **${{ matrix.platform_tag }} Build Failed** - ${{ github.ref_name }}
-
-            Platform `${{ matrix.platform }}` failed to build.
-
-            [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
+  # Job 4: Create multi-arch manifest
   create-manifest:
     needs: build-images
     runs-on: ubuntu-latest
@@ -261,17 +236,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Notify manifest creation start
-        uses: appleboy/telegram-action@v1.0.0
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          format: markdown
-          message: |
-            🔗 **Creating Multi-Arch Manifest** - ${{ github.ref_name }}
-
-            Combining platform images into unified manifest...
-
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -336,10 +300,9 @@ jobs:
           message: |
             ❌ **Manifest Creation Failed** - ${{ github.ref_name }}
 
-            Failed to create multi-arch manifest.
-
             [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
+  # Job 5: Create GitHub release
   create-release:
     needs: create-manifest
     runs-on: ubuntu-latest

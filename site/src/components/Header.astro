@@ -1,0 +1,140 @@
+---
+const currentPath = Astro.url.pathname;
+const isDocsPage = currentPath.startsWith('/docs');
+---
+
+<header class="header">
+  <div class="header-inner">
+    <a href="/" class="logo">
+      <svg class="logo-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+      </svg>
+      <span class="logo-text">rLightning</span>
+    </a>
+
+    <nav class="nav">
+      <a href="/docs/getting-started" class:list={['nav-link', { active: isDocsPage }]}>Docs</a>
+      <a href="https://github.com/altista-tech/rLightning" class="nav-link" target="_blank" rel="noopener">
+        GitHub
+        <svg class="external-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
+      </a>
+      <a href="https://hub.docker.com/r/nxrvl/rlightning" class="nav-link" target="_blank" rel="noopener">
+        Docker Hub
+        <svg class="external-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
+      </a>
+    </nav>
+
+    <button class="mobile-toggle" id="mobile-toggle" aria-label="Toggle navigation">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<style>
+  .header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--header-height);
+    background: rgba(10, 14, 23, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    z-index: 100;
+  }
+
+  .header-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-heading);
+    font-weight: 700;
+    font-size: 1.2rem;
+  }
+
+  .logo-icon {
+    color: var(--accent);
+  }
+
+  .logo:hover {
+    color: var(--text-heading);
+  }
+
+  .logo:hover .logo-icon {
+    color: var(--accent-hover);
+  }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .nav-link {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.5rem 0.875rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    border-radius: var(--radius);
+    transition: all 0.2s;
+  }
+
+  .nav-link:hover, .nav-link.active {
+    color: var(--text-heading);
+    background: var(--bg-tertiary);
+  }
+
+  .external-icon {
+    opacity: 0.5;
+  }
+
+  .mobile-toggle {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0.5rem;
+  }
+
+  @media (max-width: 768px) {
+    .nav { display: none; }
+    .mobile-toggle { display: block; }
+  }
+</style>
+
+<script>
+  const toggle = document.getElementById('mobile-toggle');
+  const nav = document.querySelector('.nav') as HTMLElement;
+  toggle?.addEventListener('click', () => {
+    const visible = nav.style.display === 'flex';
+    nav.style.display = visible ? 'none' : 'flex';
+    if (!visible) {
+      nav.style.position = 'absolute';
+      nav.style.top = 'var(--header-height)';
+      nav.style.right = '1rem';
+      nav.style.flexDirection = 'column';
+      nav.style.background = 'var(--bg-secondary)';
+      nav.style.border = '1px solid var(--border)';
+      nav.style.borderRadius = 'var(--radius)';
+      nav.style.padding = '0.5rem';
+    }
+  });
+</script>

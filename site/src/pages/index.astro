@@ -1,0 +1,163 @@
+---
+import LandingLayout from '../layouts/LandingLayout.astro';
+import Hero from '../components/Hero.astro';
+import FeatureCard from '../components/FeatureCard.astro';
+---
+
+<LandingLayout title="rLightning - Lightning-fast Redis, built in Rust">
+  <Hero />
+
+  <section class="features">
+    <div class="features-inner">
+      <h2 class="section-title">Why rLightning?</h2>
+      <div class="features-grid">
+        <FeatureCard
+          icon="⚡"
+          title="Blazing Fast"
+          description="Built in Rust with lock-free concurrent data structures, jemalloc, and async I/O via Tokio for maximum throughput."
+        />
+        <FeatureCard
+          icon="🔄"
+          title="Redis 7.x Compatible"
+          description="Full RESP2/RESP3 protocol support. Drop-in replacement for Redis with 400+ commands across all data types."
+        />
+        <FeatureCard
+          icon="📦"
+          title="All Data Types"
+          description="Strings, hashes, lists, sets, sorted sets, streams, bitmaps, HyperLogLog, and geospatial indexes."
+        />
+        <FeatureCard
+          icon="🔒"
+          title="ACL Security"
+          description="Per-user command, key, and channel permissions. Password and named-user authentication with ACL LOG tracking."
+        />
+        <FeatureCard
+          icon="🌐"
+          title="Cluster & Sentinel"
+          description="Hash slot distribution, gossip protocol, automatic failover, and Sentinel monitoring with quorum-based detection."
+        />
+        <FeatureCard
+          icon="📜"
+          title="Lua Scripting"
+          description="Lua 5.1 engine with redis.call()/pcall() bindings. EVAL/EVALSHA and Redis 7.0 Functions support."
+        />
+        <FeatureCard
+          icon="💾"
+          title="Persistence"
+          description="RDB snapshots, AOF logging, and hybrid mode. Background saves with configurable sync policies."
+        />
+        <FeatureCard
+          icon="🐳"
+          title="Multi-arch Docker"
+          description="Pre-built images for amd64, arm64, and armv7. Lightweight Debian-based runtime with non-root user."
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="quickstart">
+    <div class="quickstart-inner">
+      <h2 class="section-title">Quick Start</h2>
+      <div class="quickstart-options">
+        <div class="quickstart-option">
+          <h3>Docker</h3>
+          <pre><code>docker pull nxrvl/rlightning
+docker run -d -p 6379:6379 nxrvl/rlightning</code></pre>
+        </div>
+        <div class="quickstart-option">
+          <h3>From Source</h3>
+          <pre><code>git clone https://github.com/altista-tech/rLightning.git
+cd rLightning
+cargo build --release
+./target/release/rlightning</code></pre>
+        </div>
+      </div>
+      <div class="quickstart-cta">
+        <a href="/docs/quick-start" class="btn btn-primary">Full Quick Start Guide</a>
+      </div>
+    </div>
+  </section>
+</LandingLayout>
+
+<style>
+  .features {
+    padding: 4rem 1.5rem;
+  }
+
+  .features-inner, .quickstart-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  .section-title {
+    font-size: 1.75rem;
+    text-align: center;
+    margin-bottom: 2.5rem;
+    color: var(--text-heading);
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+  }
+
+  .quickstart {
+    padding: 4rem 1.5rem;
+    background: var(--bg-secondary);
+  }
+
+  .quickstart-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .quickstart-option {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+  }
+
+  .quickstart-option h3 {
+    font-size: 1rem;
+    margin-bottom: 1rem;
+    color: var(--accent);
+  }
+
+  .quickstart-option pre {
+    margin: 0;
+  }
+
+  .quickstart-cta {
+    text-align: center;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    border-radius: var(--radius);
+    transition: all 0.2s;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover);
+    color: #fff;
+  }
+
+  @media (max-width: 768px) {
+    .quickstart-options {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
