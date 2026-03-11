@@ -630,7 +630,7 @@ fn bench_json_operations_throughput(c: &mut Criterion) {
                                     args: vec![key, path, json_value],
                                 };
 
-                                black_box(handler_ref.process(json_set_cmd, 0).await.unwrap());
+                                let _ = black_box(handler_ref.process(json_set_cmd, 0).await);
                             });
 
                             handles.push(handle);

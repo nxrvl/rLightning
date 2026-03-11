@@ -118,6 +118,14 @@ harness = false
 name = "cluster_bench"
 harness = false
 
+[[bench]]
+name = "geo_bitmap_hll_bench"
+harness = false
+
+[[bench]]
+name = "scan_bench"
+harness = false
+
 # Profiling configuration for benchmarks
 [profile.bench]
 debug = true
