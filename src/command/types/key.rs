@@ -593,7 +593,7 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut elements: Vec<Vec<u8>> = match key_type.as_str() {
         "list" => {
             if let Some(value) = engine.get(key).await? {
-                bincode::deserialize::<Vec<Vec<u8>>>(&value).unwrap_or_default()
+                crate::storage::list_bytes::deserialize_all(&value).unwrap_or_default()
             } else {
                 vec![]
             }

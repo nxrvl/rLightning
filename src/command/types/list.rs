@@ -8,6 +8,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
+use crate::storage::list_bytes;
 
 /// Internal helper for LPOP/RPOP return types
 enum PopResult {
@@ -17,7 +18,7 @@ enum PopResult {
 }
 
 /// Redis LPUSH command - Push a value onto the beginning of a list
-/// Uses atomic_modify for thread-safe read-modify-write
+/// Uses byte-level operations for O(N) memmove instead of O(N) deserialize+splice+serialize
 pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -27,30 +28,24 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        let mut list = match current {
-            Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?,
-            None => Vec::new(),
-        };
-
-        list.splice(0..0, elements.clone());
-        let length = list.len() as i64;
-
-        let serialized = bincode::serialize(&list).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
-        Ok((Some(serialized), length))
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            list_bytes::lpush(data, &elements)?;
+            let new_len = list_bytes::len(data)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
+        }
+        None => {
+            let new_data = list_bytes::new_from_elements(&elements);
+            let new_len = elements.len() as i64;
+            Ok((Some(new_data), new_len))
+        }
     })?;
 
     Ok(RespValue::Integer(length))
 }
 
 /// Redis RPUSH command - Push a value onto the end of a list
-/// Uses atomic_modify for thread-safe read-modify-write
+/// Uses byte-level operations for O(k) append instead of O(N) deserialize+extend+serialize
 pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -60,30 +55,23 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        let mut list = match current {
-            Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?,
-            None => Vec::new(),
-        };
-
-        list.extend(elements.clone());
-        let length = list.len() as i64;
-
-        let serialized = bincode::serialize(&list).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
-        Ok((Some(serialized), length))
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let new_len = list_bytes::rpush(data, &elements)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
+        }
+        None => {
+            let new_data = list_bytes::new_from_elements(&elements);
+            let new_len = elements.len() as i64;
+            Ok((Some(new_data), new_len))
+        }
     })?;
 
     Ok(RespValue::Integer(length))
 }
 
 /// Redis LPOP command - Remove and return the first element(s) of a list
-/// Uses atomic_modify for thread-safe read-modify-write
+/// Uses byte-level operations for efficient element extraction
 pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -109,32 +97,28 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            if list.is_empty() {
-                return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
+            let total = list_bytes::len(data)?;
+            if total == 0 {
+                return Ok((Some(std::mem::take(data)), PopResult::Nil(count.is_some())));
             }
 
-            let pop_result = if let Some(count) = count {
-                let actual_count = std::cmp::min(count, list.len());
-                let elements: Vec<Vec<u8>> = list.drain(..actual_count).collect();
+            let pop_count = count.unwrap_or(1);
+            let elements = list_bytes::lpop(data, pop_count)?;
+
+            let pop_result = if count.is_some() {
                 PopResult::Multi(elements)
             } else {
-                let element = list.remove(0);
-                PopResult::Single(element)
+                match elements.into_iter().next() {
+                    Some(e) => PopResult::Single(e),
+                    None => PopResult::Nil(false),
+                }
             };
 
-            if list.is_empty() {
+            let remaining = list_bytes::len(data)?;
+            if remaining == 0 {
                 Ok((None, pop_result))
             } else {
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), pop_result))
+                Ok((Some(std::mem::take(data)), pop_result))
             }
         }
         None => Ok((None, PopResult::Nil(count.is_some()))),
@@ -160,7 +144,7 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis RPOP command - Remove and return the last element(s) of a list
-/// Uses atomic_modify for thread-safe read-modify-write
+/// Uses byte-level operations for efficient element extraction
 pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -186,33 +170,28 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            if list.is_empty() {
-                return Ok((Some(data.clone()), PopResult::Nil(count.is_some())));
+            let total = list_bytes::len(data)?;
+            if total == 0 {
+                return Ok((Some(std::mem::take(data)), PopResult::Nil(count.is_some())));
             }
 
-            let pop_result = if let Some(count) = count {
-                let actual_count = std::cmp::min(count, list.len());
-                let start = list.len() - actual_count;
-                let elements: Vec<Vec<u8>> = list.drain(start..).rev().collect();
+            let pop_count = count.unwrap_or(1);
+            let elements = list_bytes::rpop(data, pop_count)?;
+
+            let pop_result = if count.is_some() {
                 PopResult::Multi(elements)
             } else {
-                let element = list.pop().unwrap();
-                PopResult::Single(element)
+                match elements.into_iter().next() {
+                    Some(e) => PopResult::Single(e),
+                    None => PopResult::Nil(false),
+                }
             };
 
-            if list.is_empty() {
+            let remaining = list_bytes::len(data)?;
+            if remaining == 0 {
                 Ok((None, pop_result))
             } else {
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), pop_result))
+                Ok((Some(std::mem::take(data)), pop_result))
             }
         }
         None => Ok((None, PopResult::Nil(count.is_some()))),
@@ -238,6 +217,7 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis LRANGE command - Get a range of elements from a list
+/// Uses byte-level range scan for O(start + k) instead of full deserialization
 pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -245,83 +225,28 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Parse start and stop indices
-    let start_str = bytes_to_string(&args[1])?;
-    let stop_str = bytes_to_string(&args[2])?;
-
-    let start = start_str.parse::<i64>().map_err(|_| {
+    let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
 
-    let stop = stop_str.parse::<i64>().map_err(|_| {
+    let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
 
-    // Get the current list
-    let list = match engine.get(key).await? {
-        Some(data) => {
-            // Try to deserialize the list
-            match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
-                Ok(list) => list,
-                Err(_) => return Err(CommandError::WrongType),
-            }
-        }
-        None => {
-            // List doesn't exist, return empty array
-            return Ok(RespValue::Array(Some(vec![])));
-        }
-    };
+    let elements = engine.atomic_read(key, RedisDataType::List, |data| match data {
+        Some(d) => list_bytes::range(d, start, stop),
+        None => Ok(vec![]),
+    })?;
 
-    // Handle negative indices (counting from the end)
-    let len = list.len() as i64;
-
-    // Convert indices to zero-based array indices
-    let start_idx = if start < 0 {
-        // Negative index means count from the end
-        (len + start).max(0) as usize
-    } else {
-        start as usize
-    };
-
-    let stop_idx = if stop < 0 {
-        // Negative index means count from the end
-        (len + stop).min(len - 1) as usize
-    } else {
-        stop.min(len - 1) as usize
-    };
-
-    // Get the elements in the range
-    let mut result = Vec::new();
-
-    // Check if we have a valid range before trying to iterate
-    if start_idx <= stop_idx && start_idx < list.len() {
-        let actual_stop_idx = stop_idx.min(list.len() - 1);
-        let range_len = actual_stop_idx - start_idx + 1;
-
-        // Pre-allocate vector with exact capacity to avoid reallocations
-        result = Vec::with_capacity(range_len);
-
-        // Process elements in chunks if the range is large
-        // This helps avoid excessive memory usage and prevents buffer overflow
-        const CHUNK_SIZE: usize = 100;
-
-        for i in (start_idx..=actual_stop_idx).step_by(CHUNK_SIZE) {
-            let chunk_end = (i + CHUNK_SIZE - 1).min(actual_stop_idx);
-
-            for j in i..=chunk_end {
-                // Check if index is valid (just to be safe)
-                if j < list.len() {
-                    result.push(RespValue::BulkString(Some(list[j].clone())));
-                }
-            }
-        }
-    }
-
-    // Return the result as a RESP array
+    let result: Vec<RespValue> = elements
+        .into_iter()
+        .map(|e| RespValue::BulkString(Some(e)))
+        .collect();
     Ok(RespValue::Array(Some(result)))
 }
 
 /// Redis LLEN command - Return the length of a list
+/// Uses byte-level O(1) length read instead of full deserialization
 pub async fn llen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -329,34 +254,16 @@ pub async fn llen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Check if the key exists and is the right type
-    if engine.exists(key).await? {
-        let key_type = engine.get_type(key).await?;
-        if key_type != "list" {
-            return Err(CommandError::WrongType);
-        }
+    let count = engine.atomic_read(key, RedisDataType::List, |data| match data {
+        Some(d) => Ok(list_bytes::len(d)? as i64),
+        None => Ok(0i64),
+    })?;
 
-        // Get the current list
-        match engine.get(key).await? {
-            Some(data) => {
-                // Try to deserialize the list
-                match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
-                    Ok(list) => Ok(RespValue::Integer(list.len() as i64)),
-                    Err(_) => Err(CommandError::WrongType),
-                }
-            }
-            None => {
-                // This should not happen if exists returned true
-                Ok(RespValue::Integer(0))
-            }
-        }
-    } else {
-        // Key doesn't exist, return 0
-        Ok(RespValue::Integer(0))
-    }
+    Ok(RespValue::Integer(count))
 }
 
 /// Redis LINDEX command - Get an element from a list by index
+/// Uses byte-level index scan for O(index) instead of full deserialization
 pub async fn lindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -364,48 +271,20 @@ pub async fn lindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Parse index
-    let index_str = bytes_to_string(&args[1])?;
-    let index = index_str
+    let idx = bytes_to_string(&args[1])?
         .parse::<i64>()
         .map_err(|_| CommandError::InvalidArgument("Invalid index, not an integer".to_string()))?;
 
-    // Get the current list
-    let list = match engine.get(key).await? {
-        Some(data) => {
-            // Try to deserialize the list
-            match bincode::deserialize::<Vec<Vec<u8>>>(&data) {
-                Ok(list) => list,
-                Err(_) => return Err(CommandError::WrongType),
-            }
-        }
-        None => {
-            // List doesn't exist, return nil
-            return Ok(RespValue::BulkString(None));
-        }
-    };
+    let elem = engine.atomic_read(key, RedisDataType::List, |data| match data {
+        Some(d) => list_bytes::index(d, idx),
+        None => Ok(None),
+    })?;
 
-    if list.is_empty() {
-        return Ok(RespValue::BulkString(None));
-    }
-
-    // Handle negative indices (counting from the end)
-    let len = list.len() as i64;
-    let actual_index = if index < 0 { len + index } else { index };
-
-    // Check if index is within bounds
-    if actual_index < 0 || actual_index >= len {
-        return Ok(RespValue::BulkString(None));
-    }
-
-    // Return the element at the specified index
-    Ok(RespValue::BulkString(Some(
-        list[actual_index as usize].clone(),
-    )))
+    Ok(RespValue::BulkString(elem))
 }
 
 /// Redis LTRIM command - Trim a list to the specified range
-/// Uses atomic_modify for thread-safe read-modify-write
+/// Uses byte-level trim for efficient in-place range extraction
 pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -413,76 +292,30 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Parse start and stop indices
-    let start_str = bytes_to_string(&args[1])?;
-    let stop_str = bytes_to_string(&args[2])?;
-
-    let start = start_str.parse::<i64>().map_err(|_| {
+    let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
     })?;
 
-    let stop = stop_str.parse::<i64>().map_err(|_| {
+    let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
 
-    engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-                let len = list.len() as i64;
-
-                // Handle negative indices
-                let start_idx = if start < 0 {
-                    std::cmp::max(len + start, 0) as usize
-                } else {
-                    start as usize
-                };
-
-                let stop_idx = if stop < 0 {
-                    let raw = len + stop;
-                    if raw < 0 {
-                        return Ok((None, ()));
-                    }
-                    raw as usize
-                } else {
-                    stop as usize
-                };
-
-                if start_idx > stop_idx || start_idx >= list.len() {
-                    return Ok((None, ()));
-                }
-
-                let stop_idx = std::cmp::min(stop_idx, list.len() - 1);
-                let trimmed: Vec<Vec<u8>> = list
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i >= start_idx && *i <= stop_idx)
-                    .map(|(_, v)| v)
-                    .collect();
-
-                if trimmed.is_empty() {
-                    Ok((None, ()))
-                } else {
-                    let serialized = bincode::serialize(&trimmed).map_err(|e| {
-                        crate::storage::error::StorageError::InternalError(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-                    Ok((Some(serialized), ()))
-                }
+    engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let should_delete = list_bytes::trim(data, start, stop)?;
+            if should_delete {
+                Ok((None, ()))
+            } else {
+                Ok((Some(std::mem::take(data)), ()))
             }
-            None => Ok((None, ())),
         }
+        None => Ok((None, ())),
     })?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
 }
 
 /// Redis LPUSHX command - Push elements to the head of a list only if the key exists
-/// Uses atomic_modify for thread-safe read-modify-write
 pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -493,17 +326,9 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-            list.splice(0..0, elements.clone());
-            let length = list.len() as i64;
-            let serialized = bincode::serialize(&list).map_err(|e| {
-                crate::storage::error::StorageError::InternalError(format!(
-                    "Serialization error: {}",
-                    e
-                ))
-            })?;
-            Ok((Some(serialized), length))
+            list_bytes::lpush(data, &elements)?;
+            let new_len = list_bytes::len(data)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
         }
         None => Ok((None, 0i64)),
     })?;
@@ -512,7 +337,6 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis RPUSHX command - Push elements to the tail of a list only if the key exists
-/// Uses atomic_modify for thread-safe read-modify-write
 pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -523,17 +347,8 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-            list.extend(elements.clone());
-            let length = list.len() as i64;
-            let serialized = bincode::serialize(&list).map_err(|e| {
-                crate::storage::error::StorageError::InternalError(format!(
-                    "Serialization error: {}",
-                    e
-                ))
-            })?;
-            Ok((Some(serialized), length))
+            let new_len = list_bytes::rpush(data, &elements)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
         }
         None => Ok((None, 0i64)),
     })?;
@@ -542,7 +357,6 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis LINSERT command - Insert an element before or after a pivot element
-/// Uses atomic_modify for thread-safe read-modify-write
 pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 4 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -556,25 +370,15 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         return Err(CommandError::InvalidArgument("syntax error".to_string()));
     }
 
+    let before = position == "BEFORE";
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            if let Some(idx) = list.iter().position(|e| *e == pivot) {
-                let insert_idx = if position == "BEFORE" { idx } else { idx + 1 };
-                list.insert(insert_idx, element.clone());
-                let length = list.len() as i64;
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), length))
+            let result = list_bytes::insert_pivot(data, &pivot, element.clone(), before)?;
+            if result == -1 {
+                Ok((Some(std::mem::take(data)), -1i64))
             } else {
-                Ok((Some(data.clone()), -1i64))
+                Ok((Some(std::mem::take(data)), result))
             }
         }
         None => Ok((None, 0i64)),
@@ -584,14 +388,12 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 }
 
 /// Redis LSET command - Set the value of an element at an index
-/// Uses atomic_modify for thread-safe read-modify-write
 pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let key = &args[0];
-    let index_str = bytes_to_string(&args[1])?;
-    let index = index_str.parse::<i64>().map_err(|_| {
+    let index = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
         CommandError::InvalidArgument("value is not an integer or out of range".to_string())
     })?;
     let element = args[2].clone();
@@ -599,27 +401,8 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            let len = list.len() as i64;
-            let actual_index = if index < 0 { len + index } else { index };
-
-            if actual_index < 0 || actual_index >= len {
-                return Err(crate::storage::error::StorageError::InternalError(
-                    "index out of range".to_string(),
-                ));
-            }
-
-            list[actual_index as usize] = element.clone();
-
-            let serialized = bincode::serialize(&list).map_err(|e| {
-                crate::storage::error::StorageError::InternalError(format!(
-                    "Serialization error: {}",
-                    e
-                ))
-            })?;
-            Ok((Some(serialized), ()))
+            list_bytes::set_element(data, index, element.clone())?;
+            Ok((Some(std::mem::take(data)), ()))
         }
         None => Err(crate::storage::error::StorageError::InternalError(
             "no such key".to_string(),
@@ -631,10 +414,6 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
 /// Redis LREM command - Remove elements from a list
 /// LREM key count element
-/// count > 0: Remove count elements equal to element, moving from head to tail.
-/// count < 0: Remove |count| elements equal to element, moving from tail to head.
-/// count = 0: Remove all elements equal to element.
-/// Uses atomic_modify for thread-safe read-modify-write
 pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -647,54 +426,12 @@ pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let removed = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            let mut removed = 0i64;
-            let max_removals = if count == 0 {
-                list.len() as i64
-            } else {
-                count.abs()
-            };
-
-            if count >= 0 {
-                list.retain(|e| {
-                    if removed >= max_removals {
-                        return true;
-                    }
-                    if *e == element {
-                        removed += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            } else {
-                list.reverse();
-                list.retain(|e| {
-                    if removed >= max_removals {
-                        return true;
-                    }
-                    if *e == element {
-                        removed += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-                list.reverse();
-            }
-
-            if list.is_empty() {
+            let removed = list_bytes::remove(data, count, &element)?;
+            let remaining = list_bytes::len(data)?;
+            if remaining == 0 {
                 Ok((None, removed))
             } else {
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), removed))
+                Ok((Some(std::mem::take(data)), removed))
             }
         }
         None => Ok((None, 0i64)),
@@ -773,81 +510,17 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         i += 1;
     }
 
-    if !engine.exists(key).await? {
+    let matches = engine.atomic_read(key, RedisDataType::List, |data| match data {
+        Some(d) => list_bytes::pos(d, element, rank, count, maxlen),
+        None => Ok(vec![]),
+    })?;
+
+    if matches.is_empty() && !engine.exists(key).await? {
         return Ok(if count.is_some() {
             RespValue::Array(Some(vec![]))
         } else {
             RespValue::BulkString(None)
         });
-    }
-
-    let key_type = engine.get_type(key).await?;
-    if key_type != "list" {
-        return Err(CommandError::WrongType);
-    }
-
-    let list = match engine.get(key).await? {
-        Some(data) => {
-            bincode::deserialize::<Vec<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
-        }
-        None => {
-            return Ok(if count.is_some() {
-                RespValue::Array(Some(vec![]))
-            } else {
-                RespValue::BulkString(None)
-            });
-        }
-    };
-
-    let mut matches = Vec::new();
-
-    if rank > 0 {
-        // Forward scan
-        let search_len = if maxlen > 0 {
-            maxlen.min(list.len())
-        } else {
-            list.len()
-        };
-        let mut found = 0i64;
-        for (idx, item) in list[..search_len].iter().enumerate() {
-            if *item == *element {
-                found += 1;
-                if found >= rank {
-                    matches.push(idx as i64);
-                    if let Some(c) = count {
-                        if c > 0 && matches.len() >= c as usize {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-    } else {
-        // Reverse scan
-        let abs_rank = rank.unsigned_abs();
-        let start = if maxlen > 0 {
-            list.len().saturating_sub(maxlen)
-        } else {
-            0
-        };
-        let mut found = 0u64;
-        for idx in (start..list.len()).rev() {
-            if list[idx] == *element {
-                found += 1;
-                if found >= abs_rank {
-                    matches.push(idx as i64);
-                    if let Some(c) = count {
-                        if c > 0 && matches.len() >= c as usize {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     if count.is_some() {
@@ -863,7 +536,6 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis LMOVE command - Atomically pop from one list and push to another
-/// Uses atomic_modify for same-key case, lock_keys for cross-key atomicity
 pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 4 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -880,37 +552,33 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::InvalidArgument("syntax error".to_string()));
     }
 
+    let pop_left = wherefrom == "LEFT";
+    let push_left = whereto == "LEFT";
+
     if source == destination {
         // Same-key: use atomic_modify for single-key atomicity
         let result =
             engine.atomic_modify(source, RedisDataType::List, |current| match current {
                 Some(data) => {
-                    let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                        .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-                    if list.is_empty() {
-                        return Ok((Some(data.clone()), None));
+                    let total = list_bytes::len(data)?;
+                    if total == 0 {
+                        return Ok((Some(std::mem::take(data)), None));
                     }
 
-                    let element = if wherefrom == "LEFT" {
-                        list.remove(0)
+                    let elements = if pop_left {
+                        list_bytes::lpop(data, 1)?
                     } else {
-                        list.pop().unwrap()
+                        list_bytes::rpop(data, 1)?
                     };
+                    let element = elements.into_iter().next().unwrap();
 
-                    if whereto == "LEFT" {
-                        list.insert(0, element.clone());
+                    if push_left {
+                        list_bytes::lpush(data, std::slice::from_ref(&element))?;
                     } else {
-                        list.push(element.clone());
+                        list_bytes::rpush(data, std::slice::from_ref(&element))?;
                     }
 
-                    let serialized = bincode::serialize(&list).map_err(|e| {
-                        crate::storage::error::StorageError::InternalError(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-                    Ok((Some(serialized), Some(element)))
+                    Ok((Some(std::mem::take(data)), Some(element)))
                 }
                 None => Ok((None, None)),
             })?;
@@ -926,32 +594,26 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         .lock_keys(&[source.clone(), destination.clone()])
         .await;
 
-    // Pop from source using atomic_modify
+    // Pop from source
     let element = engine.atomic_modify(source, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            if list.is_empty() {
-                return Ok((Some(data.clone()), None));
+            let total = list_bytes::len(data)?;
+            if total == 0 {
+                return Ok((Some(std::mem::take(data)), None));
             }
 
-            let element = if wherefrom == "LEFT" {
-                list.remove(0)
+            let elements = if pop_left {
+                list_bytes::lpop(data, 1)?
             } else {
-                list.pop().unwrap()
+                list_bytes::rpop(data, 1)?
             };
+            let element = elements.into_iter().next().unwrap();
 
-            if list.is_empty() {
+            let remaining = list_bytes::len(data)?;
+            if remaining == 0 {
                 Ok((None, Some(element)))
             } else {
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), Some(element)))
+                Ok((Some(std::mem::take(data)), Some(element)))
             }
         }
         None => Ok((None, None)),
@@ -962,29 +624,22 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         None => return Ok(RespValue::BulkString(None)),
     };
 
-    // Push to destination using atomic_modify
+    // Push to destination
     engine.check_write_memory(0).await?;
     let elem_for_push = element.clone();
-    engine.atomic_modify(destination, RedisDataType::List, |current| {
-        let mut list = match current {
-            Some(data) => bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?,
-            None => Vec::new(),
-        };
-
-        if whereto == "LEFT" {
-            list.insert(0, elem_for_push.clone());
-        } else {
-            list.push(elem_for_push.clone());
+    engine.atomic_modify(destination, RedisDataType::List, |current| match current {
+        Some(data) => {
+            if push_left {
+                list_bytes::lpush(data, std::slice::from_ref(&elem_for_push))?;
+            } else {
+                list_bytes::rpush(data, std::slice::from_ref(&elem_for_push))?;
+            }
+            Ok((Some(std::mem::take(data)), ()))
         }
-
-        let serialized = bincode::serialize(&list).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
-        Ok((Some(serialized), ()))
+        None => {
+            let new_data = list_bytes::new_from_elements(std::slice::from_ref(&elem_for_push));
+            Ok((Some(new_data), ()))
+        }
     })?;
 
     Ok(RespValue::BulkString(Some(element)))
@@ -1064,34 +719,22 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     for key in keys {
         let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
             Some(data) => {
-                let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-                if list.is_empty() {
-                    return Ok((Some(data.clone()), None));
+                let total = list_bytes::len(data)?;
+                if total == 0 {
+                    return Ok((Some(std::mem::take(data)), None));
                 }
 
-                let pop_count = count.min(list.len());
-                let mut popped = Vec::with_capacity(pop_count);
-
-                if left {
-                    popped.extend(list.drain(..pop_count));
+                let popped = if left {
+                    list_bytes::lpop(data, count)?
                 } else {
-                    let start = list.len() - pop_count;
-                    popped.extend(list.drain(start..));
-                    popped.reverse();
-                }
+                    list_bytes::rpop(data, count)?
+                };
 
-                if list.is_empty() {
+                let remaining = list_bytes::len(data)?;
+                if remaining == 0 {
                     Ok((None, Some(popped)))
                 } else {
-                    let serialized = bincode::serialize(&list).map_err(|e| {
-                        crate::storage::error::StorageError::InternalError(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-                    Ok((Some(serialized), Some(popped)))
+                    Ok((Some(std::mem::take(data)), Some(popped)))
                 }
             }
             None => Ok((None, None)),
@@ -1118,7 +761,6 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 // --- Blocking Commands ---
 
 /// Helper: try to pop an element from a list
-/// Uses atomic_modify for thread-safe read-modify-write
 async fn try_pop(
     engine: &StorageEngine,
     key: &[u8],
@@ -1126,29 +768,23 @@ async fn try_pop(
 ) -> Result<Option<Vec<u8>>, CommandError> {
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(data) => {
-            let mut list = bincode::deserialize::<Vec<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
-            if list.is_empty() {
-                return Ok((Some(data.clone()), None));
+            let total = list_bytes::len(data)?;
+            if total == 0 {
+                return Ok((Some(std::mem::take(data)), None));
             }
 
-            let element = if left {
-                list.remove(0)
+            let elements = if left {
+                list_bytes::lpop(data, 1)?
             } else {
-                list.pop().unwrap()
+                list_bytes::rpop(data, 1)?
             };
+            let element = elements.into_iter().next().unwrap();
 
-            if list.is_empty() {
+            let remaining = list_bytes::len(data)?;
+            if remaining == 0 {
                 Ok((None, Some(element)))
             } else {
-                let serialized = bincode::serialize(&list).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), Some(element)))
+                Ok((Some(std::mem::take(data)), Some(element)))
             }
         }
         None => Ok((None, None)),
@@ -1516,8 +1152,7 @@ mod tests {
         engine.del(&key).await.unwrap();
 
         // Create a list directly first using set_with_type to properly track type
-        let empty_list: Vec<Vec<u8>> = Vec::new();
-        let serialized = bincode::serialize(&empty_list).unwrap();
+        let serialized = list_bytes::new_empty();
         engine
             .set_with_type(
                 key.clone(),
@@ -1698,8 +1333,7 @@ mod tests {
         engine.del(&key).await.unwrap();
 
         // Create a list directly first using set_with_type to properly track type
-        let empty_list: Vec<Vec<u8>> = Vec::new();
-        let serialized = bincode::serialize(&empty_list).unwrap();
+        let serialized = list_bytes::new_empty();
         engine
             .set_with_type(
                 key.clone(),

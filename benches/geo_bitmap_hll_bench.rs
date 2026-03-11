@@ -38,7 +38,10 @@ fn bench_geoadd(c: &mut Criterion) {
                         args.push(format!("{:.6}", lat).into_bytes());
                         args.push(format!("place:{}", i).into_bytes());
                     }
-                    let cmd = Command { name: "geoadd".to_string(), args };
+                    let cmd = Command {
+                        name: "geoadd".to_string(),
+                        args,
+                    };
                     black_box(handler.process(cmd, 0).await.unwrap());
                 })
             });
@@ -66,7 +69,10 @@ fn bench_geodist(c: &mut Criterion) {
                     args.push(format!("{:.6}", lat).into_bytes());
                     args.push(format!("place:{}", i).into_bytes());
                 }
-                let cmd = Command { name: "geoadd".to_string(), args };
+                let cmd = Command {
+                    name: "geoadd".to_string(),
+                    args,
+                };
                 handler.process(cmd, 0).await.unwrap();
             });
             b.iter(|| {
@@ -108,61 +114,56 @@ fn bench_geosearch(c: &mut Criterion) {
                 args.push(format!("{:.6}", lat).into_bytes());
                 args.push(format!("place:{}", i).into_bytes());
             }
-            let cmd = Command { name: "geoadd".to_string(), args };
+            let cmd = Command {
+                name: "geoadd".to_string(),
+                args,
+            };
             handler.process(cmd, 0).await.unwrap();
         });
 
         // Small radius (~1km, few results)
-        group.bench_with_input(
-            BenchmarkId::new("BYRADIUS small", size),
-            &size,
-            |b, _| {
-                let handler = handler.clone();
-                b.iter(|| {
-                    rt.block_on(async {
-                        let cmd = Command {
-                            name: "geosearch".to_string(),
-                            args: vec![
-                                b"geosearch:key".to_vec(),
-                                b"FROMLONLAT".to_vec(),
-                                b"-73.5".to_vec(),
-                                b"40.5".to_vec(),
-                                b"BYRADIUS".to_vec(),
-                                b"1".to_vec(),
-                                b"km".to_vec(),
-                            ],
-                        };
-                        black_box(handler.process(cmd, 0).await.unwrap());
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("BYRADIUS small", size), &size, |b, _| {
+            let handler = handler.clone();
+            b.iter(|| {
+                rt.block_on(async {
+                    let cmd = Command {
+                        name: "geosearch".to_string(),
+                        args: vec![
+                            b"geosearch:key".to_vec(),
+                            b"FROMLONLAT".to_vec(),
+                            b"-73.5".to_vec(),
+                            b"40.5".to_vec(),
+                            b"BYRADIUS".to_vec(),
+                            b"1".to_vec(),
+                            b"km".to_vec(),
+                        ],
+                    };
+                    black_box(handler.process(cmd, 0).await.unwrap());
+                })
+            });
+        });
 
         // Large radius (~50km, many results)
-        group.bench_with_input(
-            BenchmarkId::new("BYRADIUS large", size),
-            &size,
-            |b, _| {
-                let handler = handler.clone();
-                b.iter(|| {
-                    rt.block_on(async {
-                        let cmd = Command {
-                            name: "geosearch".to_string(),
-                            args: vec![
-                                b"geosearch:key".to_vec(),
-                                b"FROMLONLAT".to_vec(),
-                                b"-73.5".to_vec(),
-                                b"40.5".to_vec(),
-                                b"BYRADIUS".to_vec(),
-                                b"50".to_vec(),
-                                b"km".to_vec(),
-                            ],
-                        };
-                        black_box(handler.process(cmd, 0).await.unwrap());
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("BYRADIUS large", size), &size, |b, _| {
+            let handler = handler.clone();
+            b.iter(|| {
+                rt.block_on(async {
+                    let cmd = Command {
+                        name: "geosearch".to_string(),
+                        args: vec![
+                            b"geosearch:key".to_vec(),
+                            b"FROMLONLAT".to_vec(),
+                            b"-73.5".to_vec(),
+                            b"40.5".to_vec(),
+                            b"BYRADIUS".to_vec(),
+                            b"50".to_vec(),
+                            b"km".to_vec(),
+                        ],
+                    };
+                    black_box(handler.process(cmd, 0).await.unwrap());
+                })
+            });
+        });
     }
     group.finish();
 }
@@ -183,7 +184,10 @@ fn bench_geopos(c: &mut Criterion) {
             args.push(format!("{:.6}", lat).into_bytes());
             args.push(format!("place:{}", i).into_bytes());
         }
-        let cmd = Command { name: "geoadd".to_string(), args };
+        let cmd = Command {
+            name: "geoadd".to_string(),
+            args,
+        };
         handler.process(cmd, 0).await.unwrap();
     });
 
@@ -196,7 +200,10 @@ fn bench_geopos(c: &mut Criterion) {
                     for i in 0..batch {
                         args.push(format!("place:{}", i).into_bytes());
                     }
-                    let cmd = Command { name: "geopos".to_string(), args };
+                    let cmd = Command {
+                        name: "geopos".to_string(),
+                        args,
+                    };
                     black_box(handler.process(cmd, 0).await.unwrap());
                 })
             });
@@ -277,10 +284,7 @@ fn bench_bitmap_getbit(c: &mut Criterion) {
                             let offset = (i * max_offset / 100) as u64;
                             let cmd = Command {
                                 name: "getbit".to_string(),
-                                args: vec![
-                                    b"bitmap:get".to_vec(),
-                                    offset.to_string().into_bytes(),
-                                ],
+                                args: vec![b"bitmap:get".to_vec(), offset.to_string().into_bytes()],
                             };
                             black_box(handler.process(cmd, 0).await.unwrap());
                         }
@@ -436,10 +440,7 @@ fn bench_hll_pfadd(c: &mut Criterion) {
                     for i in 0..count {
                         let cmd = Command {
                             name: "pfadd".to_string(),
-                            args: vec![
-                                b"hll:add".to_vec(),
-                                format!("element:{}", i).into_bytes(),
-                            ],
+                            args: vec![b"hll:add".to_vec(), format!("element:{}", i).into_bytes()],
                         };
                         black_box(handler.process(cmd, 0).await.unwrap());
                     }
@@ -463,31 +464,24 @@ fn bench_hll_pfcount(c: &mut Criterion) {
             for i in 0..count {
                 let cmd = Command {
                     name: "pfadd".to_string(),
-                    args: vec![
-                        b"hll:count".to_vec(),
-                        format!("elem:{}", i).into_bytes(),
-                    ],
+                    args: vec![b"hll:count".to_vec(), format!("elem:{}", i).into_bytes()],
                 };
                 handler.process(cmd, 0).await.unwrap();
             }
         });
 
-        group.bench_with_input(
-            BenchmarkId::new("single key", count),
-            &count,
-            |b, _| {
-                let handler = handler.clone();
-                b.iter(|| {
-                    rt.block_on(async {
-                        let cmd = Command {
-                            name: "pfcount".to_string(),
-                            args: vec![b"hll:count".to_vec()],
-                        };
-                        black_box(handler.process(cmd, 0).await.unwrap());
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("single key", count), &count, |b, _| {
+            let handler = handler.clone();
+            b.iter(|| {
+                rt.block_on(async {
+                    let cmd = Command {
+                        name: "pfcount".to_string(),
+                        args: vec![b"hll:count".to_vec()],
+                    };
+                    black_box(handler.process(cmd, 0).await.unwrap());
+                })
+            });
+        });
     }
 
     // Multiple keys union count
@@ -518,7 +512,10 @@ fn bench_hll_pfcount(c: &mut Criterion) {
                         let args: Vec<Vec<u8>> = (0..num_keys)
                             .map(|k| format!("hll:multi:{}", k).into_bytes())
                             .collect();
-                        let cmd = Command { name: "pfcount".to_string(), args };
+                        let cmd = Command {
+                            name: "pfcount".to_string(),
+                            args,
+                        };
                         black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });
@@ -562,7 +559,10 @@ fn bench_hll_pfmerge(c: &mut Criterion) {
                         for k in 0..num_sources {
                             args.push(format!("hll:merge:src:{}", k).into_bytes());
                         }
-                        let cmd = Command { name: "pfmerge".to_string(), args };
+                        let cmd = Command {
+                            name: "pfmerge".to_string(),
+                            args,
+                        };
                         black_box(handler.process(cmd, 0).await.unwrap());
                     })
                 });

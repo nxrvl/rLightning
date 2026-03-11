@@ -695,7 +695,7 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
             commands.push(args);
         }
         RedisDataType::List => {
-            if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&item.value)
+            if let Ok(list) = crate::storage::list_bytes::deserialize_all(&item.value)
                 && !list.is_empty()
             {
                 // Emit RPUSH key elem1 elem2 ...

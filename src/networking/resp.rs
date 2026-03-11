@@ -92,22 +92,9 @@ impl RespValue {
             '|' => parse_attribute(buffer),
             '>' => parse_push(buffer),
             _ => {
-                // Invalid RESP protocol marker
-                // Note: We don't try to guess if it's "data" vs "command" - just report the error
-                let preview = if buffer.len() >= 20 {
-                    String::from_utf8_lossy(&buffer[0..20])
-                } else {
-                    String::from_utf8_lossy(buffer)
-                };
-
-                warn!(
-                    "Invalid RESP protocol marker, expected +/-/:/$/* but got '{}'",
-                    first_byte
-                );
-                Err(RespError::InvalidFormatDetails(format!(
-                    "Invalid RESP command format, starts with: {}",
-                    preview
-                )))
+                // Not a RESP type marker — try to parse as an inline command
+                // (plain text like "PING\r\n" or "SET foo bar\r\n")
+                parse_inline_command(buffer)
             }
         }
     }
@@ -1393,6 +1380,57 @@ fn parse_push(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
     Ok(Some(RespValue::Push(items)))
 }
 
+/// Parse an inline (plain-text) command.
+///
+/// Redis inline protocol: `COMMAND arg1 arg2 ...\r\n`
+/// The first byte is NOT a RESP type marker. Tokens are separated by whitespace.
+/// Returns `Ok(None)` if the line is incomplete (no `\r\n` yet).
+fn parse_inline_command(buffer: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
+    // Find \r\n or \n
+    let newline_pos = buffer.iter().position(|&b| b == b'\n');
+    let newline_pos = match newline_pos {
+        Some(pos) => pos,
+        None => return Ok(None), // Incomplete — wait for more data
+    };
+
+    // Determine actual line end (handle \r\n and bare \n)
+    let line_end = if newline_pos > 0 && buffer[newline_pos - 1] == b'\r' {
+        newline_pos - 1
+    } else {
+        newline_pos
+    };
+
+    let line = &buffer[..line_end];
+
+    // Skip empty lines (Redis ignores blank inline lines)
+    if line.iter().all(|b| b.is_ascii_whitespace()) {
+        buffer.advance(newline_pos + 1);
+        return Ok(None);
+    }
+
+    // Split on ASCII whitespace into tokens
+    let tokens: Vec<Vec<u8>> = line
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_vec())
+        .collect();
+
+    // Consume the line from the buffer
+    buffer.advance(newline_pos + 1);
+
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+
+    // Convert to RespValue::Array of BulkStrings (same as RESP-framed commands)
+    let args: Vec<RespValue> = tokens
+        .into_iter()
+        .map(|t| RespValue::BulkString(Some(t)))
+        .collect();
+
+    Ok(Some(RespValue::Array(Some(args))))
+}
+
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
 mod tests {
@@ -1498,9 +1536,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_invalid_resp_markers() {
-        // Test that non-RESP protocol markers are rejected
-        // These would only appear if there's a protocol error or data corruption
+    fn test_non_resp_without_newline_returns_none() {
+        // With inline protocol support, non-RESP data without \r\n is treated
+        // as incomplete input (waiting for line ending), not an error.
         let test_patterns = [
             "B64JSON:W3data",       // Starts with 'B'
             "b64:encoded_data",     // Starts with 'b'
@@ -1514,20 +1552,11 @@ mod tests {
             let mut buffer = BytesMut::from(pattern.as_bytes());
             let result = RespValue::parse(&mut buffer);
             assert!(
-                result.is_err(),
-                "Should reject invalid RESP marker in pattern '{}'",
+                matches!(result, Ok(None)),
+                "Non-RESP data without \\r\\n should be incomplete (Ok(None)), got {:?} for '{}'",
+                result,
                 pattern
             );
-
-            // Verify error message indicates invalid format
-            if let Err(e) = result {
-                let error_str = e.to_string();
-                assert!(
-                    error_str.contains("Invalid RESP") || error_str.contains("format"),
-                    "Error should mention invalid format: {}",
-                    error_str
-                );
-            }
         }
     }
 
@@ -2663,6 +2692,80 @@ mod tests {
                 RespValue::BulkString(Some(b"a".to_vec())),
                 RespValue::BulkString(Some(b"b".to_vec())),
             ]))
+        );
+    }
+
+    // ─── Inline protocol tests ───────────────────────────────────────
+
+    #[test]
+    fn test_inline_ping() {
+        let mut buffer = BytesMut::from("PING\r\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Array(Some(vec![RespValue::BulkString(Some(
+                b"PING".to_vec()
+            ))])))
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_inline_set_command() {
+        let mut buffer = BytesMut::from("SET foo bar\r\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"SET".to_vec())),
+                RespValue::BulkString(Some(b"foo".to_vec())),
+                RespValue::BulkString(Some(b"bar".to_vec())),
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_inline_bare_newline() {
+        // Redis accepts bare \n as line ending
+        let mut buffer = BytesMut::from("PING\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Array(Some(vec![RespValue::BulkString(Some(
+                b"PING".to_vec()
+            ))])))
+        );
+    }
+
+    #[test]
+    fn test_inline_incomplete() {
+        // No \r\n yet — should return None (incomplete)
+        let mut buffer = BytesMut::from("PING");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(result, None);
+        // Buffer should be unchanged
+        assert_eq!(&buffer[..], b"PING");
+    }
+
+    #[test]
+    fn test_inline_empty_line() {
+        let mut buffer = BytesMut::from("\r\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(result, None);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_inline_multiple_spaces() {
+        let mut buffer = BytesMut::from("SET   foo   bar\r\n");
+        let result = RespValue::parse(&mut buffer).unwrap();
+        assert_eq!(
+            result,
+            Some(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"SET".to_vec())),
+                RespValue::BulkString(Some(b"foo".to_vec())),
+                RespValue::BulkString(Some(b"bar".to_vec())),
+            ])))
         );
     }
 }
