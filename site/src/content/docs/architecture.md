@@ -33,6 +33,7 @@ The storage engine is the core of rLightning, designed for lock-free concurrent 
 - **Cross-key atomicity** via `lock_keys()` with sorted-order deadlock prevention for multi-key operations (`MSET`, `SMOVE`, `GEOSEARCHSTORE`)
 - **Runtime configuration** -- `runtime_config` DashMap for `CONFIG SET`/`GET` with glob pattern matching
 - **Periodic maintenance** -- cleanup of stale key locks and key versions every 60 seconds
+- **Byte-level list storage** -- dual-format engine with V0 (flat sequential) for small lists and V1 (gap buffer) for large lists, enabling O(1) amortized LPUSH and O(1) LPOP without memory moves
 
 ### Command Handler (`src/command/`)
 

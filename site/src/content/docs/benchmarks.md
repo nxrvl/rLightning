@@ -83,6 +83,29 @@ RESP protocol parsing uses the `memchr` crate for SIMD-accelerated byte scanning
 
 Where possible, rLightning avoids copying data during protocol parsing. Byte slices from the read buffer are used directly, reducing memory allocations and improving cache locality.
 
+### Byte-Level List Storage with Gap Buffer
+
+List operations use a dual-format byte-level storage engine:
+- **V0 format** for small lists (≤128 elements): flat sequential layout with minimal overhead
+- **V1 gap buffer** for large lists (>128 elements): 24-byte header with left-gap enabling O(1) amortized LPUSH and O(1) LPOP without memory moves
+
+## Performance vs Redis 7
+
+Measured with `redis-benchmark -n 100000 -c 50` against Redis 7, both running in Docker containers on the same host:
+
+| Operation | rLightning | Redis 7 | Ratio |
+|-----------|-----------|---------|-------|
+| SET       | ~73K rps  | ~67K rps | 1.09x |
+| GET       | ~75K rps  | ~68K rps | 1.10x |
+| RPUSH     | ~64K rps  | ~67K rps | 0.96x |
+| LPUSH     | ~60K rps  | ~53K rps | 1.13x |
+| LPOP      | ~64K rps  | ~63K rps | 1.01x |
+| RPOP      | ~62K rps  | ~65K rps | 0.95x |
+| SADD      | ~72K rps  | ~68K rps | 1.06x |
+| HSET      | ~70K rps  | ~66K rps | 1.06x |
+
+> Results vary by hardware and configuration. Run your own benchmarks for production sizing.
+
 ## Benchmarking with redis-benchmark
 
 You can also benchmark rLightning using the standard `redis-benchmark` tool that ships with Redis. This provides a direct comparison under identical test conditions.
