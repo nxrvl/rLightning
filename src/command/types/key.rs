@@ -659,8 +659,7 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Handle STORE option
     if let Some(store) = store_key {
         let count = elements.len() as i64;
-        let serialized = bincode::serialize(&elements)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
+        let serialized = crate::storage::list_bytes::new_from_elements(&elements);
         engine
             .set_with_type(store, serialized, RedisDataType::List, None)
             .await?;
@@ -1246,7 +1245,7 @@ mod tests {
         engine
             .set_with_type(
                 b"small_list".to_vec(),
-                bincode::serialize(&small_list).unwrap(),
+                crate::storage::list_bytes::new_from_elements(&small_list),
                 RedisDataType::List,
                 None,
             )
@@ -1328,7 +1327,7 @@ mod tests {
         engine
             .set_with_type(
                 b"large_list".to_vec(),
-                bincode::serialize(&large_list).unwrap(),
+                crate::storage::list_bytes::new_from_elements(&large_list),
                 RedisDataType::List,
                 None,
             )
@@ -1404,7 +1403,7 @@ mod tests {
         engine
             .set_with_type(
                 b"list_big_elem".to_vec(),
-                bincode::serialize(&list_big_elem).unwrap(),
+                crate::storage::list_bytes::new_from_elements(&list_big_elem),
                 RedisDataType::List,
                 None,
             )
@@ -1622,7 +1621,7 @@ mod tests {
             b"5".to_vec(),
             b"4".to_vec(),
         ];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -1671,7 +1670,7 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"fruits".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -1704,7 +1703,7 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list: Vec<Vec<u8>> = (1..=10).map(|i: i32| i.to_string().into_bytes()).collect();
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"numbers".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -1743,7 +1742,7 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"src_list".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -1763,7 +1762,7 @@ mod tests {
 
         // Verify stored result
         let stored = engine.get(b"dst_list").await.unwrap().unwrap();
-        let stored_list: Vec<Vec<u8>> = bincode::deserialize(&stored).unwrap();
+        let stored_list = crate::storage::list_bytes::deserialize_all(&stored).unwrap();
         assert_eq!(stored_list, vec![b"1", b"2", b"3"]);
     }
 
@@ -1773,7 +1772,7 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"ro_list".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -1874,7 +1873,7 @@ mod tests {
 
         // Set a list key
         let list = vec![b"item1".to_vec()];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
             .await

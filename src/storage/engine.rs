@@ -1746,14 +1746,14 @@ impl StorageEngine {
                         key,
                         crate::storage::item::RedisDataType::List,
                         |existing| {
-                            let mut list: Vec<Vec<u8>> = existing
-                                .as_deref()
-                                .and_then(|v| bincode::deserialize(v).ok())
-                                .unwrap_or_default();
-                            for elem in elements {
-                                list.push(elem.clone());
+                            let elems: Vec<Vec<u8>> = elements.iter().map(|e| e.to_vec()).collect();
+                            match existing {
+                                Some(data) => {
+                                    list_bytes::rpush(data, &elems)?;
+                                    Ok((Some(std::mem::take(data)), ()))
+                                }
+                                None => Ok((Some(list_bytes::new_from_elements(&elems)), ())),
                             }
-                            Ok((Some(bincode::serialize(&list).unwrap()), ()))
                         },
                     )?;
                 }
@@ -3833,7 +3833,7 @@ mod tests {
                 match existing {
                     None => {
                         // Create new list with one element
-                        let data = bincode::serialize(&vec![b"item1".to_vec()]).unwrap();
+                        let data = list_bytes::new_from_elements(&[b"item1".to_vec()]);
                         Ok((Some(data), 1))
                     }
                     Some(_) => unreachable!(),
@@ -3846,11 +3846,9 @@ mod tests {
         let result: usize = storage
             .atomic_modify(b"my_list", RedisDataType::List, |existing| match existing {
                 Some(data) => {
-                    let mut list: Vec<Vec<u8>> = bincode::deserialize(data).unwrap();
-                    list.push(b"item2".to_vec());
-                    let new_len = list.len();
-                    let new_data = bincode::serialize(&list).unwrap();
-                    Ok((Some(new_data), new_len))
+                    list_bytes::rpush(data, &[b"item2".to_vec()]).unwrap();
+                    let new_len = list_bytes::len(data).unwrap() as usize;
+                    Ok((Some(std::mem::take(data)), new_len))
                 }
                 None => unreachable!(),
             })

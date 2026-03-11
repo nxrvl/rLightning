@@ -975,8 +975,7 @@ mod tests {
         let _ = handler.process(del_command, 0).await.unwrap();
 
         // Initialize the key as a list using set_with_type to properly track type
-        let empty_list: Vec<Vec<u8>> = Vec::new();
-        let serialized = bincode::serialize(&empty_list).unwrap();
+        let serialized = crate::storage::list_bytes::new_empty();
         storage
             .set_with_type(
                 list_key.clone(),
