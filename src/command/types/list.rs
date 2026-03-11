@@ -28,18 +28,16 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                list_bytes::lpush(data, &elements)?;
-                let new_len = list_bytes::len(data)? as i64;
-                Ok((Some(std::mem::take(data)), new_len))
-            }
-            None => {
-                let new_data = list_bytes::new_from_elements(&elements);
-                let new_len = elements.len() as i64;
-                Ok((Some(new_data), new_len))
-            }
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            list_bytes::lpush(data, &elements)?;
+            let new_len = list_bytes::len(data)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
+        }
+        None => {
+            let new_data = list_bytes::new_from_elements(&elements);
+            let new_len = elements.len() as i64;
+            Ok((Some(new_data), new_len))
         }
     })?;
 
@@ -57,17 +55,15 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let new_len = list_bytes::rpush(data, &elements)? as i64;
-                Ok((Some(std::mem::take(data)), new_len))
-            }
-            None => {
-                let new_data = list_bytes::new_from_elements(&elements);
-                let new_len = elements.len() as i64;
-                Ok((Some(new_data), new_len))
-            }
+    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let new_len = list_bytes::rpush(data, &elements)? as i64;
+            Ok((Some(std::mem::take(data)), new_len))
+        }
+        None => {
+            let new_data = list_bytes::new_from_elements(&elements);
+            let new_len = elements.len() as i64;
+            Ok((Some(new_data), new_len))
         }
     })?;
 
@@ -229,17 +225,13 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    let start = bytes_to_string(&args[1])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
-        })?;
+    let start = bytes_to_string(&args[1])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("Invalid start index, not an integer".to_string())
+    })?;
 
-    let stop = bytes_to_string(&args[2])?
-        .parse::<i64>()
-        .map_err(|_| {
-            CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
-        })?;
+    let stop = bytes_to_string(&args[2])?.parse::<i64>().map_err(|_| {
+        CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
+    })?;
 
     let elements = engine.atomic_read(key, RedisDataType::List, |data| match data {
         Some(d) => list_bytes::range(d, start, stop),
@@ -308,18 +300,16 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         CommandError::InvalidArgument("Invalid stop index, not an integer".to_string())
     })?;
 
-    engine.atomic_modify(key, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                let should_delete = list_bytes::trim(data, start, stop)?;
-                if should_delete {
-                    Ok((None, ()))
-                } else {
-                    Ok((Some(std::mem::take(data)), ()))
-                }
+    engine.atomic_modify(key, RedisDataType::List, |current| match current {
+        Some(data) => {
+            let should_delete = list_bytes::trim(data, start, stop)?;
+            if should_delete {
+                Ok((None, ()))
+            } else {
+                Ok((Some(std::mem::take(data)), ()))
             }
-            None => Ok((None, ())),
         }
+        None => Ok((None, ())),
     })?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -583,9 +573,9 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     let element = elements.into_iter().next().unwrap();
 
                     if push_left {
-                        list_bytes::lpush(data, &[element.clone()])?;
+                        list_bytes::lpush(data, std::slice::from_ref(&element))?;
                     } else {
-                        list_bytes::rpush(data, &[element.clone()])?;
+                        list_bytes::rpush(data, std::slice::from_ref(&element))?;
                     }
 
                     Ok((Some(std::mem::take(data)), Some(element)))
@@ -637,20 +627,18 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Push to destination
     engine.check_write_memory(0).await?;
     let elem_for_push = element.clone();
-    engine.atomic_modify(destination, RedisDataType::List, |current| {
-        match current {
-            Some(data) => {
-                if push_left {
-                    list_bytes::lpush(data, &[elem_for_push.clone()])?;
-                } else {
-                    list_bytes::rpush(data, &[elem_for_push.clone()])?;
-                }
-                Ok((Some(std::mem::take(data)), ()))
+    engine.atomic_modify(destination, RedisDataType::List, |current| match current {
+        Some(data) => {
+            if push_left {
+                list_bytes::lpush(data, std::slice::from_ref(&elem_for_push))?;
+            } else {
+                list_bytes::rpush(data, std::slice::from_ref(&elem_for_push))?;
             }
-            None => {
-                let new_data = list_bytes::new_from_elements(&[elem_for_push.clone()]);
-                Ok((Some(new_data), ()))
-            }
+            Ok((Some(std::mem::take(data)), ()))
+        }
+        None => {
+            let new_data = list_bytes::new_from_elements(std::slice::from_ref(&elem_for_push));
+            Ok((Some(new_data), ()))
         }
     })?;
 

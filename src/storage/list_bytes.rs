@@ -100,7 +100,6 @@ fn resolve_index(idx: i64, len: u64) -> Option<u64> {
     }
 }
 
-
 // ──────────────────────────── Public API ──────────────────────────────────
 
 /// Create an empty list in wire format.
@@ -273,9 +272,8 @@ pub fn index(data: &[u8], idx: i64) -> Result<Option<Vec<u8>>> {
 /// Set element at index. Replaces in-place with possible resize.
 pub fn set_element(data: &mut Vec<u8>, idx: i64, value: Vec<u8>) -> Result<()> {
     let total = len(data)?;
-    let i = resolve_index(idx, total).ok_or_else(|| {
-        StorageError::InternalError("index out of range".into())
-    })?;
+    let i = resolve_index(idx, total)
+        .ok_or_else(|| StorageError::InternalError("index out of range".into()))?;
 
     let off = offset_of_index(data, i)?;
     let old_elem_len = read_u64(data, off)? as usize;
@@ -505,11 +503,7 @@ pub fn pos(
         return Ok(vec![]);
     }
 
-    let search_len = if maxlen > 0 {
-        maxlen.min(total)
-    } else {
-        total
-    };
+    let search_len = if maxlen > 0 { maxlen.min(total) } else { total };
 
     let mut matches = Vec::new();
 
@@ -537,11 +531,7 @@ pub fn pos(
         }
     } else {
         // Backward scan: collect all element offsets first
-        let scan_len = if maxlen > 0 {
-            maxlen.min(total)
-        } else {
-            total
-        };
+        let scan_len = if maxlen > 0 { maxlen.min(total) } else { total };
         let scan_start = total - scan_len;
 
         // Skip to scan_start
@@ -681,8 +671,7 @@ mod tests {
 
     #[test]
     fn lpop_basic() {
-        let mut data =
-            new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let mut data = new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         let popped = lpop(&mut data, 1).unwrap();
         assert_eq!(popped, vec![b"a".to_vec()]);
         assert_eq!(
@@ -693,8 +682,7 @@ mod tests {
 
     #[test]
     fn lpop_multiple() {
-        let mut data =
-            new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let mut data = new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         let popped = lpop(&mut data, 2).unwrap();
         assert_eq!(popped, vec![b"a".to_vec(), b"b".to_vec()]);
         assert_eq!(deserialize_all(&data).unwrap(), vec![b"c".to_vec()]);
@@ -710,8 +698,7 @@ mod tests {
 
     #[test]
     fn rpop_basic() {
-        let mut data =
-            new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let mut data = new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         let popped = rpop(&mut data, 1).unwrap();
         assert_eq!(popped, vec![b"c".to_vec()]);
         assert_eq!(
@@ -722,8 +709,7 @@ mod tests {
 
     #[test]
     fn rpop_multiple() {
-        let mut data =
-            new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let mut data = new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         let popped = rpop(&mut data, 2).unwrap();
         // RPOP returns rightmost first
         assert_eq!(popped, vec![b"c".to_vec(), b"b".to_vec()]);
@@ -732,12 +718,7 @@ mod tests {
 
     #[test]
     fn range_basic() {
-        let data = new_from_elements(&[
-            b"a".to_vec(),
-            b"b".to_vec(),
-            b"c".to_vec(),
-            b"d".to_vec(),
-        ]);
+        let data = new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
         assert_eq!(
             range(&data, 1, 2).unwrap(),
             vec![b"b".to_vec(), b"c".to_vec()]
@@ -746,7 +727,10 @@ mod tests {
             range(&data, 0, -1).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
         );
-        assert_eq!(range(&data, -2, -1).unwrap(), vec![b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(
+            range(&data, -2, -1).unwrap(),
+            vec![b"c".to_vec(), b"d".to_vec()]
+        );
     }
 
     #[test]
@@ -777,12 +761,8 @@ mod tests {
 
     #[test]
     fn trim_basic() {
-        let mut data = new_from_elements(&[
-            b"a".to_vec(),
-            b"b".to_vec(),
-            b"c".to_vec(),
-            b"d".to_vec(),
-        ]);
+        let mut data =
+            new_from_elements(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
         let deleted = trim(&mut data, 1, 2).unwrap();
         assert!(!deleted);
         assert_eq!(

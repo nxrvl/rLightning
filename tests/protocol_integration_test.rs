@@ -218,5 +218,8 @@ fn test_resp_inline_protocol_support() {
     // Data with \r\n is parsed as an inline command
     let mut buffer = BytesMut::from("PING\r\n");
     let result = RespValue::parse(&mut buffer).unwrap();
-    assert!(result.is_some(), "PING with \\r\\n should parse as inline command");
+    assert!(
+        result.is_some(),
+        "PING with \\r\\n should parse as inline command"
+    );
 }

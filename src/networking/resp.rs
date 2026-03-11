@@ -2703,9 +2703,9 @@ mod tests {
         let result = RespValue::parse(&mut buffer).unwrap();
         assert_eq!(
             result,
-            Some(RespValue::Array(Some(vec![RespValue::BulkString(
-                Some(b"PING".to_vec())
-            )])))
+            Some(RespValue::Array(Some(vec![RespValue::BulkString(Some(
+                b"PING".to_vec()
+            ))])))
         );
         assert!(buffer.is_empty());
     }
@@ -2731,9 +2731,9 @@ mod tests {
         let result = RespValue::parse(&mut buffer).unwrap();
         assert_eq!(
             result,
-            Some(RespValue::Array(Some(vec![RespValue::BulkString(
-                Some(b"PING".to_vec())
-            )])))
+            Some(RespValue::Array(Some(vec![RespValue::BulkString(Some(
+                b"PING".to_vec()
+            ))])))
         );
     }
 

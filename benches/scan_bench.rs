@@ -21,11 +21,9 @@ fn make_handler(rt: &tokio::runtime::Runtime) -> Arc<CommandHandler> {
 fn extract_cursor(result: &RespValue) -> u64 {
     match result {
         RespValue::Array(Some(parts)) if parts.len() >= 2 => match &parts[0] {
-            RespValue::BulkString(Some(cursor_bytes)) => {
-                String::from_utf8_lossy(cursor_bytes)
-                    .parse::<u64>()
-                    .unwrap_or(0)
-            }
+            RespValue::BulkString(Some(cursor_bytes)) => String::from_utf8_lossy(cursor_bytes)
+                .parse::<u64>()
+                .unwrap_or(0),
             _ => 0,
         },
         _ => 0,
@@ -166,26 +164,22 @@ fn bench_scan_count_sizes(c: &mut Criterion) {
     populate_keys(&rt, &handler, 10_000);
 
     for &count in &[10, 100, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("COUNT", count),
-            &count,
-            |b, &count| {
-                let handler = handler.clone();
-                b.iter(|| {
-                    rt.block_on(async {
-                        let cmd = Command {
-                            name: "scan".to_string(),
-                            args: vec![
-                                b"0".to_vec(),
-                                b"COUNT".to_vec(),
-                                count.to_string().into_bytes(),
-                            ],
-                        };
-                        black_box(handler.process(cmd, 0).await.unwrap());
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("COUNT", count), &count, |b, &count| {
+            let handler = handler.clone();
+            b.iter(|| {
+                rt.block_on(async {
+                    let cmd = Command {
+                        name: "scan".to_string(),
+                        args: vec![
+                            b"0".to_vec(),
+                            b"COUNT".to_vec(),
+                            count.to_string().into_bytes(),
+                        ],
+                    };
+                    black_box(handler.process(cmd, 0).await.unwrap());
+                })
+            });
+        });
     }
     group.finish();
 }
@@ -390,5 +384,10 @@ criterion_group!(
     bench_scan_with_match,
     bench_scan_count_sizes
 );
-criterion_group!(collection_scan_benches, bench_hscan, bench_sscan, bench_zscan);
+criterion_group!(
+    collection_scan_benches,
+    bench_hscan,
+    bench_sscan,
+    bench_zscan
+);
 criterion_main!(scan_benches, collection_scan_benches);

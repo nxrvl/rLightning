@@ -151,7 +151,10 @@ fn test_buffer_not_reinterpreted_after_incomplete() {
     );
 
     // Buffer should still contain the data
-    assert!(!buffer.is_empty(), "Buffer should not be consumed on incomplete");
+    assert!(
+        !buffer.is_empty(),
+        "Buffer should not be consumed on incomplete"
+    );
 
     // Clear the buffer manually (as server would do)
     buffer.clear();
