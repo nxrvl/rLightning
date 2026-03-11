@@ -312,8 +312,8 @@ pub fn rpush(data: &mut Vec<u8>, elements: &[Vec<u8>]) -> Result<u64> {
     if is_v1(data) {
         // Track tail_offset: offset of the last new element
         let mut off = 0usize;
-        for i in 0..elements.len() - 1 {
-            off += HEADER_SIZE + elements[i].len();
+        for elem in elements.iter().take(elements.len() - 1) {
+            off += HEADER_SIZE + elem.len();
         }
         let new_tail = data.len() + off;
         data.extend_from_slice(&wire);
@@ -1194,7 +1194,10 @@ mod tests {
         let all = deserialize_all(&data).unwrap();
         assert_eq!(all[0], b"new_head");
         assert_eq!(all[1], format!("e0").into_bytes());
-        assert_eq!(all.last().unwrap(), &format!("e{}", GAP_BUFFER_THRESHOLD - 1).into_bytes());
+        assert_eq!(
+            all.last().unwrap(),
+            &format!("e{}", GAP_BUFFER_THRESHOLD - 1).into_bytes()
+        );
     }
 
     #[test]
@@ -1458,6 +1461,9 @@ mod tests {
 
         // Verify bincode compatibility for small V0 lists
         let bincode_result: Vec<Vec<u8>> = bincode::deserialize(&data).unwrap();
-        assert_eq!(bincode_result, vec![b"z".to_vec(), b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            bincode_result,
+            vec![b"z".to_vec(), b"a".to_vec(), b"b".to_vec()]
+        );
     }
 }

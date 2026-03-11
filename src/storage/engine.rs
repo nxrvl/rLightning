@@ -1746,16 +1746,13 @@ impl StorageEngine {
                         key,
                         crate::storage::item::RedisDataType::List,
                         |existing| {
-                            let elems: Vec<Vec<u8>> =
-                                elements.iter().map(|e| e.to_vec()).collect();
+                            let elems: Vec<Vec<u8>> = elements.iter().map(|e| e.to_vec()).collect();
                             match existing {
                                 Some(data) => {
                                     list_bytes::rpush(data, &elems)?;
                                     Ok((Some(std::mem::take(data)), ()))
                                 }
-                                None => {
-                                    Ok((Some(list_bytes::new_from_elements(&elems)), ()))
-                                }
+                                None => Ok((Some(list_bytes::new_from_elements(&elems)), ())),
                             }
                         },
                     )?;
