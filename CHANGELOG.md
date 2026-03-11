@@ -5,6 +5,26 @@ All notable changes to rLightning will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-03-11
+
+### Added
+
+- **Gap buffer for list operations** — V1 format with left-gap buffer for lists exceeding 128 elements, enabling O(1) amortized LPUSH and O(1) LPOP on large lists
+- 19 new unit tests for V1 gap buffer: migration, compaction, mixed operations, edge cases
+
+### Changed
+
+- **Bincode cleanup** — all raw `bincode::serialize`/`deserialize` for lists replaced with `list_bytes` API (production code in `engine.rs` RPUSH and `key.rs` SORT STORE)
+- List operations now use version-aware format: V0 (flat sequential) for small lists, V1 (gap buffer) for lists > 128 elements
+- RPOP uses cached `tail_offset` for O(1) single-element pop after RPUSH
+
+### Performance
+
+- **LPUSH**: 0.51x → 1.13x Redis 7 (122% improvement, now beats Redis)
+- **LPOP**: 0.32x → 1.01x Redis 7 (216% improvement, matches Redis)
+- **RPOP**: 0.28x → 0.95x Redis 7 (239% improvement, matches Redis)
+- No regressions on RPUSH or LRANGE
+
 ## [2.0.0] - 2026-03-10
 
 ### Added
@@ -128,6 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authentication support
 - Configurable eviction policies (LRU, Random, NoEviction)
 
+[2.1.0]: https://github.com/nxrvl/rLightning/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/nxrvl/rLightning/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/nxrvl/rLightning/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/nxrvl/rLightning/compare/v1.0.5...v1.0.6
