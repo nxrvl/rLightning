@@ -1086,7 +1086,7 @@ mod tests {
     fn test_aof_rewrite_list() {
         let key = b"mylist".to_vec();
         let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let item = make_item(bincode::serialize(&list).unwrap(), RedisDataType::List);
+        let item = make_item(crate::storage::list_bytes::new_from_elements(&list), RedisDataType::List);
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"RPUSH");
@@ -1281,7 +1281,7 @@ mod tests {
 
         // List
         let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
-        let list_item = make_item(bincode::serialize(&list).unwrap(), RedisDataType::List);
+        let list_item = make_item(crate::storage::list_bytes::new_from_elements(&list), RedisDataType::List);
         for args in aof_rewrite_commands_for_item(&b"lst".to_vec(), &list_item) {
             engine
                 .process_command(&RespCommand {
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!(engine.get_type(b"str").await.unwrap(), "string");
 
         let list_val = engine.get(b"lst").await.unwrap().unwrap();
-        let loaded_list: Vec<Vec<u8>> = bincode::deserialize(&list_val).unwrap();
+        let loaded_list = crate::storage::list_bytes::deserialize_all(&list_val).unwrap();
         assert_eq!(
             loaded_list,
             vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
@@ -1946,7 +1946,7 @@ mod tests {
 
         // Verify list: RPUSH [1,2] then LPUSH [0] -> [0,1,2]
         let list_val = engine.get(b"list").await.unwrap().unwrap();
-        let list: Vec<Vec<u8>> = bincode::deserialize(&list_val).unwrap();
+        let list = crate::storage::list_bytes::deserialize_all(&list_val).unwrap();
         assert_eq!(list, vec![b"0".to_vec(), b"1".to_vec(), b"2".to_vec()]);
 
         // Verify set: {a, c} (b removed)

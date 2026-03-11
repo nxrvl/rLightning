@@ -533,7 +533,7 @@ mod tests {
 
         // Create a list
         let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let serialized = bincode::serialize(&list).unwrap();
+        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
             .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
             .await
@@ -550,7 +550,7 @@ mod tests {
         let tp = engine2.get_type(b"mylist").await.unwrap();
         assert_eq!(tp, "list");
         let raw = engine2.get(b"mylist").await.unwrap().unwrap();
-        let loaded: Vec<Vec<u8>> = bincode::deserialize(&raw).unwrap();
+        let loaded = crate::storage::list_bytes::deserialize_all(&raw).unwrap();
         assert_eq!(loaded, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
@@ -708,7 +708,7 @@ mod tests {
         engine
             .set_with_type(
                 b"lst".to_vec(),
-                bincode::serialize(&list).unwrap(),
+                crate::storage::list_bytes::new_from_elements(&list),
                 RedisDataType::List,
                 None,
             )
@@ -795,7 +795,7 @@ mod tests {
         engine
             .set_with_type(
                 b"explist".to_vec(),
-                bincode::serialize(&list).unwrap(),
+                crate::storage::list_bytes::new_from_elements(&list),
                 RedisDataType::List,
                 Some(Duration::from_secs(7200)),
             )
