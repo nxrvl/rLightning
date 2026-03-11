@@ -1,31 +1,22 @@
 use bytes::BytesMut;
-use rlightning::networking::resp::{RespError, RespValue};
+use rlightning::networking::resp::RespValue;
 use rlightning::networking::resp_parser_state::StatefulRespParser;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 use std::sync::Arc;
 
-/// Test the critical RESP protocol fixes
+/// Test inline protocol support — non-RESP data without \r\n is incomplete
 #[tokio::test]
 async fn test_resp_protocol_data_command_separation() {
-    // Test 1: Ensure parser rejects data that looks like commands
+    // With inline protocol support, non-RESP data without \r\n is
+    // treated as incomplete (waiting for line ending), not an error.
     let mut buffer = BytesMut::from("B64JSON:W3...");
     let result = RespValue::parse(&mut buffer);
 
-    // Should fail because this isn't a valid RESP command
     assert!(
-        result.is_err(),
-        "Parser should reject data that looks like stored content"
+        matches!(result, Ok(None)),
+        "Data without newline should be incomplete (Ok(None)), got: {:?}",
+        result
     );
-
-    if let Err(e) = result {
-        let error_msg = e.to_string();
-        assert!(
-            error_msg.contains("Data corruption detected")
-                || error_msg.contains("Invalid RESP command"),
-            "Error should indicate data corruption detection, got: {}",
-            error_msg
-        );
-    }
 }
 
 #[tokio::test]

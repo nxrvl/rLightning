@@ -10,6 +10,7 @@ use tokio::time::{self, Interval};
 use crate::networking::resp::RespCommand;
 use crate::storage::error::StorageError;
 use crate::storage::item::{RedisDataType, StorageItem};
+use crate::storage::list_bytes;
 
 tokio::task_local! {
     /// The currently active database index for this task/connection.
@@ -2397,7 +2398,7 @@ impl StorageEngine {
                     }
                 }
                 RedisDataType::List => {
-                    if let Ok(list) = bincode::deserialize::<Vec<Vec<u8>>>(&entry.value().value) {
+                    if let Ok(list) = list_bytes::deserialize_all(&entry.value().value) {
                         if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
                             "listpack"
                         } else {

@@ -1,9 +1,10 @@
 use bytes::BytesMut;
-use rlightning::networking::resp::{RespError, RespValue};
+use rlightning::networking::resp::RespValue;
 
 #[test]
 fn test_buffer_not_confused_with_stored_data() {
-    // Test that stored data patterns are not interpreted as commands
+    // With inline protocol support, non-RESP data without \r\n is treated
+    // as incomplete (Ok(None)) since the parser waits for a line ending.
     let test_cases = vec![
         "B64JSON:W3siaWQiOiAx",
         "{\"id\": 1, \"data\": \"test\"}",
@@ -17,23 +18,11 @@ fn test_buffer_not_confused_with_stored_data() {
         let result = RespValue::parse(&mut buffer);
 
         assert!(
-            result.is_err(),
-            "Data '{}' should not parse as RESP command",
-            data
+            matches!(result, Ok(None)),
+            "Data '{}' without \\r\\n should be treated as incomplete, got {:?}",
+            data,
+            result
         );
-        if let Err(e) = result {
-            match e {
-                RespError::InvalidFormatDetails(msg) => {
-                    assert!(
-                        msg.contains("Data corruption detected") || msg.contains("Invalid RESP"),
-                        "Error should indicate data corruption or invalid RESP for '{}': {}",
-                        data,
-                        msg
-                    );
-                }
-                _ => panic!("Expected InvalidFormatDetails error for '{}'", data),
-            }
-        }
     }
 }
 
@@ -150,16 +139,19 @@ fn test_large_bulk_string_with_special_chars() {
 }
 
 #[test]
-fn test_buffer_not_reinterpreted_after_error() {
-    // Test that buffer is properly cleared after errors
-    let mut buffer = BytesMut::from("INVALID_DATA_THAT_LOOKS_LIKE_JSON{\"test\": 1}");
+fn test_buffer_not_reinterpreted_after_incomplete() {
+    // With inline protocol, data without \r\n is incomplete (Ok(None))
+    let mut buffer = BytesMut::from("INVALID_DATA_THAT_LOOKS_LIKE_JSON");
 
-    // First parse should fail
+    // First parse should return incomplete (no \r\n)
     let result = RespValue::parse(&mut buffer);
-    assert!(result.is_err(), "Invalid data should not parse");
+    assert!(
+        matches!(result, Ok(None)),
+        "Data without newline should be incomplete"
+    );
 
-    // Buffer should still contain the invalid data
-    assert!(!buffer.is_empty(), "Buffer should not be consumed on error");
+    // Buffer should still contain the data
+    assert!(!buffer.is_empty(), "Buffer should not be consumed on incomplete");
 
     // Clear the buffer manually (as server would do)
     buffer.clear();

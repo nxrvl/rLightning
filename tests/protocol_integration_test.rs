@@ -104,7 +104,9 @@ async fn test_server_handles_invalid_commands_gracefully() {
     let storage = StorageEngine::new(Default::default());
     let handler = CommandHandler::new(storage);
 
-    // Test that invalid data is rejected as a command
+    // With inline protocol support, non-RESP data without \r\n is treated as
+    // incomplete (Ok(None)) rather than an error. Data with \r\n would be parsed
+    // as an inline command.
     let invalid_inputs = vec![
         "B64JSON:W3siaWQiOiAx",
         "{\"test\": 1}",
@@ -113,14 +115,13 @@ async fn test_server_handles_invalid_commands_gracefully() {
     ];
 
     for input in invalid_inputs {
-        // In a real scenario, this would be parsed by RESP parser first
-        // which should reject it before reaching command handler
         let mut buffer = bytes::BytesMut::from(input);
         let parse_result = rlightning::networking::resp::RespValue::parse(&mut buffer);
 
         assert!(
-            parse_result.is_err(),
-            "Invalid input '{}' should not parse as RESP",
+            matches!(parse_result, Ok(None)),
+            "Non-RESP data without \\r\\n should be incomplete, got {:?} for '{}'",
+            parse_result,
             input
         );
     }
@@ -201,27 +202,21 @@ async fn test_large_payload_handling() {
 }
 
 #[test]
-fn test_resp_error_messages() {
+fn test_resp_inline_protocol_support() {
     use bytes::BytesMut;
-    use rlightning::networking::resp::{RespError, RespValue};
+    use rlightning::networking::resp::RespValue;
 
-    // Test that error messages are informative
-    let invalid_data = "B64JSON:W3siaWQiOiAx";
-    let mut buffer = BytesMut::from(invalid_data);
+    // With inline protocol support, data without \r\n is incomplete
+    let data = "B64JSON:W3siaWQiOiAx";
+    let mut buffer = BytesMut::from(data);
+    let result = RespValue::parse(&mut buffer);
+    assert!(
+        matches!(result, Ok(None)),
+        "Data without newline should be incomplete"
+    );
 
-    match RespValue::parse(&mut buffer) {
-        Err(RespError::InvalidFormatDetails(msg)) => {
-            // After our fix, it should mention "Invalid RESP command format"
-            assert!(
-                msg.contains("Invalid RESP command format"),
-                "Error message should indicate invalid RESP format: {}",
-                msg
-            );
-            assert!(
-                msg.contains("B64JSON"),
-                "Error message should include preview of problematic data"
-            );
-        }
-        _ => panic!("Expected InvalidFormatDetails error"),
-    }
+    // Data with \r\n is parsed as an inline command
+    let mut buffer = BytesMut::from("PING\r\n");
+    let result = RespValue::parse(&mut buffer).unwrap();
+    assert!(result.is_some(), "PING with \\r\\n should parse as inline command");
 }
