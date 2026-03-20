@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use crate::storage::item::Entry;
 
-type ShardMap = HBHashMap<Vec<u8>, Entry, FxBuildHasher>;
+/// The underlying HashMap type used within each shard.
+pub type ShardMap = HBHashMap<Vec<u8>, Entry, FxBuildHasher>;
 
 /// Internal data for a single shard.
 struct ShardInner {
@@ -406,6 +407,68 @@ impl ShardedStore {
         indices.sort_unstable();
         indices.dedup();
         indices
+    }
+
+    // --- Batch execution methods ---
+
+    /// Execute a read-only function with direct access to a shard's HashMap.
+    /// Acquires a read lock for the duration of the closure. Used by pipeline
+    /// batching to execute multiple read commands under a single lock acquisition.
+    #[inline]
+    pub fn execute_on_shard_ref<F, R>(&self, shard_idx: usize, f: F) -> R
+    where
+        F: FnOnce(&ShardMap) -> R,
+    {
+        let guard = self.shards[shard_idx].inner.read();
+        f(&guard.map)
+    }
+
+    /// Execute a mutating function with direct access to a shard's HashMap.
+    /// Acquires a write lock for the duration of the closure. Used by pipeline
+    /// batching to execute multiple write commands under a single lock acquisition.
+    #[inline]
+    pub fn execute_on_shard_mut<F, R>(&self, shard_idx: usize, f: F) -> R
+    where
+        F: FnOnce(&mut ShardMap) -> R,
+    {
+        let mut guard = self.shards[shard_idx].inner.write();
+        f(&mut guard.map)
+    }
+
+    // --- Shard-indexed counter methods (for batch processing) ---
+
+    /// Add to the memory counter for a specific shard by index.
+    pub fn add_memory_by_shard(&self, shard_idx: usize, amount: u64) {
+        self.shards[shard_idx]
+            .used_memory
+            .fetch_add(amount, Ordering::AcqRel);
+    }
+
+    /// Subtract from the memory counter for a specific shard by index.
+    pub fn sub_memory_by_shard(&self, shard_idx: usize, amount: u64) {
+        self.shards[shard_idx]
+            .used_memory
+            .fetch_sub(amount, Ordering::AcqRel);
+    }
+
+    /// Increment the key count for a specific shard by index.
+    pub fn inc_key_count_by_shard(&self, shard_idx: usize, count: u32) {
+        self.shards[shard_idx]
+            .key_count
+            .fetch_add(count, Ordering::AcqRel);
+    }
+
+    /// Decrement the key count for a specific shard by index.
+    pub fn dec_key_count_by_shard(&self, shard_idx: usize, count: u32) {
+        self.shards[shard_idx]
+            .key_count
+            .fetch_sub(count, Ordering::AcqRel);
+    }
+
+    /// Create a ShardedStore with a specific shard count for testing.
+    #[cfg(test)]
+    pub fn with_shard_count_for_test(shard_count: usize) -> Self {
+        Self::with_shard_count(shard_count)
     }
 }
 

@@ -139,16 +139,16 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Create: `src/storage/batch.rs`
 - Modify: `src/storage/mod.rs`
 
-- [ ] Implement `process_pipeline()` that groups consecutive same-shard commands for batch execution under a single lock
-- [ ] Implement read/write command classification (GET/EXISTS/TTL = read, SET/DEL/INCR = write) for optimal lock selection (read lock vs write lock)
-- [ ] Implement `execute_on_shard_mut()` and `execute_on_shard_ref()` that operate directly on shard HashMap
-- [ ] Maintain Redis command ordering semantics (no reordering, only consecutive same-shard grouping)
-- [ ] Exclude MULTI/EXEC, EVAL/EVALSHA, Pub/Sub subscription commands from batching
-- [ ] Exclude multi-key commands (MSET, MGET) from batching - they use their own shard locking
-- [ ] Preserve pipeline error isolation: each command gets its own result (Ok or Error)
-- [ ] Wire batch processing into server connection handler for pipeline depth > 1
-- [ ] Write tests for: pipeline batching correctness, command ordering preserved, error isolation, mixed read/write batches, fallback for excluded commands
-- [ ] Run full test suite + integration tests - must pass before task 8
+- [x] Implement `process_pipeline()` that groups consecutive same-shard commands for batch execution under a single lock
+- [x] Implement read/write command classification (GET/EXISTS/TTL = read, SET/DEL/INCR = write) for optimal lock selection (read lock vs write lock)
+- [x] Implement `execute_on_shard_mut()` and `execute_on_shard_ref()` that operate directly on shard HashMap
+- [x] Maintain Redis command ordering semantics (no reordering, only consecutive same-shard grouping)
+- [x] Exclude MULTI/EXEC, EVAL/EVALSHA, Pub/Sub subscription commands from batching
+- [x] Exclude multi-key commands (MSET, MGET) from batching - they use their own shard locking
+- [x] Preserve pipeline error isolation: each command gets its own result (Ok or Error)
+- [x] Wire batch processing into server connection handler for pipeline depth > 1
+- [x] Write tests for: pipeline batching correctness, command ordering preserved, error isolation, mixed read/write batches, fallback for excluded commands
+- [x] Run full test suite + integration tests - must pass before task 8
 
 ### Task 8: Phase 7 - Memory Optimization
 

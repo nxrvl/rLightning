@@ -27,6 +27,7 @@ use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
 use crate::sentinel::SentinelManager;
+use crate::storage::batch::{self, PipelineEntry};
 use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
 use crate::utils::logging;
 
@@ -431,9 +432,15 @@ impl Server {
                 response_buffer.clear();
                 let mut commands_processed = 0;
 
-                // Process complete RESP messages from the buffer directly
-                while !buffer.is_empty() {
-                    // If we have leftover data from previous read, prepend it to the buffer
+                // Phase 1: Pre-parse all commands from buffer
+                // (separates parsing from execution to enable pipeline batching)
+                const MAX_BATCH_COMMANDS: usize = 100;
+                #[allow(dead_code)]
+                const MAX_BATCH_SIZE: usize = 64 * 1024; // 64KB
+                let mut parsed_commands: Vec<Command> = Vec::new();
+                let mut _had_parse_error = false;
+
+                while !buffer.is_empty() && parsed_commands.len() < MAX_BATCH_COMMANDS {
                     if !partial_command_buffer.is_empty() {
                         let mut combined =
                             BytesMut::with_capacity(partial_command_buffer.len() + buffer.len());
@@ -441,11 +448,8 @@ impl Server {
                         combined.extend_from_slice(&buffer);
                         buffer = combined;
                         partial_command_buffer.clear();
-                        debug!(client_addr = %client_addr_str, combined_buffer = buffer.len(), "Combined partial buffer with new data");
                     }
 
-                    // Try the zero-copy fast path first - parses without allocating.
-                    // Use a separate scope to drop the borrowed RawCommand before mutating buffer.
                     let fast_parse_result = {
                         match RawCommand::try_parse(&buffer) {
                             Ok(Some(raw_cmd)) => {
@@ -461,110 +465,28 @@ impl Server {
                     match fast_parse_result {
                         Some(Ok((cmd, consumed))) => {
                             buffer.advance(consumed);
-                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Zero-copy fast path command");
-
-                            match Self::dispatch_command(
-                                &cmd,
-                                &mut socket_writer,
-                                &mut response_buffer,
-                                &mut db_index,
-                                &mut protocol_version,
-                                &mut in_subscription_mode,
-                                &mut tx_state,
-                                &pubsub,
-                                client_id,
-                                &security,
-                                &sentinel,
-                                &cluster,
-                                &replication,
-                                &command_handler,
-                                &persistence,
-                                aof_sync_policy,
-                                &client_addr_str,
-                                &connections,
-                                conn_id,
-                                &mut last_cmd_local,
-                            )
-                            .await?
-                            {
-                                DispatchAction::CloseConnection => {
-                                    pubsub.unregister_client(client_id).await;
-                                    if let Some(security_mgr) = security {
-                                        security_mgr.remove_client(&client_addr_str);
-                                    }
-                                    return Ok(());
-                                }
-                                DispatchAction::Continue => {
-                                    commands_processed += 1;
-                                }
-                            }
+                            parsed_commands.push(cmd);
                         }
                         None => {
-                            // Zero-copy path didn't match (inline command, RESP3, or non-array)
-                            // Fall through to standard parser which handles all RESP types
                             match RespValue::parse(&mut buffer) {
                                 Ok(Some(value)) => {
-                                    debug!(client_addr = %client_addr_str, value = ?value, "Received RESP value");
-
-                                    // Convert to a command
                                     match parser::parse_command(value) {
-                                        Ok(cmd) => {
-                                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Processing command");
-
-                                            match Self::dispatch_command(
-                                                &cmd,
-                                                &mut socket_writer,
-                                                &mut response_buffer,
-                                                &mut db_index,
-                                                &mut protocol_version,
-                                                &mut in_subscription_mode,
-                                                &mut tx_state,
-                                                &pubsub,
-                                                client_id,
-                                                &security,
-                                                &sentinel,
-                                                &cluster,
-                                                &replication,
-                                                &command_handler,
-                                                &persistence,
-                                                aof_sync_policy,
-                                                &client_addr_str,
-                                                &connections,
-                                                conn_id,
-                                                &mut last_cmd_local,
-                                            )
-                                            .await?
-                                            {
-                                                DispatchAction::CloseConnection => {
-                                                    pubsub.unregister_client(client_id).await;
-                                                    if let Some(security_mgr) = security {
-                                                        security_mgr
-                                                            .remove_client(&client_addr_str);
-                                                    }
-                                                    return Ok(());
-                                                }
-                                                DispatchAction::Continue => {
-                                                    commands_processed += 1;
-                                                }
-                                            }
-                                        }
+                                        Ok(cmd) => parsed_commands.push(cmd),
                                         Err(e) => {
                                             error!(client_addr = %client_addr_str, error = ?e, "Command parsing error");
-                                            Self::send_error_to_writer(
-                                                &mut socket_writer,
-                                                e.to_string(),
-                                                &client_addr_str,
-                                            )
-                                            .await?;
+                                            let error_resp = RespValue::Error(e.to_string());
+                                            if let Ok(bytes) = error_resp.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                            _had_parse_error = true;
                                         }
                                     }
                                 }
                                 Ok(None) => {
-                                    debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message, waiting for more data");
                                     if partial_command_buffer.len() + buffer.len()
                                         > MAX_PARTIAL_BUFFER_SIZE
                                     {
-                                        error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
+                                        error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit");
                                         Self::send_error_to_writer(
                                             &mut socket_writer,
                                             "ERR Protocol error: command too large".to_string(),
@@ -575,91 +497,251 @@ impl Server {
                                     }
                                     partial_command_buffer.extend_from_slice(&buffer);
                                     buffer.clear();
-                                    debug!(client_addr = %client_addr_str, partial_buffer_len = partial_command_buffer.len(), "Saved partial command data");
                                     break;
                                 }
                                 Err(e) => {
                                     error!(client_addr = %client_addr_str, error = ?e, "RESP protocol error");
-
                                     let error_msg = match &e {
                                         RespError::InvalidFormatDetails(details) => {
-                                            format!(
-                                                "ERR Protocol error: Invalid RESP data format - {}",
-                                                details
-                                            )
+                                            format!("ERR Protocol error: Invalid RESP data format - {}", details)
                                         }
                                         RespError::ValueTooLarge(details) => {
                                             format!("ERR Protocol error: {}", details)
                                         }
-                                        _ => {
-                                            format!("ERR Protocol error: {}", e)
-                                        }
+                                        _ => format!("ERR Protocol error: {}", e),
                                     };
-
-                                    if buffer.len() > 1024 * 50 {
-                                        debug!(client_addr = %client_addr_str, buffer_len = buffer.len(),
-                                               "Large buffer in error state, checking for JSON");
-
-                                        if buffer.len() > 5
-                                            && (buffer[0] == b'{' || buffer[0] == b'[')
-                                        {
-                                            debug!(client_addr = %client_addr_str, "JSON-like data detected in error state");
-                                        }
+                                    let error_resp = RespValue::Error(error_msg);
+                                    if let Ok(bytes) = error_resp.serialize() {
+                                        response_buffer.extend_from_slice(&bytes);
                                     }
-
-                                    Self::send_error_to_writer(
-                                        &mut socket_writer,
-                                        error_msg,
-                                        &client_addr_str,
-                                    )
-                                    .await?;
-
                                     buffer.clear();
                                     partial_command_buffer.clear();
-                                    debug!(client_addr = %client_addr_str, "Cleared buffers after protocol error");
+                                    _had_parse_error = true;
                                     break;
                                 }
                             }
                         }
                         Some(Err(e)) => {
                             error!(client_addr = %client_addr_str, error = ?e, "Zero-copy parser error");
-
                             let error_msg = match &e {
                                 RespError::InvalidFormatDetails(details) => {
-                                    format!(
-                                        "ERR Protocol error: Invalid RESP data format - {}",
-                                        details
-                                    )
+                                    format!("ERR Protocol error: Invalid RESP data format - {}", details)
                                 }
                                 RespError::ValueTooLarge(details) => {
                                     format!("ERR Protocol error: {}", details)
                                 }
-                                _ => {
-                                    format!("ERR Protocol error: {}", e)
-                                }
+                                _ => format!("ERR Protocol error: {}", e),
                             };
-
-                            Self::send_error_to_writer(
-                                &mut socket_writer,
-                                error_msg,
-                                &client_addr_str,
-                            )
-                            .await?;
+                            let error_resp = RespValue::Error(error_msg);
+                            if let Ok(bytes) = error_resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
                             buffer.clear();
                             partial_command_buffer.clear();
+                            _had_parse_error = true;
                             break;
                         }
                     }
+                }
 
-                    // If we've accumulated enough commands or the response buffer is getting large,
-                    // send the batch to avoid excessive memory usage
-                    const MAX_BATCH_COMMANDS: usize = 100;
-                    const MAX_BATCH_SIZE: usize = 64 * 1024; // 64KB
+                // Phase 2: Execute commands with optional pipeline batching
+                // Batch when: multiple commands, no MULTI, no subscription, RESP2,
+                // no cluster (avoid slot routing), no security (ACL handled by dispatch).
+                let batch_eligible = parsed_commands.len() > 1
+                    && !tx_state.in_multi
+                    && !in_subscription_mode
+                    && protocol_version == ProtocolVersion::RESP2
+                    && cluster.is_none()
+                    && security.is_none();
 
-                    if commands_processed >= MAX_BATCH_COMMANDS
-                        || response_buffer.len() >= MAX_BATCH_SIZE
-                    {
-                        break;
+                if batch_eligible {
+                    let active_db = command_handler.storage().get_db_by_index(db_index);
+                    let groups = batch::group_pipeline(
+                        &parsed_commands,
+                        |k| active_db.shard_index(k),
+                    );
+
+                    let mut close_connection = false;
+                    'batch_loop: for entry in &groups {
+                        match entry {
+                            PipelineEntry::Batch(group) => {
+                                if group.is_read_only {
+                                    // Read batch: single shard read lock
+                                    let results = active_db.execute_on_shard_ref(
+                                        group.shard_idx,
+                                        |map| batch::execute_read_batch(map, &group.commands),
+                                    );
+                                    for result in results {
+                                        let resp = match result {
+                                            Ok(r) => r,
+                                            Err(e) => RespValue::Error(e.to_string()),
+                                        };
+                                        if let Ok(bytes) = resp.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                        commands_processed += 1;
+                                    }
+                                } else {
+                                    // Write batch: check read-only replica first
+                                    if let Some(ref repl) = replication {
+                                        if repl.is_read_only() {
+                                            for _ in &group.commands {
+                                                let resp = RespValue::Error(
+                                                    "READONLY You can't write against a read only replica.".to_string(),
+                                                );
+                                                if let Ok(bytes) = resp.serialize() {
+                                                    response_buffer.extend_from_slice(&bytes);
+                                                }
+                                                commands_processed += 1;
+                                            }
+                                            continue;
+                                        }
+                                    }
+
+                                    // Write batch: single shard write lock
+                                    let results = active_db.execute_on_shard_mut(
+                                        group.shard_idx,
+                                        |map| batch::execute_write_batch(map, &group.commands),
+                                    );
+                                    for (i, (result, mem_delta)) in results.iter().enumerate() {
+                                        // Update memory counters
+                                        if *mem_delta > 0 {
+                                            active_db.add_memory_by_shard(
+                                                group.shard_idx,
+                                                *mem_delta as u64,
+                                            );
+                                        } else if *mem_delta < 0 {
+                                            active_db.sub_memory_by_shard(
+                                                group.shard_idx,
+                                                (-*mem_delta) as u64,
+                                            );
+                                        }
+                                        // AOF logging and replication for successful writes
+                                        if result.is_ok() {
+                                            let cmd = group.commands[i];
+                                            let cmd_lower = cmd.name.to_lowercase();
+                                            if let Some(ref pm) = persistence {
+                                                let resp_cmd = RespCommand {
+                                                    name: cmd.name.as_bytes().to_vec(),
+                                                    args: cmd.args.clone(),
+                                                };
+                                                let _ = pm.log_command(resp_cmd, aof_sync_policy).await;
+                                            }
+                                            if let Some(ref repl) = replication {
+                                                if ReplicationManager::is_write_command(&cmd_lower) {
+                                                    let select_cmd = RespCommand {
+                                                        name: b"SELECT".to_vec(),
+                                                        args: vec![db_index.to_string().into_bytes()],
+                                                    };
+                                                    let repl_cmd = RespCommand {
+                                                        name: cmd.name.as_bytes().to_vec(),
+                                                        args: cmd.args.clone(),
+                                                    };
+                                                    repl.propagate_commands_batch(
+                                                        &[select_cmd, repl_cmd],
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                        }
+                                        let resp = match result {
+                                            Ok(r) => r.clone(),
+                                            Err(e) => RespValue::Error(e.to_string()),
+                                        };
+                                        if let Ok(bytes) = resp.serialize() {
+                                            response_buffer.extend_from_slice(&bytes);
+                                        }
+                                        commands_processed += 1;
+                                    }
+                                }
+                            }
+                            PipelineEntry::Individual(cmd) => {
+                                match Self::dispatch_command(
+                                    cmd,
+                                    &mut socket_writer,
+                                    &mut response_buffer,
+                                    &mut db_index,
+                                    &mut protocol_version,
+                                    &mut in_subscription_mode,
+                                    &mut tx_state,
+                                    &pubsub,
+                                    client_id,
+                                    &security,
+                                    &sentinel,
+                                    &cluster,
+                                    &replication,
+                                    &command_handler,
+                                    &persistence,
+                                    aof_sync_policy,
+                                    &client_addr_str,
+                                    &connections,
+                                    conn_id,
+                                    &mut last_cmd_local,
+                                )
+                                .await?
+                                {
+                                    DispatchAction::CloseConnection => {
+                                        close_connection = true;
+                                        break 'batch_loop;
+                                    }
+                                    DispatchAction::Continue => {
+                                        commands_processed += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if close_connection {
+                        // Send any accumulated responses before closing
+                        if !response_buffer.is_empty() {
+                            let _ = socket_writer.write_all(&response_buffer).await;
+                            let _ = socket_writer.flush().await;
+                        }
+                        pubsub.unregister_client(client_id).await;
+                        if let Some(security_mgr) = security {
+                            security_mgr.remove_client(&client_addr_str);
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    // No batching: process each command individually
+                    for cmd in &parsed_commands {
+                        match Self::dispatch_command(
+                            cmd,
+                            &mut socket_writer,
+                            &mut response_buffer,
+                            &mut db_index,
+                            &mut protocol_version,
+                            &mut in_subscription_mode,
+                            &mut tx_state,
+                            &pubsub,
+                            client_id,
+                            &security,
+                            &sentinel,
+                            &cluster,
+                            &replication,
+                            &command_handler,
+                            &persistence,
+                            aof_sync_policy,
+                            &client_addr_str,
+                            &connections,
+                            conn_id,
+                            &mut last_cmd_local,
+                        )
+                        .await?
+                        {
+                            DispatchAction::CloseConnection => {
+                                pubsub.unregister_client(client_id).await;
+                                if let Some(security_mgr) = security {
+                                    security_mgr.remove_client(&client_addr_str);
+                                }
+                                return Ok(());
+                            }
+                            DispatchAction::Continue => {
+                                commands_processed += 1;
+                            }
+                        }
                     }
                 }
 
@@ -681,7 +763,6 @@ impl Server {
                     response_buffer.clear();
                 }
                 // Flush the write buffer before going back to reading
-                // This ensures all buffered responses (including small ones) are sent
                 if let Err(e) = socket_writer.flush().await {
                     error!(client_addr = %client_addr_str, "Failed to flush write buffer: {}", e);
                     break;
