@@ -32,14 +32,6 @@ pub struct BatchGroup<'a> {
     pub commands: Vec<&'a Command>,
 }
 
-/// Result of pipeline processing for a single command.
-pub enum PipelineResult {
-    /// Command was batched and produced this result.
-    Batched(CommandResult),
-    /// Command cannot be batched - must use normal dispatch.
-    NotBatched,
-}
-
 /// Entry in the pipeline processing sequence.
 pub enum PipelineEntry<'a> {
     /// A batch of commands to execute under a single shard lock.
@@ -731,25 +723,28 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     }
     let now = cached_now();
     let key = &args[0];
-    match map.remove(key) {
+    // Check type before removing to avoid remove-then-reinsert on WRONGTYPE
+    match map.get(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                // Expired
+                // Expired — remove lazily
+                map.remove(key);
                 return (Ok(RespValue::BulkString(None)), 0);
             }
-            let mem = (key.len() + entry.value.mem_size()) as i64;
-            match entry.value {
-                StoreValue::Str(data) => {
-                    (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem)
-                }
-                _ => {
-                    // WRONGTYPE - put it back (getdel only works on strings)
-                    map.insert(key.clone(), entry);
-                    (Err(CommandError::WrongType), 0)
-                }
+            if !matches!(&entry.value, StoreValue::Str(_)) {
+                return (Err(CommandError::WrongType), 0);
             }
         }
-        None => (Ok(RespValue::BulkString(None)), 0),
+        None => return (Ok(RespValue::BulkString(None)), 0),
+    }
+    // Safe to remove — we know key exists and is a String
+    let entry = map.remove(key).unwrap();
+    let mem = (key.len() + entry.value.mem_size()) as i64;
+    match entry.value {
+        StoreValue::Str(data) => {
+            (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem)
+        }
+        _ => unreachable!(), // Type already checked above
     }
 }
 
@@ -816,17 +811,19 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let seconds = match parse_i64(&args[1]) {
-        Some(s) if s > 0 => s,
-        Some(_) => {
-            return (
-                Err(CommandError::InvalidArgument(
-                    "invalid expire time in 'expire' command".to_string(),
-                )),
-                0,
-            )
-        }
+        Some(s) => s,
         None => return (Err(CommandError::NotANumber), 0),
     };
+    // Redis: TTL <= 0 means delete the key immediately
+    if seconds <= 0 {
+        return match map.remove(&args[0]) {
+            Some(entry) => {
+                let mem = (args[0].len() + entry.value.mem_size()) as i64;
+                (Ok(RespValue::Integer(1)), -mem)
+            }
+            None => (Ok(RespValue::Integer(0)), 0),
+        };
+    }
     let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
@@ -846,17 +843,19 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let millis = match parse_i64(&args[1]) {
-        Some(m) if m > 0 => m,
-        Some(_) => {
-            return (
-                Err(CommandError::InvalidArgument(
-                    "invalid expire time in 'pexpire' command".to_string(),
-                )),
-                0,
-            )
-        }
+        Some(m) => m,
         None => return (Err(CommandError::NotANumber), 0),
     };
+    // Redis: TTL <= 0 means delete the key immediately
+    if millis <= 0 {
+        return match map.remove(&args[0]) {
+            Some(entry) => {
+                let mem = (args[0].len() + entry.value.mem_size()) as i64;
+                (Ok(RespValue::Integer(1)), -mem)
+            }
+            None => (Ok(RespValue::Integer(0)), 0),
+        };
+    }
     let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
@@ -1493,20 +1492,28 @@ mod tests {
     fn test_batch_read_get() {
         let store = ShardedStore::with_shard_count_for_test(16);
         store.insert(b"key1".to_vec(), Entry::new_string(b"val1".to_vec()));
-        store.insert(b"key2".to_vec(), Entry::new_string(b"val2".to_vec()));
-
-        let cmd1 = make_cmd("GET", &[b"key1"]);
-        let cmd2 = make_cmd("GET", &[b"key2"]);
-        let cmd3 = make_cmd("GET", &[b"nonexistent"]);
-        let cmds: Vec<&Command> = vec![&cmd1, &cmd2, &cmd3];
 
         let shard_idx = store.shard_index(b"key1");
+        let cmd_hit = make_cmd("GET", &[b"key1"]);
+        let cmd_miss = make_cmd("GET", &[b"nonexistent"]);
+        let cmds: Vec<&Command> = vec![&cmd_hit, &cmd_miss];
+
         let results = store.execute_on_shard_ref(shard_idx, |map| {
             execute_read_batch(map, &cmds)
         });
 
-        // key1 and key2 may or may not be in this shard, but we test the execution logic
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 2);
+        // key1 is in this shard — verify correct value returned
+        match &results[0] {
+            Ok(RespValue::BulkString(Some(data))) => assert_eq!(data, &b"val1".to_vec()),
+            other => panic!("Expected BulkString(Some(val1)), got {:?}", other),
+        }
+        // nonexistent may or may not hash to this shard, but batch_get returns nil for missing keys
+        match &results[1] {
+            Ok(RespValue::BulkString(None)) => {} // Correct: nil for missing
+            Ok(RespValue::BulkString(Some(_))) => panic!("Expected nil for nonexistent key"),
+            other => panic!("Expected nil BulkString, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1563,6 +1570,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].0.is_ok());
         assert!(results[1].0.is_ok());
+
+        // Verify the final value is the overwritten one
+        let entry = store.get(b"key1").expect("key should exist after SET");
+        assert_eq!(entry.value.as_str().unwrap(), &b"val2".to_vec());
     }
 
     #[test]
@@ -1638,8 +1649,8 @@ mod tests {
         store.insert(b"hash".to_vec(), Entry::new(StoreValue::Hash(hash)));
 
         let cmd1 = make_cmd("TYPE", &[b"str"]);
-        let cmd2 = make_cmd("TYPE", &[b"hash"]);
-        let cmd3 = make_cmd("TYPE", &[b"missing"]);
+        let _cmd2 = make_cmd("TYPE", &[b"hash"]);
+        let _cmd3 = make_cmd("TYPE", &[b"missing"]);
 
         // These may be on different shards, just test the execution logic
         let now = cached_now();

@@ -27,7 +27,9 @@ use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
 use crate::sentinel::SentinelManager;
+use crate::networking::raw_command::cmd_eq;
 use crate::storage::batch::{self, PipelineEntry};
+use crate::storage::clock::cached_now;
 use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
 use crate::utils::logging;
 
@@ -616,10 +618,43 @@ impl Server {
                                                 (-*mem_delta) as u64,
                                             );
                                         }
-                                        // AOF logging and replication for successful writes
+                                        // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
                                             let cmd = group.commands[i];
                                             let cmd_lower = cmd.name.to_lowercase();
+
+                                            // Bump key version for WATCH invalidation
+                                            if let Some(key) = cmd.args.first() {
+                                                command_handler.storage().bump_key_version(key);
+                                            }
+
+                                            // Add to expiration heap for EXPIRE/PEXPIRE
+                                            let cmd_name_bytes = cmd.name.as_bytes();
+                                            if (cmd_eq(cmd_name_bytes, b"EXPIRE") || cmd_eq(cmd_name_bytes, b"PEXPIRE"))
+                                                && matches!(result, Ok(RespValue::Integer(1)))
+                                            {
+                                                if let Some(key) = cmd.args.first() {
+                                                    if let Some(ttl_bytes) = cmd.args.get(1) {
+                                                        if let Ok(ttl_str) = std::str::from_utf8(ttl_bytes) {
+                                                            if let Ok(ttl) = ttl_str.parse::<i64>() {
+                                                                if ttl > 0 {
+                                                                    let expires_at = if cmd_eq(cmd_name_bytes, b"EXPIRE") {
+                                                                        cached_now() + std::time::Duration::from_secs(ttl as u64)
+                                                                    } else {
+                                                                        cached_now() + std::time::Duration::from_millis(ttl as u64)
+                                                                    };
+                                                                    active_db.add_expiration_by_shard(
+                                                                        group.shard_idx,
+                                                                        key.clone(),
+                                                                        expires_at,
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
                                             if let Some(ref pm) = persistence {
                                                 let resp_cmd = RespCommand {
                                                     name: cmd.name.as_bytes().to_vec(),

@@ -133,7 +133,7 @@ impl RespValue {
 
     /// Serializes the RespValue to a vector of bytes
     pub fn serialize(&self) -> Result<Vec<u8>, RespError> {
-        // Fast path: static interned responses (zero allocation)
+        // Fast path: static interned responses (avoids format/serialize overhead)
         if let Some(static_resp) = self.try_static_response() {
             return Ok(static_resp.to_vec());
         }

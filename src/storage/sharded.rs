@@ -303,21 +303,6 @@ impl ShardedStore {
         }
     }
 
-    /// Iterate over all entries with mutable access.
-    /// Acquires a write lock on each shard sequentially.
-    #[allow(dead_code)]
-    pub fn for_each_mut<F>(&self, mut f: F)
-    where
-        F: FnMut(&Vec<u8>, &mut Entry),
-    {
-        for shard in self.shards.iter() {
-            let mut guard = shard.inner.write();
-            for (key, entry) in guard.map.iter_mut() {
-                f(key, entry);
-            }
-        }
-    }
-
     /// Iterate and collect results. Returns items where f returns Some.
     pub fn filter_map<F, R>(&self, mut f: F) -> Vec<R>
     where
@@ -441,14 +426,6 @@ impl ShardedStore {
 
     /// Compute unique sorted shard indices for a set of keys.
     pub fn unique_shard_indices(&self, keys: &[Vec<u8>]) -> Vec<usize> {
-        let mut indices: Vec<usize> = keys.iter().map(|k| self.shard_index(k)).collect();
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    }
-
-    /// Compute unique sorted shard indices from byte slice keys.
-    pub fn unique_shard_indices_from_slices(&self, keys: &[&[u8]]) -> Vec<usize> {
         let mut indices: Vec<usize> = keys.iter().map(|k| self.shard_index(k)).collect();
         indices.sort_unstable();
         indices.dedup();

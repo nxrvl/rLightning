@@ -302,7 +302,6 @@ impl StorageEngine {
                 }
                 if metadata_cleanup_counter >= 600 {
                     metadata_cleanup_counter = 0;
-                    engine.cleanup_stale_metadata();
                 }
             }
         });
@@ -617,18 +616,6 @@ impl StorageEngine {
                 }
             }
         }
-    }
-
-    /// Periodic metadata cleanup. Transaction locking is now handled by ShardedStore
-    /// per-shard tx locks, so there are no stale key_locks to clean up.
-    ///
-    /// NOTE: key_versions are intentionally NOT cleaned up. Removing version
-    /// entries for deleted keys would cause WATCH correctness bugs: if a key is
-    /// watched at version 0 (non-existent), then created and deleted, cleanup would
-    /// reset its version to 0 (the fallback), causing EXEC to incorrectly proceed
-    /// instead of aborting.
-    fn cleanup_stale_metadata(&self) {
-        // No-op: key_locks removed (shard-based tx locking), key_versions preserved for WATCH.
     }
 
     /// Get the size of a key-value pair in bytes
@@ -1393,12 +1380,6 @@ impl StorageEngine {
     #[cfg(test)]
     pub fn key_versions_len(&self) -> usize {
         self.key_versions.len()
-    }
-
-    /// Trigger metadata cleanup (exposed for testing)
-    #[cfg(test)]
-    pub fn trigger_metadata_cleanup(&self) {
-        self.cleanup_stale_metadata();
     }
 
     /// Check if the current task is inside a MULTI/EXEC transaction execution.
@@ -4083,113 +4064,6 @@ mod tests {
             remaining.unwrap().as_secs() > 200,
             "TTL should still be close to 300s"
         );
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_stale_metadata() {
-        let config = StorageConfig::default();
-        let storage = StorageEngine::new(config);
-
-        // Create many keys and WATCH them (bump their versions)
-        let num_keys = 10_000;
-        for i in 0..num_keys {
-            let key = format!("watched_key_{}", i).into_bytes();
-            storage
-                .set(key.clone(), b"value".to_vec(), None)
-                .await
-                .unwrap();
-            // Bump key version to simulate WATCH
-            storage.bump_key_version(&key);
-        }
-
-        // Verify key_versions has entries
-        assert!(
-            storage.key_versions_len() >= num_keys,
-            "key_versions should have at least {} entries, got {}",
-            num_keys,
-            storage.key_versions_len()
-        );
-
-        // Delete all keys from data store
-        for i in 0..num_keys {
-            let key = format!("watched_key_{}", i).into_bytes();
-            storage.del(&key).await.unwrap();
-        }
-
-        // Before cleanup, key_versions should still have entries
-        assert!(
-            storage.key_versions_len() >= num_keys,
-            "key_versions should still have entries before cleanup"
-        );
-
-        // Run cleanup (now a no-op for key_versions which are preserved for WATCH)
-        storage.trigger_metadata_cleanup();
-
-        // After cleanup: key_versions are intentionally preserved (WATCH correctness
-        // requires versions to persist for deleted keys so that EXEC detects modifications).
-        assert!(
-            storage.key_versions_len() >= num_keys,
-            "key_versions should be preserved after cleanup for WATCH correctness, got {}",
-            storage.key_versions_len()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_preserves_active_keys() {
-        let config = StorageConfig::default();
-        let storage = StorageEngine::new(config);
-
-        // Create keys that will remain
-        for i in 0..100 {
-            let key = format!("active_key_{}", i).into_bytes();
-            storage
-                .set(key.clone(), b"value".to_vec(), None)
-                .await
-                .unwrap();
-            storage.bump_key_version(&key);
-        }
-
-        // Create keys that will be deleted
-        for i in 0..100 {
-            let key = format!("stale_key_{}", i).into_bytes();
-            storage
-                .set(key.clone(), b"value".to_vec(), None)
-                .await
-                .unwrap();
-            storage.bump_key_version(&key);
-        }
-
-        // Delete only the stale keys
-        for i in 0..100 {
-            let key = format!("stale_key_{}", i).into_bytes();
-            storage.del(&key).await.unwrap();
-        }
-
-        let versions_before = storage.key_versions_len();
-        assert!(
-            versions_before >= 200,
-            "Should have at least 200 version entries"
-        );
-
-        // Run cleanup
-        storage.trigger_metadata_cleanup();
-
-        // All key versions should be preserved (cleanup no longer removes them for
-        // WATCH correctness — deleted keys must retain their versions so EXEC detects
-        // modifications even after the key is gone).
-        let versions_after = storage.key_versions_len();
-        assert_eq!(
-            versions_after, versions_before,
-            "key_versions should be unchanged after cleanup ({} should equal {})",
-            versions_after, versions_before
-        );
-
-        // Verify active keys still have valid versions (non-zero since we bumped them)
-        for i in 0..100 {
-            let key = format!("active_key_{}", i).into_bytes();
-            let version = storage.get_key_version(&key);
-            assert!(version > 0, "Active key {} should have non-zero version", i);
-        }
     }
 
     #[tokio::test]
