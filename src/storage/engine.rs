@@ -1,12 +1,13 @@
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
+use crate::storage::clock::{cached_now, start_clock_updater};
 use crate::storage::sharded::{ShardedStore, ShardEntry};
 use tokio::sync::RwLock;
-use tokio::time::{self, Interval};
+use tokio::time;
 
 use crate::networking::resp::RespCommand;
 use crate::storage::error::StorageError;
@@ -39,27 +40,7 @@ pub enum SetResult {
     OldValue(Option<Vec<u8>>),
 }
 
-/// Entry in the expiration priority queue
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ExpirationEntry {
-    expires_at: Instant,
-    key: Vec<u8>,
-    /// Database index this key belongs to (for multi-DB expiration)
-    db_index: usize,
-}
-
-impl PartialOrd for ExpirationEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ExpirationEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse ordering so earliest expiration comes first in min-heap
-        other.expires_at.cmp(&self.expires_at)
-    }
-}
+// ExpirationEntry is now per-shard in ShardedStore (ShardExpirationEntry)
 
 /// Eviction policy for the storage engine
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -188,12 +169,9 @@ pub struct StorageEngine {
     config: StorageConfig,
     /// Atomic memory counter for better performance (eliminates lock contention)
     current_memory: AtomicU64,
-    expiration_timer: RwLock<Interval>,
     write_counters: RwLock<Vec<Arc<AtomicU64>>>,
     /// Atomic counter for the total number of keys (for O(1) DBSIZE)
     key_count: AtomicU64,
-    /// Priority queue for efficient TTL management (O(log n) operations)
-    expiration_queue: RwLock<BinaryHeap<ExpirationEntry>>,
     /// Pattern index for common prefixes (optimizes KEYS command), keyed by (db_index, prefix)
     #[allow(clippy::type_complexity)]
     prefix_index: RwLock<HashMap<(usize, String), Vec<Vec<u8>>>>,
@@ -243,14 +221,15 @@ impl StorageEngine {
         } else {
             config.max_memory
         };
+        // Start the cached clock updater (idempotent if already started)
+        start_clock_updater();
+
         let engine = Arc::new(Self {
             data: ShardedStore::with_capacity(1024), // Starting with a reasonable capacity
             config,
             current_memory: AtomicU64::new(0),
-            expiration_timer: RwLock::new(time::interval(Duration::from_secs(1))),
             write_counters: RwLock::new(Vec::new()),
             key_count: AtomicU64::new(0),
-            expiration_queue: RwLock::new(BinaryHeap::new()),
             prefix_index: RwLock::new(HashMap::new()),
             extra_dbs,
             key_versions: DashMap::with_capacity(256),
@@ -272,21 +251,56 @@ impl StorageEngine {
         engine
     }
 
-    /// Start the background task for efficient TTL-based expiration
+    /// Start the background task for per-shard round-robin TTL expiration.
+    /// Processes a few shards per tick (100ms interval) to spread work evenly.
     fn start_expiration_task(engine: Arc<Self>) {
         tokio::spawn(async move {
-            let mut interval = engine.expiration_timer.write().await;
+            let mut interval = time::interval(Duration::from_millis(100));
             let mut metadata_cleanup_counter: u64 = 0;
+            // Round-robin index across all databases and shards
+            let mut rr_db: usize = 0;
+            let mut rr_shard: usize = 0;
 
             loop {
                 interval.tick().await;
-                // Use priority queue for efficient expiration + probabilistic sampling
-                engine.process_expired_keys().await;
+                let now = cached_now();
 
-                // Periodically clean up stale key_versions and key_locks entries
-                // to prevent unbounded memory growth from WATCH/transaction metadata
+                // Process a batch of shards per tick (round-robin across all DBs)
+                // We process multiple shards per tick for throughput
+                const SHARDS_PER_TICK: usize = 4;
+                const MAX_EXPIRES_PER_SHARD: usize = 25;
+
+                for _ in 0..SHARDS_PER_TICK {
+                    let db = engine.get_db_by_index(rr_db);
+                    let num_shards = db.num_shards();
+
+                    if rr_shard < num_shards {
+                        let removed = db.expire_shard(rr_shard, now, MAX_EXPIRES_PER_SHARD);
+                        for (k, entry) in &removed {
+                            let size = Self::calculate_entry_size(k, &entry.value) as u64;
+                            engine.current_memory.fetch_sub(size, Ordering::Relaxed);
+                            engine.key_count.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    // Advance round-robin
+                    rr_shard += 1;
+                    let db_shards = engine.get_db_by_index(rr_db).num_shards();
+                    if rr_shard >= db_shards {
+                        rr_shard = 0;
+                        rr_db += 1;
+                        if rr_db >= NUM_DATABASES {
+                            rr_db = 0;
+                        }
+                    }
+                }
+
+                // Also do probabilistic sampling every 10 ticks (1 second)
                 metadata_cleanup_counter += 1;
-                if metadata_cleanup_counter >= 60 {
+                if metadata_cleanup_counter % 10 == 0 {
+                    engine.probabilistic_cleanup_sharded(now);
+                }
+                if metadata_cleanup_counter >= 600 {
                     metadata_cleanup_counter = 0;
                     engine.cleanup_stale_metadata();
                 }
@@ -568,86 +582,38 @@ impl StorageEngine {
         }
     }
 
-    /// Efficient expiration using priority queue + probabilistic sampling (all databases)
-    async fn process_expired_keys(&self) {
-        let now = Instant::now();
-        let mut removed_count = 0;
-        const MAX_REMOVALS_PER_CYCLE: usize = 100;
-
-        // Phase 1: Process expired keys from priority queue (O(log n) per removal)
-        {
-            let mut queue = self.expiration_queue.write().await;
-
-            while let Some(entry) = queue.peek() {
-                if entry.expires_at > now {
-                    break; // No more expired keys in queue
-                }
-
-                let expired_entry = queue.pop().unwrap();
-                drop(queue); // Release queue lock early
-
-                // Get the correct database for this entry
-                let db = self.get_db_by_index(expired_entry.db_index);
-
-                // Only remove the key if it is actually expired (it may have been refreshed with a new TTL)
-                let should_remove = match db.get(&expired_entry.key) {
-                    Some(item) => item.is_expired(),
-                    None => false, // Key already deleted
-                };
-                if should_remove && let Some((k, item)) = db.remove(&expired_entry.key) {
-                    if !item.is_expired() {
-                        // Key was refreshed concurrently — put it back
-                        db.insert(k, item);
-                    } else {
-                        let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
-                        self.key_count.fetch_sub(1, Ordering::Relaxed);
-                        removed_count += 1;
-                    }
-                }
-
-                // Limit removals per cycle to avoid blocking
-                if removed_count >= MAX_REMOVALS_PER_CYCLE {
-                    break;
-                }
-
-                // Reacquire queue lock for next iteration
-                queue = self.expiration_queue.write().await;
-            }
-        }
-
-        // Phase 2: Probabilistic sampling for keys not in queue (cleanup across all DBs)
-        // This handles keys that might have been missed or expired through lazy deletion
-        if removed_count < MAX_REMOVALS_PER_CYCLE / 2 {
-            self.probabilistic_cleanup().await;
-        }
-    }
-
-    /// Probabilistic cleanup for keys not tracked in expiration queue (all databases)
-    async fn probabilistic_cleanup(&self) {
+    /// Probabilistic cleanup using per-shard sampling (all databases).
+    /// Called periodically to catch keys that expired but weren't in the heap
+    /// (e.g., keys whose TTL was refreshed but stale heap entries weren't cleaned).
+    fn probabilistic_cleanup_sharded(&self, now: Instant) {
         const SAMPLE_SIZE: usize = 20;
 
-        // Sample from all databases, not just DB 0
         for db_idx in 0..NUM_DATABASES {
             let db = self.get_db_by_index(db_idx);
             if db.is_empty() {
                 continue;
             }
             let keys_to_remove: Vec<Vec<u8>> = db.sample(SAMPLE_SIZE, |key, entry| {
-                if entry.is_expired() { Some(key.clone()) } else { None }
+                if let Some(exp) = entry.expires_at {
+                    if exp <= now {
+                        return Some(key.clone());
+                    }
+                }
+                None
             });
 
-            // Remove expired keys found in this sample
             for key in keys_to_remove {
                 if let Some((k, item)) = db.remove(&key) {
-                    if !item.is_expired() {
-                        // Key was refreshed concurrently — put it back
-                        db.insert(k, item);
-                    } else {
-                        let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
-                        self.key_count.fetch_sub(1, Ordering::Relaxed);
+                    if let Some(exp) = item.expires_at {
+                        if exp <= now {
+                            let size = Self::calculate_entry_size(&k, &item.value) as u64;
+                            self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                            self.key_count.fetch_sub(1, Ordering::Relaxed);
+                            continue;
+                        }
                     }
+                    // Key was refreshed concurrently — put it back
+                    db.insert(k, item);
                 }
             }
         }
@@ -672,17 +638,19 @@ impl StorageEngine {
 
     /// Helper method to remove expired key and update memory/counters
     async fn remove_expired_key(&self, key: &[u8]) {
+        let now = cached_now();
         let db = self.active_db();
         if let Some((k, item)) = db.remove(key) {
-            if !item.is_expired() {
-                // Key was refreshed concurrently — put it back
-                db.insert(k, item);
-                return;
+            if let Some(exp) = item.expires_at {
+                if exp <= now {
+                    let size = Self::calculate_entry_size(&k, &item.value) as u64;
+                    self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
             }
-            // Use atomic operations for memory tracking
-            let size = Self::calculate_entry_size(&k, &item.value) as u64;
-            self.current_memory.fetch_sub(size, Ordering::Relaxed);
-            self.key_count.fetch_sub(1, Ordering::Relaxed);
+            // Key was refreshed concurrently — put it back
+            db.insert(k, item);
         }
     }
 
@@ -695,14 +663,13 @@ impl StorageEngine {
         }
     }
 
-    /// Add a key to the expiration queue (with current database index)
+    /// Add a key to the per-shard expiration heap (current database).
     async fn add_to_expiration_queue(&self, key: Vec<u8>, expires_at: Instant) {
-        let db_index = Self::current_db_idx();
-        self.add_to_expiration_queue_for_db(key, expires_at, db_index)
-            .await;
+        let db = self.active_db();
+        db.add_expiration(&key, expires_at);
     }
 
-    /// Add a key to the expiration queue for a specific database.
+    /// Add a key to the expiration heap for a specific database.
     /// Used by cross-DB operations (e.g. MOVE) that need to enqueue TTL
     /// in a database other than the current task-local one.
     async fn add_to_expiration_queue_for_db(
@@ -711,31 +678,14 @@ impl StorageEngine {
         expires_at: Instant,
         db_index: usize,
     ) {
-        let mut queue = self.expiration_queue.write().await;
-        queue.push(ExpirationEntry {
-            expires_at,
-            key,
-            db_index,
-        });
+        let db = self.get_db_by_index(db_index);
+        db.add_expiration(&key, expires_at);
     }
 
-    /// Remove a key from expiration queue for the current database (used when TTL is removed).
-    /// Only removes entries matching both the key AND the current database index,
-    /// so removing TTL from `foo` in DB 0 won't affect `foo` in DB 1.
+    /// Remove a key from its shard's expiration heap (current database).
     async fn remove_from_expiration_queue(&self, key: &[u8]) {
-        let db_index = Self::current_db_idx();
-        let mut queue = self.expiration_queue.write().await;
-        // Note: BinaryHeap doesn't support efficient removal by key
-        // In practice, we'll let the background task clean up stale entries
-        // This is acceptable since the queue will filter out non-existent keys
-
-        // Rebuild the queue without the target key+db entry (expensive but rare operation)
-        let entries: Vec<ExpirationEntry> = queue.drain().collect();
-        for entry in entries {
-            if !(entry.key == key && entry.db_index == db_index) {
-                queue.push(entry);
-            }
-        }
+        let db = self.active_db();
+        db.remove_expiration(key);
     }
 
     /// Common prefixes to index for faster KEYS operations
@@ -838,101 +788,48 @@ impl StorageEngine {
                     return Err(StorageError::MemoryLimitExceeded);
                 }
 
-                // Helper: find victim in a single DB
+                // Per-shard probabilistic eviction: sample candidates from random shards
+                // across all databases, then pick the best victim from the sample.
                 let volatile_only = eviction_policy.is_volatile();
-                let find_victim_in_db = |db: &ShardedStore| -> Option<Vec<u8>> {
-                    match eviction_policy {
-                        EvictionPolicy::LRU | EvictionPolicy::VolatileLRU => {
-                            let mut best_key: Option<Vec<u8>> = None;
-                            let mut best_clock = u32::MAX;
-                            db.for_each(|key, entry| {
-                                if volatile_only && entry.expires_at.is_none() { return; }
-                                if entry.lru_clock < best_clock {
-                                    best_clock = entry.lru_clock;
-                                    best_key = Some(key.clone());
-                                }
-                            });
-                            best_key
-                        }
-                        EvictionPolicy::LFU | EvictionPolicy::VolatileLFU => {
-                            let mut best_key: Option<Vec<u8>> = None;
-                            let mut best_count = u16::MAX;
-                            db.for_each(|key, entry| {
-                                if volatile_only && entry.expires_at.is_none() { return; }
-                                if entry.access_count < best_count {
-                                    best_count = entry.access_count;
-                                    best_key = Some(key.clone());
-                                }
-                            });
-                            best_key
-                        }
-                        EvictionPolicy::Random | EvictionPolicy::VolatileRandom => {
-                            if volatile_only {
-                                let eligible: Vec<Vec<u8>> = db.filter_map(|key, entry| {
-                                    if entry.expires_at.is_some() { Some(key.clone()) } else { None }
-                                });
-                                if eligible.is_empty() {
-                                    None
-                                } else {
-                                    let idx = fastrand::usize(0..eligible.len());
-                                    Some(eligible[idx].clone())
-                                }
-                            } else {
-                                let sampled = db.sample(1, |key, _entry| Some(key.clone()));
-                                sampled.into_iter().next()
-                            }
-                        }
-                        _ => None,
-                    }
-                };
-
-                // Find the best victim across all databases
-                // eviction_score: lower = more likely to be evicted
-                // For LRU: elapsed time (higher elapsed = older = lower score inverted via wrapping)
-                // For LFU: access_count directly (lower = evict first)
-                let mut best_victim: Option<(Vec<u8>, usize)> = None;
-                let mut best_score: Option<u64> = None;
                 let is_lfu = matches!(
                     eviction_policy,
                     EvictionPolicy::LFU | EvictionPolicy::VolatileLFU
                 );
+                let is_random = matches!(
+                    eviction_policy,
+                    EvictionPolicy::Random | EvictionPolicy::VolatileRandom
+                );
+
+                let mut best_victim: Option<(Vec<u8>, usize)> = None; // (key, db_idx)
+                let mut best_score: u64 = u64::MAX;
+
                 for db_idx in 0..NUM_DATABASES {
                     let db = self.get_db_by_index(db_idx);
-                    if let Some(victim_key) = find_victim_in_db(db) {
-                        // Compute score once and reuse to avoid TOCTOU race
-                        // from a second db.get() after releasing the shard lock.
-                        let victim_score = if matches!(
-                            eviction_policy,
-                            EvictionPolicy::Random | EvictionPolicy::VolatileRandom
-                        ) {
-                            None // Random doesn't use scores
-                        } else {
-                            db.get(&victim_key).map(|entry| {
-                                if is_lfu {
-                                    entry.access_count as u64
-                                } else {
-                                    // Lower lru_clock = older = evict first
-                                    entry.lru_clock as u64
-                                }
-                            })
-                        };
+                    let num_shards = db.num_shards();
+                    if num_shards == 0 {
+                        continue;
+                    }
 
-                        let should_replace = if matches!(
-                            eviction_policy,
-                            EvictionPolicy::Random | EvictionPolicy::VolatileRandom
-                        ) {
-                            best_victim.is_none()
-                        } else if let Some(score) = victim_score {
-                            match best_score {
-                                None => true,
-                                Some(best) => score < best,
+                    // Sample from a random shard in this DB
+                    let shard_idx = fastrand::usize(0..num_shards);
+                    let candidates = db.sample_eviction_candidates(shard_idx, volatile_only);
+
+                    for candidate in &candidates {
+                        if is_random {
+                            // For random eviction, just pick the first candidate found
+                            if best_victim.is_none() {
+                                best_victim = Some((candidate.key.clone(), db_idx));
                             }
                         } else {
-                            false
-                        };
-                        if should_replace {
-                            best_score = victim_score;
-                            best_victim = Some((victim_key, db_idx));
+                            let score = if is_lfu {
+                                candidate.access_count as u64
+                            } else {
+                                candidate.lru_clock as u64
+                            };
+                            if score < best_score {
+                                best_score = score;
+                                best_victim = Some((candidate.key.clone(), db_idx));
+                            }
                         }
                     }
                 }
@@ -1020,7 +917,7 @@ impl StorageEngine {
         let mut item = Entry::new(value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
-            Some(Instant::now() + ttl)
+            Some(cached_now() + ttl)
         } else {
             None
         };
@@ -1235,11 +1132,11 @@ impl StorageEngine {
                     None // expired = not found
                 } else if let Some(ttl) = ttl {
                     entry.expire(ttl);
-                    let expires_at = Instant::now() + ttl;
+                    let expires_at = cached_now() + ttl;
                     Some(Some((true, expires_at)))
                 } else {
                     entry.remove_expiry();
-                    Some(Some((false, Instant::now())))
+                    Some(Some((false, cached_now())))
                 }
             } else {
                 None
@@ -1984,7 +1881,7 @@ impl StorageEngine {
                 if entry.is_expired() {
                     ExpiretimeResult::Expired
                 } else if let Some(expires_at) = entry.expires_at {
-                    let now = Instant::now();
+                    let now = cached_now();
                     if expires_at <= now {
                         ExpiretimeResult::NoExpiry
                     } else {
@@ -2022,7 +1919,7 @@ impl StorageEngine {
                 if entry.is_expired() {
                     None // signals need for lazy cleanup
                 } else if let Some(expires_at) = entry.expires_at {
-                    let now = Instant::now();
+                    let now = cached_now();
                     if expires_at <= now {
                         Some(None)
                     } else {
@@ -2077,11 +1974,11 @@ impl StorageEngine {
         // Clone with fresh timestamps but same TTL
         let mut new_item = crate::storage::item::Entry::new(src_item.value.clone());
         if let Some(expires_at) = src_item.expires_at {
-            let now = Instant::now();
+            let now = cached_now();
             if expires_at > now {
                 let remaining = expires_at - now;
                 new_item.expire(remaining);
-                self.add_to_expiration_queue(dst.clone(), Instant::now() + remaining)
+                self.add_to_expiration_queue(dst.clone(), cached_now() + remaining)
                     .await;
             }
         }
@@ -2202,7 +2099,7 @@ impl StorageEngine {
         self.bump_key_version_for_db(key, dst_db);
 
         if let Some(expires_at) = src_expires_at
-            && expires_at > Instant::now()
+            && expires_at > cached_now()
         {
             self.add_to_expiration_queue_for_db(key.to_vec(), expires_at, dst_db)
                 .await;
@@ -2242,26 +2139,8 @@ impl StorageEngine {
         new_mapping &= !(0xF_u64 << (db2 * 4)); // Clear db2's nibble
         new_mapping |= (phys1 as u64) << (db2 * 4); // Set db2 → phys1
 
-        // Fix expiration queue BEFORE the mapping swap: entries still carry
-        // pre-swap logical db indices, so the rewrite is straightforward.
-        {
-            let mut queue = self.expiration_queue.write().await;
-            let old_entries: Vec<ExpirationEntry> = std::iter::from_fn(|| queue.pop()).collect();
-            for entry in old_entries {
-                let new_db_index = if entry.db_index == db1 {
-                    db2
-                } else if entry.db_index == db2 {
-                    db1
-                } else {
-                    entry.db_index
-                };
-                queue.push(ExpirationEntry {
-                    expires_at: entry.expires_at,
-                    key: entry.key,
-                    db_index: new_db_index,
-                });
-            }
-        }
+        // Per-shard expiration heaps live inside each ShardedStore, so they
+        // follow the db_mapping swap automatically. No heap rewrite needed.
 
         // Swap prefix index entries BEFORE the mapping swap.
         {
@@ -2533,7 +2412,7 @@ impl StorageEngine {
         let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
-            Some(Instant::now() + ttl)
+            Some(cached_now() + ttl)
         } else {
             None
         };
@@ -2606,7 +2485,7 @@ impl StorageEngine {
         let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
-            Some(Instant::now() + ttl)
+            Some(cached_now() + ttl)
         } else {
             None
         };
@@ -2671,7 +2550,7 @@ impl StorageEngine {
         let mut item = crate::storage::item::Entry::new(store_value);
         let new_expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
-            Some(Instant::now() + ttl)
+            Some(cached_now() + ttl)
         } else {
             None
         };
@@ -3117,7 +2996,7 @@ impl StorageEngine {
                         }
                         Some(Some(duration)) => {
                             item.expire(duration);
-                            let expires_at = Instant::now() + duration;
+                            let expires_at = cached_now() + duration;
                             (Some(expires_at), true)
                         }
                     };

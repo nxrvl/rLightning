@@ -1,19 +1,60 @@
 //! Sharded storage engine using parking_lot::RwLock per shard.
 //! Replaces DashMap for better performance and control over locking granularity.
+//!
+//! Each shard contains its own expiration min-heap, eliminating the global
+//! expiration queue lock contention from the previous design.
 
+use arrayvec::ArrayVec;
 use hashbrown::HashMap as HBHashMap;
 use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
 };
 use rustc_hash::FxBuildHasher;
+use std::collections::BinaryHeap;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::storage::item::Entry;
 
 /// The underlying HashMap type used within each shard.
 pub type ShardMap = HBHashMap<Vec<u8>, Entry, FxBuildHasher>;
+
+/// Entry in a per-shard expiration min-heap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardExpirationEntry {
+    pub expires_at: Instant,
+    pub key: Vec<u8>,
+}
+
+impl PartialOrd for ShardExpirationEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ShardExpirationEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering so earliest expiration comes first (min-heap)
+        other.expires_at.cmp(&self.expires_at)
+    }
+}
+
+/// Maximum number of eviction candidates sampled per shard.
+pub const EVICTION_SAMPLE_SIZE: usize = 16;
+
+/// A candidate for eviction, holding enough info to pick a victim without
+/// re-acquiring the shard lock.
+#[derive(Debug, Clone)]
+pub struct EvictionCandidate {
+    pub key: Vec<u8>,
+    pub lru_clock: u32,
+    pub access_count: u16,
+    pub has_expiry: bool,
+    pub mem_size: usize,
+}
 
 /// Internal data for a single shard.
 struct ShardInner {
@@ -25,6 +66,9 @@ struct ShardInner {
 struct Shard {
     /// Data storage with parking_lot RwLock for fast synchronous locking.
     inner: RwLock<ShardInner>,
+    /// Per-shard expiration min-heap. Uses a separate parking_lot Mutex
+    /// so expiration processing doesn't hold the data RwLock.
+    expiration_heap: Mutex<BinaryHeap<ShardExpirationEntry>>,
     /// Transaction-level lock for MULTI/EXEC isolation (async-compatible).
     tx_lock: Arc<tokio::sync::Mutex<()>>,
     /// Per-shard memory usage counter (bytes).
@@ -144,6 +188,7 @@ impl ShardedStore {
                         ShardMap::with_hasher(FxBuildHasher)
                     },
                 }),
+                expiration_heap: Mutex::new(BinaryHeap::new()),
                 tx_lock: Arc::new(tokio::sync::Mutex::new(())),
                 used_memory: AtomicU64::new(0),
                 key_count: AtomicU32::new(0),
@@ -238,6 +283,7 @@ impl ShardedStore {
         for shard in self.shards.iter() {
             let mut guard = shard.inner.write();
             guard.map.clear();
+            shard.expiration_heap.lock().clear();
             shard.used_memory.store(0, Ordering::Relaxed);
             shard.key_count.store(0, Ordering::Relaxed);
         }
@@ -463,6 +509,115 @@ impl ShardedStore {
         self.shards[shard_idx]
             .key_count
             .fetch_sub(count, Ordering::Relaxed);
+    }
+
+    // --- Per-shard expiration methods ---
+
+    /// Add a key to the per-shard expiration heap.
+    pub fn add_expiration(&self, key: &[u8], expires_at: Instant) {
+        let shard_idx = self.shard_index(key);
+        self.add_expiration_by_shard(shard_idx, key.to_vec(), expires_at);
+    }
+
+    /// Add an expiration entry to a specific shard's heap by index.
+    pub fn add_expiration_by_shard(&self, shard_idx: usize, key: Vec<u8>, expires_at: Instant) {
+        let mut heap = self.shards[shard_idx].expiration_heap.lock();
+        heap.push(ShardExpirationEntry { expires_at, key });
+    }
+
+    /// Remove a key from the per-shard expiration heap.
+    /// This is an O(n) operation but is only called on TTL removal (PERSIST, DEL),
+    /// which is rare compared to reads/writes.
+    pub fn remove_expiration(&self, key: &[u8]) {
+        let shard_idx = self.shard_index(key);
+        let mut heap = self.shards[shard_idx].expiration_heap.lock();
+        // Rebuild without the target key
+        let entries: Vec<ShardExpirationEntry> = heap.drain().collect();
+        for entry in entries {
+            if entry.key != key {
+                heap.push(entry);
+            }
+        }
+    }
+
+    /// Process expired keys from a single shard's expiration heap.
+    /// Returns a list of (key, Entry) pairs that were expired and removed.
+    /// `max_removals`: maximum keys to expire in this call.
+    /// `now`: the current (possibly cached) instant.
+    pub fn expire_shard(
+        &self,
+        shard_idx: usize,
+        now: Instant,
+        max_removals: usize,
+    ) -> Vec<(Vec<u8>, Entry)> {
+        let mut removed = Vec::new();
+
+        // Phase 1: Collect expired keys from the heap (lock heap only)
+        let mut expired_keys = Vec::new();
+        {
+            let mut heap = self.shards[shard_idx].expiration_heap.lock();
+            while expired_keys.len() < max_removals {
+                match heap.peek() {
+                    Some(entry) if entry.expires_at <= now => {
+                        let entry = heap.pop().unwrap();
+                        expired_keys.push(entry.key);
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        if expired_keys.is_empty() {
+            return removed;
+        }
+
+        // Phase 2: Remove expired keys from data map (lock data)
+        let mut guard = self.shards[shard_idx].inner.write();
+        for key in expired_keys {
+            if let Some(entry) = guard.map.get(&key) {
+                // Verify the key is actually expired (may have been refreshed)
+                if let Some(exp) = entry.expires_at {
+                    if exp <= now {
+                        if let Some(entry) = guard.map.remove(&key) {
+                            removed.push((key, entry));
+                        }
+                    }
+                }
+                // else: key has no expiry anymore (PERSIST was called), skip
+            }
+            // else: key was already deleted, skip
+        }
+
+        removed
+    }
+
+    /// Sample eviction candidates from a specific shard.
+    /// Returns up to EVICTION_SAMPLE_SIZE candidates without removing them.
+    pub fn sample_eviction_candidates(
+        &self,
+        shard_idx: usize,
+        volatile_only: bool,
+    ) -> ArrayVec<EvictionCandidate, EVICTION_SAMPLE_SIZE> {
+        let mut candidates = ArrayVec::new();
+        let guard = self.shards[shard_idx].inner.read();
+
+        for (key, entry) in guard.map.iter() {
+            if candidates.is_full() {
+                break;
+            }
+            if volatile_only && entry.expires_at.is_none() {
+                continue;
+            }
+            candidates.push(EvictionCandidate {
+                key: key.clone(),
+                lru_clock: entry.lru_clock,
+                access_count: entry.access_count,
+                has_expiry: entry.expires_at.is_some(),
+                mem_size: key.len() + entry.value.mem_size(),
+            });
+        }
+
+        candidates
     }
 
     /// Create a ShardedStore with a specific shard count for testing.
@@ -834,6 +989,193 @@ mod tests {
 
         for h in handles {
             h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_per_shard_expiration_basic() {
+        use std::time::Duration;
+
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let key = b"expkey".to_vec();
+        let now = Instant::now();
+        let expires_at = now + Duration::from_millis(50);
+
+        // Insert key with expiration
+        let mut entry = make_entry(b"val");
+        entry.expires_at = Some(expires_at);
+        store.insert(key.clone(), entry);
+
+        // Add to expiration heap
+        store.add_expiration(&key, expires_at);
+
+        // Before expiration: expire_shard should not remove
+        let removed = store.expire_shard(store.shard_index(&key), now, 10);
+        assert!(removed.is_empty(), "Should not expire before deadline");
+        assert!(store.contains_key(&key));
+
+        // After expiration: expire_shard should remove
+        let future = now + Duration::from_millis(100);
+        let removed = store.expire_shard(store.shard_index(&key), future, 10);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, key);
+        assert!(!store.contains_key(&key));
+    }
+
+    #[test]
+    fn test_per_shard_expiration_refreshed_key() {
+        use std::time::Duration;
+
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let key = b"refreshed".to_vec();
+        let now = Instant::now();
+        let old_expires = now + Duration::from_millis(50);
+
+        // Insert with short TTL
+        let mut entry = make_entry(b"val");
+        entry.expires_at = Some(old_expires);
+        store.insert(key.clone(), entry);
+        store.add_expiration(&key, old_expires);
+
+        // Refresh the TTL to much later
+        let new_expires = now + Duration::from_secs(60);
+        if let Some(mut e) = store.get_mut(&key) {
+            e.expires_at = Some(new_expires);
+        }
+
+        // Try to expire at old time - key should NOT be removed
+        // because the entry's expires_at was refreshed
+        let removed = store.expire_shard(
+            store.shard_index(&key),
+            now + Duration::from_millis(100),
+            10,
+        );
+        assert!(removed.is_empty(), "Refreshed key should not be expired");
+        assert!(store.contains_key(&key));
+    }
+
+    #[test]
+    fn test_per_shard_expiration_max_removals() {
+        use std::time::Duration;
+
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let now = Instant::now();
+        let expires = now + Duration::from_millis(10);
+
+        // Insert multiple keys that all hash to the same shard
+        // by finding keys that land on shard 0
+        let mut shard0_keys = Vec::new();
+        for i in 0u32..10000 {
+            let key = format!("exp:{}", i).into_bytes();
+            if store.shard_index(&key) == 0 {
+                let mut entry = make_entry(b"val");
+                entry.expires_at = Some(expires);
+                store.insert(key.clone(), entry);
+                store.add_expiration_by_shard(0, key.clone(), expires);
+                shard0_keys.push(key);
+                if shard0_keys.len() >= 10 {
+                    break;
+                }
+            }
+        }
+        assert!(shard0_keys.len() >= 5, "Need enough keys on shard 0");
+
+        // Expire with max_removals = 3
+        let future = now + Duration::from_millis(100);
+        let removed = store.expire_shard(0, future, 3);
+        assert_eq!(removed.len(), 3, "Should respect max_removals limit");
+    }
+
+    #[test]
+    fn test_remove_expiration() {
+        use std::time::Duration;
+
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let key = b"persist_me".to_vec();
+        let now = Instant::now();
+        let expires = now + Duration::from_millis(50);
+
+        // Add expiration
+        let mut entry = make_entry(b"val");
+        entry.expires_at = Some(expires);
+        store.insert(key.clone(), entry);
+        store.add_expiration(&key, expires);
+
+        // Remove expiration (simulates PERSIST)
+        store.remove_expiration(&key);
+
+        // expire_shard should find nothing in the heap
+        let future = now + Duration::from_millis(100);
+        let removed = store.expire_shard(store.shard_index(&key), future, 10);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_eviction_candidate_sampling() {
+        let store = ShardedStore::with_shard_count_for_test(16);
+
+        // Insert keys with varying LRU clocks
+        for i in 0..100 {
+            let key = format!("evict:{}", i).into_bytes();
+            let mut entry = make_entry(b"val");
+            entry.lru_clock = i as u32;
+            entry.access_count = (100 - i) as u16;
+            if i % 2 == 0 {
+                entry.expires_at = Some(Instant::now() + std::time::Duration::from_secs(60));
+            }
+            store.insert(key, entry);
+        }
+
+        // Sample from each shard (all keys)
+        let mut total_candidates = 0;
+        for shard_idx in 0..store.num_shards() {
+            let candidates = store.sample_eviction_candidates(shard_idx, false);
+            total_candidates += candidates.len();
+            // Each candidate should have valid data
+            for c in &candidates {
+                assert!(!c.key.is_empty());
+                assert!(c.mem_size > 0);
+            }
+        }
+        assert!(total_candidates > 0, "Should find some candidates");
+
+        // Sample volatile-only (keys with expiry)
+        let mut volatile_candidates = 0;
+        for shard_idx in 0..store.num_shards() {
+            let candidates = store.sample_eviction_candidates(shard_idx, true);
+            for c in &candidates {
+                assert!(c.has_expiry, "Volatile-only should only return keys with expiry");
+            }
+            volatile_candidates += candidates.len();
+        }
+        assert!(volatile_candidates > 0 && volatile_candidates < total_candidates);
+    }
+
+    #[test]
+    fn test_clear_also_clears_expiration_heaps() {
+        use std::time::Duration;
+
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let now = Instant::now();
+
+        // Add keys with expirations
+        for i in 0..50 {
+            let key = format!("clearme:{}", i).into_bytes();
+            let expires = now + Duration::from_millis(100);
+            let mut entry = make_entry(b"val");
+            entry.expires_at = Some(expires);
+            store.insert(key.clone(), entry);
+            store.add_expiration(&key, expires);
+        }
+
+        // Clear the store
+        store.clear();
+
+        // Expiration heaps should also be empty
+        let future = now + Duration::from_secs(1);
+        for shard_idx in 0..store.num_shards() {
+            let removed = store.expire_shard(shard_idx, future, 100);
+            assert!(removed.is_empty(), "Expiration heaps should be cleared");
         }
     }
 }

@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use serde::{Serialize, Deserialize};
+use crate::storage::clock::cached_now;
 use crate::storage::value::StoreValue;
 
 /// Redis data type
@@ -69,18 +70,20 @@ impl Entry {
     }
 
     /// Check if this entry has expired.
+    /// Uses cached clock (~1ms resolution) to avoid syscall overhead.
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
-            Instant::now() > expires_at
+            cached_now() > expires_at
         } else {
             false
         }
     }
 
     /// Calculate the remaining TTL (time-to-live).
+    /// Uses cached clock for consistency with is_expired().
     pub fn ttl(&self) -> Option<Duration> {
         self.expires_at.map(|expires_at| {
-            let now = Instant::now();
+            let now = cached_now();
             if now >= expires_at {
                 Duration::from_secs(0)
             } else {
@@ -96,8 +99,9 @@ impl Entry {
     }
 
     /// Set a new expiration time.
+    /// Uses cached clock for consistency.
     pub fn expire(&mut self, ttl: Duration) {
-        self.expires_at = Some(Instant::now() + ttl);
+        self.expires_at = Some(cached_now() + ttl);
     }
 
     /// Remove the expiration time.

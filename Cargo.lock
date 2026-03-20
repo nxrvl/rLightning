@@ -1556,6 +1556,7 @@ name = "rlightning"
 version = "2.1.0"
 dependencies = [
  "anyhow",
+ "arrayvec",
  "base64",
  "bincode",
  "byteorder",

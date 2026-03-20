@@ -77,6 +77,8 @@ rustc-hash = "2"
 parking_lot = "0.12"
 # Fast integer-to-string conversion for RESP serialization
 itoa = "1"
+# Fixed-capacity stack-allocated Vec for eviction candidate buffers
+arrayvec = "0.7"
 
 
 [dev-dependencies]

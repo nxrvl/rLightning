@@ -12,6 +12,7 @@ use crate::storage::item::Entry;
 use crate::storage::sharded::ShardMap;
 use crate::storage::value::StoreValue;
 use std::time::{Duration, Instant};
+use crate::storage::clock::cached_now;
 
 /// Classification of a command for pipeline batching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,7 +317,7 @@ fn flush_batch<'a>(
 /// Execute a batch of read commands under a single shard read lock.
 /// Returns one CommandResult per command in order.
 pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandResult> {
-    let now = Instant::now();
+    let now = cached_now();
     commands
         .iter()
         .map(|cmd| execute_read_cmd(map, cmd, now))
@@ -728,7 +729,7 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     if args.is_empty() {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
-    let now = Instant::now();
+    let now = cached_now();
     let key = &args[0];
     match map.remove(key) {
         Some(entry) => {
@@ -762,7 +763,7 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
 
     // Check if key exists and is valid
     let current_val = match map.get(key) {
@@ -826,7 +827,7 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         }
         None => return (Err(CommandError::NotANumber), 0),
     };
-    let now = Instant::now();
+    let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
@@ -856,7 +857,7 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         }
         None => return (Err(CommandError::NotANumber), 0),
     };
-    let now = Instant::now();
+    let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
@@ -873,7 +874,7 @@ fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     if args.is_empty() {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
-    let now = Instant::now();
+    let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
@@ -896,7 +897,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     }
     let key = &args[0];
     let value = &args[1];
-    let now = Instant::now();
+    let now = cached_now();
 
     // Check for expired entry
     if let Some(entry) = map.get(key) {
@@ -940,7 +941,7 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
     let mut mem_delta: i64 = 0;
 
     // Remove expired entry
@@ -991,7 +992,7 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
 
     match map.get_mut(key) {
         Some(entry) => {
@@ -1022,7 +1023,7 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
     let mut mem_delta: i64 = 0;
 
     // Remove expired entry
@@ -1069,7 +1070,7 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
 
     match map.get_mut(key) {
         Some(entry) => {
@@ -1101,7 +1102,7 @@ fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
     let mut mem_delta: i64 = 0;
 
     // Remove expired entry
@@ -1162,7 +1163,7 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
 
     match map.get_mut(key) {
         Some(entry) => {
@@ -1193,7 +1194,7 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
     let mut mem_delta: i64 = 0;
 
     // Remove expired entry
@@ -1235,7 +1236,7 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         return (Err(CommandError::WrongNumberOfArguments), 0);
     }
     let key = &args[0];
-    let now = Instant::now();
+    let now = cached_now();
     let mut mem_delta: i64 = 0;
 
     // Remove expired entry
@@ -1512,7 +1513,7 @@ mod tests {
     fn test_batch_read_expired_key() {
         let store = ShardedStore::with_shard_count_for_test(16);
         let mut entry = Entry::new_string(b"val".to_vec());
-        entry.expires_at = Some(Instant::now() - Duration::from_secs(1)); // Already expired
+        entry.expires_at = Some(cached_now() - Duration::from_secs(1)); // Already expired
         store.insert(b"expired".to_vec(), entry);
 
         let cmd = make_cmd("GET", &[b"expired"]);
@@ -1641,7 +1642,7 @@ mod tests {
         let cmd3 = make_cmd("TYPE", &[b"missing"]);
 
         // These may be on different shards, just test the execution logic
-        let now = Instant::now();
+        let now = cached_now();
         let shard_idx = store.shard_index(b"str");
         store.execute_on_shard_ref(shard_idx, |map| {
             let result = execute_read_cmd(map, &cmd1, now);
@@ -1702,7 +1703,7 @@ mod tests {
                         match kind {
                             CommandKind::Read => {
                                 let r = store.execute_on_shard_ref(shard_idx, |map| {
-                                    execute_read_cmd(map, cmd, Instant::now())
+                                    execute_read_cmd(map, cmd, cached_now())
                                 });
                                 results.push(r);
                             }

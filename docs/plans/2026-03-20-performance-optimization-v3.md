@@ -180,13 +180,13 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/storage/sharded.rs`
 - Modify: `src/storage/engine.rs`
 
-- [ ] Add `arrayvec` dependency to Cargo.toml
-- [ ] Implement per-shard expiration heaps (move from global BinaryHeap with RwLock to per-shard BinaryHeap accessed under existing shard lock)
-- [ ] Implement background round-robin shard expiration (N expires per iteration per shard)
-- [ ] Implement probabilistic eviction with per-shard `ArrayVec<EvictionCandidate, 16>` candidate buffer
-- [ ] Replace `Instant::now()` calls on every GET with cached clock (`CACHED_NOW: AtomicU64`, updated every 1ms by background timer)
-- [ ] Write tests for: per-shard expiration correctness, eviction candidate selection, cached clock accuracy
-- [ ] Run full test suite - must pass before task 11
+- [x] Add `arrayvec` dependency to Cargo.toml
+- [x] Implement per-shard expiration heaps (move from global BinaryHeap with RwLock to per-shard BinaryHeap accessed under existing shard lock)
+- [x] Implement background round-robin shard expiration (N expires per iteration per shard)
+- [x] Implement probabilistic eviction with per-shard `ArrayVec<EvictionCandidate, 16>` candidate buffer
+- [x] Replace `Instant::now()` calls on every GET with cached clock (`CACHED_NOW: AtomicU64`, updated every 1ms by background timer)
+- [x] Write tests for: per-shard expiration correctness, eviction candidate selection, cached clock accuracy
+- [x] Run full test suite - must pass before task 11
 
 ### Task 11: Phase 10 - Non-Blocking Persistence
 

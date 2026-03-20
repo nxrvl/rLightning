@@ -497,3 +497,74 @@ starting task execution phase
 - Added 7 new tests: concurrent reads, EXISTS/TTL/TYPE read locks, INCR/DECR atomicity, relaxed ordering accuracy, sharded concurrent reads, sharded relaxed counters, execute_on_shard_ref concurrent
 - All 1536+ tests pass
 [26-03-21 00:32:19] Now commit:
+[26-03-21 00:32:46] Task 9 complete. There are still uncompleted task sections remaining (Tasks 10, 11, 12, 13), so stopping here for the loop to handle the next iteration.
+[26-03-21 00:32:46] Summary of what was done:
+[26-03-21 00:32:46]   - GET now uses read locks (parking_lot::RwLock::read()) instead of write locks, enabling concurrent reader throughput
+[26-03-21 00:32:46]   - EXISTS, TTL, TYPE confirmed already using read locks
+[26-03-21 00:32:46]   - atomic_incr uses itoa::Buffer for direct integer serialization, avoiding String allocations
+[26-03-21 00:32:46]   - All counter atomics relaxed from AcqRel to Relaxed for memory_used, key_count across both sharded.rs (16 sites) and engine.rs (77 sites)
+[26-03-21 00:32:46]   - Version counters, flush epochs, and config values kept at stronger orderings (SeqCst/Acquire/Release)
+[26-03-21 00:32:46]   - Added 7 new tests for concurrent read correctness, INCR/DECR atomicity under contention, and relaxed ordering accuracy
+[26-03-21 00:32:46]   - All 1536+ tests pass
+[26-03-21 00:32:50] The background test run also completed successfully (exit code 0). Task 9 is done and committed. The loop can proceed to Task 10.
+
+--- task iteration 10 ---
+[26-03-21 00:33:15] I'm picking up Task 10: Phase 9 - TTL and Eviction Optimization. This task will:
+[26-03-21 00:33:15]   - Move TTL expiration from a global structure to per-shard expiration heaps, reducing lock contention
+[26-03-21 00:33:15]   - Implement background round-robin shard expiration scanning
+[26-03-21 00:33:15]   - Add probabilistic eviction with per-shard candidate buffers using ArrayVec
+[26-03-21 00:33:15]   - Replace frequent Instant::now() syscalls with a cached clock updated by a background timer
+[26-03-21 00:33:15]   - Key files: src/storage/sharded.rs, src/storage/engine.rs, Cargo.toml
+[26-03-21 00:33:15] Let me start by understanding the current codebase state.
+[26-03-21 00:33:24] Let me read the engine.rs parts relevant to TTL, expiration, and eviction.
+[26-03-21 00:33:54] Now let me look at the Entry struct and understand its `expires_at` field, and check for `Instant::now()` usage patterns.
+[26-03-21 00:34:12] Now let me understand the existing set_value, and how expiration_queue is used in key set operations, and also look at the `get` operations to see where `Instant::now()` is called on reads.
+[26-03-21 00:34:30] Good, I now have a comprehensive understanding of the codebase. Let me now plan and implement the changes for Task 10. The key items are:
+[26-03-21 00:34:30]   1. Add `arrayvec` dependency
+[26-03-21 00:34:30]   2. Per-shard expiration heaps (move from global BinaryHeap)
+[26-03-21 00:34:30]   3. Background round-robin shard expiration
+[26-03-21 00:34:30]   4. Probabilistic eviction with per-shard ArrayVec candidate buffer
+[26-03-21 00:34:30]   5. Cached clock (CACHED_NOW) replacing `Instant::now()` on hot paths
+[26-03-21 00:34:30]   6. Tests
+[26-03-21 00:34:30] Let me start implementing.
+[26-03-21 00:34:41] Now let me create the cached clock module. I'll add it to the storage module.
+[26-03-21 00:35:11] Now let me add per-shard expiration heaps to the ShardedStore. I need to modify the `Shard` struct to include a `BinaryHeap` per shard, and add methods for managing per-shard expirations.
+[26-03-21 00:35:16] Now I'll add the per-shard expiration heap to the `ShardInner` and the eviction candidate types. Let me make the changes:
+[26-03-21 00:35:34] Now update the Shard construction in `with_shard_count_and_capacity`:
+[26-03-21 00:35:42] Now update the `clear` method to also clear expiration heaps:
+[26-03-21 00:35:48] Now add the per-shard expiration and eviction methods to `ShardedStore`. I'll add them before the `#[cfg(test)]` block:
+[26-03-21 00:36:15] Now I need to update the `StorageEngine` to use per-shard expiration heaps instead of the global one, implement background round-robin shard expiration, and replace `Instant::now()` with `cached_now()` on
+[26-03-21 00:36:15] hot paths. Let me first see what needs to change in engine.rs:
+[26-03-21 00:36:19] Now let me update the imports and remove the global BinaryHeap from the engine:
+[26-03-21 00:36:28] Now remove the `ExpirationEntry` struct from engine.rs since we're moving to per-shard heaps:
+[26-03-21 00:36:41] Now remove the `expiration_queue` and `expiration_timer` fields from `StorageEngine`, replacing the timer with a round-robin shard index:
+[26-03-21 00:36:49] Now update the `new()` constructor:
+[26-03-21 00:36:56] Now update the expiration task to use round-robin per-shard processing:
+[26-03-21 00:37:13] Now update `process_expired_keys`, `probabilistic_cleanup`, `add_to_expiration_queue`, and `remove_from_expiration_queue`:
+[26-03-21 00:37:34] Now update `remove_expired_key` and `lazy_expire` to use `cached_now()`:
+[26-03-21 00:37:45] Now update `add_to_expiration_queue` and `remove_from_expiration_queue` to use per-shard heaps:
+[26-03-21 00:38:02] Now let me update the `maybe_evict` method to use per-shard probabilistic eviction with `ArrayVec`:
+[26-03-21 00:38:30] Now let me replace `Instant::now()` calls in `set_value` and other hot paths with `cached_now()`:
+[26-03-21 00:38:34] Now let me replace `Instant::now()` with `cached_now()` in the `set_value` method's TTL handling:
+[26-03-21 00:38:40] Let me replace all `Instant::now()` occurrences in engine.rs with `cached_now()`:
+[26-03-21 00:38:44] Now update the `item.rs` to use `cached_now()` instead of `Instant::now()` for the hot-path `is_expired()`, `ttl()`, and `expire()` methods:
+[26-03-21 00:38:59] Now update `batch.rs` to use `cached_now()` instead of `Instant::now()`:
+[26-03-21 00:39:09] Now let me try to build and see if there are compilation errors:
+[26-03-21 00:39:20] There's a reference to the old `expiration_queue` and `ExpirationEntry` in a flush/swapdb function. Let me find and fix it:
+[26-03-21 00:39:30] The expiration queue handling for SWAPDB is no longer needed since per-shard heaps are stored within each ShardedStore. When we swap databases (which are separate ShardedStore instances), the per-shard
+[26-03-21 00:39:30] heaps go with them naturally through the db_mapping swap. The expiration entries are already inside the correct ShardedStore, so there's nothing to rewrite.
+[26-03-21 00:39:36] Now clean up the unused imports:
+[26-03-21 00:40:09] The build succeeds with only pre-existing warnings. Now let me also check that `Instant::now()` was properly removed from hot paths. Let me verify we haven't left any in the critical import chain:
+[26-03-21 00:40:20] Good - the only remaining `Instant::now()` calls are in the clock module itself (where it's correct) and in test code. 
+[26-03-21 00:40:20] Now let me check if there are any `Instant::now()` usages in other files that call into item.rs functions (the command handlers shouldn't have any direct calls since they go through the storage engine):
+[26-03-21 00:40:26] The remaining `Instant::now()` calls are in sentinel, replication, and the clock module itself - these are correct (sentinel/replication need real-time accuracy, not cached). The storage hot paths are all
+[26-03-21 00:40:26] converted to `cached_now()`.
+[26-03-21 00:40:26] Now let me add tests to the sharded.rs file for the new expiration and eviction methods:
+[26-03-21 00:40:30] Now let me find the end of the test module in sharded.rs and add new tests:
+[26-03-21 00:41:18] Now let's build and run the sharded tests:
+[26-03-21 00:41:35] Build succeeds. Let me run the new sharded tests:
+[26-03-21 00:42:00] All 22 tests pass (including our new 6 tests). Let me also run the clock tests:
+[26-03-21 00:42:03] Now let's run the full test suite:
+[26-03-21 00:50:05] All tests pass. Let me also verify the full count:
+[26-03-21 00:53:07] All tests pass - 0 failures across all test suites. Now let me update the plan and commit.
+[26-03-21 00:53:23] Now commit:
