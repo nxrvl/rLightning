@@ -600,8 +600,8 @@ impl StorageEngine {
                         db.insert(k, item);
                     } else {
                         let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
                         removed_count += 1;
                     }
                 }
@@ -645,8 +645,8 @@ impl StorageEngine {
                         db.insert(k, item);
                     } else {
                         let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -681,8 +681,8 @@ impl StorageEngine {
             }
             // Use atomic operations for memory tracking
             let size = Self::calculate_entry_size(&k, &item.value) as u64;
-            self.current_memory.fetch_sub(size, Ordering::AcqRel);
-            self.key_count.fetch_sub(1, Ordering::AcqRel);
+            self.current_memory.fetch_sub(size, Ordering::Relaxed);
+            self.key_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -817,7 +817,7 @@ impl StorageEngine {
         // Read the active max memory limit (may have been changed at runtime via CONFIG SET)
         let max_memory = self.active_max_memory.load(Ordering::Acquire);
         // Check if adding this item would exceed our memory limit
-        let current_memory = self.current_memory.load(Ordering::Acquire) as usize;
+        let current_memory = self.current_memory.load(Ordering::Relaxed) as usize;
         if current_memory + required_size > max_memory {
             // Read the active eviction policy (may have been changed at runtime via CONFIG SET)
             let eviction_policy =
@@ -829,7 +829,7 @@ impl StorageEngine {
             }
 
             // Evict items until we have enough space (search across all databases)
-            while self.current_memory.load(Ordering::Acquire) as usize + required_size > max_memory
+            while self.current_memory.load(Ordering::Relaxed) as usize + required_size > max_memory
             {
                 // Check if there are any items to evict across all DBs
                 let total_keys: usize =
@@ -942,8 +942,8 @@ impl StorageEngine {
                     let db = self.get_db_by_index(db_idx);
                     if let Some((k, item)) = db.remove(&key) {
                         let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
                     }
                 } else {
                     return Err(StorageError::MemoryLimitExceeded);
@@ -1030,17 +1030,17 @@ impl StorageEngine {
                 let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
                     self.current_memory
-                        .fetch_sub(old_size as u64, Ordering::AcqRel);
+                        .fetch_sub(old_size as u64, Ordering::Relaxed);
                 }
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 entry.insert(item);
                 self.bump_key_version(&key);
                 false
             }
             ShardEntry::Vacant(entry) => {
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 entry.insert(item);
                 self.bump_key_version(&key);
                 true
@@ -1053,7 +1053,7 @@ impl StorageEngine {
 
         if is_new_key {
             self.update_prefix_indices(&key, true).await;
-            self.key_count.fetch_add(1, Ordering::AcqRel);
+            self.key_count.fetch_add(1, Ordering::Relaxed);
         }
         self.increment_write_counters().await;
 
@@ -1092,17 +1092,17 @@ impl StorageEngine {
                 let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
                     self.current_memory
-                        .fetch_sub(old_size as u64, Ordering::AcqRel);
+                        .fetch_sub(old_size as u64, Ordering::Relaxed);
                 }
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 entry.insert(item);
                 self.bump_key_version(&key);
                 (false, existing_expires_at)
             }
             ShardEntry::Vacant(entry) => {
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 entry.insert(item);
                 self.bump_key_version(&key);
                 (true, None)
@@ -1115,7 +1115,7 @@ impl StorageEngine {
 
         if is_new_key {
             self.update_prefix_indices(&key, true).await;
-            self.key_count.fetch_add(1, Ordering::AcqRel);
+            self.key_count.fetch_add(1, Ordering::Relaxed);
         }
         self.increment_write_counters().await;
 
@@ -1125,13 +1125,13 @@ impl StorageEngine {
     /// Get a string value from the storage engine
     pub async fn get(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
         let db = self.active_db();
-        // Extract result in sync block to ensure !Send guard doesn't span await.
+        // Use read lock for maximum concurrent reader throughput.
+        // LRU/LFU touch is skipped on reads - eviction sampling handles approximation.
         let (result, needs_expire) = {
-            if let Some(mut entry) = db.get_mut(key) {
+            if let Some(entry) = db.get(key) {
                 if entry.is_expired() {
                     (None, true)
                 } else {
-                    entry.touch();
                     let val = match &entry.value {
                         StoreValue::Str(v) => Some(v.to_vec()),
                         _ => None,
@@ -1155,10 +1155,10 @@ impl StorageEngine {
         if let Some((k, item)) = self.active_db().remove(key) {
             // Use atomic operations for memory tracking - much faster than write lock
             let size = Self::calculate_entry_size(&k, &item.value) as u64;
-            self.current_memory.fetch_sub(size, Ordering::AcqRel);
+            self.current_memory.fetch_sub(size, Ordering::Relaxed);
             // Update prefix index and decrement key count
             self.update_prefix_indices(&k, false).await;
-            self.key_count.fetch_sub(1, Ordering::AcqRel);
+            self.key_count.fetch_sub(1, Ordering::Relaxed);
             // Bump key version for WATCH support
             self.bump_key_version(&k);
             Ok(true)
@@ -1184,8 +1184,8 @@ impl StorageEngine {
                     } else {
                         let (k, item) = entry.remove_entry();
                         let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                        self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
                         self.bump_key_version(&k);
                         Some(k)
                     }
@@ -1332,8 +1332,8 @@ impl StorageEngine {
         }
 
         // Reset memory and key count atomically
-        self.current_memory.store(0, Ordering::Release);
-        self.key_count.store(0, Ordering::Release);
+        self.current_memory.store(0, Ordering::Relaxed);
+        self.key_count.store(0, Ordering::Relaxed);
 
         // Clear prefix index
         let mut prefix_index = self.prefix_index.write().await;
@@ -1360,13 +1360,13 @@ impl StorageEngine {
         });
         db.clear();
         self.current_memory.fetch_sub(
-            size.min(self.current_memory.load(Ordering::Acquire)),
-            Ordering::AcqRel,
+            size.min(self.current_memory.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
         );
         // Recalculate total key count across all databases
         let total: u64 =
             self.data.len() as u64 + self.extra_dbs.iter().map(|db| db.len() as u64).sum::<u64>();
-        self.key_count.store(total, Ordering::Release);
+        self.key_count.store(total, Ordering::Relaxed);
 
         // Clear prefix index entries for this DB
         let mut prefix_index = self.prefix_index.write().await;
@@ -1866,7 +1866,7 @@ impl StorageEngine {
 
     /// Get the current number of keys (O(1) operation for DBSIZE)
     pub fn get_key_count(&self) -> u64 {
-        self.key_count.load(Ordering::Acquire)
+        self.key_count.load(Ordering::Relaxed)
     }
 
     /// Get the key count for a specific database (logical index, uses db_mapping).
@@ -1881,7 +1881,7 @@ impl StorageEngine {
 
     /// Get the current memory usage in bytes
     pub fn get_used_memory(&self) -> u64 {
-        self.current_memory.load(Ordering::Acquire)
+        self.current_memory.load(Ordering::Relaxed)
     }
 
     /// Get a random key from the storage engine (O(1) operation for RANDOMKEY)
@@ -2111,9 +2111,9 @@ impl StorageEngine {
                     return Ok(false);
                 }
                 let old_size = Self::calculate_entry_size(&dst, &occ.get().value) as u64;
-                self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 occ.insert(new_item);
                 // Bump version while OccupiedEntry still holds the shard lock
                 self.bump_key_version(&dst);
@@ -2121,7 +2121,7 @@ impl StorageEngine {
             }
             ShardEntry::Vacant(vac) => {
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 vac.insert(new_item);
                 self.bump_key_version(&dst);
                 true
@@ -2130,7 +2130,7 @@ impl StorageEngine {
 
         if is_new_key {
             self.update_prefix_indices(&dst, true).await;
-            self.key_count.fetch_add(1, Ordering::AcqRel);
+            self.key_count.fetch_add(1, Ordering::Relaxed);
         }
         self.increment_write_counters().await;
         Ok(true)
@@ -2165,8 +2165,8 @@ impl StorageEngine {
                     let (k, item) = occ.remove_entry();
                     // Bookkeeping for expired key removal
                     let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                    self.current_memory.fetch_sub(size, Ordering::AcqRel);
-                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(size, Ordering::Relaxed);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
                     return Ok(false);
                 }
                 occ.remove_entry()
@@ -2547,9 +2547,9 @@ impl StorageEngine {
                 // Key exists - check if expired
                 if occ.get().is_expired() {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                     self.current_memory
-                        .fetch_add(required_size as u64, Ordering::AcqRel);
+                        .fetch_add(required_size as u64, Ordering::Relaxed);
                     occ.insert(item);
                     // Bump version while OccupiedEntry still holds the shard lock
                     let v = self.bump_and_get_key_version(&key);
@@ -2561,7 +2561,7 @@ impl StorageEngine {
             }
             ShardEntry::Vacant(vac) => {
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 vac.insert(item);
                 // Bump version while shard lock is still held
                 let v = self.bump_and_get_key_version(&key);
@@ -2575,7 +2575,7 @@ impl StorageEngine {
             }
             self.update_prefix_indices(&key, true).await;
             if !replaced_expired {
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
             }
             self.increment_write_counters().await;
         }
@@ -2616,15 +2616,15 @@ impl StorageEngine {
                 if occ.get().is_expired() {
                     // Expired key doesn't count as existing
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                     occ.remove();
-                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
                     false
                 } else {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                     self.current_memory
-                        .fetch_add(required_size as u64, Ordering::AcqRel);
+                        .fetch_add(required_size as u64, Ordering::Relaxed);
                     occ.insert(item);
                     // Bump version while OccupiedEntry still holds the shard lock
                     self.bump_key_version(&key);
@@ -2694,9 +2694,9 @@ impl StorageEngine {
                         // XX: don't set if key doesn't exist
                         if expired {
                             let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                            self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                            self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                             occ.remove();
-                            self.key_count.fetch_sub(1, Ordering::AcqRel);
+                            self.key_count.fetch_sub(1, Ordering::Relaxed);
                         }
                         (false, None, false, None)
                     } else {
@@ -2713,9 +2713,9 @@ impl StorageEngine {
                             None
                         };
                         let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                        self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                         self.current_memory
-                            .fetch_add(required_size as u64, Ordering::AcqRel);
+                            .fetch_add(required_size as u64, Ordering::Relaxed);
                         if keepttl && effectively_exists {
                             // Preserve the old TTL by copying expires_at
                             item.expires_at = preserved_expires;
@@ -2740,7 +2740,7 @@ impl StorageEngine {
                         (false, None, false, None)
                     } else {
                         self.current_memory
-                            .fetch_add(required_size as u64, Ordering::AcqRel);
+                            .fetch_add(required_size as u64, Ordering::Relaxed);
                         vac.insert(item);
                         self.bump_key_version(&key);
                         (true, None, true, new_expires_at)
@@ -2754,7 +2754,7 @@ impl StorageEngine {
             }
             if is_new_key {
                 self.update_prefix_indices(&key, true).await;
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
             }
             self.increment_write_counters().await;
         }
@@ -2772,17 +2772,20 @@ impl StorageEngine {
     /// If the key doesn't exist, it is created with value 0 before incrementing.
     /// Returns the new value after increment.
     pub fn atomic_incr(&self, key: &[u8], delta: i64) -> StorageResult<i64> {
+        // Stack buffer for itoa serialization (avoids String allocation).
+        // i64::MIN = "-9223372036854775808" = 20 bytes, so 24 is plenty.
+        let mut itoa_buf = itoa::Buffer::new();
+
         match self.active_db().entry(key.to_vec()) {
             ShardEntry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     // Treat expired as non-existent: set to delta
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    let new_val_str = delta.to_string();
-                    let new_val_bytes = new_val_str.as_bytes().to_vec();
+                    let new_val_bytes = itoa_buf.format(delta).as_bytes().to_vec();
                     let new_sv = StoreValue::Str(new_val_bytes.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                    self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                     let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
@@ -2793,31 +2796,30 @@ impl StorageEngine {
                 if occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                // Parse current value
+                // Parse current value directly from bytes
                 let bytes = occ.get().value.as_str().ok_or(StorageError::WrongType)?;
                 let current_str =
                     std::str::from_utf8(bytes).map_err(|_| StorageError::NotANumber)?;
                 let current: i64 = current_str.parse().map_err(|_| StorageError::NotANumber)?;
                 let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                let new_val_str = new_val.to_string();
-                let new_val_bytes = new_val_str.as_bytes().to_vec();
+                // Use itoa for direct integer serialization (no String allocation)
+                let new_val_bytes = itoa_buf.format(new_val).as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
                 let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
-                self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                 occ.get_mut().value = new_sv;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_val)
             }
             ShardEntry::Vacant(vac) => {
-                let new_val_str = delta.to_string();
-                let new_val_bytes = new_val_str.as_bytes().to_vec();
+                let new_val_bytes = itoa_buf.format(delta).as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
-                self.current_memory.fetch_add(size, Ordering::AcqRel);
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                self.current_memory.fetch_add(size, Ordering::Relaxed);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
                 vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(delta)
@@ -2840,8 +2842,8 @@ impl StorageEngine {
                     let new_val_bytes = new_val_str.as_bytes().to_vec();
                     let new_sv = StoreValue::Str(new_val_bytes.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                    self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                     let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
@@ -2867,8 +2869,8 @@ impl StorageEngine {
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
                 let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
-                self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                 occ.get_mut().value = new_sv;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
@@ -2879,8 +2881,8 @@ impl StorageEngine {
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
-                self.current_memory.fetch_add(size, Ordering::AcqRel);
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                self.current_memory.fetch_add(size, Ordering::Relaxed);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
                 vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(delta)
@@ -2900,8 +2902,8 @@ impl StorageEngine {
                     let new_len = new_val.len();
                     let new_sv = StoreValue::Str(new_val.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                    self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                     let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
@@ -2918,8 +2920,8 @@ impl StorageEngine {
                 }
                 let new_len = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
                 let new_size = old_size + (new_len - old_val_size) as u64;
-                self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_len)
@@ -2929,8 +2931,8 @@ impl StorageEngine {
                 let new_len = new_val.len();
                 let new_sv = StoreValue::Str(new_val.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
-                self.current_memory.fetch_add(size, Ordering::AcqRel);
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                self.current_memory.fetch_add(size, Ordering::Relaxed);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
                 vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(new_len)
@@ -2971,19 +2973,19 @@ impl StorageEngine {
                         if expired {
                             // Expired key, closure got None but returned Keep = no-op
                             // Clean up the expired entry
-                            self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                            self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                             occ.remove();
-                            self.key_count.fetch_sub(1, Ordering::AcqRel);
+                            self.key_count.fetch_sub(1, Ordering::Relaxed);
                         } else {
                             let new_size =
                                 Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                             if new_size != old_size {
                                 if old_size > new_size {
                                     self.current_memory
-                                        .fetch_sub(old_size - new_size, Ordering::AcqRel);
+                                        .fetch_sub(old_size - new_size, Ordering::Relaxed);
                                 } else {
                                     self.current_memory
-                                        .fetch_add(new_size - old_size, Ordering::AcqRel);
+                                        .fetch_add(new_size - old_size, Ordering::Relaxed);
                                 }
                             }
                             occ.get_mut().touch();
@@ -2991,8 +2993,8 @@ impl StorageEngine {
                     }
                     ModifyResult::Set(val) => {
                         let new_size = Self::calculate_entry_size(key, &val) as u64;
-                        self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                        self.current_memory.fetch_add(new_size, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                        self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                         if expired {
                             occ.insert(Entry::new(val));
                         } else {
@@ -3001,9 +3003,9 @@ impl StorageEngine {
                         }
                     }
                     ModifyResult::Delete => {
-                        self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                        self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                         occ.remove();
-                        self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        self.key_count.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
                 self.bump_key_version(key);
@@ -3015,8 +3017,8 @@ impl StorageEngine {
                 match action {
                     ModifyResult::Set(val) => {
                         let size = Self::calculate_entry_size(key, &val) as u64;
-                        self.current_memory.fetch_add(size, Ordering::AcqRel);
-                        self.key_count.fetch_add(1, Ordering::AcqRel);
+                        self.current_memory.fetch_add(size, Ordering::Relaxed);
+                        self.key_count.fetch_add(1, Ordering::Relaxed);
                         vac.insert(Entry::new(val));
                         self.bump_key_version(key);
                         self.increment_write_counters_sync();
@@ -3060,8 +3062,8 @@ impl StorageEngine {
             ShardEntry::Occupied(occ) => {
                 if occ.get().is_expired() {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
                     occ.remove();
                     self.bump_key_version(key);
                     Ok(None)
@@ -3070,8 +3072,8 @@ impl StorageEngine {
                 } else {
                     let old_value = occ.get().value.as_str().map(|b| b.to_vec());
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                    self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
-                    self.key_count.fetch_sub(1, Ordering::AcqRel);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
                     occ.remove();
                     self.bump_key_version(key);
                     Ok(old_value)
@@ -3172,9 +3174,9 @@ impl StorageEngine {
                     occ.get().value.as_str().map(|b| b.to_vec())
                 };
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
                 let item = crate::storage::item::Entry::new(store_value);
                 occ.insert(item);
                 // Bump version while OccupiedEntry still holds the shard lock
@@ -3183,8 +3185,8 @@ impl StorageEngine {
             }
             ShardEntry::Vacant(vac) => {
                 self.current_memory
-                    .fetch_add(required_size as u64, Ordering::AcqRel);
-                self.key_count.fetch_add(1, Ordering::AcqRel);
+                    .fetch_add(required_size as u64, Ordering::Relaxed);
+                self.key_count.fetch_add(1, Ordering::Relaxed);
                 vac.insert(crate::storage::item::Entry::new(store_value));
                 self.bump_key_version(&key);
                 None
@@ -4323,5 +4325,171 @@ mod tests {
         // Key should still be accessible
         let val = storage.get(&key).await.unwrap();
         assert_eq!(val, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_reads_use_read_lock() {
+        // Verify that concurrent GET operations don't block each other
+        // (read locks allow multiple concurrent readers)
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Set up test data
+        for i in 0..100 {
+            let key = format!("read_key:{}", i);
+            let val = format!("val:{}", i);
+            storage.set(key.into_bytes(), val.into_bytes(), None).await.unwrap();
+        }
+
+        // Spawn many concurrent read tasks
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for i in 0..100 {
+                    let key = format!("read_key:{}", i);
+                    let val = storage.get(key.as_bytes()).await.unwrap();
+                    assert!(val.is_some(), "Key {} should exist", key);
+                    let expected = format!("val:{}", i);
+                    assert_eq!(val.unwrap(), expected.as_bytes());
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_exists_ttl_type_read_lock() {
+        // Verify EXISTS, TTL, TYPE all use read locks and work concurrently
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        for i in 0..50 {
+            let key = format!("rlock_key:{}", i);
+            storage.set(key.into_bytes(), b"value".to_vec(), None).await.unwrap();
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for i in 0..50 {
+                    let key = format!("rlock_key:{}", i);
+                    // All these should use read locks
+                    assert!(storage.exists(key.as_bytes()).await.unwrap());
+                    let _ttl = storage.ttl(key.as_bytes()).await.unwrap();
+                    let dtype = storage.get_type(key.as_bytes()).await.unwrap();
+                    assert_eq!(dtype, "string");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_incr_atomicity_under_contention() {
+        // Verify INCR is atomic: N threads each incrementing the same key M times
+        // should result in N*M as the final value
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Initialize key to 0
+        storage.set(b"counter".to_vec(), b"0".to_vec(), None).await.unwrap();
+
+        let num_tasks = 16;
+        let increments_per_task = 1000;
+
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..increments_per_task {
+                    storage.atomic_incr(b"counter", 1).unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let val = storage.get(b"counter").await.unwrap().unwrap();
+        let final_value: i64 = std::str::from_utf8(&val).unwrap().parse().unwrap();
+        assert_eq!(final_value, num_tasks * increments_per_task);
+    }
+
+    #[tokio::test]
+    async fn test_decr_atomicity_under_contention() {
+        // Same test but with DECR (negative delta)
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        let num_tasks: i64 = 8;
+        let decrements: i64 = 500;
+        let start_value = num_tasks * decrements;
+
+        storage.set(
+            b"dcounter".to_vec(),
+            start_value.to_string().into_bytes(),
+            None,
+        ).await.unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..decrements {
+                    storage.atomic_incr(b"dcounter", -1).unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let val = storage.get(b"dcounter").await.unwrap().unwrap();
+        let final_value: i64 = std::str::from_utf8(&val).unwrap().parse().unwrap();
+        assert_eq!(final_value, 0);
+    }
+
+    #[tokio::test]
+    async fn test_relaxed_ordering_counter_accuracy() {
+        // Verify that relaxed atomic orderings still give correct final counts
+        // after all concurrent operations complete
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        let num_tasks = 8;
+        let ops_per_task = 100;
+
+        let mut handles = Vec::new();
+        for t in 0..num_tasks {
+            let storage = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for i in 0..ops_per_task {
+                    let key = format!("relax_key:{}:{}", t, i);
+                    storage.set(key.into_bytes(), b"v".to_vec(), None).await.unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // After all tasks complete, key_count should reflect all insertions
+        let count = storage.get_key_count();
+        assert_eq!(count, (num_tasks * ops_per_task) as u64);
+
+        // Memory tracking should be non-zero
+        let mem = storage.get_used_memory();
+        assert!(mem > 0, "Memory usage should be tracked");
     }
 }

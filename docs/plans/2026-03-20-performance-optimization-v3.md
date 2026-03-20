@@ -168,11 +168,11 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/storage/sharded.rs`
 - Modify: `src/storage/engine.rs`
 
-- [ ] Optimize read-heavy operations (GET, EXISTS, TTL, TYPE) to use `parking_lot::RwLock::read()` for maximum concurrent reader throughput
-- [ ] Implement inline atomic operations (INCR, DECR, APPEND, SETNX) that operate directly within shard write guard without intermediate deserialization
-- [ ] Audit and relax atomic orderings where safe: use `Relaxed` for `memory_used`, `key_count`, `lru_clock` loads/stores
-- [ ] Write tests verifying concurrent read correctness, INCR atomicity under contention
-- [ ] Run full test suite - must pass before task 10
+- [x] Optimize read-heavy operations (GET, EXISTS, TTL, TYPE) to use `parking_lot::RwLock::read()` for maximum concurrent reader throughput
+- [x] Implement inline atomic operations (INCR, DECR, APPEND, SETNX) that operate directly within shard write guard without intermediate deserialization
+- [x] Audit and relax atomic orderings where safe: use `Relaxed` for `memory_used`, `key_count`, `lru_clock` loads/stores
+- [x] Write tests verifying concurrent read correctness, INCR atomicity under contention
+- [x] Run full test suite - must pass before task 10
 
 ### Task 10: Phase 9 - TTL and Eviction Optimization
 

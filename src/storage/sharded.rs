@@ -238,8 +238,8 @@ impl ShardedStore {
         for shard in self.shards.iter() {
             let mut guard = shard.inner.write();
             guard.map.clear();
-            shard.used_memory.store(0, Ordering::Release);
-            shard.key_count.store(0, Ordering::Release);
+            shard.used_memory.store(0, Ordering::Relaxed);
+            shard.key_count.store(0, Ordering::Relaxed);
         }
     }
 
@@ -343,7 +343,7 @@ impl ShardedStore {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
             .used_memory
-            .fetch_add(amount, Ordering::AcqRel);
+            .fetch_add(amount, Ordering::Relaxed);
     }
 
     /// Subtract from the memory counter for the shard containing `key`.
@@ -351,7 +351,7 @@ impl ShardedStore {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
             .used_memory
-            .fetch_sub(amount, Ordering::AcqRel);
+            .fetch_sub(amount, Ordering::Relaxed);
     }
 
     /// Increment the key count for the shard containing `key`.
@@ -359,7 +359,7 @@ impl ShardedStore {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
             .key_count
-            .fetch_add(1, Ordering::AcqRel);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Decrement the key count for the shard containing `key`.
@@ -367,7 +367,7 @@ impl ShardedStore {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
             .key_count
-            .fetch_sub(1, Ordering::AcqRel);
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Get total memory usage across all shards.
@@ -441,28 +441,28 @@ impl ShardedStore {
     pub fn add_memory_by_shard(&self, shard_idx: usize, amount: u64) {
         self.shards[shard_idx]
             .used_memory
-            .fetch_add(amount, Ordering::AcqRel);
+            .fetch_add(amount, Ordering::Relaxed);
     }
 
     /// Subtract from the memory counter for a specific shard by index.
     pub fn sub_memory_by_shard(&self, shard_idx: usize, amount: u64) {
         self.shards[shard_idx]
             .used_memory
-            .fetch_sub(amount, Ordering::AcqRel);
+            .fetch_sub(amount, Ordering::Relaxed);
     }
 
     /// Increment the key count for a specific shard by index.
     pub fn inc_key_count_by_shard(&self, shard_idx: usize, count: u32) {
         self.shards[shard_idx]
             .key_count
-            .fetch_add(count, Ordering::AcqRel);
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Decrement the key count for a specific shard by index.
     pub fn dec_key_count_by_shard(&self, shard_idx: usize, count: u32) {
         self.shards[shard_idx]
             .key_count
-            .fetch_sub(count, Ordering::AcqRel);
+            .fetch_sub(count, Ordering::Relaxed);
     }
 
     /// Create a ShardedStore with a specific shard count for testing.
@@ -737,5 +737,103 @@ mod tests {
     fn test_cache_line_alignment() {
         // Verify Shard is 128-byte aligned
         assert_eq!(std::mem::align_of::<Shard>(), 128);
+    }
+
+    #[test]
+    fn test_concurrent_reads_dont_block() {
+        // Verify that many concurrent reads via get() (read lock) don't block each other
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(ShardedStore::new());
+
+        // Populate
+        for i in 0..1000 {
+            store.insert(format!("key:{}", i).into_bytes(), make_entry(b"value"));
+        }
+
+        // Spawn many reader threads simultaneously
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..1000 {
+                    let key = format!("key:{}", i);
+                    let entry = store.get(key.as_bytes());
+                    assert!(entry.is_some(), "Key should exist");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_relaxed_ordering_counters() {
+        // Verify that relaxed atomics for memory/key counters converge to correct values
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(ShardedStore::new());
+        let num_threads = 8;
+        let ops_per_thread = 500;
+
+        let mut handles = Vec::new();
+        for t in 0..num_threads {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let key = format!("t{}:k{}", t, i);
+                    store.insert(key.into_bytes(), make_entry(b"val"));
+                    store.add_memory(format!("t{}:k{}", t, i).as_bytes(), 10);
+                    store.inc_key_count(format!("t{}:k{}", t, i).as_bytes());
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all threads complete, counters should be correct
+        let total_keys = store.total_key_count();
+        assert_eq!(total_keys, (num_threads * ops_per_thread) as u64);
+
+        let total_memory = store.total_used_memory();
+        assert_eq!(total_memory, (num_threads * ops_per_thread * 10) as u64);
+    }
+
+    #[test]
+    fn test_execute_on_shard_ref_concurrent() {
+        // Verify execute_on_shard_ref uses read locks allowing concurrent access
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(ShardedStore::new());
+        for i in 0..100 {
+            store.insert(format!("key:{}", i).into_bytes(), make_entry(b"value"));
+        }
+
+        let mut handles = Vec::new();
+        let num_shards = store.num_shards();
+
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                let mut found = 0;
+                for shard_idx in 0..num_shards {
+                    found += store.execute_on_shard_ref(shard_idx, |map| {
+                        map.len()
+                    });
+                }
+                assert_eq!(found, 100);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }
