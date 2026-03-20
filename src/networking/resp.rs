@@ -543,7 +543,8 @@ impl RespValue {
         }
     }
 
-    /// Try to parse common commands using a fast path
+    /// Try to parse common commands using a fast path (superseded by RawCommand::try_parse)
+    #[allow(dead_code)]
     pub fn try_parse_common_command(
         buffer: &mut BytesMut,
     ) -> Result<Option<RespCommand>, RespError> {

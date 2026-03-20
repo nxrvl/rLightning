@@ -69,6 +69,8 @@ mlua = { version = "0.10", features = ["lua51", "vendored"] }
 sha1_smol = "1.0"
 # SHA256 hashing for ACL password storage (Redis-compatible)
 sha2 = "0.10"
+# Small-buffer-optimized Vec for zero-copy command parsing
+smallvec = "1.13"
 
 
 [dev-dependencies]

@@ -1584,6 +1584,7 @@ dependencies = [
  "serde_json",
  "sha1_smol",
  "sha2",
+ "smallvec",
  "tempfile",
  "thiserror",
  "tokio",

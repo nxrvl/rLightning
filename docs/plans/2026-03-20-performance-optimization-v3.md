@@ -56,15 +56,15 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/networking/mod.rs`
 - Modify: `src/networking/server.rs`
 
-- [ ] Add `smallvec` dependency to Cargo.toml
-- [ ] Create `RawCommand<'buf>` struct with `name: &'buf [u8]` and `args: SmallVec<[&'buf [u8]; 4]>`
-- [ ] Implement `try_parse_raw()` function that parses RESP commands as zero-copy byte slices from read buffer
-- [ ] Implement case-insensitive byte comparison (`cmd_eq`) without allocation
-- [ ] Add fallback path: convert `RawCommand` to owned `RespValue` for MULTI queue, AOF logging, and RESP3 features
-- [ ] Integrate zero-copy parser into the server connection handler hot path
-- [ ] Keep existing `RespValue` parser for owned-data paths (AOF, MULTI, RESP3)
-- [ ] Write tests for zero-copy parser covering: simple commands, multi-bulk, edge cases (empty args, binary data, >4 args triggering SmallVec spill)
-- [ ] Run full test suite + integration tests - must pass before task 4
+- [x] Add `smallvec` dependency to Cargo.toml
+- [x] Create `RawCommand<'buf>` struct with `name: &'buf [u8]` and `args: SmallVec<[&'buf [u8]; 4]>`
+- [x] Implement `try_parse_raw()` function that parses RESP commands as zero-copy byte slices from read buffer
+- [x] Implement case-insensitive byte comparison (`cmd_eq`) without allocation
+- [x] Add fallback path: convert `RawCommand` to owned `RespValue` for MULTI queue, AOF logging, and RESP3 features
+- [x] Integrate zero-copy parser into the server connection handler hot path
+- [x] Keep existing `RespValue` parser for owned-data paths (AOF, MULTI, RESP3)
+- [x] Write tests for zero-copy parser covering: simple commands, multi-bulk, edge cases (empty args, binary data, >4 args triggering SmallVec spill)
+- [x] Run full test suite + integration tests - must pass before task 4
 
 ### Task 4: Phase 5 - Fast Command Dispatch
 

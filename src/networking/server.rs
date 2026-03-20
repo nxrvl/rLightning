@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -19,6 +19,7 @@ use crate::command::types::pubsub::{
     self as pubsub_commands, ClientId, subscription_message_to_resp,
 };
 use crate::networking::error::NetworkError;
+use crate::networking::raw_command::RawCommand;
 use crate::networking::resp::{ProtocolVersion, RespCommand, RespValue};
 use crate::persistence::PersistenceManager;
 use crate::persistence::config::AofSyncPolicy;
@@ -443,14 +444,24 @@ impl Server {
                         debug!(client_addr = %client_addr_str, combined_buffer = buffer.len(), "Combined partial buffer with new data");
                     }
 
-                    // Try the fast path for common commands first
-                    match RespValue::try_parse_common_command(&mut buffer) {
-                        Ok(Some(resp_cmd)) => {
-                            let cmd = Command {
-                                name: String::from_utf8_lossy(&resp_cmd.name).to_string(),
-                                args: resp_cmd.args.clone(),
-                            };
-                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Fast path command");
+                    // Try the zero-copy fast path first - parses without allocating.
+                    // Use a separate scope to drop the borrowed RawCommand before mutating buffer.
+                    let fast_parse_result = {
+                        match RawCommand::try_parse(&buffer) {
+                            Ok(Some(raw_cmd)) => {
+                                let cmd = raw_cmd.to_command();
+                                let consumed = raw_cmd.bytes_consumed;
+                                Some(Ok((cmd, consumed)))
+                            }
+                            Ok(None) => None,
+                            Err(e) => Some(Err(e)),
+                        }
+                    };
+
+                    match fast_parse_result {
+                        Some(Ok((cmd, consumed))) => {
+                            buffer.advance(consumed);
+                            debug!(client_addr = %client_addr_str, command = ?cmd.name, "Zero-copy fast path command");
 
                             match Self::dispatch_command(
                                 &cmd,
@@ -488,8 +499,9 @@ impl Server {
                                 }
                             }
                         }
-                        Ok(None) => {
-                            // Fast path didn't match, try regular parsing
+                        None => {
+                            // Zero-copy path didn't match (inline command, RESP3, or non-array)
+                            // Fall through to standard parser which handles all RESP types
                             match RespValue::parse(&mut buffer) {
                                 Ok(Some(value)) => {
                                     debug!(client_addr = %client_addr_str, value = ?value, "Received RESP value");
@@ -609,57 +621,33 @@ impl Server {
                                 }
                             }
                         }
-                        Err(e) => {
-                            error!(client_addr = %client_addr_str, error = ?e, "Fast path error");
-                            if let RespError::Incomplete = e {
-                                debug!(client_addr = %client_addr_str, buffer_len = buffer.len(), "Incomplete RESP message in fast path, waiting for more data");
-                                if partial_command_buffer.len() + buffer.len()
-                                    > MAX_PARTIAL_BUFFER_SIZE
-                                {
-                                    error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit, disconnecting client");
-                                    Self::send_error_to_writer(
-                                        &mut socket_writer,
-                                        "ERR Protocol error: command too large".to_string(),
-                                        &client_addr_str,
+                        Some(Err(e)) => {
+                            error!(client_addr = %client_addr_str, error = ?e, "Zero-copy parser error");
+
+                            let error_msg = match &e {
+                                RespError::InvalidFormatDetails(details) => {
+                                    format!(
+                                        "ERR Protocol error: Invalid RESP data format - {}",
+                                        details
                                     )
-                                    .await?;
-                                    return Ok(());
                                 }
-                                partial_command_buffer.extend_from_slice(&buffer);
-                                buffer.clear();
-                                break;
-                            } else {
-                                let error_msg = match &e {
-                                    RespError::InvalidFormatDetails(details) => {
-                                        format!(
-                                            "ERR Protocol error: Invalid RESP data format - {}",
-                                            details
-                                        )
-                                    }
-                                    RespError::ValueTooLarge(details) => {
-                                        format!("ERR Protocol error: {}", details)
-                                    }
-                                    _ => {
-                                        format!("ERR Protocol error: {}", e)
-                                    }
-                                };
-
-                                if buffer.len() > 1024 * 50 {
-                                    debug!(client_addr = %client_addr_str, buffer_len = buffer.len(),
-                                           "Large buffer in fast path error, possible JSON data");
+                                RespError::ValueTooLarge(details) => {
+                                    format!("ERR Protocol error: {}", details)
                                 }
+                                _ => {
+                                    format!("ERR Protocol error: {}", e)
+                                }
+                            };
 
-                                Self::send_error_to_writer(
-                                    &mut socket_writer,
-                                    error_msg,
-                                    &client_addr_str,
-                                )
-                                .await?;
-                                buffer.clear();
-                                partial_command_buffer.clear();
-                                debug!(client_addr = %client_addr_str, "Cleared buffers after fast path protocol error");
-                                break;
-                            }
+                            Self::send_error_to_writer(
+                                &mut socket_writer,
+                                error_msg,
+                                &client_addr_str,
+                            )
+                            .await?;
+                            buffer.clear();
+                            partial_command_buffer.clear();
+                            break;
                         }
                     }
 
