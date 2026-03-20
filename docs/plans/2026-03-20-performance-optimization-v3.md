@@ -71,14 +71,14 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 **Files:**
 - Modify: `src/command/handler.rs`
 
-- [ ] Implement two-level byte dispatch: Level 1 dispatches on first byte (26 letters), Level 2 dispatches on command length + exact byte comparison
-- [ ] Add `cmd_eq()` helper for case-insensitive byte-level comparison without allocations
-- [ ] Remove `command.name.to_lowercase()` allocation from dispatch hot path
-- [ ] Implement fast path for top-20 most common commands (SET, GET, DEL, INCR, HSET, HGET, LPUSH, RPUSH, SADD, SREM, ZADD, MGET, MSET, EXISTS, TTL, TYPE, EXPIRE, PEXPIRE, PING, INFO)
-- [ ] Keep phf-style or match fallback for remaining 380+ commands
-- [ ] Wire new dispatch into `RawCommand` path from Task 3
-- [ ] Write tests verifying all 400+ commands still dispatch correctly (case-insensitive, mixed case)
-- [ ] Run full test suite - must pass before task 5
+- [x] Implement two-level byte dispatch: Level 1 dispatches on first byte (26 letters), Level 2 dispatches on command length + exact byte comparison
+- [x] Add `cmd_eq()` helper for case-insensitive byte-level comparison without allocations
+- [x] Remove `command.name.to_lowercase()` allocation from dispatch hot path
+- [x] Implement fast path for top-20 most common commands (SET, GET, DEL, INCR, HSET, HGET, LPUSH, RPUSH, SADD, SREM, ZADD, MGET, MSET, EXISTS, TTL, TYPE, EXPIRE, PEXPIRE, PING, INFO)
+- [x] Keep phf-style or match fallback for remaining 380+ commands
+- [x] Wire new dispatch into `RawCommand` path from Task 3
+- [x] Write tests verifying all 400+ commands still dispatch correctly (case-insensitive, mixed case)
+- [x] Run full test suite - must pass before task 5
 
 ### Task 5: Phase 6 - Native Data Types (Remove Bincode Serialization)
 

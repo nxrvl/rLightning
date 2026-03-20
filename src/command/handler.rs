@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::command::commands;
 use crate::command::types::blocking::BlockingManager;
 use crate::command::{Command, CommandError, CommandResult};
+use crate::networking::raw_command::cmd_eq;
 use crate::networking::resp::RespValue;
 use crate::scripting::ScriptingEngine;
 use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
@@ -60,470 +61,552 @@ impl CommandHandler {
         &self.scripting
     }
 
-    /// Process a command and return the result
+    /// Process a command and return the result.
+    /// Uses two-level byte dispatch for top-20 commands to avoid allocation.
     pub async fn process(&self, command: Command, db_index: usize) -> CommandResult {
-        CURRENT_DB_INDEX
-            .scope(db_index, async move {
-                let cmd_lowercase = command.name.to_lowercase();
-
-                match cmd_lowercase.as_str() {
-                    // Key expiration/TTL commands
-                    "expire" => commands::expire(&self.storage, &command.args).await,
-                    "pexpire" => commands::pexpire(&self.storage, &command.args).await,
-                    "ttl" => commands::ttl(&self.storage, &command.args).await,
-                    "pttl" => commands::pttl(&self.storage, &command.args).await,
-                    "persist" => commands::persist(&self.storage, &command.args).await,
-                    "expireat" => commands::expireat(&self.storage, &command.args).await,
-                    "pexpireat" => commands::pexpireat(&self.storage, &command.args).await,
-                    "expiretime" => commands::expiretime(&self.storage, &command.args).await,
-                    "pexpiretime" => commands::pexpiretime(&self.storage, &command.args).await,
-
-                    // Basic key operations
-                    "del" => commands::del(&self.storage, &command.args).await,
-                    "unlink" => commands::unlink(&self.storage, &command.args).await,
-                    "exists" => commands::exists(&self.storage, &command.args).await,
-                    "type" => commands::get_type(&self.storage, &command.args).await,
-                    "copy" => commands::copy(&self.storage, &command.args).await,
-                    "move" => commands::move_cmd(&self.storage, &command.args).await,
-                    "touch" => commands::touch(&self.storage, &command.args).await,
-                    "object" => commands::object(&self.storage, &command.args).await,
-                    "dump" => commands::dump(&self.storage, &command.args).await,
-                    "restore" => commands::restore(&self.storage, &command.args).await,
-                    "sort" => commands::sort(&self.storage, &command.args).await,
-                    "sort_ro" => commands::sort_ro(&self.storage, &command.args).await,
-                    "waitaof" => commands::waitaof(&self.storage, &command.args).await,
-                    "select" => commands::select(&self.storage, &command.args).await,
-
-                    // Server commands
-                    "ping" => {
-                        if command.args.is_empty() {
-                            Ok(RespValue::SimpleString("PONG".to_string()))
-                        } else {
-                            Ok(RespValue::BulkString(Some(command.args[0].clone())))
-                        }
-                    }
-
-                    // String commands
-                    "set" => commands::set(&self.storage, &command.args).await,
-                    "get" => commands::get(&self.storage, &command.args).await,
-                    "mget" => commands::mget(&self.storage, &command.args).await,
-                    "mset" => commands::mset(&self.storage, &command.args).await,
-                    "msetnx" => commands::msetnx(&self.storage, &command.args).await,
-                    "setnx" => commands::setnx(&self.storage, &command.args).await,
-                    "setex" => commands::setex(&self.storage, &command.args).await,
-                    "incr" => commands::incr(&self.storage, &command.args).await,
-                    "decr" => commands::decr(&self.storage, &command.args).await,
-                    "incrby" => commands::incrby(&self.storage, &command.args).await,
-                    "decrby" => commands::decrby(&self.storage, &command.args).await,
-                    "incrbyfloat" => commands::incrbyfloat(&self.storage, &command.args).await,
-                    "append" => commands::append(&self.storage, &command.args).await,
-                    "strlen" => commands::strlen(&self.storage, &command.args).await,
-                    "getrange" => commands::getrange(&self.storage, &command.args).await,
-                    "setrange" => commands::setrange(&self.storage, &command.args).await,
-                    "getset" => commands::getset(&self.storage, &command.args).await,
-                    "getex" => commands::getex(&self.storage, &command.args).await,
-                    "getdel" => commands::getdel(&self.storage, &command.args).await,
-                    "psetex" => commands::psetex(&self.storage, &command.args).await,
-                    "lcs" => commands::lcs(&self.storage, &command.args).await,
-                    "substr" => commands::substr(&self.storage, &command.args).await,
-
-                    // Bitmap commands
-                    "setbit" => commands::setbit(&self.storage, &command.args).await,
-                    "getbit" => commands::getbit(&self.storage, &command.args).await,
-                    "bitcount" => commands::bitcount(&self.storage, &command.args).await,
-                    "bitpos" => commands::bitpos(&self.storage, &command.args).await,
-                    "bitop" => commands::bitop(&self.storage, &command.args).await,
-                    "bitfield" => commands::bitfield(&self.storage, &command.args).await,
-                    "bitfield_ro" => commands::bitfield_ro(&self.storage, &command.args).await,
-
-                    // HyperLogLog commands
-                    "pfadd" => commands::pfadd(&self.storage, &command.args).await,
-                    "pfcount" => commands::pfcount(&self.storage, &command.args).await,
-                    "pfmerge" => commands::pfmerge(&self.storage, &command.args).await,
-
-                    // Geo commands
-                    "geoadd" => commands::geoadd(&self.storage, &command.args).await,
-                    "geodist" => commands::geodist(&self.storage, &command.args).await,
-                    "geohash" => commands::geohash(&self.storage, &command.args).await,
-                    "geopos" => commands::geopos(&self.storage, &command.args).await,
-                    "geosearch" => commands::geosearch(&self.storage, &command.args).await,
-                    "geosearchstore" => {
-                        commands::geosearchstore(&self.storage, &command.args).await
-                    }
-                    "georadius" => commands::georadius(&self.storage, &command.args).await,
-                    "georadiusbymember" => {
-                        commands::georadiusbymember(&self.storage, &command.args).await
-                    }
-
-                    // List commands
-                    "lpush" => {
-                        let result = commands::lpush(&self.storage, &command.args).await;
-                        if result.is_ok() && !command.args.is_empty() {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "rpush" => {
-                        let result = commands::rpush(&self.storage, &command.args).await;
-                        if result.is_ok() && !command.args.is_empty() {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "lpushx" => {
-                        let result = commands::lpushx(&self.storage, &command.args).await;
-                        if let Ok(RespValue::Integer(n)) = &result
-                            && *n > 0
-                            && !command.args.is_empty()
-                        {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "rpushx" => {
-                        let result = commands::rpushx(&self.storage, &command.args).await;
-                        if let Ok(RespValue::Integer(n)) = &result
-                            && *n > 0
-                            && !command.args.is_empty()
-                        {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "linsert" => {
-                        let result = commands::linsert(&self.storage, &command.args).await;
-                        if let Ok(RespValue::Integer(n)) = &result
-                            && *n > 0
-                            && !command.args.is_empty()
-                        {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "lpop" => commands::lpop(&self.storage, &command.args).await,
-                    "rpop" => commands::rpop(&self.storage, &command.args).await,
-                    "lrange" => commands::lrange(&self.storage, &command.args).await,
-                    "lindex" => commands::lindex(&self.storage, &command.args).await,
-                    "llen" => commands::llen(&self.storage, &command.args).await,
-                    "ltrim" => commands::ltrim(&self.storage, &command.args).await,
-                    "lset" => commands::lset(&self.storage, &command.args).await,
-                    "lrem" => commands::lrem(&self.storage, &command.args).await,
-                    "lpos" => commands::lpos(&self.storage, &command.args).await,
-                    "lmove" => {
-                        let result = commands::lmove(&self.storage, &command.args).await;
-                        // Notify destination key if move succeeded
-                        if result.is_ok()
-                            && command.args.len() >= 2
-                            && let Ok(RespValue::BulkString(Some(_))) = &result
-                        {
-                            self.blocking_mgr.notify_key(&command.args[1]);
-                        }
-                        result
-                    }
-                    "rpoplpush" => {
-                        let result = commands::rpoplpush(&self.storage, &command.args).await;
-                        // Notify destination key if move succeeded
-                        if result.is_ok()
-                            && command.args.len() >= 2
-                            && let Ok(RespValue::BulkString(Some(_))) = &result
-                        {
-                            self.blocking_mgr.notify_key(&command.args[1]);
-                        }
-                        result
-                    }
-                    "lmpop" => commands::lmpop(&self.storage, &command.args).await,
-                    "blpop" => {
-                        commands::blpop(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "brpop" => {
-                        commands::brpop(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "blmove" => {
-                        let result =
-                            commands::blmove(&self.storage, &command.args, &self.blocking_mgr)
-                                .await;
-                        // Notify destination key if move succeeded
-                        if result.is_ok()
-                            && command.args.len() >= 2
-                            && let Ok(RespValue::BulkString(Some(_))) = &result
-                        {
-                            self.blocking_mgr.notify_key(&command.args[1]);
-                        }
-                        result
-                    }
-                    "blmpop" => {
-                        commands::blmpop(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-
-                    // Hash commands
-                    "hset" => commands::hset(&self.storage, &command.args).await,
-                    "hget" => commands::hget(&self.storage, &command.args).await,
-                    "hgetall" => commands::hgetall(&self.storage, &command.args).await,
-                    "hdel" => commands::hdel(&self.storage, &command.args).await,
-                    "hexists" => commands::hexists(&self.storage, &command.args).await,
-                    "hmset" => commands::hmset(&self.storage, &command.args).await,
-                    "hkeys" => commands::hkeys(&self.storage, &command.args).await,
-                    "hvals" => commands::hvals(&self.storage, &command.args).await,
-                    "hlen" => commands::hlen(&self.storage, &command.args).await,
-                    "hmget" => commands::hmget(&self.storage, &command.args).await,
-                    "hincrby" => commands::hincrby(&self.storage, &command.args).await,
-                    "hincrbyfloat" => commands::hincrbyfloat(&self.storage, &command.args).await,
-                    "hsetnx" => commands::hsetnx(&self.storage, &command.args).await,
-                    "hstrlen" => commands::hstrlen(&self.storage, &command.args).await,
-                    "hrandfield" => commands::hrandfield(&self.storage, &command.args).await,
-                    "hscan" => commands::hscan(&self.storage, &command.args).await,
-
-                    // Set commands
-                    "sadd" => commands::sadd(&self.storage, &command.args).await,
-                    "srem" => commands::srem(&self.storage, &command.args).await,
-                    "smembers" => commands::smembers(&self.storage, &command.args).await,
-                    "sismember" => commands::sismember(&self.storage, &command.args).await,
-                    "scard" => commands::scard(&self.storage, &command.args).await,
-                    "spop" => commands::spop(&self.storage, &command.args).await,
-                    "srandmember" => commands::srandmember(&self.storage, &command.args).await,
-                    "sinter" => commands::sinter(&self.storage, &command.args).await,
-                    "sinterstore" => commands::sinterstore(&self.storage, &command.args).await,
-                    "sunion" => commands::sunion(&self.storage, &command.args).await,
-                    "sunionstore" => commands::sunionstore(&self.storage, &command.args).await,
-                    "sdiff" => commands::sdiff(&self.storage, &command.args).await,
-                    "sdiffstore" => commands::sdiffstore(&self.storage, &command.args).await,
-                    "smove" => commands::smove(&self.storage, &command.args).await,
-                    "sintercard" => commands::sintercard(&self.storage, &command.args).await,
-                    "smismember" => commands::smismember(&self.storage, &command.args).await,
-                    "sscan" => commands::sscan(&self.storage, &command.args).await,
-
-                    // Sorted Set commands
-                    "zadd" => commands::zadd(&self.storage, &command.args).await,
-                    "zrange" => commands::zrange_unified(&self.storage, &command.args).await,
-                    "zrem" => commands::zrem(&self.storage, &command.args).await,
-                    "zscore" => commands::zscore(&self.storage, &command.args).await,
-                    "zcard" => commands::zcard(&self.storage, &command.args).await,
-                    "zcount" => commands::zcount(&self.storage, &command.args).await,
-                    "zrank" => commands::zrank(&self.storage, &command.args).await,
-                    "zrevrange" => commands::zrevrange(&self.storage, &command.args).await,
-                    "zincrby" => commands::zincrby(&self.storage, &command.args).await,
-                    "zrangebyscore" => commands::zrangebyscore(&self.storage, &command.args).await,
-                    "zrevrangebyscore" => {
-                        commands::zrevrangebyscore(&self.storage, &command.args).await
-                    }
-                    "zrangebylex" => commands::zrangebylex(&self.storage, &command.args).await,
-                    "zrevrangebylex" => {
-                        commands::zrevrangebylex(&self.storage, &command.args).await
-                    }
-                    "zremrangebyrank" => {
-                        commands::zremrangebyrank(&self.storage, &command.args).await
-                    }
-                    "zremrangebyscore" => {
-                        commands::zremrangebyscore(&self.storage, &command.args).await
-                    }
-                    "zremrangebylex" => {
-                        commands::zremrangebylex(&self.storage, &command.args).await
-                    }
-                    "zlexcount" => commands::zlexcount(&self.storage, &command.args).await,
-                    "zrevrank" => commands::zrevrank(&self.storage, &command.args).await,
-                    "zinterstore" => commands::zinterstore(&self.storage, &command.args).await,
-                    "zunionstore" => commands::zunionstore(&self.storage, &command.args).await,
-                    "zinter" => commands::zinter(&self.storage, &command.args).await,
-                    "zunion" => commands::zunion(&self.storage, &command.args).await,
-                    "zdiff" => commands::zdiff(&self.storage, &command.args).await,
-                    "zdiffstore" => commands::zdiffstore(&self.storage, &command.args).await,
-                    "zpopmin" => commands::zpopmin(&self.storage, &command.args).await,
-                    "zpopmax" => commands::zpopmax(&self.storage, &command.args).await,
-                    "bzpopmin" => {
-                        commands::bzpopmin(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "bzpopmax" => {
-                        commands::bzpopmax(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "zrandmember" => commands::zrandmember(&self.storage, &command.args).await,
-                    "zmscore" => commands::zmscore(&self.storage, &command.args).await,
-                    "zmpop" => commands::zmpop(&self.storage, &command.args).await,
-                    "bzmpop" => {
-                        commands::bzmpop(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "zrangestore" => commands::zrangestore(&self.storage, &command.args).await,
-                    "zscan" => commands::zscan(&self.storage, &command.args).await,
-
-                    // JSON commands
-                    "json.get" | "jsonget" | "get_json" | "getjson" => {
-                        commands::json_get(&self.storage, &command.args).await
-                    }
-                    "json.set" | "jsonset" | "set_json" | "setjson" => {
-                        commands::json_set(&self.storage, &command.args).await
-                    }
-                    "json.type" | "jsontype" => {
-                        commands::json_type(&self.storage, &command.args).await
-                    }
-                    "json.arrappend" | "jsonarrappend" => {
-                        commands::json_arrappend(&self.storage, &command.args).await
-                    }
-                    "json.arrtrim" | "jsonarrtrim" => {
-                        commands::json_arrtrim(&self.storage, &command.args).await
-                    }
-                    "json.resp" | "jsonresp" => {
-                        commands::json_resp(&self.storage, &command.args).await
-                    }
-                    "json.del" | "jsondel" => {
-                        commands::json_del(&self.storage, &command.args).await
-                    }
-                    "json.objkeys" | "jsonobjkeys" => {
-                        commands::json_objkeys(&self.storage, &command.args).await
-                    }
-                    "json.objlen" | "jsonobjlen" => {
-                        commands::json_objlen(&self.storage, &command.args).await
-                    }
-                    "json.arrlen" | "jsonarrlen" => {
-                        commands::json_arrlen(&self.storage, &command.args).await
-                    }
-                    "json.numincrby" | "jsonnumincrby" => {
-                        commands::json_numincrby(&self.storage, &command.args).await
-                    }
-                    "json.mget" | "jsonmget" => {
-                        commands::json_mget(&self.storage, &command.args).await
-                    }
-                    "json.arrindex" | "jsonarrindex" => {
-                        commands::json_arrindex(&self.storage, &command.args).await
-                    }
-
-                    // Server commands
-                    "info" => commands::info_expanded(&self.storage, &command.args).await,
-                    "auth" => commands::auth(&self.storage, &command.args).await,
-                    "config" => {
-                        if !command.args.is_empty() {
-                            let subcmd = String::from_utf8_lossy(&command.args[0]).to_uppercase();
-                            match subcmd.as_str() {
-                                "SET" => {
-                                    commands::config_set(&self.storage, &command.args[1..]).await
-                                }
-                                "REWRITE" => commands::config_rewrite(&self.storage, &[]).await,
-                                "RESETSTAT" => commands::config_resetstat(&self.storage, &[]).await,
-                                _ => commands::config(&self.storage, &command.args).await,
-                            }
-                        } else {
-                            commands::config(&self.storage, &command.args).await
-                        }
-                    }
-                    "keys" => commands::keys(&self.storage, &command.args).await,
-                    "rename" => commands::rename(&self.storage, &command.args).await,
-                    "renamenx" => commands::renamenx(&self.storage, &command.args).await,
-                    "flushall" => commands::flushall(&self.storage, &command.args).await,
-                    "flushdb" => commands::flushdb(&self.storage, &command.args).await,
-                    "monitor" => commands::monitor(&self.storage, &command.args).await,
-                    "scan" => commands::scan_with_type(&self.storage, &command.args).await,
-                    "dbsize" => commands::dbsize(&self.storage, &command.args).await,
-                    "randomkey" => commands::randomkey(&self.storage, &command.args).await,
-
-                    // Stream commands
-                    "xadd" => {
-                        let result = commands::xadd(&self.storage, &command.args).await;
-                        if result.is_ok() && !command.args.is_empty() {
-                            self.blocking_mgr.notify_key(&command.args[0]);
-                        }
-                        result
-                    }
-                    "xlen" => commands::xlen(&self.storage, &command.args).await,
-                    "xrange" => commands::xrange(&self.storage, &command.args).await,
-                    "xrevrange" => commands::xrevrange(&self.storage, &command.args).await,
-                    "xread" => {
-                        commands::xread(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "xtrim" => commands::xtrim(&self.storage, &command.args).await,
-                    "xdel" => commands::xdel(&self.storage, &command.args).await,
-                    "xinfo" => commands::xinfo(&self.storage, &command.args).await,
-                    "xgroup" => commands::xgroup(&self.storage, &command.args).await,
-                    "xreadgroup" => {
-                        commands::xreadgroup(&self.storage, &command.args, &self.blocking_mgr).await
-                    }
-                    "xack" => commands::xack(&self.storage, &command.args).await,
-                    "xpending" => commands::xpending(&self.storage, &command.args).await,
-                    "xclaim" => commands::xclaim(&self.storage, &command.args).await,
-                    "xautoclaim" => commands::xautoclaim(&self.storage, &command.args).await,
-
-                    // Scripting commands
-                    "eval" => self.scripting.handle_eval(self, &command.args, false).await,
-                    "eval_ro" => self.scripting.handle_eval(self, &command.args, true).await,
-                    "evalsha" => {
-                        self.scripting
-                            .handle_evalsha(self, &command.args, false)
-                            .await
-                    }
-                    "evalsha_ro" => {
-                        self.scripting
-                            .handle_evalsha(self, &command.args, true)
-                            .await
-                    }
-                    "script" => self.scripting.handle_script(&command.args),
-                    "function" => self.scripting.handle_function(&command.args),
-                    "fcall" => {
-                        self.scripting
-                            .handle_fcall(self, &command.args, false)
-                            .await
-                    }
-                    "fcall_ro" => self.scripting.handle_fcall(self, &command.args, true).await,
-
-                    // Connection commands
-                    "quit" => commands::quit(&self.storage, &command.args).await,
-                    "reset" => commands::reset(&self.storage, &command.args).await,
-                    "echo" => commands::echo(&self.storage, &command.args).await,
-                    "client" => commands::client(&self.storage, &command.args).await,
-                    "command" => commands::command_cmd(&self.storage, &command.args).await,
-
-                    // Persistence commands
-                    "save" => commands::save(&self.storage, &command.args).await,
-                    "bgsave" => commands::bgsave(&self.storage, &command.args).await,
-                    "bgrewriteaof" => commands::bgrewriteaof(&self.storage, &command.args).await,
-                    "lastsave" => commands::lastsave(&self.storage, &command.args).await,
-                    "shutdown" => commands::shutdown(&self.storage, &command.args).await,
-
-                    // Monitoring commands
-                    "slowlog" => commands::slowlog(&self.storage, &command.args).await,
-                    "latency" => commands::latency(&self.storage, &command.args).await,
-                    "memory" => commands::memory(&self.storage, &command.args).await,
-                    "debug" => commands::debug(&self.storage, &command.args).await,
-
-                    // Database commands
-                    "swapdb" => commands::swapdb(&self.storage, &command.args).await,
-                    "time" => commands::time(&self.storage, &command.args).await,
-                    "lolwut" => commands::lolwut(&self.storage, &command.args).await,
-
-                    // Cluster commands are handled at the server level (needs access to ClusterManager)
-                    "cluster" => Ok(RespValue::Error(
-                        "ERR Cluster commands must be handled at the server level".to_string(),
-                    )),
-                    "asking" => commands::asking(&self.storage, &command.args).await,
-                    "readonly" => commands::readonly(&self.storage, &command.args).await,
-                    "readwrite" => commands::readwrite(&self.storage, &command.args).await,
-                    "migrate" => commands::migrate(&self.storage, &command.args).await,
-
-                    // Module commands (stubs - rLightning doesn't support C-extension modules)
-                    "module" => commands::module_command(&self.storage, &command.args).await,
-
-                    // ACL commands are handled in server.rs, but return a friendly message here
-                    "acl" => Ok(RespValue::Error(
-                        "ERR ACL commands must be handled at the server level".to_string(),
-                    )),
-
-                    // Replication commands are handled at the server level
-                    "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" => {
-                        Ok(RespValue::Error(
-                            "ERR Replication commands must be handled at the server level"
-                                .to_string(),
-                        ))
-                    }
-
-                    // Sentinel commands are handled at the server level
-                    "sentinel" => Ok(RespValue::Error(
-                        "ERR Sentinel commands must be handled at the server level".to_string(),
-                    )),
-
-                    // WAIT is handled at the server level (needs access to ReplicationManager)
-                    "wait" => commands::wait_cmd(&self.storage, &command.args).await,
-
-                    // Unknown command
-                    _ => Err(CommandError::UnknownCommand(command.name)),
-                }
-            })
+        self.process_bytes(command.name.as_bytes(), &command.args, db_index)
             .await
+    }
+
+    /// Process a command using raw byte name - avoids lowercase allocation entirely
+    /// for the top-20 most common commands. Used by the zero-copy RawCommand path.
+    pub async fn process_bytes(
+        &self,
+        name: &[u8],
+        args: &[Vec<u8>],
+        db_index: usize,
+    ) -> CommandResult {
+        CURRENT_DB_INDEX
+            .scope(db_index, async move { self.dispatch(name, args).await })
+            .await
+    }
+
+    /// Two-level byte dispatch for fast command routing without allocation.
+    ///
+    /// Level 1: dispatch on first byte (26 letters, case-insensitive).
+    /// Level 2: dispatch on command length + exact case-insensitive byte comparison via cmd_eq.
+    ///
+    /// Fast path covers the top-20 most common Redis commands.
+    /// All remaining commands fall through to dispatch_slow which lowercases once and
+    /// uses the full match table.
+    async fn dispatch(&self, name: &[u8], args: &[Vec<u8>]) -> CommandResult {
+        match name.first().map(|b| b.to_ascii_uppercase()) {
+            Some(b'D') => {
+                if name.len() == 3 && cmd_eq(name, b"DEL") {
+                    return commands::del(&self.storage, args).await;
+                }
+            }
+            Some(b'E') => {
+                if name.len() == 6 {
+                    if cmd_eq(name, b"EXISTS") {
+                        return commands::exists(&self.storage, args).await;
+                    }
+                    if cmd_eq(name, b"EXPIRE") {
+                        return commands::expire(&self.storage, args).await;
+                    }
+                }
+            }
+            Some(b'G') => {
+                if name.len() == 3 && cmd_eq(name, b"GET") {
+                    return commands::get(&self.storage, args).await;
+                }
+            }
+            Some(b'H') => {
+                if name.len() == 4 {
+                    if cmd_eq(name, b"HSET") {
+                        return commands::hset(&self.storage, args).await;
+                    }
+                    if cmd_eq(name, b"HGET") {
+                        return commands::hget(&self.storage, args).await;
+                    }
+                }
+            }
+            Some(b'I') => {
+                if name.len() == 4 {
+                    if cmd_eq(name, b"INCR") {
+                        return commands::incr(&self.storage, args).await;
+                    }
+                    if cmd_eq(name, b"INFO") {
+                        return commands::info_expanded(&self.storage, args).await;
+                    }
+                }
+            }
+            Some(b'L') => {
+                if name.len() == 5 && cmd_eq(name, b"LPUSH") {
+                    let result = commands::lpush(&self.storage, args).await;
+                    if result.is_ok() && !args.is_empty() {
+                        self.blocking_mgr.notify_key(&args[0]);
+                    }
+                    return result;
+                }
+            }
+            Some(b'M') => {
+                if name.len() == 4 {
+                    if cmd_eq(name, b"MGET") {
+                        return commands::mget(&self.storage, args).await;
+                    }
+                    if cmd_eq(name, b"MSET") {
+                        return commands::mset(&self.storage, args).await;
+                    }
+                }
+            }
+            Some(b'P') => {
+                if name.len() == 4 && cmd_eq(name, b"PING") {
+                    return if args.is_empty() {
+                        Ok(RespValue::SimpleString("PONG".to_string()))
+                    } else {
+                        Ok(RespValue::BulkString(Some(args[0].clone())))
+                    };
+                }
+                if name.len() == 7 && cmd_eq(name, b"PEXPIRE") {
+                    return commands::pexpire(&self.storage, args).await;
+                }
+            }
+            Some(b'R') => {
+                if name.len() == 5 && cmd_eq(name, b"RPUSH") {
+                    let result = commands::rpush(&self.storage, args).await;
+                    if result.is_ok() && !args.is_empty() {
+                        self.blocking_mgr.notify_key(&args[0]);
+                    }
+                    return result;
+                }
+            }
+            Some(b'S') => {
+                if name.len() == 3 && cmd_eq(name, b"SET") {
+                    return commands::set(&self.storage, args).await;
+                }
+                if name.len() == 4 {
+                    if cmd_eq(name, b"SADD") {
+                        return commands::sadd(&self.storage, args).await;
+                    }
+                    if cmd_eq(name, b"SREM") {
+                        return commands::srem(&self.storage, args).await;
+                    }
+                }
+            }
+            Some(b'T') => {
+                if name.len() == 3 && cmd_eq(name, b"TTL") {
+                    return commands::ttl(&self.storage, args).await;
+                }
+                if name.len() == 4 && cmd_eq(name, b"TYPE") {
+                    return commands::get_type(&self.storage, args).await;
+                }
+            }
+            Some(b'Z') => {
+                if name.len() == 4 && cmd_eq(name, b"ZADD") {
+                    return commands::zadd(&self.storage, args).await;
+                }
+            }
+            _ => {}
+        }
+
+        // Slow path: lowercase once and dispatch via full match table
+        self.dispatch_slow(name, args).await
+    }
+
+    /// Slow-path dispatch: lowercases the command name once and uses the full match
+    /// table for all 400+ commands. Called when the fast path doesn't match.
+    async fn dispatch_slow(&self, name: &[u8], args: &[Vec<u8>]) -> CommandResult {
+        let cmd_lowercase = std::str::from_utf8(name)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|_| String::from_utf8_lossy(name).to_lowercase());
+
+        match cmd_lowercase.as_str() {
+            // Key expiration/TTL commands
+            "expire" => commands::expire(&self.storage, args).await,
+            "pexpire" => commands::pexpire(&self.storage, args).await,
+            "ttl" => commands::ttl(&self.storage, args).await,
+            "pttl" => commands::pttl(&self.storage, args).await,
+            "persist" => commands::persist(&self.storage, args).await,
+            "expireat" => commands::expireat(&self.storage, args).await,
+            "pexpireat" => commands::pexpireat(&self.storage, args).await,
+            "expiretime" => commands::expiretime(&self.storage, args).await,
+            "pexpiretime" => commands::pexpiretime(&self.storage, args).await,
+
+            // Basic key operations
+            "del" => commands::del(&self.storage, args).await,
+            "unlink" => commands::unlink(&self.storage, args).await,
+            "exists" => commands::exists(&self.storage, args).await,
+            "type" => commands::get_type(&self.storage, args).await,
+            "copy" => commands::copy(&self.storage, args).await,
+            "move" => commands::move_cmd(&self.storage, args).await,
+            "touch" => commands::touch(&self.storage, args).await,
+            "object" => commands::object(&self.storage, args).await,
+            "dump" => commands::dump(&self.storage, args).await,
+            "restore" => commands::restore(&self.storage, args).await,
+            "sort" => commands::sort(&self.storage, args).await,
+            "sort_ro" => commands::sort_ro(&self.storage, args).await,
+            "waitaof" => commands::waitaof(&self.storage, args).await,
+            "select" => commands::select(&self.storage, args).await,
+
+            // Server commands
+            "ping" => {
+                if args.is_empty() {
+                    Ok(RespValue::SimpleString("PONG".to_string()))
+                } else {
+                    Ok(RespValue::BulkString(Some(args[0].clone())))
+                }
+            }
+
+            // String commands
+            "set" => commands::set(&self.storage, args).await,
+            "get" => commands::get(&self.storage, args).await,
+            "mget" => commands::mget(&self.storage, args).await,
+            "mset" => commands::mset(&self.storage, args).await,
+            "msetnx" => commands::msetnx(&self.storage, args).await,
+            "setnx" => commands::setnx(&self.storage, args).await,
+            "setex" => commands::setex(&self.storage, args).await,
+            "incr" => commands::incr(&self.storage, args).await,
+            "decr" => commands::decr(&self.storage, args).await,
+            "incrby" => commands::incrby(&self.storage, args).await,
+            "decrby" => commands::decrby(&self.storage, args).await,
+            "incrbyfloat" => commands::incrbyfloat(&self.storage, args).await,
+            "append" => commands::append(&self.storage, args).await,
+            "strlen" => commands::strlen(&self.storage, args).await,
+            "getrange" => commands::getrange(&self.storage, args).await,
+            "setrange" => commands::setrange(&self.storage, args).await,
+            "getset" => commands::getset(&self.storage, args).await,
+            "getex" => commands::getex(&self.storage, args).await,
+            "getdel" => commands::getdel(&self.storage, args).await,
+            "psetex" => commands::psetex(&self.storage, args).await,
+            "lcs" => commands::lcs(&self.storage, args).await,
+            "substr" => commands::substr(&self.storage, args).await,
+
+            // Bitmap commands
+            "setbit" => commands::setbit(&self.storage, args).await,
+            "getbit" => commands::getbit(&self.storage, args).await,
+            "bitcount" => commands::bitcount(&self.storage, args).await,
+            "bitpos" => commands::bitpos(&self.storage, args).await,
+            "bitop" => commands::bitop(&self.storage, args).await,
+            "bitfield" => commands::bitfield(&self.storage, args).await,
+            "bitfield_ro" => commands::bitfield_ro(&self.storage, args).await,
+
+            // HyperLogLog commands
+            "pfadd" => commands::pfadd(&self.storage, args).await,
+            "pfcount" => commands::pfcount(&self.storage, args).await,
+            "pfmerge" => commands::pfmerge(&self.storage, args).await,
+
+            // Geo commands
+            "geoadd" => commands::geoadd(&self.storage, args).await,
+            "geodist" => commands::geodist(&self.storage, args).await,
+            "geohash" => commands::geohash(&self.storage, args).await,
+            "geopos" => commands::geopos(&self.storage, args).await,
+            "geosearch" => commands::geosearch(&self.storage, args).await,
+            "geosearchstore" => commands::geosearchstore(&self.storage, args).await,
+            "georadius" => commands::georadius(&self.storage, args).await,
+            "georadiusbymember" => commands::georadiusbymember(&self.storage, args).await,
+
+            // List commands
+            "lpush" => {
+                let result = commands::lpush(&self.storage, args).await;
+                if result.is_ok() && !args.is_empty() {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "rpush" => {
+                let result = commands::rpush(&self.storage, args).await;
+                if result.is_ok() && !args.is_empty() {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "lpushx" => {
+                let result = commands::lpushx(&self.storage, args).await;
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0
+                    && !args.is_empty()
+                {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "rpushx" => {
+                let result = commands::rpushx(&self.storage, args).await;
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0
+                    && !args.is_empty()
+                {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "linsert" => {
+                let result = commands::linsert(&self.storage, args).await;
+                if let Ok(RespValue::Integer(n)) = &result
+                    && *n > 0
+                    && !args.is_empty()
+                {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "lpop" => commands::lpop(&self.storage, args).await,
+            "rpop" => commands::rpop(&self.storage, args).await,
+            "lrange" => commands::lrange(&self.storage, args).await,
+            "lindex" => commands::lindex(&self.storage, args).await,
+            "llen" => commands::llen(&self.storage, args).await,
+            "ltrim" => commands::ltrim(&self.storage, args).await,
+            "lset" => commands::lset(&self.storage, args).await,
+            "lrem" => commands::lrem(&self.storage, args).await,
+            "lpos" => commands::lpos(&self.storage, args).await,
+            "lmove" => {
+                let result = commands::lmove(&self.storage, args).await;
+                if result.is_ok()
+                    && args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result
+                {
+                    self.blocking_mgr.notify_key(&args[1]);
+                }
+                result
+            }
+            "rpoplpush" => {
+                let result = commands::rpoplpush(&self.storage, args).await;
+                if result.is_ok()
+                    && args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result
+                {
+                    self.blocking_mgr.notify_key(&args[1]);
+                }
+                result
+            }
+            "lmpop" => commands::lmpop(&self.storage, args).await,
+            "blpop" => commands::blpop(&self.storage, args, &self.blocking_mgr).await,
+            "brpop" => commands::brpop(&self.storage, args, &self.blocking_mgr).await,
+            "blmove" => {
+                let result = commands::blmove(&self.storage, args, &self.blocking_mgr).await;
+                if result.is_ok()
+                    && args.len() >= 2
+                    && let Ok(RespValue::BulkString(Some(_))) = &result
+                {
+                    self.blocking_mgr.notify_key(&args[1]);
+                }
+                result
+            }
+            "blmpop" => commands::blmpop(&self.storage, args, &self.blocking_mgr).await,
+
+            // Hash commands
+            "hset" => commands::hset(&self.storage, args).await,
+            "hget" => commands::hget(&self.storage, args).await,
+            "hgetall" => commands::hgetall(&self.storage, args).await,
+            "hdel" => commands::hdel(&self.storage, args).await,
+            "hexists" => commands::hexists(&self.storage, args).await,
+            "hmset" => commands::hmset(&self.storage, args).await,
+            "hkeys" => commands::hkeys(&self.storage, args).await,
+            "hvals" => commands::hvals(&self.storage, args).await,
+            "hlen" => commands::hlen(&self.storage, args).await,
+            "hmget" => commands::hmget(&self.storage, args).await,
+            "hincrby" => commands::hincrby(&self.storage, args).await,
+            "hincrbyfloat" => commands::hincrbyfloat(&self.storage, args).await,
+            "hsetnx" => commands::hsetnx(&self.storage, args).await,
+            "hstrlen" => commands::hstrlen(&self.storage, args).await,
+            "hrandfield" => commands::hrandfield(&self.storage, args).await,
+            "hscan" => commands::hscan(&self.storage, args).await,
+
+            // Set commands
+            "sadd" => commands::sadd(&self.storage, args).await,
+            "srem" => commands::srem(&self.storage, args).await,
+            "smembers" => commands::smembers(&self.storage, args).await,
+            "sismember" => commands::sismember(&self.storage, args).await,
+            "scard" => commands::scard(&self.storage, args).await,
+            "spop" => commands::spop(&self.storage, args).await,
+            "srandmember" => commands::srandmember(&self.storage, args).await,
+            "sinter" => commands::sinter(&self.storage, args).await,
+            "sinterstore" => commands::sinterstore(&self.storage, args).await,
+            "sunion" => commands::sunion(&self.storage, args).await,
+            "sunionstore" => commands::sunionstore(&self.storage, args).await,
+            "sdiff" => commands::sdiff(&self.storage, args).await,
+            "sdiffstore" => commands::sdiffstore(&self.storage, args).await,
+            "smove" => commands::smove(&self.storage, args).await,
+            "sintercard" => commands::sintercard(&self.storage, args).await,
+            "smismember" => commands::smismember(&self.storage, args).await,
+            "sscan" => commands::sscan(&self.storage, args).await,
+
+            // Sorted Set commands
+            "zadd" => commands::zadd(&self.storage, args).await,
+            "zrange" => commands::zrange_unified(&self.storage, args).await,
+            "zrem" => commands::zrem(&self.storage, args).await,
+            "zscore" => commands::zscore(&self.storage, args).await,
+            "zcard" => commands::zcard(&self.storage, args).await,
+            "zcount" => commands::zcount(&self.storage, args).await,
+            "zrank" => commands::zrank(&self.storage, args).await,
+            "zrevrange" => commands::zrevrange(&self.storage, args).await,
+            "zincrby" => commands::zincrby(&self.storage, args).await,
+            "zrangebyscore" => commands::zrangebyscore(&self.storage, args).await,
+            "zrevrangebyscore" => commands::zrevrangebyscore(&self.storage, args).await,
+            "zrangebylex" => commands::zrangebylex(&self.storage, args).await,
+            "zrevrangebylex" => commands::zrevrangebylex(&self.storage, args).await,
+            "zremrangebyrank" => commands::zremrangebyrank(&self.storage, args).await,
+            "zremrangebyscore" => commands::zremrangebyscore(&self.storage, args).await,
+            "zremrangebylex" => commands::zremrangebylex(&self.storage, args).await,
+            "zlexcount" => commands::zlexcount(&self.storage, args).await,
+            "zrevrank" => commands::zrevrank(&self.storage, args).await,
+            "zinterstore" => commands::zinterstore(&self.storage, args).await,
+            "zunionstore" => commands::zunionstore(&self.storage, args).await,
+            "zinter" => commands::zinter(&self.storage, args).await,
+            "zunion" => commands::zunion(&self.storage, args).await,
+            "zdiff" => commands::zdiff(&self.storage, args).await,
+            "zdiffstore" => commands::zdiffstore(&self.storage, args).await,
+            "zpopmin" => commands::zpopmin(&self.storage, args).await,
+            "zpopmax" => commands::zpopmax(&self.storage, args).await,
+            "bzpopmin" => commands::bzpopmin(&self.storage, args, &self.blocking_mgr).await,
+            "bzpopmax" => commands::bzpopmax(&self.storage, args, &self.blocking_mgr).await,
+            "zrandmember" => commands::zrandmember(&self.storage, args).await,
+            "zmscore" => commands::zmscore(&self.storage, args).await,
+            "zmpop" => commands::zmpop(&self.storage, args).await,
+            "bzmpop" => commands::bzmpop(&self.storage, args, &self.blocking_mgr).await,
+            "zrangestore" => commands::zrangestore(&self.storage, args).await,
+            "zscan" => commands::zscan(&self.storage, args).await,
+
+            // JSON commands
+            "json.get" | "jsonget" | "get_json" | "getjson" => {
+                commands::json_get(&self.storage, args).await
+            }
+            "json.set" | "jsonset" | "set_json" | "setjson" => {
+                commands::json_set(&self.storage, args).await
+            }
+            "json.type" | "jsontype" => commands::json_type(&self.storage, args).await,
+            "json.arrappend" | "jsonarrappend" => {
+                commands::json_arrappend(&self.storage, args).await
+            }
+            "json.arrtrim" | "jsonarrtrim" => {
+                commands::json_arrtrim(&self.storage, args).await
+            }
+            "json.resp" | "jsonresp" => commands::json_resp(&self.storage, args).await,
+            "json.del" | "jsondel" => commands::json_del(&self.storage, args).await,
+            "json.objkeys" | "jsonobjkeys" => {
+                commands::json_objkeys(&self.storage, args).await
+            }
+            "json.objlen" | "jsonobjlen" => commands::json_objlen(&self.storage, args).await,
+            "json.arrlen" | "jsonarrlen" => commands::json_arrlen(&self.storage, args).await,
+            "json.numincrby" | "jsonnumincrby" => {
+                commands::json_numincrby(&self.storage, args).await
+            }
+            "json.mget" | "jsonmget" => commands::json_mget(&self.storage, args).await,
+            "json.arrindex" | "jsonarrindex" => {
+                commands::json_arrindex(&self.storage, args).await
+            }
+
+            // Server commands
+            "info" => commands::info_expanded(&self.storage, args).await,
+            "auth" => commands::auth(&self.storage, args).await,
+            "config" => {
+                if !args.is_empty() {
+                    let subcmd = String::from_utf8_lossy(&args[0]).to_uppercase();
+                    match subcmd.as_str() {
+                        "SET" => commands::config_set(&self.storage, &args[1..]).await,
+                        "REWRITE" => commands::config_rewrite(&self.storage, &[]).await,
+                        "RESETSTAT" => commands::config_resetstat(&self.storage, &[]).await,
+                        _ => commands::config(&self.storage, args).await,
+                    }
+                } else {
+                    commands::config(&self.storage, args).await
+                }
+            }
+            "keys" => commands::keys(&self.storage, args).await,
+            "rename" => commands::rename(&self.storage, args).await,
+            "renamenx" => commands::renamenx(&self.storage, args).await,
+            "flushall" => commands::flushall(&self.storage, args).await,
+            "flushdb" => commands::flushdb(&self.storage, args).await,
+            "monitor" => commands::monitor(&self.storage, args).await,
+            "scan" => commands::scan_with_type(&self.storage, args).await,
+            "dbsize" => commands::dbsize(&self.storage, args).await,
+            "randomkey" => commands::randomkey(&self.storage, args).await,
+
+            // Stream commands
+            "xadd" => {
+                let result = commands::xadd(&self.storage, args).await;
+                if result.is_ok() && !args.is_empty() {
+                    self.blocking_mgr.notify_key(&args[0]);
+                }
+                result
+            }
+            "xlen" => commands::xlen(&self.storage, args).await,
+            "xrange" => commands::xrange(&self.storage, args).await,
+            "xrevrange" => commands::xrevrange(&self.storage, args).await,
+            "xread" => commands::xread(&self.storage, args, &self.blocking_mgr).await,
+            "xtrim" => commands::xtrim(&self.storage, args).await,
+            "xdel" => commands::xdel(&self.storage, args).await,
+            "xinfo" => commands::xinfo(&self.storage, args).await,
+            "xgroup" => commands::xgroup(&self.storage, args).await,
+            "xreadgroup" => {
+                commands::xreadgroup(&self.storage, args, &self.blocking_mgr).await
+            }
+            "xack" => commands::xack(&self.storage, args).await,
+            "xpending" => commands::xpending(&self.storage, args).await,
+            "xclaim" => commands::xclaim(&self.storage, args).await,
+            "xautoclaim" => commands::xautoclaim(&self.storage, args).await,
+
+            // Scripting commands
+            "eval" => self.scripting.handle_eval(self, args, false).await,
+            "eval_ro" => self.scripting.handle_eval(self, args, true).await,
+            "evalsha" => self.scripting.handle_evalsha(self, args, false).await,
+            "evalsha_ro" => self.scripting.handle_evalsha(self, args, true).await,
+            "script" => self.scripting.handle_script(args),
+            "function" => self.scripting.handle_function(args),
+            "fcall" => self.scripting.handle_fcall(self, args, false).await,
+            "fcall_ro" => self.scripting.handle_fcall(self, args, true).await,
+
+            // Connection commands
+            "quit" => commands::quit(&self.storage, args).await,
+            "reset" => commands::reset(&self.storage, args).await,
+            "echo" => commands::echo(&self.storage, args).await,
+            "client" => commands::client(&self.storage, args).await,
+            "command" => commands::command_cmd(&self.storage, args).await,
+
+            // Persistence commands
+            "save" => commands::save(&self.storage, args).await,
+            "bgsave" => commands::bgsave(&self.storage, args).await,
+            "bgrewriteaof" => commands::bgrewriteaof(&self.storage, args).await,
+            "lastsave" => commands::lastsave(&self.storage, args).await,
+            "shutdown" => commands::shutdown(&self.storage, args).await,
+
+            // Monitoring commands
+            "slowlog" => commands::slowlog(&self.storage, args).await,
+            "latency" => commands::latency(&self.storage, args).await,
+            "memory" => commands::memory(&self.storage, args).await,
+            "debug" => commands::debug(&self.storage, args).await,
+
+            // Database commands
+            "swapdb" => commands::swapdb(&self.storage, args).await,
+            "time" => commands::time(&self.storage, args).await,
+            "lolwut" => commands::lolwut(&self.storage, args).await,
+
+            // Cluster commands are handled at the server level
+            "cluster" => Ok(RespValue::Error(
+                "ERR Cluster commands must be handled at the server level".to_string(),
+            )),
+            "asking" => commands::asking(&self.storage, args).await,
+            "readonly" => commands::readonly(&self.storage, args).await,
+            "readwrite" => commands::readwrite(&self.storage, args).await,
+            "migrate" => commands::migrate(&self.storage, args).await,
+
+            // Module commands (stubs)
+            "module" => commands::module_command(&self.storage, args).await,
+
+            // ACL commands are handled in server.rs
+            "acl" => Ok(RespValue::Error(
+                "ERR ACL commands must be handled at the server level".to_string(),
+            )),
+
+            // Replication commands are handled at the server level
+            "role" | "replicaof" | "slaveof" | "replconf" | "psync" | "failover" => {
+                Ok(RespValue::Error(
+                    "ERR Replication commands must be handled at the server level".to_string(),
+                ))
+            }
+
+            // Sentinel commands are handled at the server level
+            "sentinel" => Ok(RespValue::Error(
+                "ERR Sentinel commands must be handled at the server level".to_string(),
+            )),
+
+            // WAIT is handled at the server level
+            "wait" => commands::wait_cmd(&self.storage, args).await,
+
+            // Unknown command
+            _ => Err(CommandError::UnknownCommand(cmd_lowercase)),
+        }
     }
 }
 
@@ -1903,5 +1986,381 @@ mod tests {
         };
         let result = handler.process(hget_db1, 1).await.unwrap();
         assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+    }
+
+    // ---- Fast byte dispatch tests ----
+
+    #[tokio::test]
+    async fn test_process_bytes_top20_fast_path() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // SET via process_bytes (uppercase)
+        let result = handler
+            .process_bytes(b"SET", &[b"key1".to_vec(), b"val1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // GET via process_bytes (lowercase)
+        let result = handler
+            .process_bytes(b"get", &[b"key1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+
+        // GET via process_bytes (mixed case)
+        let result = handler
+            .process_bytes(b"GeT", &[b"key1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"val1".to_vec())));
+
+        // DEL
+        let result = handler
+            .process_bytes(b"DEL", &[b"key1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // EXISTS (key deleted)
+        let result = handler
+            .process_bytes(b"EXISTS", &[b"key1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_ping() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // PING no args
+        let result = handler.process_bytes(b"PING", &[], 0).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("PONG".to_string()));
+
+        // PING with arg
+        let result = handler
+            .process_bytes(b"ping", &[b"hello".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_incr() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        handler
+            .process_bytes(b"SET", &[b"counter".to_vec(), b"10".to_vec()], 0)
+            .await
+            .unwrap();
+
+        let result = handler
+            .process_bytes(b"INCR", &[b"counter".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(11));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_hash_commands() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // HSET
+        let result = handler
+            .process_bytes(
+                b"HSET",
+                &[b"h1".to_vec(), b"f1".to_vec(), b"v1".to_vec()],
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // HGET
+        let result = handler
+            .process_bytes(b"hget", &[b"h1".to_vec(), b"f1".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::BulkString(Some(b"v1".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_set_sadd_srem() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // SADD
+        let result = handler
+            .process_bytes(b"SADD", &[b"myset".to_vec(), b"a".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // SREM
+        let result = handler
+            .process_bytes(b"srem", &[b"myset".to_vec(), b"a".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_zadd() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        let result = handler
+            .process_bytes(
+                b"ZADD",
+                &[b"zs".to_vec(), b"1.5".to_vec(), b"mem".to_vec()],
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_ttl_type_expire() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        handler
+            .process_bytes(b"SET", &[b"k".to_vec(), b"v".to_vec()], 0)
+            .await
+            .unwrap();
+
+        // TYPE
+        let result = handler
+            .process_bytes(b"TYPE", &[b"k".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::SimpleString("string".to_string()));
+
+        // EXPIRE
+        let result = handler
+            .process_bytes(b"EXPIRE", &[b"k".to_vec(), b"100".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // TTL
+        let result = handler
+            .process_bytes(b"TTL", &[b"k".to_vec()], 0)
+            .await
+            .unwrap();
+        if let RespValue::Integer(ttl) = result {
+            assert!(ttl > 0 && ttl <= 100);
+        } else {
+            panic!("Expected integer from TTL");
+        }
+
+        // PEXPIRE
+        let result = handler
+            .process_bytes(b"PEXPIRE", &[b"k".to_vec(), b"50000".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_mget_mset() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // MSET
+        let result = handler
+            .process_bytes(
+                b"MSET",
+                &[
+                    b"a".to_vec(),
+                    b"1".to_vec(),
+                    b"b".to_vec(),
+                    b"2".to_vec(),
+                ],
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // MGET
+        let result = handler
+            .process_bytes(b"MGET", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .await
+            .unwrap();
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespValue::BulkString(Some(b"1".to_vec())));
+                assert_eq!(arr[1], RespValue::BulkString(Some(b"2".to_vec())));
+            }
+            _ => panic!("Expected array from MGET"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_lpush_rpush() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // LPUSH
+        let result = handler
+            .process_bytes(b"LPUSH", &[b"list".to_vec(), b"a".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(1));
+
+        // RPUSH
+        let result = handler
+            .process_bytes(b"RPUSH", &[b"list".to_vec(), b"b".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(2));
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_info() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        let result = handler.process_bytes(b"INFO", &[], 0).await.unwrap();
+        match result {
+            RespValue::BulkString(Some(data)) => {
+                let info_str = String::from_utf8_lossy(&data);
+                assert!(info_str.contains("redis_version"));
+            }
+            _ => panic!("Expected bulk string from INFO"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_bytes_slow_path_fallback() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // APPEND goes through slow path (not in top-20)
+        handler
+            .process_bytes(b"SET", &[b"key".to_vec(), b"hello".to_vec()], 0)
+            .await
+            .unwrap();
+        let result = handler
+            .process_bytes(b"APPEND", &[b"key".to_vec(), b" world".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(11));
+
+        // STRLEN goes through slow path
+        let result = handler
+            .process_bytes(b"STRLEN", &[b"key".to_vec()], 0)
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(11));
+
+        // HGETALL goes through slow path
+        handler
+            .process_bytes(
+                b"HSET",
+                &[b"h".to_vec(), b"f".to_vec(), b"v".to_vec()],
+                0,
+            )
+            .await
+            .unwrap();
+        let result = handler
+            .process_bytes(b"HGETALL", &[b"h".to_vec()], 0)
+            .await
+            .unwrap();
+        match result {
+            RespValue::Array(Some(arr)) => assert_eq!(arr.len(), 2),
+            _ => panic!("Expected array from HGETALL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_case_insensitive_all_cases() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        // Test various case combinations for SET
+        for variant in &[&b"set"[..], b"Set", b"sEt", b"SET"] {
+            let result = handler
+                .process_bytes(*variant, &[b"k".to_vec(), b"v".to_vec()], 0)
+                .await;
+            assert!(
+                result.is_ok(),
+                "SET variant {:?} should dispatch correctly",
+                std::str::from_utf8(*variant)
+            );
+        }
+
+        // Test various case combinations for GET
+        for variant in &[&b"get"[..], b"Get", b"gEt", b"GET"] {
+            let result = handler
+                .process_bytes(*variant, &[b"k".to_vec()], 0)
+                .await;
+            assert!(
+                result.is_ok(),
+                "GET variant {:?} should dispatch correctly",
+                std::str::from_utf8(*variant)
+            );
+        }
+
+        // Test various case combinations for DEL
+        for variant in &[&b"del"[..], b"Del", b"dEl", b"DEL"] {
+            // Re-set key before each DEL
+            handler
+                .process_bytes(b"SET", &[b"k".to_vec(), b"v".to_vec()], 0)
+                .await
+                .unwrap();
+            let result = handler
+                .process_bytes(*variant, &[b"k".to_vec()], 0)
+                .await;
+            assert!(
+                result.is_ok(),
+                "DEL variant {:?} should dispatch correctly",
+                std::str::from_utf8(*variant)
+            );
+        }
+
+        // Test case insensitivity for slow-path commands too
+        for variant in &[&b"append"[..], b"APPEND", b"Append"] {
+            let result = handler
+                .process_bytes(*variant, &[b"k2".to_vec(), b"x".to_vec()], 0)
+                .await;
+            assert!(
+                result.is_ok(),
+                "APPEND variant {:?} should dispatch correctly",
+                std::str::from_utf8(*variant)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_command_via_process_bytes() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let handler = CommandHandler::new(Arc::clone(&storage));
+
+        let result = handler
+            .process_bytes(b"NOTACOMMAND", &[], 0)
+            .await;
+        assert!(result.is_err());
     }
 }

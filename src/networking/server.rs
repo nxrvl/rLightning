@@ -1760,7 +1760,10 @@ impl Server {
         // Execute the command first, then log to AOF only on success
         // Catch CommandError and convert to error response instead of propagating,
         // so pipeline error isolation works correctly (each command's error is independent)
-        let result = match command_handler.process(cmd.clone(), db_index).await {
+        let result = match command_handler
+            .process_bytes(cmd.name.as_bytes(), &cmd.args, db_index)
+            .await
+        {
             Ok(value) => value,
             Err(err) => return Ok(RespValue::Error(err.to_string())),
         };

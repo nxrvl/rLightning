@@ -128,3 +128,55 @@ starting task execution phase
 [26-03-20 19:53:36] All tests pass - 0 failures across all test suites. Let me also run the integration tests explicitly.
 [26-03-20 19:53:40] All tests pass. Now let me update the plan file, marking Task 3 checkboxes as complete.
 [26-03-20 19:53:54] Now commit all changes.
+[26-03-20 19:54:13] Task 3 is complete. All 981+ tests pass, zero failures. The remaining tasks (4-13) still have unchecked items in the plan.
+
+--- task iteration 4 ---
+[26-03-20 19:54:36] TASK 4: Phase 5 - Fast Command Dispatch
+[26-03-20 19:54:36] This task replaces the string-based command dispatch in the command handler with a fast two-level byte dispatch system. Instead of calling to_lowercase() on every command name (which allocates), it will dispatch based on the first byte and command length using direct byte comparison. This targets the top-20 most common commands for the fastest path, with a fallback for the remaining 380+ commands.
+[26-03-20 19:54:36] Key files:
+[26-03-20 19:54:36]   - src/command/handler.rs (main dispatch logic)
+[26-03-20 19:54:36]   - src/networking/raw_command.rs (cmd_eq helper already exists from Task 3)
+[26-03-20 19:54:36] Let me start by reading the current command handler to understand the dispatch mechanism.
+[26-03-20 19:54:42] Let me read the full handler.rs to understand all command dispatch branches.
+[26-03-20 19:54:58] Now let me understand how the server currently uses the command handler and the RawCommand path.
+[26-03-20 19:58:05] Let me find where `dispatch_command` calls `process` in server.rs.
+[26-03-20 19:58:12] Let me see the full dispatch_command around where it handles commands like transactions, pub/sub etc., to understand the `cmd_lower` usage.
+[26-03-20 19:58:21] Now I have a complete understanding of the codebase. Let me implement the two-level byte dispatch. The approach:
+[26-03-20 19:58:21]   1. In handler.rs: Add `process_bytes` method with two-level byte dispatch for top-20 commands, fallback to lowercase + match for the rest
+[26-03-20 19:58:21]   2. Change `process` to delegate to the new dispatch method (removing its to_lowercase)
+[26-03-20 19:58:21]   3. In server.rs: Wire the fast path to use `process_bytes` directly
+[26-03-20 19:58:21] Let me start implementing.
+[26-03-20 19:58:26] Now I'll implement the new dispatch system. I need to:
+[26-03-20 19:58:26]   1. Add the import for `cmd_eq`
+[26-03-20 19:58:26]   2. Add `process_bytes` method
+[26-03-20 19:58:26]   3. Replace the `process` method's dispatch with two-level byte dispatch
+[26-03-20 19:58:26]   4. Extract the slow path into a separate method
+[26-03-20 19:58:31] Now replace the `process` method with the new byte-dispatch approach:
+[26-03-20 19:59:16] Good, the warning is expected since the import will be used by the new `dispatch` method. Now I need to update the remaining part of the match in `dispatch_slow`. Let me replace the rest of the command.args references:
+[26-03-20 19:59:24] I see the file has a mix of old and new code. Let me read the current state to see exactly what needs to be fixed - the remaining `&command.args` references and closing braces.
+[26-03-20 19:59:29] I need to replace the entire remaining section from line 275 to 673 (the old `&command.args` references and closing braces). Let me do a bulk replacement:
+[26-03-20 20:01:01] Now I need to update the server.rs to wire the new dispatch into the RawCommand path. Currently the fast path calls `raw_cmd.to_command()` which lowercases. Instead, I should use `process_bytes` with the raw name. However, `dispatch_command` also needs the command. Let me update dispatch_command to call `process_bytes` instead of `process`:
+[26-03-20 20:01:08] Now let me build to check for compilation errors:
+[26-03-20 20:01:46] Clean build - only pre-existing warnings. Now let me add tests for the fast dispatch. I need to read the existing test module:
+[26-03-20 20:01:50] Let me find the end of the test module:
+[26-03-20 20:01:58] Now let me add comprehensive tests for the new dispatch:
+[26-03-20 20:02:37] Now let me build and run tests:
+[26-03-20 20:03:02] Clean build. Now run the tests:
+[26-03-20 20:04:15] One failure. Let me see which test:
+[26-03-20 20:04:25] No panic output - it might be a task spawn issue. Let me check the actual error:
+[26-03-20 20:04:37] The test is calling SET with only 1 arg when it should have 2. The test logic was treating all variants as GET. Let me fix it:
+[26-03-20 20:12:01] All tests pass - 0 failures across all test suites. Now let me update the plan and commit.
+[26-03-20 20:12:15] Now update the progress file and commit:
+
+--- task iteration 4 ---
+[26-03-20] TASK 4: Phase 5 - Fast Command Dispatch
+[26-03-20] Implemented two-level byte dispatch for zero-allocation command routing:
+[26-03-20]   1. dispatch() method: Level 1 matches on first byte (uppercase), Level 2 on length + cmd_eq
+[26-03-20]   2. Fast path for top-20 commands (SET, GET, DEL, INCR, HSET, HGET, LPUSH, RPUSH, SADD, SREM, ZADD, MGET, MSET, EXISTS, TTL, TYPE, EXPIRE, PEXPIRE, PING, INFO)
+[26-03-20]   3. dispatch_slow() fallback: lowercases once and uses full match table for remaining 380+ commands
+[26-03-20]   4. Added process_bytes(name: &[u8], args: &[Vec<u8>], db_index) for direct byte-level dispatch
+[26-03-20]   5. process() now delegates to process_bytes (removes to_lowercase)
+[26-03-20]   6. server.rs: dispatch_command calls process_bytes instead of process (removes redundant lowercase)
+[26-03-20]   7. cmd_eq helper (from Task 3) used for case-insensitive byte comparison without allocation
+[26-03-20] Added 12 new tests covering: top-20 fast path, case sensitivity, slow path fallback, unknown commands
+[26-03-20] All 994+ tests pass across all suites. Zero failures.
