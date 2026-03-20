@@ -215,6 +215,6 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 
 ### Task 13: Update Documentation
 
-- [ ] Update CLAUDE.md architecture section to reflect sharded storage, native types, zero-copy parser
-- [ ] Update `docs/OPTIMIZATION_PLAN.md` to mark completed phases
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md architecture section to reflect sharded storage, native types, zero-copy parser
+- [x] Update `docs/OPTIMIZATION_PLAN.md` to mark completed phases
+- [x] Move this plan to `docs/plans/completed/`
