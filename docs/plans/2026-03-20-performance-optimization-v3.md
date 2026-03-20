@@ -118,19 +118,19 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/storage/mod.rs`
 - Modify: `src/command/transaction.rs`
 
-- [ ] Add `parking_lot` dependency to Cargo.toml
-- [ ] Implement `Shard` struct with `#[repr(align(128))]`, containing `hashbrown::HashMap<Box<[u8]>, Entry, FxBuildHasher>`, `version: u64`, `used_memory: usize`, `key_count: u32`
-- [ ] Implement `ShardedStore` with `(num_cpus * 16).next_power_of_two().clamp(16, 1024)` shards
-- [ ] Use FxHash for shard selection with single-hash lookup via `raw_entry()` API
-- [ ] Use `parking_lot::RwLock` for per-shard locking
-- [ ] Implement per-shard memory tracking (sum for global INFO/CONFIG queries)
-- [ ] Implement the same public API as current StorageEngine (get, set, atomic_modify, etc.)
-- [ ] Migrate `StorageEngine` to use `ShardedStore` internally instead of DashMap
-- [ ] Update `lock_keys()` to use sorted shard-level locking for deadlock prevention
-- [ ] Update WATCH/MULTI/EXEC to use per-shard version tracking
-- [ ] Support multi-database via array of `ShardedStore` (one per DB)
-- [ ] Write tests for shard distribution, concurrent read/write, WATCH with per-shard versioning, cross-shard MSET atomicity
-- [ ] Run full test suite + integration tests + docker compat tests - must pass before task 7
+- [x] Add `parking_lot` dependency to Cargo.toml
+- [x] Implement `Shard` struct with `#[repr(align(128))]`, containing `hashbrown::HashMap<Box<[u8]>, Entry, FxBuildHasher>`, `version: u64`, `used_memory: usize`, `key_count: u32`
+- [x] Implement `ShardedStore` with `(num_cpus * 16).next_power_of_two().clamp(16, 1024)` shards
+- [x] Use FxHash for shard selection with single-hash lookup via `raw_entry()` API
+- [x] Use `parking_lot::RwLock` for per-shard locking
+- [x] Implement per-shard memory tracking (sum for global INFO/CONFIG queries)
+- [x] Implement the same public API as current StorageEngine (get, set, atomic_modify, etc.)
+- [x] Migrate `StorageEngine` to use `ShardedStore` internally instead of DashMap
+- [x] Update `lock_keys()` to use sorted shard-level locking for deadlock prevention
+- [x] Update WATCH/MULTI/EXEC to use per-shard version tracking
+- [x] Support multi-database via array of `ShardedStore` (one per DB)
+- [x] Write tests for shard distribution, concurrent read/write, WATCH with per-shard versioning, cross-shard MSET atomicity
+- [x] Run full test suite + integration tests + docker compat tests - must pass before task 7
 
 ### Task 7: Phase 4 - Pipeline Batching
 

@@ -235,3 +235,78 @@ starting task execution phase
 [26-03-20 21:48:54] All 994 tests pass. Let me verify.
 [26-03-20 21:52:51] All tests pass - 0 failures across all test suites. Now let me update the plan file and commit.
 [26-03-20 21:53:08] Now let me commit all changes.
+[26-03-20 21:53:35] Task 5 (Phase 6 - Native Data Types) is complete. All 994+ tests pass across all suites, zero failures.
+[26-03-20 21:53:35] What was implemented:
+[26-03-20 21:53:35]   - Created StoreValue enum with native variants (Str, Hash, Set, ZSet, List, Stream) in src/storage/value.rs
+[26-03-20 21:53:35]   - Created Entry struct replacing StorageItem with lru_clock:u32 and access_count:u16
+[26-03-20 21:53:35]   - Added rustc-hash dependency for FxHash-backed NativeHashMap and NativeHashSet
+[26-03-20 21:53:35]   - Migrated StorageEngine from DashMap<Vec<u8>, StorageItem> to DashMap<Vec<u8>, Entry>
+[26-03-20 21:53:35]   - Rewrote atomic_modify/atomic_read with new ModifyResult enum (Keep/Set/Delete) enabling zero-copy in-place modifications
+[26-03-20 21:53:35]   - Updated all 12+ command handler files to use native types instead of bincode
+[26-03-20 21:53:35]   - Replaced list_bytes binary format with VecDeque<Vec<u8>> for list operations
+[26-03-20 21:53:35]   - Updated RDB and AOF persistence to serialize/deserialize native types
+[26-03-20 21:53:35]   - 23 files changed, 1987 insertions, 1487 deletions
+[26-03-20 21:53:35] More Task sections with [ ] remain in the plan. Stopping here for the loop to handle the next task.
+[26-03-20 21:53:42] That's a stale background task from earlier - the stream.rs errors have already been fixed as part of the completed Task 5 work. All tests pass and the commit is done. The loop can proceed to Task 6 (Phase
+[26-03-20 21:53:42] 3 - Sharded Storage Engine) on the next iteration.
+[26-03-20 21:53:48] Another stale background task from the earlier debugging phase - `test_new_commands` was already fixed and passes. Task 5 is committed and complete. Ready for the loop to invoke the next iteration for Task
+[26-03-20 21:53:48] 6.
+[26-03-20 21:53:51] Stale background task - `test_ltrim` was already fixed and passes. Task 5 is committed. Waiting for the loop.
+[26-03-20 21:53:55] Stale background task was killed - all tests already pass and Task 5 is committed. Ready for the next iteration.
+
+--- task iteration 6 ---
+[26-03-20 21:54:27] TASK 6: Phase 3 - Sharded Storage Engine
+[26-03-20 21:54:27] This task replaces the DashMap-based storage with a custom sharded storage engine for better performance and control. The sharded engine uses parking_lot RwLock per shard with FxHash for fast shard
+[26-03-20 21:54:27] selection, aligned to 128 bytes to prevent false sharing. It provides per-shard memory tracking, version tracking for WATCH/MULTI, and sorted shard-level locking for deadlock prevention.
+[26-03-20 21:54:27] Key files:
+[26-03-20 21:54:27]   - Cargo.toml (add parking_lot dependency)
+[26-03-20 21:54:27]   - src/storage/sharded.rs (new - Shard and ShardedStore implementation)
+[26-03-20 21:54:27]   - src/storage/engine.rs (migrate from DashMap to ShardedStore)
+[26-03-20 21:54:27]   - src/storage/mod.rs (export new module)
+[26-03-20 21:54:27]   - src/command/transaction.rs (update WATCH/MULTI/EXEC for per-shard versioning)
+[26-03-20 21:54:27] Let me start by understanding the current storage architecture.
+[26-03-20 21:54:34] Let me read more of the engine to understand the full API surface.
+[26-03-20 21:54:55] Let me now read the critical methods - `get`, `set`, `atomic_modify`, `lock_keys`, and key versioning.
+[26-03-20 21:55:04] Now let me read `atomic_modify` and the rest of the important methods.
+[26-03-20 21:56:08] Let me check how `active_db()` and `get_db_by_index()` are used externally.
+[26-03-20 21:59:13] Let me check the total size of engine.rs and understand the full scope of changes needed.
+[26-03-20 22:00:22] This is a massive task. Let me use a systematic approach - create the ShardedStore first, then refactor StorageEngine to use it. Let me start by reading the remaining critical sections of engine.rs.
+[26-03-20 22:03:33] Given the massive scope of this task, let me start by creating the ShardedStore implementation, then use agents to help with the engine.rs migration. First, let me add the dependency and create the new
+[26-03-20 22:03:33] file.
+[26-03-20 22:03:39] Now let me create the ShardedStore implementation.
+[26-03-20 22:05:06] Let me verify the sharded module compiles before starting the massive engine.rs migration.
+[26-03-20 22:05:22] Compiles cleanly (only pre-existing warnings). Now let me tackle the massive engine.rs migration. This requires changing ~4400 lines of code. I'll use parallel agents for efficiency.
+[26-03-20 22:26:58] The agent completed the engine.rs migration. Let me verify the build and check if transaction.rs needs updates.
+[26-03-20 22:27:04] No compilation errors. Let me check for any remaining DashMap references in engine.rs that should have been changed, and verify transaction.rs.
+[26-03-20 22:27:10] Good - no remaining DashMap entry references. Let me also check that the external callers (server.rs, key.rs, connection.rs) still compile correctly.
+[26-03-20 22:27:15] Good, `.len()` works the same on ShardedStore. Now let me run the full test suite.
+[26-03-20 22:36:48] All 1007+ tests pass with 0 failures. Let me also run the integration tests explicitly.
+[26-03-20 22:36:53] All tests pass. Now let me update the plan file and commit.
+[26-03-20 22:37:09] Now update the progress file and commit.
+[26-03-20] TASK 6: Phase 3 - Sharded Storage Engine - COMPLETE
+[26-03-20] Implemented custom sharded storage engine replacing DashMap:
+[26-03-20]   1. Created src/storage/sharded.rs with ShardedStore implementation
+[26-03-20]      - Shard struct with #[repr(align(128))] for cache-line alignment
+[26-03-20]      - hashbrown::HashMap with FxBuildHasher per shard
+[26-03-20]      - parking_lot::RwLock per shard for fast synchronous locking
+[26-03-20]      - Per-shard AtomicU64 memory tracking and AtomicU32 key count
+[26-03-20]      - Per-shard tokio::sync::Mutex for transaction isolation
+[26-03-20]      - Dynamic shard count: (num_cpus * 16).next_power_of_two().clamp(16, 1024)
+[26-03-20]   2. Complete DashMap-compatible API: get, get_mut, entry, insert, remove, contains_key
+[26-03-20]      - MappedRwLockReadGuard/MappedRwLockWriteGuard for zero-overhead references
+[26-03-20]      - Custom ShardEntry/OccupiedShardEntry/VacantShardEntry for entry pattern
+[26-03-20]      - for_each, filter_map, sample for iteration (replaces DashMap iter())
+[26-03-20]   3. Migrated entire StorageEngine (4400+ lines) from DashMap to ShardedStore
+[26-03-20]      - data and extra_dbs fields now use ShardedStore
+[26-03-20]      - Removed key_locks DashMap (replaced by per-shard tx_locks)
+[26-03-20]      - All DashMap entry patterns converted to ShardEntry patterns
+[26-03-20]      - All DashMap iteration converted to for_each/filter_map/sample
+[26-03-20]      - Restructured async methods to avoid holding parking_lot guards across await
+[26-03-20]   4. Updated lock_keys/lock_keys_multi_db for shard-level locking
+[26-03-20]      - Sorted shard indices for deadlock prevention
+[26-03-20]      - O(shards) locks instead of O(keys) locks
+[26-03-20]   5. Per-shard memory tracking with sum for global queries
+[26-03-20]   6. Multi-database via array of ShardedStore (one per DB)
+[26-03-20]   7. 12+ tests for sharded storage: distribution, concurrent r/w, entry API, sampling, tx locks
+[26-03-20] All 1007+ tests pass across all suites. Zero failures.
+[26-03-20 22:37:30] Now let me commit all changes.

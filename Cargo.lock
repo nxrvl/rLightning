@@ -1578,6 +1578,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "ordered-float",
+ "parking_lot",
  "pprof",
  "redis",
  "regex",

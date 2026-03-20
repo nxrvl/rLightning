@@ -73,6 +73,8 @@ sha2 = "0.10"
 smallvec = "1.13"
 # Fast non-cryptographic hasher for native collection types
 rustc-hash = "2"
+# High-performance synchronization primitives (RwLock for sharded storage)
+parking_lot = "0.12"
 
 
 [dev-dependencies]
