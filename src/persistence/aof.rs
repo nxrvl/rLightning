@@ -123,7 +123,9 @@ impl AofPersistence {
 
             loop {
                 tokio::select! {
-                    // Handle new entries
+                    // Handle new entries — batch-drain: collect the first entry plus
+                    // all immediately available entries from the channel to write them
+                    // in a single I/O operation, reducing syscall overhead.
                     Some(entry) = writer_rx.recv() => {
                         // If the writer was poisoned by a prior failed reopen,
                         // try to recover before processing any new batches.
@@ -152,31 +154,49 @@ impl AofPersistence {
                             }
                         }
 
-                        // Stage entire batch in a memory buffer before writing.
+                        // Batch-drain: collect all immediately available entries
+                        let mut entries = vec![entry];
+                        while let Ok(extra) = writer_rx.try_recv() {
+                            entries.push(extra);
+                        }
+
+                        // Determine if any entry in the batch requires immediate sync
+                        let mut force_sync = false;
+
+                        // Stage all entries in a single memory buffer before writing.
                         // This prevents partial RESP commands from reaching the file
                         // if serialization or I/O fails mid-batch.
                         let mut batch_buf: Vec<u8> = Vec::new();
                         let mut serialization_failed = false;
-                        let batch_len = entry.commands.len();
+                        let mut total_commands = 0usize;
 
-                        for command in &entry.commands {
-                            let resp_cmd = RespValue::Array(Some(
-                                std::iter::once(RespValue::BulkString(Some(command.name.clone())))
-                                    .chain(command.args.iter().cloned().map(|arg| RespValue::BulkString(Some(arg))))
-                                    .collect()
-                            ));
+                        for batch_entry in &entries {
+                            if batch_entry.sync {
+                                force_sync = true;
+                            }
+                            for command in &batch_entry.commands {
+                                total_commands += 1;
+                                let resp_cmd = RespValue::Array(Some(
+                                    std::iter::once(RespValue::BulkString(Some(command.name.clone())))
+                                        .chain(command.args.iter().cloned().map(|arg| RespValue::BulkString(Some(arg))))
+                                        .collect()
+                                ));
 
-                            match resp_cmd.serialize() {
-                                Ok(data) => batch_buf.extend_from_slice(&data),
-                                Err(e) => {
-                                    error!(
-                                        command_name = ?command.name,
-                                        batch_size = batch_len,
-                                        "Failed to serialize command for AOF, discarding entire batch: {:?}", e
-                                    );
-                                    serialization_failed = true;
-                                    break;
+                                match resp_cmd.serialize() {
+                                    Ok(data) => batch_buf.extend_from_slice(&data),
+                                    Err(e) => {
+                                        error!(
+                                            command_name = ?command.name,
+                                            batch_size = total_commands,
+                                            "Failed to serialize command for AOF, discarding entire batch: {:?}", e
+                                        );
+                                        serialization_failed = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if serialization_failed {
+                                break;
                             }
                         }
 
@@ -238,7 +258,7 @@ impl AofPersistence {
                         if let Err(e) = writer.write_all(&batch_buf).await {
                             error!(
                                 path = ?path,
-                                batch_size = batch_len,
+                                batch_size = total_commands,
                                 batch_bytes = total_written,
                                 "Failed to write batch to AOF file, discarding batch: {:?}", e
                             );
@@ -276,7 +296,7 @@ impl AofPersistence {
                         // Update the file size
                         *file_size.write().await += total_written;
 
-                        if entry.sync {
+                        if force_sync {
                             // Always policy: flush and fsync immediately
                             if let Err(e) = writer.flush().await {
                                 error!(path = ?path, "Failed to flush AOF buffer: {:?}", e);

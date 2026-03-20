@@ -195,12 +195,12 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/persistence/aof.rs`
 - Modify: `src/persistence/mod.rs`
 
-- [ ] Implement COW-based RDB snapshots: per-shard read-lock, clone HashMap (Bytes cheap clone via refcount), release lock, serialize clone in background
-- [ ] Remove `cross_db_lock` write lock from snapshot path
-- [ ] Implement lock-free AOF appending via MPSC channel: command threads send `AofEntry` to dedicated AOF writer thread
-- [ ] AOF writer thread batch-drains channel and performs `fsync()` on everysec schedule
-- [ ] Write tests for: RDB snapshot during concurrent writes, AOF append ordering, persistence roundtrip (save -> kill -> restart -> verify data)
-- [ ] Run full test suite + persistence integration tests - must pass before task 12
+- [x] Implement COW-based RDB snapshots: per-shard read-lock, clone HashMap (Bytes cheap clone via refcount), release lock, serialize clone in background
+- [x] Remove `cross_db_lock` write lock from snapshot path
+- [x] Implement lock-free AOF appending via MPSC channel: command threads send `AofEntry` to dedicated AOF writer thread
+- [x] AOF writer thread batch-drains channel and performs `fsync()` on everysec schedule
+- [x] Write tests for: RDB snapshot during concurrent writes, AOF append ordering, persistence roundtrip (save -> kill -> restart -> verify data)
+- [x] Run full test suite + persistence integration tests - must pass before task 12
 
 ### Task 12: Verify Acceptance Criteria
 

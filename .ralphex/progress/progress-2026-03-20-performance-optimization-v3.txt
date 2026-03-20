@@ -568,3 +568,69 @@ starting task execution phase
 [26-03-21 00:50:05] All tests pass. Let me also verify the full count:
 [26-03-21 00:53:07] All tests pass - 0 failures across all test suites. Now let me update the plan and commit.
 [26-03-21 00:53:23] Now commit:
+[26-03-21 00:54:03] Task 10 (Phase 9 - TTL and Eviction Optimization) is complete. Here's what was done:
+[26-03-21 00:54:03]   - Added `arrayvec` dependency to Cargo.toml
+[26-03-21 00:54:03]   - Created `src/storage/clock.rs` with a cached monotonic clock (CACHED_OFFSET_US AtomicU64, updated every 1ms by a Tokio background timer)
+[26-03-21 00:54:03]   - Moved from a single global BinaryHeap expiration queue to per-shard expiration heaps inside ShardedStore, each protected by a separate parking_lot::Mutex
+[26-03-21 00:54:03]   - Replaced the old 1-second interval expiration task with round-robin per-shard processing (4 shards per 100ms tick, 25 max expires per shard)
+[26-03-21 00:54:03]   - Added per-shard probabilistic eviction using ArrayVec<EvictionCandidate, 16> for stack-allocated candidate sampling
+[26-03-21 00:54:03]   - Replaced all Instant::now() calls in storage hot paths (is_expired, ttl, expire, batch operations) with cached_now()
+[26-03-21 00:54:03]   - Added 9 new tests: per-shard expiration (basic, refreshed key, max removals), remove_expiration, eviction candidate sampling, clear-clears-heaps, and 3 cached clock tests
+[26-03-21 00:54:03]   - All 1067+ tests pass across all test suites
+[26-03-21 00:54:03] Tasks 11-13 still have unchecked items in the plan.
+[26-03-21 00:54:13] The background task notification is for the test run that already completed successfully. Task 10 is done and committed. Stopping here for the external loop to pick up Task 11.
+
+--- task iteration 11 ---
+[26-03-21 00:54:32] I'm picking up Task 11: Phase 10 - Non-Blocking Persistence. This task implements copy-on-write RDB snapshots and lock-free AOF appending via MPSC channels. The goal is to eliminate lock contention during
+[26-03-21 00:54:32] persistence operations so that read/write throughput isn't degraded during saves. Key files: src/persistence/rdb.rs, src/persistence/aof.rs, src/persistence/mod.rs, and the sharded storage engine.
+[26-03-21 00:54:32] Let me read the current persistence and storage files to understand what needs to change.
+[26-03-21 00:55:02] Now let me look at how `snapshot_db` works and the sharded store.
+[26-03-21 00:55:22] Now let me look at the rest of the AOF file for the `append_commands_batch` and rewrite functions.
+[26-03-21 00:56:03] Let me check the `StorageItem` type and how shards are structured.
+[26-03-21 00:56:12] Now I have a clear picture. Let me also check the `Entry` struct to understand what we're cloning.
+[26-03-21 00:56:22] Good. Now I have a full understanding. Let me implement the changes. I'll start with all the modifications in parallel.
+[26-03-21 00:56:22] First, let me add the `snapshot_shard_clone` method to `ShardedStore`, then update `StorageEngine::snapshot_all_dbs` to remove the `cross_db_lock` write lock, update the AOF writer to batch-drain, and then
+[26-03-21 00:56:22] write tests.
+[26-03-21 00:56:31] Now let me look at the last part of the ShardedStore file to see where to add the new method.
+[26-03-21 00:56:50] Now I have a thorough understanding of the codebase. Let me implement the changes:
+[26-03-21 00:56:50]   1. Add `snapshot_cow()` method to `ShardedStore` - clones each shard under a read lock
+[26-03-21 00:56:50]   2. Add `snapshot_all_dbs_cow()` to `StorageEngine` - no cross_db_lock write
+[26-03-21 00:56:50]   3. Update RDB `save()` to use the new COW method
+[26-03-21 00:56:50]   4. Update AOF writer task to batch-drain
+[26-03-21 00:56:50]   5. Write tests
+[26-03-21 00:57:04] Now update `StorageEngine::snapshot_all_dbs` to use COW approach without the cross_db_lock write lock.
+[26-03-21 00:57:21] Now update the AOF writer task to batch-drain. Let me find the exact location where entries are processed one at a time.
+[26-03-21 00:57:30] Now I need to modify the writer task to batch-drain entries. The key change is: after receiving one entry from `recv()`, try to drain more with `try_recv()` before writing. Let me replace the entry
+[26-03-21 00:57:30] processing section.
+[26-03-21 00:57:53] Now I need to update the sync logic further down in the same code block. The old code checked `entry.sync` for a single entry. Now we use the `force_sync` variable. Let me find and update that section.
+[26-03-21 00:58:01] I see there's a `batch_len` reference that needs to be fixed. Let me also fix the `entry.sync` to `force_sync`.
+[26-03-21 00:58:31] The issue is that `entry` is moved into `entries` vec but there's still a reference to `entry.sync` later. Let me check the exact problem. The `entry` is consumed by `vec![entry]` at line ~158, but
+[26-03-21 00:58:31] `entry.sync` is referenced later at line ~299 after our edit. Wait, I already replaced `entry.sync` with `force_sync`. Let me check line 299.
+[26-03-21 00:58:42] That's correct now. The diagnostic must be stale. Let me check the exact error location - it says line 299:28 "use of moved value: `entry`". That might be from a different part. Let me search for remaining
+[26-03-21 00:58:42] uses of `entry.` after the batch-drain.
+[26-03-21 00:58:55] Good, no more `entry.sync` references. The diagnostics are clearing up. Let me now build to verify the changes compile correctly.
+[26-03-21 00:59:14] Build succeeded. The warnings are all pre-existing. Now let me write the tests. I need to add tests for:
+[26-03-21 00:59:14]   1. RDB snapshot during concurrent writes
+[26-03-21 00:59:14]   2. AOF append ordering
+[26-03-21 00:59:14]   3. Persistence roundtrip (save -> verify data)
+[26-03-21 00:59:14] Let me add tests to the RDB and persistence test files.
+[26-03-21 00:59:23] Let me find the end of the tests file so I can add new tests.
+[26-03-21 00:59:40] Now let me add the new tests at the end of the tests module.
+[26-03-21 01:00:30] Now let me build and run the new tests to validate.
+[26-03-21 01:00:44] There are compilation errors. Let me see them.
+[26-03-21 01:01:09] The issue is that `StorageEngine::new()` already returns `Arc<StorageEngine>`, so wrapping in `Arc::new()` creates a double-Arc. Let me fix the tests.
+[26-03-21 01:01:17] Also need to remove the `use std::sync::Arc` that's no longer needed in those test functions, and the `Arc::new` wrapping for engine2. Let me check - actually, `StorageEngine::new` returns
+[26-03-21 01:01:17] `Arc<StorageEngine>`, so `engine.clone()` works directly. The `use std::sync::Arc` import is still needed if other parts use it. Let me just rebuild.
+[26-03-21 01:01:37] These are the `engine2` lines. The issue is `engine2.clone()` where engine2 is already `Arc<StorageEngine>`. But wait, the `RdbPersistence::new()` expects `Arc<StorageEngine>`, and `engine2` is already
+[26-03-21 01:01:37] `Arc<StorageEngine>`. Let me check these lines.
+[26-03-21 01:01:47] The `engine2` declarations still have `Arc::new()`. The `replace_all` only caught `let engine = Arc::new(...)` not `let engine2 = Arc::new(...)`. Let me fix these.
+[26-03-21 01:02:15] Compilation passes. Let me clean up the unused `Arc` imports in the test functions and then run the tests.
+[26-03-21 01:02:35] There are still some `use std::sync::Arc` lines left (these are in test functions that had the `Arc` on a separate line from the `tokio::task` import). Let me check them.
+[26-03-21 01:02:43] Hmm, the diagnostics may be stale. Let me check lines 806, 874, etc.
+[26-03-21 01:02:52] Good, the `Arc` imports are already gone. Let me now run all the new tests.
+[26-03-21 01:03:13] The filter didn't match. Let me try a broader pattern.
+[26-03-21 01:03:28] All 5 new tests pass. Now let me run the full test suite to make sure nothing is broken.
+[26-03-21 01:03:35] All 1072 tests pass. Let me also run the existing RDB-specific tests to make sure those still work.
+[26-03-21 01:03:40] All RDB tests pass. Now let me also run the integration tests.
+[26-03-21 01:04:01] All tests pass. Now let me update the plan to mark Task 11 checkboxes as completed.
+[26-03-21 01:04:14] Now let me commit all changes.

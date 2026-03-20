@@ -620,6 +620,25 @@ impl ShardedStore {
         candidates
     }
 
+    /// COW snapshot: clone each shard's HashMap under a short-lived read lock.
+    /// Returns a Vec of (key, Entry) pairs for all non-expired entries.
+    /// Each shard lock is held only for the duration of the clone, then released
+    /// before moving to the next shard. This allows concurrent writes to proceed
+    /// on other shards while the snapshot is being built.
+    pub fn snapshot_cow(&self) -> Vec<(Vec<u8>, Entry)> {
+        let mut result = Vec::new();
+        for shard in self.shards.iter() {
+            let guard = shard.inner.read();
+            for (key, entry) in guard.map.iter() {
+                if !entry.is_expired() {
+                    result.push((key.clone(), entry.clone()));
+                }
+            }
+            // guard drops here, releasing the read lock before next shard
+        }
+        result
+    }
+
     /// Create a ShardedStore with a specific shard count for testing.
     #[cfg(test)]
     pub fn with_shard_count_for_test(shard_count: usize) -> Self {

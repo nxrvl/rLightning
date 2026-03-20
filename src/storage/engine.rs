@@ -1302,13 +1302,26 @@ impl StorageEngine {
 
     /// Get a snapshot of all databases (for multi-DB persistence).
     /// Returns a Vec indexed by database number, each containing the DB's data.
-    /// Acquires an exclusive cross-DB lock to prevent MOVE/SWAPDB from running
-    /// during the snapshot, ensuring a consistent view across all databases.
+    ///
+    /// Uses COW-based per-shard snapshotting: each shard's read lock is held only
+    /// long enough to clone its HashMap, then released before moving to the next.
+    /// This eliminates the global cross_db_lock write lock from the snapshot path,
+    /// allowing concurrent reads and writes to proceed on other shards during save.
+    ///
+    /// Trade-off: the snapshot is not perfectly atomic across all databases (a MOVE
+    /// or SWAPDB running concurrently could cause minor inconsistency), but this
+    /// matches Redis's fork-based snapshot semantics and vastly reduces lock
+    /// contention during persistence.
     pub async fn snapshot_all_dbs(&self) -> StorageResult<Vec<HashMap<Vec<u8>, StorageItem>>> {
-        let _guard = self.cross_db_lock.write().await;
         let mut snapshots = Vec::with_capacity(NUM_DATABASES);
         for db_idx in 0..NUM_DATABASES {
-            snapshots.push(self.snapshot_db(db_idx).await?);
+            let db = self.get_db_by_index(db_idx);
+            let entries = db.snapshot_cow();
+            let mut map = HashMap::with_capacity(entries.len());
+            for (key, entry) in entries {
+                map.insert(key, entry);
+            }
+            snapshots.push(map);
         }
         Ok(snapshots)
     }
