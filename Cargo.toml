@@ -15,7 +15,7 @@ readme = "README.md"
 # Async runtime
 tokio = { version = "1.32", features = ["full"] }
 # Efficient collections
-hashbrown = "0.14"
+hashbrown = { version = "0.14", features = ["serde"] }
 bytes = "1.5"
 # Ordered floating point for BTreeSet usage
 ordered-float = { version = "4", features = ["serde"] }
@@ -71,6 +71,8 @@ sha1_smol = "1.0"
 sha2 = "0.10"
 # Small-buffer-optimized Vec for zero-copy command parsing
 smallvec = "1.13"
+# Fast non-cryptographic hasher for native collection types
+rustc-hash = "2"
 
 
 [dev-dependencies]

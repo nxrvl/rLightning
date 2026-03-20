@@ -2,6 +2,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
+use crate::storage::value::{ModifyResult, StoreValue};
 
 #[allow(deprecated)]
 use std::hash::SipHasher;
@@ -161,20 +162,21 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let changed = engine.atomic_modify(key, RedisDataType::String, |current| {
         let is_new = current.is_none();
         let mut hll_data = match current {
-            Some(ref data) if hll_is_valid(data) => (*data).clone(),
-            Some(ref data) if data.is_empty() => hll_new_dense(),
-            Some(_) => {
+            Some(StoreValue::Str(data)) if hll_is_valid(data) => data.clone(),
+            Some(StoreValue::Str(data)) if data.is_empty() => hll_new_dense(),
+            Some(StoreValue::Str(_)) => {
                 return Err(crate::storage::error::StorageError::WrongType);
             }
             None => hll_new_dense(),
+            _ => return Err(crate::storage::error::StorageError::WrongType),
         };
 
         // If no elements provided, just ensure the key exists
         if elements.is_empty() {
             if is_new {
-                return Ok((Some(hll_data), 1i64));
+                return Ok((ModifyResult::Set(StoreValue::Str(hll_data)), 1i64));
             }
-            return Ok((Some(hll_data), 0i64));
+            return Ok((ModifyResult::Set(StoreValue::Str(hll_data)), 0i64));
         }
 
         let mut changed = false;
@@ -185,7 +187,7 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
 
-        Ok((Some(hll_data), if changed { 1 } else { 0 }))
+        Ok((ModifyResult::Set(StoreValue::Str(hll_data)), if changed { 1 } else { 0 }))
     })?;
 
     Ok(RespValue::Integer(changed))
@@ -203,10 +205,11 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         // Single key - atomic type check + read in one DashMap hold
         let key = &args[0];
         let count = engine.atomic_read(key, RedisDataType::String, |data| match data {
-            Some(d) if hll_is_valid(d) => Ok(hll_count(d)),
-            Some(d) if d.is_empty() => Ok(0),
-            Some(_) => Err(crate::storage::error::StorageError::WrongType),
+            Some(StoreValue::Str(d)) if hll_is_valid(d) => Ok(hll_count(d)),
+            Some(StoreValue::Str(d)) if d.is_empty() => Ok(0),
+            Some(StoreValue::Str(_)) => Err(crate::storage::error::StorageError::WrongType),
             None => Ok(0),
+            _ => Err(crate::storage::error::StorageError::WrongType),
         })?;
         Ok(RespValue::Integer(count))
     } else {
@@ -216,10 +219,11 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         for key in args {
             let data_opt: Option<Vec<u8>> =
                 engine.atomic_read(key, RedisDataType::String, |data| match data {
-                    Some(d) if hll_is_valid(d) => Ok(Some(d.clone())),
-                    Some(d) if d.is_empty() => Ok(None),
-                    Some(_) => Err(crate::storage::error::StorageError::WrongType),
+                    Some(StoreValue::Str(d)) if hll_is_valid(d) => Ok(Some(d.clone())),
+                    Some(StoreValue::Str(d)) if d.is_empty() => Ok(None),
+                    Some(StoreValue::Str(_)) => Err(crate::storage::error::StorageError::WrongType),
                     None => Ok(None),
+                    _ => Err(crate::storage::error::StorageError::WrongType),
                 })?;
             if let Some(data) = data_opt {
                 hll_merge(&mut merged, &data);
@@ -276,7 +280,7 @@ pub async fn pfmerge(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     // Store merged result in dest key
     let ttl = engine.ttl(dest_key).await?;
     engine
-        .set_with_type(dest_key.clone(), merged, RedisDataType::String, ttl)
+        .set_with_type(dest_key.clone(), StoreValue::Str(merged), ttl)
         .await?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -564,8 +568,7 @@ mod tests {
         engine
             .set_with_type(
                 b"mylist".to_vec(),
-                bincode::serialize(&vec![b"item".to_vec()]).unwrap(),
-                RedisDataType::List,
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(vec![b"item".to_vec()])),
                 None,
             )
             .await
@@ -656,8 +659,7 @@ mod tests {
         engine
             .set_with_type(
                 b"hll_ttl".to_vec(),
-                hll_data,
-                RedisDataType::String,
+                crate::storage::value::StoreValue::Str(hll_data),
                 Some(std::time::Duration::from_secs(3600)),
             )
             .await

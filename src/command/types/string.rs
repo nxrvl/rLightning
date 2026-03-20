@@ -168,7 +168,11 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
 
     // Single DashMap lookup: type check + value read atomically
-    let value = engine.atomic_read(key, RedisDataType::String, |data| Ok(data.cloned()))?;
+    let value = engine.atomic_read(key, RedisDataType::String, |data| match data {
+        Some(crate::storage::value::StoreValue::Str(v)) => Ok(Some(v.clone())),
+        Some(_) => Err(crate::storage::error::StorageError::WrongType),
+        None => Ok(None),
+    })?;
 
     // Trigger lazy expiration: if the key returned None but still exists in the DB,
     // it was expired and should be cleaned up now
@@ -323,8 +327,10 @@ pub async fn strlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
 
     // Single DashMap lookup: type check + length read atomically
-    let len = engine.atomic_read(key, RedisDataType::String, |data| {
-        Ok(data.map(|v| v.len() as i64).unwrap_or(0))
+    let len = engine.atomic_read(key, RedisDataType::String, |data| match data {
+        Some(crate::storage::value::StoreValue::Str(v)) => Ok(v.len() as i64),
+        Some(_) => Err(crate::storage::error::StorageError::WrongType),
+        None => Ok(0),
     })?;
 
     Ok(RespValue::Integer(len))
@@ -351,7 +357,8 @@ pub async fn getrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     // Single DashMap lookup: type check + substring extraction atomically
     let result = engine.atomic_read(key, RedisDataType::String, |data| {
         let value = match data {
-            Some(v) => v,
+            Some(crate::storage::value::StoreValue::Str(v)) => v,
+            Some(_) => return Err(crate::storage::error::StorageError::WrongType),
             None => return Ok(Vec::new()),
         };
 
@@ -405,7 +412,11 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     // Atomic read-modify-write: type check, pad, overwrite, preserve TTL
     engine.check_write_memory(0).await?;
     let new_len = engine.atomic_modify(&key, RedisDataType::String, |current| {
-        let mut val = current.map(|v| v.clone()).unwrap_or_default();
+        let mut val = match current {
+            Some(crate::storage::value::StoreValue::Str(v)) => v.clone(),
+            Some(_) => return Err(crate::storage::error::StorageError::WrongType),
+            None => Vec::new(),
+        };
 
         if val.len() < required_len {
             val.resize(required_len, 0); // Pad with null bytes
@@ -417,7 +428,7 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
 
         let new_len = val.len() as i64;
-        Ok((Some(val), new_len))
+        Ok((crate::storage::value::ModifyResult::Set(crate::storage::value::StoreValue::Str(val)), new_len))
     })?;
 
     Ok(RespValue::Integer(new_len))
@@ -2211,8 +2222,7 @@ mod tests {
         engine
             .set_with_type(
                 b"list_key".to_vec(),
-                b"data".to_vec(),
-                RedisDataType::List,
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::new()),
                 None,
             )
             .await
@@ -2311,8 +2321,7 @@ mod tests {
         engine
             .set_with_type(
                 b"list_key2".to_vec(),
-                b"data".to_vec(),
-                RedisDataType::List,
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::new()),
                 None,
             )
             .await
@@ -2383,8 +2392,7 @@ mod tests {
         engine
             .set_with_type(
                 b"list_getex".to_vec(),
-                b"data".to_vec(),
-                RedisDataType::List,
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::new()),
                 None,
             )
             .await

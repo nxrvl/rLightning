@@ -470,7 +470,7 @@ pub async fn memory(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
             // Estimate memory usage
             if let Some(item) = engine.get_item(key).await? {
-                let size = key.len() + item.value.len() + 64; // 64 bytes overhead estimate
+                let size = key.len() + item.value.mem_size() + 64; // 64 bytes overhead estimate
                 Ok(RespValue::Integer(size as i64))
             } else {
                 Ok(RespValue::BulkString(None))
@@ -1653,7 +1653,7 @@ mod tests {
         // Put data in db1 directly
         if let Some(db1) = engine.get_db(1) {
             use crate::storage::item::StorageItem;
-            db1.insert(b"key1".to_vec(), StorageItem::new(b"val1".to_vec()));
+            db1.insert(b"key1".to_vec(), StorageItem::new(crate::storage::value::StoreValue::Str(b"val1".to_vec())));
         }
 
         // Swap db0 and db1

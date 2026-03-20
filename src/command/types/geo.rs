@@ -1,9 +1,9 @@
-use crate::command::types::sorted_set::SortedSetData;
 use crate::command::utils::bytes_to_string;
 use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
+use crate::storage::value::{ModifyResult, SortedSetData, StoreValue};
 
 type SortedSet = Vec<(f64, Vec<u8>)>;
 
@@ -150,20 +150,20 @@ async fn load_sorted_set(
     engine: &StorageEngine,
     key: &[u8],
 ) -> Result<Option<SortedSet>, CommandError> {
-    match engine.get(key).await? {
-        Some(data) => {
-            let ss_data = bincode::deserialize::<SortedSetData>(&data)
-                .map_err(|_| CommandError::WrongType)?;
-            // Convert from SortedSetData to Vec<(f64, Vec<u8>)> - already sorted by BTreeSet
-            let vec: Vec<(f64, Vec<u8>)> = ss_data
-                .entries
-                .into_iter()
-                .map(|(score, member)| (score.into_inner(), member))
-                .collect();
-            Ok(Some(vec))
-        }
-        None => Ok(None),
-    }
+    engine
+        .atomic_read(key, RedisDataType::ZSet, |data| match data {
+            Some(StoreValue::ZSet(ss_data)) => {
+                let vec: Vec<(f64, Vec<u8>)> = ss_data
+                    .entries
+                    .iter()
+                    .map(|(score, member)| (score.into_inner(), member.clone()))
+                    .collect();
+                Ok(Some(vec))
+            }
+            Some(_) => Err(crate::storage::error::StorageError::WrongType),
+            None => Ok(None),
+        })
+        .map_err(CommandError::from)
 }
 
 async fn save_sorted_set(
@@ -178,10 +178,8 @@ async fn save_sorted_set(
         for (score, member) in ss {
             ss_data.insert(*score, member.clone());
         }
-        let serialized = bincode::serialize(&ss_data)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
-            .set_with_type_preserve_ttl(key.to_vec(), serialized, RedisDataType::ZSet)
+            .set_with_type_preserve_ttl(key.to_vec(), StoreValue::ZSet(ss_data))
             .await?;
     }
     Ok(())
@@ -408,15 +406,14 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |current| {
         let mut ss: SortedSet = match current {
-            Some(data) => {
-                let ss_data = bincode::deserialize::<SortedSetData>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
+            Some(StoreValue::ZSet(ss_data)) => {
                 ss_data
                     .entries
-                    .into_iter()
-                    .map(|(score, member)| (score.into_inner(), member))
+                    .iter()
+                    .map(|(score, member)| (score.into_inner(), member.clone()))
                     .collect()
             }
+            Some(_) => return Err(crate::storage::error::StorageError::WrongType),
             None => Vec::new(),
         };
 
@@ -452,15 +449,9 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         for (score, member) in &ss {
             ss_data.insert(*score, member.clone());
         }
-        let serialized = bincode::serialize(&ss_data).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
 
         let result = if ch { added + changed } else { added };
-        Ok((Some(serialized), result))
+        Ok((ModifyResult::Set(StoreValue::ZSet(ss_data)), result))
     })?;
 
     Ok(RespValue::Integer(result))
@@ -637,19 +628,13 @@ pub async fn geosearchstore(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     engine.atomic_modify(dest, RedisDataType::ZSet, |_current| {
         // Overwrite destination entirely with search results
         if dest_entries.is_empty() {
-            Ok((None, ()))
+            Ok((ModifyResult::Delete, ()))
         } else {
             let mut ss_data = SortedSetData::new();
             for (score, member) in &dest_entries {
                 ss_data.insert(*score, member.clone());
             }
-            let serialized = bincode::serialize(&ss_data).map_err(|e| {
-                crate::storage::error::StorageError::InternalError(format!(
-                    "Serialization error: {}",
-                    e
-                ))
-            })?;
-            Ok((Some(serialized), ()))
+            Ok((ModifyResult::Set(StoreValue::ZSet(ss_data)), ()))
         }
     })?;
 

@@ -1058,12 +1058,10 @@ mod tests {
         let _ = handler.process(del_command, 0).await.unwrap();
 
         // Initialize the key as a list using set_with_type to properly track type
-        let serialized = crate::storage::list_bytes::new_empty();
         storage
             .set_with_type(
                 list_key.clone(),
-                serialized,
-                crate::storage::item::RedisDataType::List,
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::new()),
                 None,
             )
             .await

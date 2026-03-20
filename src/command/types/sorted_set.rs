@@ -5,98 +5,41 @@ use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::error::StorageError;
 use crate::storage::item::RedisDataType;
+use crate::storage::value::{ModifyResult, StoreValue};
 use futures::future::select_all;
 use ordered_float::OrderedFloat;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Sorted set data structure using BTreeSet for ordered iteration and HashMap for O(1) lookups
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SortedSetData {
-    pub entries: BTreeSet<(OrderedFloat<f64>, Vec<u8>)>,
-    pub scores: HashMap<Vec<u8>, f64>,
-}
+// SortedSetData is now defined in crate::storage::value.
+// Re-export for backward compatibility with code that imports from this module.
+pub use crate::storage::value::SortedSetData;
 
-impl Default for SortedSetData {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SortedSetData {
-    pub fn new() -> Self {
-        SortedSetData {
-            entries: BTreeSet::new(),
-            scores: HashMap::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.scores.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.scores.is_empty()
-    }
-
-    pub fn insert(&mut self, score: f64, member: Vec<u8>) -> bool {
-        if let Some(&old_score) = self.scores.get(&member) {
-            if old_score != score {
-                self.entries
-                    .remove(&(OrderedFloat(old_score), member.clone()));
-                self.entries.insert((OrderedFloat(score), member.clone()));
-                self.scores.insert(member, score);
-            }
-            false
-        } else {
-            self.entries.insert((OrderedFloat(score), member.clone()));
-            self.scores.insert(member, score);
-            true
-        }
-    }
-
-    pub fn remove(&mut self, member: &[u8]) -> bool {
-        if let Some(score) = self.scores.remove(member) {
-            self.entries.remove(&(OrderedFloat(score), member.to_vec()));
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn get_score(&self, member: &[u8]) -> Option<f64> {
-        self.scores.get(member).copied()
-    }
-
-    pub fn rank(&self, member: &[u8]) -> Option<usize> {
-        let score = self.scores.get(member)?;
-        let target = (OrderedFloat(*score), member.to_vec());
-        Some(self.entries.range(..&target).count())
-    }
-
-    pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
-        let score = self.scores.get(member)?;
-        let target = (OrderedFloat(*score), member.to_vec());
-        Some(self.entries.len() - 1 - self.entries.range(..&target).count())
-    }
-}
-
-fn deserialize_ss(existing: Option<&[u8]>) -> Result<SortedSetData, StorageError> {
+/// Extract a SortedSetData for read-only access from a StoreValue reference.
+fn read_zset(existing: Option<&StoreValue>) -> Result<SortedSetData, StorageError> {
     match existing {
-        Some(bytes) => {
-            bincode::deserialize::<SortedSetData>(bytes).map_err(|_| StorageError::WrongType)
-        }
+        Some(StoreValue::ZSet(ss)) => Ok(ss.clone()),
+        Some(_) => Err(StorageError::WrongType),
         None => Ok(SortedSetData::new()),
     }
 }
 
-fn serialize_ss(ss: &SortedSetData) -> Result<Option<Vec<u8>>, StorageError> {
+/// Extract a mutable SortedSetData from a StoreValue reference for modification.
+/// Takes ownership of the data via std::mem::take, caller must put it back or return ModifyResult::Set.
+fn take_zset_mut(existing: Option<&mut StoreValue>) -> Result<SortedSetData, StorageError> {
+    match existing {
+        Some(StoreValue::ZSet(ss)) => Ok(std::mem::replace(ss, SortedSetData::new())),
+        Some(_) => Err(StorageError::WrongType),
+        None => Ok(SortedSetData::new()),
+    }
+}
+
+/// Convert a SortedSetData back to a ModifyResult.
+fn zset_result(ss: SortedSetData) -> ModifyResult {
     if ss.is_empty() {
-        Ok(None)
+        ModifyResult::Delete
     } else {
-        bincode::serialize(ss)
-            .map(Some)
-            .map_err(|e| StorageError::InternalError(e.to_string()))
+        ModifyResult::Set(StoreValue::ZSet(ss))
     }
 }
 
@@ -106,11 +49,8 @@ fn load_sorted_set_readonly(
 ) -> Result<Option<SortedSetData>, CommandError> {
     engine
         .atomic_read(key, RedisDataType::ZSet, |data| match data {
-            Some(bytes) => {
-                let ss = bincode::deserialize::<SortedSetData>(bytes)
-                    .map_err(|_| StorageError::WrongType)?;
-                Ok(Some(ss))
-            }
+            Some(StoreValue::ZSet(ss)) => Ok(Some(ss.clone())),
+            Some(_) => Err(StorageError::WrongType),
             None => Ok(None),
         })
         .map_err(|e| match e {
@@ -371,7 +311,7 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         let mut added = 0i64;
         let mut changed = 0i64;
         for (score, member) in &pairs {
@@ -400,8 +340,7 @@ pub async fn zadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         } else {
             added
         };
-        let serialized = serialize_ss(&ss)?;
-        Ok((serialized, ret))
+        Ok((zset_result(ss), ret))
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -424,7 +363,7 @@ pub async fn zrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             .unwrap_or(false);
 
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         if ss.is_empty() {
             return Ok(Vec::new());
         }
@@ -455,17 +394,16 @@ pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let members = args[1..].to_vec();
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, 0i64));
+            return Ok((ModifyResult::Delete, 0i64));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         let mut removed = 0i64;
         for member in &members {
             if ss.remove(member) {
                 removed += 1;
             }
         }
-        let serialized = serialize_ss(&ss)?;
-        Ok((serialized, removed))
+        Ok((zset_result(ss), removed))
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -478,7 +416,7 @@ pub async fn zscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let member = args[1].clone();
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         Ok(ss.get_score(&member))
     })?;
     match result {
@@ -496,7 +434,7 @@ pub async fn zcard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
     let key = &args[0];
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         Ok(ss.len() as i64)
     })?;
     Ok(RespValue::Integer(result))
@@ -511,7 +449,7 @@ pub async fn zcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let (min_score, min_exclusive) = parse_score_bound(&bytes_to_string(&args[1])?)?;
     let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let count = ss
             .entries
             .iter()
@@ -535,7 +473,7 @@ pub async fn zrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         if existing.is_none() {
             return Ok(None);
         }
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         Ok(ss.rank(&member))
     })?;
     match result {
@@ -555,7 +493,7 @@ pub async fn zrevrank(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         if existing.is_none() {
             return Ok(None);
         }
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         Ok(ss.rev_rank(&member))
     })?;
     match result {
@@ -581,7 +519,7 @@ pub async fn zrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
             .map(|s| s.to_uppercase() == "WITHSCORES")
             .unwrap_or(false);
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         if ss.is_empty() {
             return Ok(Vec::new());
         }
@@ -620,12 +558,11 @@ pub async fn zincrby(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     }
     let member = args[2].clone();
     let new_score = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         let old_score = ss.get_score(&member).unwrap_or(0.0);
         let new_score = old_score + increment;
         ss.insert(new_score, member.clone());
-        let serialized = serialize_ss(&ss)?;
-        Ok((serialized, new_score))
+        Ok((zset_result(ss), new_score))
     })?;
     Ok(RespValue::BulkString(Some(
         format_score(new_score).into_bytes(),
@@ -681,7 +618,7 @@ pub async fn zrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
         }
     }
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let mut output = Vec::new();
         for (score, member) in ss
             .entries
@@ -753,7 +690,7 @@ pub async fn zrevrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
         }
     }
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let mut output = Vec::new();
         for (score, member) in ss
             .entries
@@ -816,7 +753,7 @@ pub async fn zrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     }
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let output: Vec<RespValue> = ss
             .entries
             .iter()
@@ -869,7 +806,7 @@ pub async fn zrevrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
         }
     }
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let output: Vec<RespValue> = ss
             .entries
             .iter()
@@ -898,16 +835,15 @@ pub async fn zremrangebyrank(engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
     })?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, 0i64));
+            return Ok((ModifyResult::Delete, 0i64));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         if ss.is_empty() {
-            return Ok((None, 0i64));
+            return Ok((ModifyResult::Delete, 0i64));
         }
         match normalize_indices(start, stop, ss.len()) {
             None => {
-                let s = serialize_ss(&ss)?;
-                Ok((s, 0i64))
+                Ok((zset_result(ss), 0i64))
             }
             Some((si, ei)) => {
                 let to_remove: Vec<_> = ss
@@ -922,8 +858,7 @@ pub async fn zremrangebyrank(engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
                     ss.entries.remove(&(score, member.clone()));
                     ss.scores.remove(&member);
                 }
-                let s = serialize_ss(&ss)?;
-                Ok((s, removed))
+                Ok((zset_result(ss), removed))
             }
         }
     })?;
@@ -940,9 +875,9 @@ pub async fn zremrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
     let (max_score, max_exclusive) = parse_score_bound(&bytes_to_string(&args[2])?)?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, 0i64));
+            return Ok((ModifyResult::Delete, 0i64));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         let to_remove: Vec<_> = ss
             .entries
             .iter()
@@ -956,8 +891,7 @@ pub async fn zremrangebyscore(engine: &StorageEngine, args: &[Vec<u8>]) -> Comma
             ss.entries.remove(&(score, member.clone()));
             ss.scores.remove(&member);
         }
-        let s = serialize_ss(&ss)?;
-        Ok((s, removed))
+        Ok((zset_result(ss), removed))
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -972,9 +906,9 @@ pub async fn zremrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, 0i64));
+            return Ok((ModifyResult::Delete, 0i64));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         let to_remove: Vec<_> = ss
             .entries
             .iter()
@@ -986,8 +920,7 @@ pub async fn zremrangebylex(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             ss.entries.remove(&(score, member.clone()));
             ss.scores.remove(&member);
         }
-        let s = serialize_ss(&ss)?;
-        Ok((s, removed))
+        Ok((zset_result(ss), removed))
     })?;
     Ok(RespValue::Integer(result))
 }
@@ -1001,7 +934,7 @@ pub async fn zlexcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     let min = parse_lex_bound(&bytes_to_string(&args[1])?)?;
     let max = parse_lex_bound(&bytes_to_string(&args[2])?)?;
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let count = ss
             .entries
             .iter()
@@ -1041,7 +974,7 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     }
     if sets.is_empty() || sets.iter().any(|s| s.is_empty()) {
-        engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((None, ())))?;
+        engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((ModifyResult::Delete, ())))?;
         return Ok(RespValue::Integer(0));
     }
     let mut result_ss = SortedSetData::new();
@@ -1062,8 +995,7 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
     let count = result_ss.len() as i64;
     engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
-        let s = serialize_ss(&result_ss)?;
-        Ok((s, ()))
+        Ok((zset_result(result_ss), ()))
     })?;
     Ok(RespValue::Integer(count))
 }
@@ -1109,8 +1041,7 @@ pub async fn zunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
     let count = result_ss.len() as i64;
     engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
-        let s = serialize_ss(&result_ss)?;
-        Ok((s, ()))
+        Ok((zset_result(result_ss), ()))
     })?;
     Ok(RespValue::Integer(count))
 }
@@ -1272,7 +1203,7 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     let first_set = match load_sorted_set_readonly(engine, &keys[0])? {
         Some(ss) => ss,
         None => {
-            engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((None, ())))?;
+            engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((ModifyResult::Delete, ())))?;
             return Ok(RespValue::Integer(0));
         }
     };
@@ -1292,8 +1223,7 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     }
     let count = result_ss.len() as i64;
     engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
-        let s = serialize_ss(&result_ss)?;
-        Ok((s, ()))
+        Ok((zset_result(result_ss), ()))
     })?;
     Ok(RespValue::Integer(count))
 }
@@ -1314,11 +1244,11 @@ pub async fn zpopmin(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, Vec::new()));
+            return Ok((ModifyResult::Delete, Vec::new()));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         if ss.is_empty() {
-            return Ok((None, Vec::new()));
+            return Ok((ModifyResult::Delete, Vec::new()));
         }
         let take = count.min(ss.len());
         let mut popped = Vec::with_capacity(take * 2);
@@ -1332,8 +1262,7 @@ pub async fn zpopmin(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
                 )));
             }
         }
-        let s = serialize_ss(&ss)?;
-        Ok((s, popped))
+        Ok((zset_result(ss), popped))
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -1354,11 +1283,11 @@ pub async fn zpopmax(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
 
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
         if existing.is_none() {
-            return Ok((None, Vec::new()));
+            return Ok((ModifyResult::Delete, Vec::new()));
         }
-        let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+        let mut ss = take_zset_mut(existing)?;
         if ss.is_empty() {
-            return Ok((None, Vec::new()));
+            return Ok((ModifyResult::Delete, Vec::new()));
         }
         let take = count.min(ss.len());
         let mut popped = Vec::with_capacity(take * 2);
@@ -1372,8 +1301,7 @@ pub async fn zpopmax(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
                 )));
             }
         }
-        let s = serialize_ss(&ss)?;
-        Ok((s, popped))
+        Ok((zset_result(ss), popped))
     })?;
     Ok(RespValue::Array(Some(result)))
 }
@@ -1529,7 +1457,7 @@ pub async fn zrandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let key = &args[0];
 
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let entries: Vec<(f64, Vec<u8>)> =
             ss.entries.iter().map(|(s, m)| (s.0, m.clone())).collect();
         Ok(entries)
@@ -1592,7 +1520,7 @@ pub async fn zmscore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     let key = &args[0];
     let members: Vec<Vec<u8>> = args[1..].to_vec();
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         let scores: Vec<RespValue> = members
             .iter()
             .map(|member| match ss.get_score(member) {
@@ -1644,11 +1572,11 @@ pub async fn zmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     for key in keys {
         let pop_result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
             if existing.is_none() {
-                return Ok((None, None));
+                return Ok((ModifyResult::Delete, None));
             }
-            let mut ss = deserialize_ss(existing.as_ref().map(|v| v.as_slice()))?;
+            let mut ss = take_zset_mut(existing)?;
             if ss.is_empty() {
-                return Ok((None, None));
+                return Ok((ModifyResult::Delete, None));
             }
             let take = count.min(ss.len());
             let mut elements = Vec::with_capacity(take * 2);
@@ -1667,8 +1595,7 @@ pub async fn zmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     )));
                 }
             }
-            let s = serialize_ss(&ss)?;
-            Ok((s, Some(elements)))
+            Ok((zset_result(ss), Some(elements)))
         })?;
 
         if let Some(elements) = pop_result {
@@ -1822,7 +1749,7 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     let src_ss = match load_sorted_set_readonly(engine, src)? {
         Some(ss) => ss,
         None => {
-            engine.atomic_modify(dst, RedisDataType::ZSet, |_| Ok((None, ())))?;
+            engine.atomic_modify(dst, RedisDataType::ZSet, |_| Ok((ModifyResult::Delete, ())))?;
             return Ok(RespValue::Integer(0));
         }
     };
@@ -1909,8 +1836,7 @@ pub async fn zrangestore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     }
     let count = result_ss.len() as i64;
     engine.atomic_modify(dst, RedisDataType::ZSet, |_| {
-        let s = serialize_ss(&result_ss)?;
-        Ok((s, ()))
+        Ok((zset_result(result_ss), ()))
     })?;
     Ok(RespValue::Integer(count))
 }
@@ -1960,7 +1886,7 @@ pub async fn zscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         if ss.is_empty() {
             return Ok((0usize, Vec::new()));
         }
@@ -2076,7 +2002,7 @@ pub async fn zrange_unified(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
     }
 
     let result = engine.atomic_read(key, RedisDataType::ZSet, |existing| {
-        let ss = deserialize_ss(existing.map(|v| v.as_slice()))?;
+        let ss = read_zset(existing)?;
         if ss.is_empty() {
             return Ok(Vec::new());
         }

@@ -3,6 +3,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
+use crate::storage::value::{ModifyResult, StoreValue};
 
 /// Check if a key has a non-string type (WRONGTYPE error).
 /// Uses get_raw_data_type to avoid false positives from legacy heuristic detection
@@ -51,7 +52,11 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Atomic read-modify-write: type check, expand, get old bit, set new bit, preserve TTL
     let old_bit = engine.atomic_modify(key, RedisDataType::String, |current| {
-        let mut bitmap = current.cloned().unwrap_or_default();
+        let mut bitmap = match current {
+            Some(StoreValue::Str(v)) => v.clone(),
+            None => Vec::new(),
+            _ => return Err(crate::storage::error::StorageError::WrongType),
+        };
 
         // Expand bitmap if needed
         if bitmap.len() <= byte_offset {
@@ -68,7 +73,7 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             bitmap[byte_offset] &= !(1 << bit_offset);
         }
 
-        Ok((Some(bitmap), old as i64))
+        Ok((ModifyResult::Set(StoreValue::Str(bitmap)), old as i64))
     })?;
 
     Ok(RespValue::Integer(old_bit))
@@ -473,7 +478,11 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     if all_readonly {
         // Use atomic_read to avoid version bumps and write counter increments
         let results = engine.atomic_read(key, RedisDataType::String, |current| {
-            let bitmap = current.cloned().unwrap_or_default();
+            let bitmap = match current {
+                Some(StoreValue::Str(v)) => v.clone(),
+                None => Vec::new(),
+                _ => return Err(crate::storage::error::StorageError::WrongType),
+            };
             let mut results: Vec<RespValue> = Vec::new();
             for op in &ops {
                 if let BitfieldOp::Get { encoding, offset } = op {
@@ -488,7 +497,11 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     // Atomic read-modify-write for BITFIELD operations with SET/INCRBY
     let results = engine.atomic_modify(key, RedisDataType::String, |current| {
-        let mut bitmap = current.as_ref().map(|v| (*v).clone()).unwrap_or_default();
+        let mut bitmap = match current.as_ref() {
+            Some(StoreValue::Str(v)) => v.clone(),
+            None => Vec::new(),
+            _ => return Err(crate::storage::error::StorageError::WrongType),
+        };
         let mut results: Vec<RespValue> = Vec::new();
         let mut modified = false;
 
@@ -534,10 +547,10 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
 
         if modified {
-            Ok((Some(bitmap), results))
+            Ok((ModifyResult::Set(StoreValue::Str(bitmap)), results))
         } else {
             // No actual mutation: preserve existing key state (don't create phantom keys)
-            Ok((current.as_ref().map(|v| (*v).clone()), results))
+            Ok((ModifyResult::Keep, results))
         }
     })?;
 

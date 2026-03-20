@@ -399,8 +399,9 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     match engine.get_item(key).await? {
         Some(item) => {
+            use crate::storage::value::StoreValue;
             // Serialize using a simple format: [type_byte][value_bytes]
-            let type_byte = match item.data_type {
+            let type_byte = match item.data_type() {
                 RedisDataType::String => 0u8,
                 RedisDataType::List => 1u8,
                 RedisDataType::Set => 2u8,
@@ -408,9 +409,31 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 RedisDataType::ZSet => 4u8,
                 RedisDataType::Stream => 5u8,
             };
-            let mut serialized = Vec::with_capacity(1 + item.value.len());
+            // Serialize value based on type
+            let value_bytes: Vec<u8> = match &item.value {
+                StoreValue::Str(v) => v.clone(),
+                StoreValue::Hash(m) => {
+                    let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    bincode::serialize(&std_map).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                }
+                StoreValue::Set(s) => {
+                    let std_set: std::collections::HashSet<Vec<u8>> = s.iter().cloned().collect();
+                    bincode::serialize(&std_set).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                }
+                StoreValue::ZSet(ss) => {
+                    bincode::serialize(ss).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                }
+                StoreValue::List(deque) => {
+                    let vec: Vec<Vec<u8>> = deque.iter().cloned().collect();
+                    bincode::serialize(&vec).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                }
+                StoreValue::Stream(s) => {
+                    bincode::serialize(s).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                }
+            };
+            let mut serialized = Vec::with_capacity(1 + value_bytes.len());
             serialized.push(type_byte);
-            serialized.extend_from_slice(&item.value);
+            serialized.extend_from_slice(&value_bytes);
             Ok(RespValue::BulkString(Some(serialized)))
         }
         None => Ok(RespValue::BulkString(None)),
@@ -456,15 +479,38 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     }
 
     // Deserialize: first byte is type, rest is value
+    use crate::storage::value::StoreValue;
     let type_byte = serialized[0];
-    let value = serialized[1..].to_vec();
-    let data_type = match type_byte {
-        0 => RedisDataType::String,
-        1 => RedisDataType::List,
-        2 => RedisDataType::Set,
-        3 => RedisDataType::Hash,
-        4 => RedisDataType::ZSet,
-        5 => RedisDataType::Stream,
+    let value_bytes = &serialized[1..];
+    let store_value = match type_byte {
+        0 => StoreValue::Str(value_bytes.to_vec()),
+        1 => {
+            let vec: Vec<Vec<u8>> = bincode::deserialize(value_bytes)
+                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            StoreValue::List(vec.into())
+        }
+        2 => {
+            let std_set: std::collections::HashSet<Vec<u8>> = bincode::deserialize(value_bytes)
+                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            let native: crate::storage::value::NativeHashSet = std_set.into_iter().collect();
+            StoreValue::Set(native)
+        }
+        3 => {
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = bincode::deserialize(value_bytes)
+                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            let native: crate::storage::value::NativeHashMap = std_map.into_iter().collect();
+            StoreValue::Hash(native)
+        }
+        4 => {
+            let ss: crate::storage::value::SortedSetData = bincode::deserialize(value_bytes)
+                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            StoreValue::ZSet(ss)
+        }
+        5 => {
+            let stream: crate::storage::stream::StreamData = bincode::deserialize(value_bytes)
+                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            StoreValue::Stream(stream)
+        }
         _ => {
             return Err(CommandError::InvalidArgument(
                 "DUMP payload version or checksum are wrong".to_string(),
@@ -479,7 +525,7 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     };
 
     match engine
-        .restore_key(key, value, data_type, ttl, replace)
+        .restore_key(key, store_value, ttl, replace)
         .await
     {
         Ok(true) => Ok(RespValue::SimpleString("OK".to_string())),
@@ -589,31 +635,12 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Ok(RespValue::Array(Some(vec![])));
     }
 
-    let key_type = engine.get_type(key).await?;
-    let mut elements: Vec<Vec<u8>> = match key_type.as_str() {
-        "list" => {
-            if let Some(value) = engine.get(key).await? {
-                crate::storage::list_bytes::deserialize_all(&value).unwrap_or_default()
-            } else {
-                vec![]
-            }
-        }
-        "set" => {
-            if let Some(value) = engine.get(key).await? {
-                let set: std::collections::HashSet<Vec<u8>> =
-                    bincode::deserialize(&value).unwrap_or_default();
-                set.into_iter().collect()
-            } else {
-                vec![]
-            }
-        }
-        "zset" => {
-            if let Some(value) = engine.get(key).await? {
-                let zset: Vec<(f64, Vec<u8>)> = bincode::deserialize(&value).unwrap_or_default();
-                zset.into_iter().map(|(_, member)| member).collect()
-            } else {
-                vec![]
-            }
+    let item = engine.get_item(key).await?.unwrap(); // We checked exists above
+    let mut elements: Vec<Vec<u8>> = match &item.value {
+        crate::storage::value::StoreValue::List(deque) => deque.iter().cloned().collect(),
+        crate::storage::value::StoreValue::Set(set) => set.iter().cloned().collect(),
+        crate::storage::value::StoreValue::ZSet(ss) => {
+            ss.entries.iter().map(|(_, member)| member.clone()).collect()
         }
         _ => {
             return Err(CommandError::WrongType);
@@ -659,9 +686,9 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Handle STORE option
     if let Some(store) = store_key {
         let count = elements.len() as i64;
-        let serialized = crate::storage::list_bytes::new_from_elements(&elements);
+        let deque: std::collections::VecDeque<Vec<u8>> = elements.iter().cloned().collect();
         engine
-            .set_with_type(store, serialized, RedisDataType::List, None)
+            .set_with_type(store, crate::storage::value::StoreValue::List(deque), None)
             .await?;
         return Ok(RespValue::Integer(count));
     }
@@ -1234,19 +1261,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_object_encoding_collections_small() {
-        use crate::storage::item::RedisDataType;
-        use std::collections::{HashMap, HashSet};
+        use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+        use std::collections::VecDeque;
 
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
         // Small list (<=128 elements, all <=64 bytes) -> "listpack"
-        let small_list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        let small_list = VecDeque::from(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         engine
             .set_with_type(
                 b"small_list".to_vec(),
-                crate::storage::list_bytes::new_from_elements(&small_list),
-                RedisDataType::List,
+                StoreValue::List(small_list),
                 None,
             )
             .await
@@ -1257,14 +1283,13 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
 
         // Small set (<=128 elements, all <=64 bytes) -> "listpack"
-        let mut small_set: HashSet<Vec<u8>> = HashSet::new();
+        let mut small_set = NativeHashSet::default();
         small_set.insert(b"x".to_vec());
         small_set.insert(b"y".to_vec());
         engine
             .set_with_type(
                 b"small_set".to_vec(),
-                bincode::serialize(&small_set).unwrap(),
-                RedisDataType::Set,
+                StoreValue::Set(small_set),
                 None,
             )
             .await
@@ -1275,14 +1300,13 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"listpack".to_vec())));
 
         // Small hash (<=128 fields, all <=64 bytes) -> "listpack"
-        let mut small_hash: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let mut small_hash = NativeHashMap::default();
         small_hash.insert(b"field1".to_vec(), b"val1".to_vec());
         small_hash.insert(b"field2".to_vec(), b"val2".to_vec());
         engine
             .set_with_type(
                 b"small_hash".to_vec(),
-                bincode::serialize(&small_hash).unwrap(),
-                RedisDataType::Hash,
+                StoreValue::Hash(small_hash),
                 None,
             )
             .await
@@ -1300,8 +1324,7 @@ mod tests {
         engine
             .set_with_type(
                 b"small_zset".to_vec(),
-                bincode::serialize(&small_zset).unwrap(),
-                RedisDataType::ZSet,
+                StoreValue::ZSet(small_zset),
                 None,
             )
             .await
@@ -1314,21 +1337,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_object_encoding_collections_large() {
-        use crate::storage::item::RedisDataType;
-        use std::collections::{HashMap, HashSet};
+        use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+        use std::collections::VecDeque;
 
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
         // Large list (>128 elements) -> "quicklist"
-        let large_list: Vec<Vec<u8>> = (0..200)
+        let large_list: VecDeque<Vec<u8>> = (0..200)
             .map(|i| format!("item{}", i).into_bytes())
             .collect();
         engine
             .set_with_type(
                 b"large_list".to_vec(),
-                crate::storage::list_bytes::new_from_elements(&large_list),
-                RedisDataType::List,
+                StoreValue::List(large_list),
                 None,
             )
             .await
@@ -1339,14 +1361,13 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"quicklist".to_vec())));
 
         // Large set (>128 elements) -> "hashtable"
-        let large_set: HashSet<Vec<u8>> = (0..200)
+        let large_set: NativeHashSet = (0..200)
             .map(|i| format!("item{}", i).into_bytes())
             .collect();
         engine
             .set_with_type(
                 b"large_set".to_vec(),
-                bincode::serialize(&large_set).unwrap(),
-                RedisDataType::Set,
+                StoreValue::Set(large_set),
                 None,
             )
             .await
@@ -1357,7 +1378,7 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
 
         // Large hash (>128 fields) -> "hashtable"
-        let mut large_hash: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let mut large_hash = NativeHashMap::default();
         for i in 0..200 {
             large_hash.insert(
                 format!("f{}", i).into_bytes(),
@@ -1367,8 +1388,7 @@ mod tests {
         engine
             .set_with_type(
                 b"large_hash".to_vec(),
-                bincode::serialize(&large_hash).unwrap(),
-                RedisDataType::Hash,
+                StoreValue::Hash(large_hash),
                 None,
             )
             .await
@@ -1387,8 +1407,7 @@ mod tests {
         engine
             .set_with_type(
                 b"large_zset".to_vec(),
-                bincode::serialize(&large_zset).unwrap(),
-                RedisDataType::ZSet,
+                StoreValue::ZSet(large_zset),
                 None,
             )
             .await
@@ -1399,12 +1418,11 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"skiplist".to_vec())));
 
         // List with large element (>64 bytes) -> "quicklist"
-        let list_big_elem: Vec<Vec<u8>> = vec!["a".repeat(100).into_bytes()];
+        let list_big_elem = VecDeque::from(vec!["a".repeat(100).into_bytes()]);
         engine
             .set_with_type(
                 b"list_big_elem".to_vec(),
-                crate::storage::list_bytes::new_from_elements(&list_big_elem),
-                RedisDataType::List,
+                StoreValue::List(list_big_elem),
                 None,
             )
             .await
@@ -1415,13 +1433,12 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"quicklist".to_vec())));
 
         // Set with large element (>64 bytes) -> "hashtable"
-        let mut set_big_elem: HashSet<Vec<u8>> = HashSet::new();
+        let mut set_big_elem = NativeHashSet::default();
         set_big_elem.insert("a".repeat(100).into_bytes());
         engine
             .set_with_type(
                 b"set_big_elem".to_vec(),
-                bincode::serialize(&set_big_elem).unwrap(),
-                RedisDataType::Set,
+                StoreValue::Set(set_big_elem),
                 None,
             )
             .await
@@ -1432,13 +1449,12 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
 
         // Hash with large value (>64 bytes) -> "hashtable"
-        let mut hash_big_val: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let mut hash_big_val = NativeHashMap::default();
         hash_big_val.insert(b"k".to_vec(), "a".repeat(100).into_bytes());
         engine
             .set_with_type(
                 b"hash_big_val".to_vec(),
-                bincode::serialize(&hash_big_val).unwrap(),
-                RedisDataType::Hash,
+                StoreValue::Hash(hash_big_val),
                 None,
             )
             .await
@@ -1449,13 +1465,12 @@ mod tests {
         assert_eq!(result, RespValue::BulkString(Some(b"hashtable".to_vec())));
 
         // Hash with large key (>64 bytes) -> "hashtable"
-        let mut hash_big_key: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let mut hash_big_key = NativeHashMap::default();
         hash_big_key.insert("k".repeat(100).into_bytes(), b"v".to_vec());
         engine
             .set_with_type(
                 b"hash_big_key".to_vec(),
-                bincode::serialize(&hash_big_key).unwrap(),
-                RedisDataType::Hash,
+                StoreValue::Hash(hash_big_key),
                 None,
             )
             .await
@@ -1471,8 +1486,7 @@ mod tests {
         engine
             .set_with_type(
                 b"zset_big_mem".to_vec(),
-                bincode::serialize(&zset_big_mem).unwrap(),
-                RedisDataType::ZSet,
+                StoreValue::ZSet(zset_big_mem),
                 None,
             )
             .await
@@ -1610,6 +1624,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_numeric() {
+        use crate::storage::value::StoreValue;
+        use std::collections::VecDeque;
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
@@ -1621,9 +1637,8 @@ mod tests {
             b"5".to_vec(),
             b"4".to_vec(),
         ];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
-            .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"mylist".to_vec(), StoreValue::List(VecDeque::from(list)), None)
             .await
             .unwrap();
 
@@ -1670,9 +1685,8 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
-            .set_with_type(b"fruits".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"fruits".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
             .await
             .unwrap();
 
@@ -1702,10 +1716,9 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        let list: Vec<Vec<u8>> = (1..=10).map(|i: i32| i.to_string().into_bytes()).collect();
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
+        let list: std::collections::VecDeque<Vec<u8>> = (1..=10).map(|i: i32| i.to_string().into_bytes()).collect();
         engine
-            .set_with_type(b"numbers".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"numbers".to_vec(), crate::storage::value::StoreValue::List(list), None)
             .await
             .unwrap();
 
@@ -1742,9 +1755,8 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
-            .set_with_type(b"src_list".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"src_list".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
             .await
             .unwrap();
 
@@ -1761,9 +1773,13 @@ mod tests {
         assert_eq!(result, RespValue::Integer(3));
 
         // Verify stored result
-        let stored = engine.get(b"dst_list").await.unwrap().unwrap();
-        let stored_list = crate::storage::list_bytes::deserialize_all(&stored).unwrap();
-        assert_eq!(stored_list, vec![b"1", b"2", b"3"]);
+        let stored_item = engine.get_item(b"dst_list").await.unwrap().unwrap();
+        if let crate::storage::value::StoreValue::List(deque) = &stored_item.value {
+            let stored_list: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            assert_eq!(stored_list, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+        } else {
+            panic!("Expected List StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1772,9 +1788,8 @@ mod tests {
         let engine = StorageEngine::new(config);
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
-            .set_with_type(b"ro_list".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"ro_list".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
             .await
             .unwrap();
 
@@ -1873,9 +1888,8 @@ mod tests {
 
         // Set a list key
         let list = vec![b"item1".to_vec()];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
         engine
-            .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"mylist".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
             .await
             .unwrap();
 

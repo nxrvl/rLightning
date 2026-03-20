@@ -94,21 +94,21 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/persistence/rdb.rs`
 - Modify: `src/persistence/aof.rs`
 
-- [ ] Add `rustc-hash` dependency to Cargo.toml
-- [ ] Create `StoreValue` enum with native variants: `Str(Bytes)`, `Hash(hashbrown::HashMap<Box<[u8]>, Bytes, FxBuildHasher>)`, `Set(hashbrown::HashSet<Box<[u8]>, FxBuildHasher>)`, `SortedSet { by_score: BTreeMap, by_member: HashMap }`, `List(GapBuffer<Bytes>)`, `Stream(StreamData)`, `Bitmap(Vec<u8>)`, `HyperLogLog(Vec<u8>)`
-- [ ] Create `Entry` struct with `value: StoreValue`, `expires_at: Option<Instant>`, `lru_clock: u32`, `access_count: u16`
-- [ ] Migrate `StorageEngine` from `DashMap<Vec<u8>, StorageItem>` with bincode to `DashMap<Vec<u8>, Entry>` with native `StoreValue`
-- [ ] Update all hash command handlers to use native HashMap directly (no deserialize/serialize)
-- [ ] Update all set command handlers to use native HashSet directly
-- [ ] Update all sorted set command handlers to use native dual-index (BTreeMap + HashMap)
-- [ ] Update list command handlers to use `GapBuffer<Bytes>` instead of `GapBuffer<Vec<u8>>`
-- [ ] Update string command handlers to use `Bytes` instead of `Vec<u8>`
-- [ ] Update RDB persistence to serialize/deserialize native types to/from disk format
-- [ ] Update AOF replay to produce native types
-- [ ] Remove bincode serialization from data access hot paths (keep bincode dependency for any remaining uses)
-- [ ] Write tests for each data type: verify HGET/HSET/HDEL, SADD/SREM/SMEMBERS, ZADD/ZRANGE/ZSCORE, GET/SET/APPEND all work correctly with native types
-- [ ] Write tests for RDB save/load roundtrip with native types
-- [ ] Run full test suite + integration tests + docker compat tests - must pass before task 6
+- [x] Add `rustc-hash` dependency to Cargo.toml
+- [x] Create `StoreValue` enum with native variants: `Str(Vec<u8>)`, `Hash(NativeHashMap)`, `Set(NativeHashSet)`, `ZSet(SortedSetData)`, `List(VecDeque<Vec<u8>>)`, `Stream(StreamData)`
+- [x] Create `Entry` struct with `value: StoreValue`, `expires_at: Option<Instant>`, `lru_clock: u32`, `access_count: u16`
+- [x] Migrate `StorageEngine` from `DashMap<Vec<u8>, StorageItem>` with bincode to `DashMap<Vec<u8>, Entry>` with native `StoreValue`
+- [x] Update all hash command handlers to use native HashMap directly (no deserialize/serialize)
+- [x] Update all set command handlers to use native HashSet directly
+- [x] Update all sorted set command handlers to use native dual-index (BTreeMap + HashMap)
+- [x] Update list command handlers to use `VecDeque<Vec<u8>>` instead of list_bytes binary format
+- [x] Update string command handlers to use StoreValue::Str
+- [x] Update RDB persistence to serialize/deserialize native types to/from disk format
+- [x] Update AOF replay to produce native types
+- [x] Remove bincode serialization from data access hot paths (keep bincode dependency for any remaining uses)
+- [x] Write tests for each data type: verify HGET/HSET/HDEL, SADD/SREM/SMEMBERS, ZADD/ZRANGE/ZSCORE, GET/SET/APPEND all work correctly with native types
+- [x] Write tests for RDB save/load roundtrip with native types
+- [x] Run full test suite + integration tests + docker compat tests - must pass before task 6
 
 ### Task 6: Phase 3 - Sharded Storage Engine
 

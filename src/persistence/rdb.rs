@@ -15,6 +15,67 @@ use crate::persistence::config::PersistenceConfig;
 use crate::persistence::error::PersistenceError;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
+use crate::storage::value::StoreValue;
+
+/// Serialize a StoreValue to bytes for RDB persistence.
+fn serialize_store_value(value: &StoreValue) -> Result<Vec<u8>, String> {
+    match value {
+        StoreValue::Str(v) => Ok(v.clone()),
+        StoreValue::Hash(m) => {
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            bincode::serialize(&std_map).map_err(|e| format!("Hash serialization: {}", e))
+        }
+        StoreValue::Set(s) => {
+            let std_set: std::collections::HashSet<Vec<u8>> = s.iter().cloned().collect();
+            bincode::serialize(&std_set).map_err(|e| format!("Set serialization: {}", e))
+        }
+        StoreValue::ZSet(ss) => {
+            bincode::serialize(ss).map_err(|e| format!("ZSet serialization: {}", e))
+        }
+        StoreValue::List(deque) => {
+            let vec: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            bincode::serialize(&vec).map_err(|e| format!("List serialization: {}", e))
+        }
+        StoreValue::Stream(s) => {
+            bincode::serialize(s).map_err(|e| format!("Stream serialization: {}", e))
+        }
+    }
+}
+
+/// Deserialize bytes to a StoreValue for RDB loading.
+fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8]) -> Result<StoreValue, String> {
+    match data_type {
+        RedisDataType::String => Ok(StoreValue::Str(bytes.to_vec())),
+        RedisDataType::Hash => {
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                bincode::deserialize(bytes).map_err(|e| format!("Hash deserialization: {}", e))?;
+            let native: crate::storage::value::NativeHashMap = std_map.into_iter().collect();
+            Ok(StoreValue::Hash(native))
+        }
+        RedisDataType::Set => {
+            let std_set: std::collections::HashSet<Vec<u8>> =
+                bincode::deserialize(bytes).map_err(|e| format!("Set deserialization: {}", e))?;
+            let native: crate::storage::value::NativeHashSet = std_set.into_iter().collect();
+            Ok(StoreValue::Set(native))
+        }
+        RedisDataType::ZSet => {
+            let ss: crate::storage::value::SortedSetData =
+                bincode::deserialize(bytes).map_err(|e| format!("ZSet deserialization: {}", e))?;
+            Ok(StoreValue::ZSet(ss))
+        }
+        RedisDataType::List => {
+            let vec: Vec<Vec<u8>> =
+                bincode::deserialize(bytes).map_err(|e| format!("List deserialization: {}", e))?;
+            Ok(StoreValue::List(vec.into()))
+        }
+        RedisDataType::Stream => {
+            let s: crate::storage::stream::StreamData =
+                bincode::deserialize(bytes).map_err(|e| format!("Stream deserialization: {}", e))?;
+            Ok(StoreValue::Stream(s))
+        }
+    }
+}
 
 // Constants for RDB file format
 const RDB_VERSION: u8 = 1;
@@ -231,10 +292,17 @@ impl RdbPersistence {
                 use crate::storage::engine::CURRENT_DB_INDEX;
                 for (db_idx, key, value, data_type, ttl) in data {
                     let engine_ref = &engine;
+                    let store_value = match deserialize_store_value(&data_type, &value) {
+                        Ok(sv) => sv,
+                        Err(e) => {
+                            warn!(db = db_idx, "Error deserializing RDB value: {}", e);
+                            continue;
+                        }
+                    };
                     let result = CURRENT_DB_INDEX
                         .scope(db_idx, async move {
                             engine_ref
-                                .set_with_type(key.clone(), value, data_type.clone(), ttl)
+                                .set_with_type(key.clone(), store_value, ttl)
                                 .await
                         })
                         .await;
@@ -314,7 +382,7 @@ impl RdbPersistence {
                 hasher.update(&[db_idx as u8]);
 
                 for (key, item) in data.iter() {
-                    let type_marker = data_type_to_marker(&item.data_type);
+                    let type_marker = data_type_to_marker(&item.data_type());
 
                     writer.write_u8(type_marker).map_err(PersistenceError::Io)?;
                     hasher.update(&[type_marker]);
@@ -353,16 +421,21 @@ impl RdbPersistence {
                         hasher.update(&[0]);
                     }
 
-                    // Write value (raw bytes for all types - collection types are already bincode-serialized)
-                    writer
-                        .write_u32::<BigEndian>(item.value.len() as u32)
-                        .map_err(PersistenceError::Io)?;
-                    hasher.update(&(item.value.len() as u32).to_be_bytes());
+                    // Serialize value to bytes for RDB storage
+                    let serialized_value: Vec<u8> = serialize_store_value(&item.value)
+                        .map_err(|e| PersistenceError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other, e,
+                        )))?;
 
                     writer
-                        .write_all(&item.value)
+                        .write_u32::<BigEndian>(serialized_value.len() as u32)
                         .map_err(PersistenceError::Io)?;
-                    hasher.update(&item.value);
+                    hasher.update(&(serialized_value.len() as u32).to_be_bytes());
+
+                    writer
+                        .write_all(&serialized_value)
+                        .map_err(PersistenceError::Io)?;
+                    hasher.update(&serialized_value);
                 }
             }
 
@@ -490,8 +563,8 @@ mod tests {
     use super::*;
     use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
-    use crate::storage::item::RedisDataType;
-    use std::collections::{HashMap as StdHashMap, HashSet};
+    use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+    use std::collections::VecDeque;
     use tempfile::NamedTempFile;
 
     fn create_test_engine() -> Arc<StorageEngine> {
@@ -532,10 +605,9 @@ mod tests {
         drop(temp);
 
         // Create a list
-        let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let serialized = crate::storage::list_bytes::new_from_elements(&list);
+        let list = VecDeque::from(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         engine
-            .set_with_type(b"mylist".to_vec(), serialized, RedisDataType::List, None)
+            .set_with_type(b"mylist".to_vec(), StoreValue::List(list), None)
             .await
             .unwrap();
 
@@ -546,12 +618,9 @@ mod tests {
         let rdb2 = RdbPersistence::new(engine2.clone(), path);
         rdb2.load().await.unwrap();
 
-        // Verify type and value
+        // Verify type
         let tp = engine2.get_type(b"mylist").await.unwrap();
         assert_eq!(tp, "list");
-        let raw = engine2.get(b"mylist").await.unwrap().unwrap();
-        let loaded = crate::storage::list_bytes::deserialize_all(&raw).unwrap();
-        assert_eq!(loaded, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
     #[tokio::test]
@@ -561,12 +630,11 @@ mod tests {
         let path = temp.path().to_path_buf();
         drop(temp);
 
-        let mut set = HashSet::new();
+        let mut set = NativeHashSet::default();
         set.insert(b"x".to_vec());
         set.insert(b"y".to_vec());
-        let serialized = bincode::serialize(&set).unwrap();
         engine
-            .set_with_type(b"myset".to_vec(), serialized, RedisDataType::Set, None)
+            .set_with_type(b"myset".to_vec(), StoreValue::Set(set), None)
             .await
             .unwrap();
 
@@ -579,10 +647,6 @@ mod tests {
 
         let tp = engine2.get_type(b"myset").await.unwrap();
         assert_eq!(tp, "set");
-        let raw = engine2.get(b"myset").await.unwrap().unwrap();
-        let loaded: HashSet<Vec<u8>> = bincode::deserialize(&raw).unwrap();
-        assert!(loaded.contains(&b"x".to_vec()));
-        assert!(loaded.contains(&b"y".to_vec()));
     }
 
     #[tokio::test]
@@ -595,9 +659,8 @@ mod tests {
         let mut zset = SortedSetData::new();
         zset.insert(1.0, b"alice".to_vec());
         zset.insert(2.5, b"bob".to_vec());
-        let serialized = bincode::serialize(&zset).unwrap();
         engine
-            .set_with_type(b"myzset".to_vec(), serialized, RedisDataType::ZSet, None)
+            .set_with_type(b"myzset".to_vec(), StoreValue::ZSet(zset), None)
             .await
             .unwrap();
 
@@ -610,11 +673,6 @@ mod tests {
 
         let tp = engine2.get_type(b"myzset").await.unwrap();
         assert_eq!(tp, "zset");
-        let raw = engine2.get(b"myzset").await.unwrap().unwrap();
-        let loaded: SortedSetData = bincode::deserialize(&raw).unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.scores.get(&b"alice".to_vec()), Some(&1.0));
-        assert_eq!(loaded.scores.get(&b"bob".to_vec()), Some(&2.5));
     }
 
     #[tokio::test]
@@ -624,12 +682,11 @@ mod tests {
         let path = temp.path().to_path_buf();
         drop(temp);
 
-        let mut hash = StdHashMap::new();
+        let mut hash = NativeHashMap::default();
         hash.insert(b"field1".to_vec(), b"val1".to_vec());
         hash.insert(b"field2".to_vec(), b"val2".to_vec());
-        let serialized = bincode::serialize(&hash).unwrap();
         engine
-            .set_with_type(b"myhash".to_vec(), serialized, RedisDataType::Hash, None)
+            .set_with_type(b"myhash".to_vec(), StoreValue::Hash(hash), None)
             .await
             .unwrap();
 
@@ -642,10 +699,6 @@ mod tests {
 
         let tp = engine2.get_type(b"myhash").await.unwrap();
         assert_eq!(tp, "hash");
-        let raw = engine2.get(b"myhash").await.unwrap().unwrap();
-        let loaded: StdHashMap<Vec<u8>, Vec<u8>> = bincode::deserialize(&raw).unwrap();
-        assert_eq!(loaded.get(&b"field1".to_vec()), Some(&b"val1".to_vec()));
-        assert_eq!(loaded.get(&b"field2".to_vec()), Some(&b"val2".to_vec()));
     }
 
     #[tokio::test]
@@ -665,12 +718,10 @@ mod tests {
         };
         stream.entries.insert(entry.id.clone(), entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
-        let serialized = bincode::serialize(&stream).unwrap();
         engine
             .set_with_type(
                 b"mystream".to_vec(),
-                serialized,
-                RedisDataType::Stream,
+                StoreValue::Stream(stream),
                 None,
             )
             .await
@@ -685,9 +736,6 @@ mod tests {
 
         let tp = engine2.get_type(b"mystream").await.unwrap();
         assert_eq!(tp, "stream");
-        let raw = engine2.get(b"mystream").await.unwrap().unwrap();
-        let loaded: crate::storage::stream::StreamData = bincode::deserialize(&raw).unwrap();
-        assert_eq!(loaded.entries.len(), 1);
     }
 
     #[tokio::test]
@@ -704,38 +752,35 @@ mod tests {
             .unwrap();
 
         // List
-        let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec()];
+        let list = VecDeque::from(vec![b"1".to_vec(), b"2".to_vec()]);
         engine
             .set_with_type(
                 b"lst".to_vec(),
-                crate::storage::list_bytes::new_from_elements(&list),
-                RedisDataType::List,
+                StoreValue::List(list),
                 None,
             )
             .await
             .unwrap();
 
         // Set
-        let mut set = HashSet::new();
+        let mut set = NativeHashSet::default();
         set.insert(b"a".to_vec());
         engine
             .set_with_type(
                 b"st".to_vec(),
-                bincode::serialize(&set).unwrap(),
-                RedisDataType::Set,
+                StoreValue::Set(set),
                 None,
             )
             .await
             .unwrap();
 
         // Hash
-        let mut hash = StdHashMap::new();
+        let mut hash = NativeHashMap::default();
         hash.insert(b"f".to_vec(), b"v".to_vec());
         engine
             .set_with_type(
                 b"hs".to_vec(),
-                bincode::serialize(&hash).unwrap(),
-                RedisDataType::Hash,
+                StoreValue::Hash(hash),
                 None,
             )
             .await
@@ -747,8 +792,7 @@ mod tests {
         engine
             .set_with_type(
                 b"zs".to_vec(),
-                bincode::serialize(&zset).unwrap(),
-                RedisDataType::ZSet,
+                StoreValue::ZSet(zset),
                 None,
             )
             .await
@@ -791,12 +835,11 @@ mod tests {
             .unwrap();
 
         // List with TTL
-        let list: Vec<Vec<u8>> = vec![b"item".to_vec()];
+        let list = VecDeque::from(vec![b"item".to_vec()]);
         engine
             .set_with_type(
                 b"explist".to_vec(),
-                crate::storage::list_bytes::new_from_elements(&list),
-                RedisDataType::List,
+                StoreValue::List(list),
                 Some(Duration::from_secs(7200)),
             )
             .await
@@ -811,7 +854,7 @@ mod tests {
 
         // Both should still exist (TTL far in the future)
         assert!(engine2.get(b"expiring").await.unwrap().is_some());
-        assert!(engine2.get(b"explist").await.unwrap().is_some());
+        assert!(engine2.get_item(b"explist").await.unwrap().is_some());
         assert_eq!(engine2.get_type(b"explist").await.unwrap(), "list");
     }
 

@@ -2,7 +2,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
-use std::collections::HashSet;
+use crate::storage::value::{ModifyResult, NativeHashSet, StoreValue};
 
 use crate::utils::glob::glob_match;
 
@@ -24,33 +24,35 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let members = &args[1..];
 
     // Deduplicate input members
-    let mut unique_members = HashSet::new();
+    let mut unique_members = NativeHashSet::default();
     for member in members {
         unique_members.insert(member.clone());
     }
 
     engine.check_write_memory(0).await?;
     let new_count = engine.atomic_modify(key, RedisDataType::Set, |current| {
-        let mut set = match current {
-            Some(data) => bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?,
-            None => HashSet::new(),
-        };
-
-        let mut added = 0i64;
-        for member in &unique_members {
-            if set.insert(member.clone()) {
-                added += 1;
+        match current {
+            Some(StoreValue::Set(set)) => {
+                let mut added = 0i64;
+                for member in &unique_members {
+                    if set.insert(member.clone()) {
+                        added += 1;
+                    }
+                }
+                Ok((ModifyResult::Keep, added))
             }
+            None => {
+                let mut set = NativeHashSet::default();
+                let mut added = 0i64;
+                for member in &unique_members {
+                    if set.insert(member.clone()) {
+                        added += 1;
+                    }
+                }
+                Ok((ModifyResult::Set(StoreValue::Set(set)), added))
+            }
+            _ => Err(crate::storage::error::StorageError::WrongType),
         }
-
-        let serialized = bincode::serialize(&set).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
-        Ok((Some(serialized), added))
     })?;
 
     Ok(RespValue::Integer(new_count))
@@ -68,10 +70,7 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let members_owned: Vec<Vec<u8>> = members.to_vec();
 
     let removed = engine.atomic_modify(key, RedisDataType::Set, |current| match current {
-        Some(data) => {
-            let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
+        Some(StoreValue::Set(set)) => {
             let mut count = 0i64;
             for member in &members_owned {
                 if set.remove(member) {
@@ -80,18 +79,13 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
 
             if set.is_empty() {
-                Ok((None, count))
+                Ok((ModifyResult::Delete, count))
             } else {
-                let serialized = bincode::serialize(&set).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), count))
+                Ok((ModifyResult::Keep, count))
             }
         }
-        None => Ok((None, 0)),
+        None => Ok((ModifyResult::Keep, 0)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(removed))
@@ -105,22 +99,15 @@ pub async fn smembers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let key = &args[0];
 
-    // Get the set
-    let set = match engine.get(key).await? {
-        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-            Ok(set) => set,
-            Err(_) => {
-                return Err(CommandError::WrongType);
-            }
-        },
-        None => {
-            // Set doesn't exist, return empty array
-            return Ok(RespValue::Array(Some(vec![])));
+    let members = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => {
+            Ok(set.iter().cloned().collect::<Vec<_>>())
         }
-    };
+        None => Ok(vec![]),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
 
-    // Convert to an array of bulk strings
-    let result: Vec<RespValue> = set
+    let result: Vec<RespValue> = members
         .into_iter()
         .map(|member| RespValue::BulkString(Some(member)))
         .collect();
@@ -137,22 +124,13 @@ pub async fn sismember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
     let key = &args[0];
     let member = &args[1];
 
-    // Get the set
-    let set = match engine.get(key).await? {
-        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-            Ok(set) => set,
-            Err(_) => {
-                return Err(CommandError::WrongType);
-            }
-        },
-        None => {
-            // Set doesn't exist, so member isn't in it
-            return Ok(RespValue::Integer(0));
-        }
-    };
+    let exists = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => Ok(set.contains(member.as_slice())),
+        None => Ok(false),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
 
-    // Check if the member exists
-    Ok(RespValue::Integer(if set.contains(member) { 1 } else { 0 }))
+    Ok(RespValue::Integer(if exists { 1 } else { 0 }))
 }
 
 /// Redis SCARD command - Get the cardinality (number of members) of a set
@@ -163,21 +141,13 @@ pub async fn scard(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
 
-    // Get the set
-    let set = match engine.get(key).await? {
-        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-            Ok(set) => set,
-            Err(_) => {
-                return Err(CommandError::WrongType);
-            }
-        },
-        None => {
-            // Set doesn't exist, return 0
-            return Ok(RespValue::Integer(0));
-        }
-    };
+    let count = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => Ok(set.len() as i64),
+        None => Ok(0),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
 
-    Ok(RespValue::Integer(set.len() as i64))
+    Ok(RespValue::Integer(count))
 }
 
 /// Redis SPOP command - Remove and return random members from a set
@@ -199,58 +169,47 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Set, |current| {
         match current {
-            Some(data) => {
-                let set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
+            Some(StoreValue::Set(set)) => {
                 if set.is_empty() {
-                    return Ok((Some(data.clone()), SpopResult::Empty(count.is_some())));
+                    return Ok((ModifyResult::Keep, SpopResult::Empty(count.is_some())));
                 }
 
                 if let Some(count) = count {
                     // Return multiple elements using Fisher-Yates partial shuffle
                     let actual_count = std::cmp::min(count, set.len());
-                    let mut members: Vec<_> = set.into_iter().collect();
+                    let mut members: Vec<_> = set.drain().collect();
                     for i in 0..actual_count {
                         let j = fastrand::usize(i..members.len());
                         members.swap(i, j);
                     }
                     let popped: Vec<Vec<u8>> = members[..actual_count].to_vec();
-                    let remaining: HashSet<Vec<u8>> =
+                    // Put remaining back
+                    let remaining: NativeHashSet =
                         members[actual_count..].iter().cloned().collect();
 
                     if remaining.is_empty() {
-                        Ok((None, SpopResult::Multiple(popped)))
+                        Ok((ModifyResult::Delete, SpopResult::Multiple(popped)))
                     } else {
-                        let serialized = bincode::serialize(&remaining).map_err(|e| {
-                            crate::storage::error::StorageError::InternalError(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                        Ok((Some(serialized), SpopResult::Multiple(popped)))
+                        *set = remaining;
+                        Ok((ModifyResult::Keep, SpopResult::Multiple(popped)))
                     }
                 } else {
                     // Return single random element
-                    let mut members: Vec<_> = set.into_iter().collect();
+                    let mut members: Vec<_> = set.drain().collect();
                     let idx = fastrand::usize(0..members.len());
                     let member = members.swap_remove(idx);
-                    let remaining: HashSet<Vec<u8>> = members.into_iter().collect();
+                    let remaining: NativeHashSet = members.into_iter().collect();
 
                     if remaining.is_empty() {
-                        Ok((None, SpopResult::Single(member)))
+                        Ok((ModifyResult::Delete, SpopResult::Single(member)))
                     } else {
-                        let serialized = bincode::serialize(&remaining).map_err(|e| {
-                            crate::storage::error::StorageError::InternalError(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                        Ok((Some(serialized), SpopResult::Single(member)))
+                        *set = remaining;
+                        Ok((ModifyResult::Keep, SpopResult::Single(member)))
                     }
                 }
             }
-            None => Ok((None, SpopResult::Empty(count.is_some()))),
+            None => Ok((ModifyResult::Keep, SpopResult::Empty(count.is_some()))),
+            _ => Err(crate::storage::error::StorageError::WrongType),
         }
     })?;
 
@@ -273,14 +232,15 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 }
 
-/// Helper function to get a set from storage
-async fn get_set(engine: &StorageEngine, key: &[u8]) -> Result<HashSet<Vec<u8>>, CommandError> {
-    match engine.get(key).await? {
-        Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)
-        }
-        None => Ok(HashSet::new()),
-    }
+/// Helper function to get a set from storage using atomic_read
+async fn get_set(engine: &StorageEngine, key: &[u8]) -> Result<NativeHashSet, CommandError> {
+    engine
+        .atomic_read(key, RedisDataType::Set, |current| match current {
+            Some(StoreValue::Set(set)) => Ok(set.clone()),
+            None => Ok(NativeHashSet::default()),
+            _ => Err(crate::storage::error::StorageError::WrongType),
+        })
+        .map_err(CommandError::from)
 }
 
 /// Redis SINTER command - Return the intersection of multiple sets
@@ -337,10 +297,8 @@ pub async fn sinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if result.is_empty() {
         let _ = engine.del(destination).await;
     } else {
-        let serialized = bincode::serialize(&result)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
-            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .set_with_type(destination.to_vec(), StoreValue::Set(result), None)
             .await?;
     }
 
@@ -353,12 +311,14 @@ pub async fn sunion(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
-    let mut result = HashSet::new();
+    let mut result = NativeHashSet::default();
 
     // Union all sets
     for key in args {
         let set = get_set(engine, key).await?;
-        result = result.union(&set).cloned().collect();
+        for member in set {
+            result.insert(member);
+        }
     }
 
     // Convert to array of bulk strings
@@ -385,12 +345,14 @@ pub async fn sunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         .collect();
     let _guard = engine.lock_keys(&all_keys).await;
 
-    let mut result = HashSet::new();
+    let mut result = NativeHashSet::default();
 
     // Union all sets
     for key in keys {
         let set = get_set(engine, key).await?;
-        result = result.union(&set).cloned().collect();
+        for member in set {
+            result.insert(member);
+        }
     }
 
     let count = result.len() as i64;
@@ -399,10 +361,8 @@ pub async fn sunionstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if result.is_empty() {
         let _ = engine.del(destination).await;
     } else {
-        let serialized = bincode::serialize(&result)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
-            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .set_with_type(destination.to_vec(), StoreValue::Set(result), None)
             .await?;
     }
 
@@ -421,7 +381,9 @@ pub async fn sdiff(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Subtract remaining sets
     for key in &args[1..] {
         let other_set = get_set(engine, key).await?;
-        result = result.difference(&other_set).cloned().collect();
+        for member in &other_set {
+            result.remove(member);
+        }
     }
 
     // Convert to array of bulk strings
@@ -454,7 +416,9 @@ pub async fn sdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     // Subtract remaining sets
     for key in &keys[1..] {
         let other_set = get_set(engine, key).await?;
-        result = result.difference(&other_set).cloned().collect();
+        for member in &other_set {
+            result.remove(member);
+        }
     }
 
     let count = result.len() as i64;
@@ -463,10 +427,8 @@ pub async fn sdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     if result.is_empty() {
         let _ = engine.del(destination).await;
     } else {
-        let serialized = bincode::serialize(&result)
-            .map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?;
         engine
-            .set_with_type(destination.to_vec(), serialized, RedisDataType::Set, None)
+            .set_with_type(destination.to_vec(), StoreValue::Set(result), None)
             .await?;
     }
 
@@ -489,16 +451,16 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         None
     };
 
-    // Get the set
-    let set = match engine.get(key).await? {
-        Some(data) => match bincode::deserialize::<HashSet<Vec<u8>>>(&data) {
-            Ok(set) => set,
-            Err(_) => {
-                return Err(CommandError::WrongType);
-            }
-        },
+    // Get the set members
+    let members_vec = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => Ok(Some(set.iter().cloned().collect::<Vec<_>>())),
+        None => Ok(None),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
+
+    let set_vec = match members_vec {
+        Some(v) => v,
         None => {
-            // Set doesn't exist
             return if count.is_some() {
                 Ok(RespValue::Array(Some(vec![])))
             } else {
@@ -507,7 +469,7 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     };
 
-    if set.is_empty() {
+    if set_vec.is_empty() {
         return if count.is_some() {
             Ok(RespValue::Array(Some(vec![])))
         } else {
@@ -518,7 +480,7 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
     if let Some(count) = count {
         // Return multiple elements (with possible repetition if count > set size)
         let mut result = Vec::new();
-        let mut set_vec: Vec<_> = set.into_iter().collect();
+        let mut set_vec = set_vec;
 
         if count >= 0 {
             // Positive count: return unique random elements
@@ -543,7 +505,6 @@ pub async fn srandmember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         Ok(RespValue::Array(Some(result)))
     } else {
         // Return single element
-        let set_vec: Vec<_> = set.into_iter().collect();
         let index = fastrand::usize(0..set_vec.len());
         Ok(RespValue::BulkString(Some(set_vec[index].clone())))
     }
@@ -563,13 +524,12 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if source == destination {
         // Same key: just check membership, no-op if present
         let exists = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
-            Some(data) => {
-                let set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                    .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-                let has_member = set.contains(member);
-                Ok((Some(data.clone()), has_member))
+            Some(StoreValue::Set(set)) => {
+                let has_member = set.contains(member.as_slice());
+                Ok((ModifyResult::Keep, has_member))
             }
-            None => Ok((None, false)),
+            None => Ok((ModifyResult::Keep, false)),
+            _ => Err(crate::storage::error::StorageError::WrongType),
         })?;
         return Ok(RespValue::Integer(if exists { 1 } else { 0 }));
     }
@@ -582,27 +542,19 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Remove from source using atomic_modify
     let member_clone = member.clone();
     let removed = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
-        Some(data) => {
-            let mut set = bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?;
-
+        Some(StoreValue::Set(set)) => {
             if !set.remove(&member_clone) {
-                return Ok((Some(data.clone()), false));
+                return Ok((ModifyResult::Keep, false));
             }
 
             if set.is_empty() {
-                Ok((None, true))
+                Ok((ModifyResult::Delete, true))
             } else {
-                let serialized = bincode::serialize(&set).map_err(|e| {
-                    crate::storage::error::StorageError::InternalError(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-                Ok((Some(serialized), true))
+                Ok((ModifyResult::Keep, true))
             }
         }
-        None => Ok((None, false)),
+        None => Ok((ModifyResult::Keep, false)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     if !removed {
@@ -612,21 +564,17 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Add to destination using atomic_modify
     engine.check_write_memory(0).await?;
     let member_clone = member.clone();
-    engine.atomic_modify(destination, RedisDataType::Set, |current| {
-        let mut set = match current {
-            Some(data) => bincode::deserialize::<HashSet<Vec<u8>>>(data)
-                .map_err(|_| crate::storage::error::StorageError::WrongType)?,
-            None => HashSet::new(),
-        };
-
-        set.insert(member_clone.clone());
-        let serialized = bincode::serialize(&set).map_err(|e| {
-            crate::storage::error::StorageError::InternalError(format!(
-                "Serialization error: {}",
-                e
-            ))
-        })?;
-        Ok((Some(serialized), ()))
+    engine.atomic_modify(destination, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => {
+            set.insert(member_clone.clone());
+            Ok((ModifyResult::Keep, ()))
+        }
+        None => {
+            let mut set = NativeHashSet::default();
+            set.insert(member_clone.clone());
+            Ok((ModifyResult::Set(StoreValue::Set(set)), ()))
+        }
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(1))
@@ -712,19 +660,24 @@ pub async fn smismember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     let key = &args[0];
     let members = &args[1..];
 
-    let set = match engine.get(key).await? {
-        Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
+    let members_owned: Vec<Vec<u8>> = members.to_vec();
+    let results = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => {
+            Ok(members_owned
+                .iter()
+                .map(|m| if set.contains(m.as_slice()) { 1i64 } else { 0 })
+                .collect::<Vec<_>>())
         }
-        None => HashSet::new(),
-    };
+        None => Ok(vec![0i64; members_owned.len()]),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
 
-    let results: Vec<RespValue> = members
-        .iter()
-        .map(|m| RespValue::Integer(if set.contains(m) { 1 } else { 0 }))
+    let resp_results: Vec<RespValue> = results
+        .into_iter()
+        .map(RespValue::Integer)
         .collect();
 
-    Ok(RespValue::Array(Some(results)))
+    Ok(RespValue::Array(Some(resp_results)))
 }
 
 /// Redis SSCAN command - Incrementally iterate set members
@@ -775,11 +728,15 @@ pub async fn sscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     }
 
-    // Get the set
-    let set = match engine.get(key).await? {
-        Some(data) => {
-            bincode::deserialize::<HashSet<Vec<u8>>>(&data).map_err(|_| CommandError::WrongType)?
-        }
+    // Get the set members
+    let set_members = engine.atomic_read(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => Ok(Some(set.iter().cloned().collect::<Vec<_>>())),
+        None => Ok(None),
+        _ => Err(crate::storage::error::StorageError::WrongType),
+    })?;
+
+    let set_members = match set_members {
+        Some(m) => m,
         None => {
             // Key doesn't exist, return cursor 0 with empty array
             return Ok(RespValue::Array(Some(vec![
@@ -790,7 +747,7 @@ pub async fn sscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     // Collect and filter members
-    let mut members: Vec<Vec<u8>> = set.into_iter().collect();
+    let mut members = set_members;
     members.sort(); // Sort for deterministic cursor behavior
 
     // Apply MATCH filter
@@ -826,6 +783,7 @@ pub async fn sscan(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 mod tests {
     use super::*;
     use crate::storage::engine::StorageConfig;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     #[tokio::test]

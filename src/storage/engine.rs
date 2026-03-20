@@ -1,4 +1,4 @@
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,8 +9,8 @@ use tokio::time::{self, Interval};
 
 use crate::networking::resp::RespCommand;
 use crate::storage::error::StorageError;
-use crate::storage::item::{RedisDataType, StorageItem};
-use crate::storage::list_bytes;
+use crate::storage::item::{Entry, RedisDataType, StorageItem};
+use crate::storage::value::{ModifyResult, NativeHashMap, NativeHashSet, SortedSetData, StoreValue};
 
 tokio::task_local! {
     /// The currently active database index for this task/connection.
@@ -183,7 +183,7 @@ pub struct KeyLockGuard {
 
 /// Main storage engine for the in-memory key-value store
 pub struct StorageEngine {
-    data: DashMap<Vec<u8>, StorageItem>,
+    data: DashMap<Vec<u8>, Entry>,
     config: StorageConfig,
     /// Atomic memory counter for better performance (eliminates lock contention)
     current_memory: AtomicU64,
@@ -197,7 +197,7 @@ pub struct StorageEngine {
     #[allow(clippy::type_complexity)]
     prefix_index: RwLock<HashMap<(usize, String), Vec<Vec<u8>>>>,
     /// Additional databases (1-15) for multi-database support (SELECT/MOVE)
-    extra_dbs: Vec<DashMap<Vec<u8>, StorageItem>>,
+    extra_dbs: Vec<DashMap<Vec<u8>, Entry>>,
     /// Per-key version counter for WATCH (optimistic locking) support
     key_versions: DashMap<Vec<u8>, u64>,
     /// Global version counter for generating unique version numbers
@@ -515,7 +515,7 @@ impl StorageEngine {
 
     /// Returns a reference to a physical database by its physical index.
     /// Physical index 0 = self.data, physical index 1-15 = self.extra_dbs[0..14].
-    fn get_physical_db(&self, physical_idx: usize) -> &DashMap<Vec<u8>, StorageItem> {
+    fn get_physical_db(&self, physical_idx: usize) -> &DashMap<Vec<u8>, Entry> {
         if physical_idx == 0 {
             &self.data
         } else if physical_idx < NUM_DATABASES {
@@ -529,7 +529,7 @@ impl StorageEngine {
     /// Falls back to database 0 if no task-local is set (e.g., background tasks).
     /// Uses packed db_mapping for logical-to-physical translation so SWAPDB works atomically
     /// (a single AtomicU64 load gives a consistent snapshot of the entire mapping).
-    pub fn active_db(&self) -> &DashMap<Vec<u8>, StorageItem> {
+    pub fn active_db(&self) -> &DashMap<Vec<u8>, Entry> {
         let logical_idx = CURRENT_DB_INDEX.try_with(|v| *v).unwrap_or(0);
         if logical_idx < NUM_DATABASES {
             let mapping = self.db_mapping.load(Ordering::Acquire);
@@ -561,7 +561,7 @@ impl StorageEngine {
 
     /// Get a reference to a specific database by logical index.
     /// Uses packed db_mapping for logical-to-physical translation.
-    pub fn get_db_by_index(&self, db_index: usize) -> &DashMap<Vec<u8>, StorageItem> {
+    pub fn get_db_by_index(&self, db_index: usize) -> &DashMap<Vec<u8>, Entry> {
         if db_index < NUM_DATABASES {
             let mapping = self.db_mapping.load(Ordering::Acquire);
             let physical_idx = Self::physical_index_from_mapping(mapping, db_index);
@@ -602,7 +602,7 @@ impl StorageEngine {
                         // Key was refreshed concurrently — put it back
                         db.insert(k, item);
                     } else {
-                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        let size = Self::calculate_entry_size(&k, &item.value) as u64;
                         self.current_memory.fetch_sub(size, Ordering::AcqRel);
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                         removed_count += 1;
@@ -671,7 +671,7 @@ impl StorageEngine {
                         // Key was refreshed concurrently — put it back
                         db.insert(k, item);
                     } else {
-                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        let size = Self::calculate_entry_size(&k, &item.value) as u64;
                         self.current_memory.fetch_sub(size, Ordering::AcqRel);
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                     }
@@ -736,8 +736,8 @@ impl StorageEngine {
     }
 
     /// Get the size of a key-value pair in bytes
-    fn calculate_size(key: &[u8], value: &[u8]) -> usize {
-        key.len() + value.len()
+    fn calculate_entry_size(key: &[u8], value: &StoreValue) -> usize {
+        key.len() + value.mem_size()
     }
 
     /// Helper method to remove expired key and update memory/counters
@@ -750,7 +750,7 @@ impl StorageEngine {
                 return;
             }
             // Use atomic operations for memory tracking
-            let size = Self::calculate_size(&k, &item.value) as u64;
+            let size = Self::calculate_entry_size(&k, &item.value) as u64;
             self.current_memory.fetch_sub(size, Ordering::AcqRel);
             self.key_count.fetch_sub(1, Ordering::AcqRel);
         }
@@ -910,12 +910,12 @@ impl StorageEngine {
 
                 // Helper: find victim in a single DB
                 let volatile_only = eviction_policy.is_volatile();
-                let find_victim_in_db = |db: &DashMap<Vec<u8>, StorageItem>| -> Option<Vec<u8>> {
+                let find_victim_in_db = |db: &DashMap<Vec<u8>, Entry>| -> Option<Vec<u8>> {
                     match eviction_policy {
                         EvictionPolicy::LRU | EvictionPolicy::VolatileLRU => db
                             .iter()
                             .filter(|item| !volatile_only || item.value().expires_at.is_some())
-                            .min_by_key(|item| item.value().last_accessed)
+                            .min_by_key(|item| item.value().lru_clock)
                             .map(|item| item.key().clone()),
                         EvictionPolicy::LFU | EvictionPolicy::VolatileLFU => db
                             .iter()
@@ -973,10 +973,10 @@ impl StorageEngine {
                         } else {
                             db.get(&victim_key).map(|entry| {
                                 if is_lfu {
-                                    entry.value().access_count
+                                    entry.value().access_count as u64
                                 } else {
-                                    u64::MAX
-                                        - entry.value().last_accessed.elapsed().as_nanos() as u64
+                                    // Lower lru_clock = older = evict first
+                                    entry.value().lru_clock as u64
                                 }
                             })
                         };
@@ -1005,7 +1005,7 @@ impl StorageEngine {
                 if let Some((key, db_idx)) = best_victim {
                     let db = self.get_db_by_index(db_idx);
                     if let Some((k, item)) = db.remove(&key) {
-                        let size = Self::calculate_size(&k, &item.value) as u64;
+                        let size = Self::calculate_entry_size(&k, &item.value) as u64;
                         self.current_memory.fetch_sub(size, Ordering::AcqRel);
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
                     }
@@ -1025,76 +1025,63 @@ impl StorageEngine {
         value: Vec<u8>,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_with_type(key, value, RedisDataType::String, ttl)
-            .await
+        self.set_value(key, StoreValue::Str(value), ttl, true).await
     }
 
-    /// Set a key-value pair with explicit data type
+    /// Set a key-value pair with native StoreValue type
     pub async fn set_with_type(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
-        data_type: RedisDataType,
+        value: StoreValue,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_with_type_inner(key, value, data_type, ttl, true)
-            .await
+        self.set_value(key, value, ttl, true).await
     }
 
     /// Set a key-value pair, skipping per-key eviction checks.
-    /// Caller must have already performed a best-effort memory check via
-    /// `check_write_memory` for the total batch size. Used by MSET to prevent
-    /// partial writes that would violate its all-or-nothing guarantee.
     pub async fn set_preevicted(
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_with_type_inner(key, value, RedisDataType::String, ttl, false)
+        self.set_value(key, StoreValue::Str(value), ttl, false)
             .await
     }
 
     /// Inner implementation for set operations.
-    /// When `do_evict` is false, skips the per-key `maybe_evict` call.
-    async fn set_with_type_inner(
+    async fn set_value(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
-        data_type: RedisDataType,
+        value: StoreValue,
         ttl: Option<Duration>,
         do_evict: bool,
     ) -> StorageResult<()> {
-        // Check size limits
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
 
-        if value.len() > self.config.max_value_size {
+        let val_size = value.mem_size();
+        if val_size > self.config.max_value_size {
             return Err(StorageError::ValueTooLarge);
         }
 
-        // For large values (likely JSON), do deeper validation
-        if value.len() > 10240 {
-            // 10KB
-            // Log large SET operations for debugging
+        if val_size > 10240 {
             tracing::debug!(
                 "Large value SET operation: key={:?}, value_len={}, type={}",
                 String::from_utf8_lossy(&key),
-                value.len(),
-                data_type.as_str()
+                val_size,
+                value.data_type().as_str()
             );
         }
 
-        let required_size = Self::calculate_size(&key, &value);
+        let required_size = key.len() + val_size;
 
-        // Ensure we have enough memory (skipped when caller pre-checked for batch)
         if do_evict {
             self.maybe_evict(required_size).await?;
         }
 
-        // Create a new item with explicit type
-        let mut item = StorageItem::new_with_type(value, data_type);
+        let mut item = Entry::new(value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
             Some(Instant::now() + ttl)
@@ -1102,10 +1089,9 @@ impl StorageEngine {
             None
         };
 
-        // Use entry API for atomic read-modify-write to avoid TOCTOU races
         let is_new_key = match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let old_size = Self::calculate_size(entry.key(), &entry.get().value);
+                let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
                     self.current_memory
                         .fetch_sub(old_size as u64, Ordering::AcqRel);
@@ -1113,79 +1099,61 @@ impl StorageEngine {
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::AcqRel);
                 entry.insert(item);
-                // Bump version while OccupiedEntry still holds the shard lock,
-                // preventing a TOCTOU race with del_if_version_matches (MSETNX rollback).
                 self.bump_key_version(&key);
                 false
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::AcqRel);
-                // Bind RefMut to keep shard lock held during version bump
                 let _ref = entry.insert(item);
                 self.bump_key_version(&key);
                 true
             }
         };
 
-        // Add to expiration queue if TTL is set
         if let Some(expires_at) = expires_at {
             self.add_to_expiration_queue(key.clone(), expires_at).await;
         }
 
-        // Update prefix index and key count for new keys
         if is_new_key {
             self.update_prefix_indices(&key, true).await;
             self.key_count.fetch_add(1, Ordering::AcqRel);
         }
-        // Increment write counters
         self.increment_write_counters().await;
 
         Ok(())
     }
 
     /// Set a key-value pair preserving the existing TTL if present.
-    /// Use this for collection-type modifications (lists, sets, sorted sets, streams, geo)
-    /// where updating the value should not reset the key's expiration.
-    ///
-    /// This implementation uses a single DashMap entry operation to atomically
-    /// read the existing TTL and write the new value, avoiding TOCTOU races.
     pub async fn set_with_type_preserve_ttl(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
-        data_type: RedisDataType,
+        value: StoreValue,
     ) -> StorageResult<()> {
-        // Check size limits
         if key.len() > self.config.max_key_size {
             return Err(StorageError::ValueTooLarge);
         }
 
-        if value.len() > self.config.max_value_size {
+        let val_size = value.mem_size();
+        if val_size > self.config.max_value_size {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let required_size = Self::calculate_size(&key, &value);
-
-        // Ensure we have enough memory
+        let required_size = key.len() + val_size;
         self.maybe_evict(required_size).await?;
 
-        let mut item = StorageItem::new_with_type(value, data_type);
+        let mut item = Entry::new(value);
 
-        // Single DashMap entry operation: read existing TTL + write new value atomically
         let (is_new_key, preserved_expires_at) = match self.active_db().entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                // Read TTL from existing entry while holding the shard lock
                 let existing_expires_at = if !entry.get().is_expired() {
                     entry.get().expires_at
                 } else {
                     None
                 };
-
-                // Preserve the existing expiration on the new item
                 item.expires_at = existing_expires_at;
 
-                let old_size = Self::calculate_size(entry.key(), &entry.get().value);
+                let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
                 if old_size > 0 {
                     self.current_memory
                         .fetch_sub(old_size as u64, Ordering::AcqRel);
@@ -1205,42 +1173,38 @@ impl StorageEngine {
             }
         };
 
-        // Re-add to expiration queue if TTL was preserved (ensures queue consistency)
         if let Some(expires_at) = preserved_expires_at {
             self.add_to_expiration_queue(key.clone(), expires_at).await;
         }
 
-        // Update prefix index and key count for new keys
         if is_new_key {
             self.update_prefix_indices(&key, true).await;
             self.key_count.fetch_add(1, Ordering::AcqRel);
         }
-        // Increment write counters
         self.increment_write_counters().await;
 
         Ok(())
     }
 
-    /// Get a value from the storage engine
+    /// Get a string value from the storage engine
     pub async fn get(&self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
         let db = self.active_db();
         let result = if let Some(mut entry) = db.get_mut(key) {
             let item = entry.value_mut();
 
             if item.is_expired() {
-                // We'll remove the key in a separate step
                 None
             } else {
-                // Update the last accessed time
                 item.touch();
-
-                Some(item.value.clone())
+                match &item.value {
+                    StoreValue::Str(v) => Some(v.clone()),
+                    _ => None,
+                }
             }
         } else {
             None
         };
 
-        // If the item was expired, remove it now using lazy expiration
         if result.is_none() && db.contains_key(key) {
             self.remove_expired_key(key).await;
         }
@@ -1252,7 +1216,7 @@ impl StorageEngine {
     pub async fn del(&self, key: &[u8]) -> StorageResult<bool> {
         if let Some((k, item)) = self.active_db().remove(key) {
             // Use atomic operations for memory tracking - much faster than write lock
-            let size = Self::calculate_size(&k, &item.value) as u64;
+            let size = Self::calculate_entry_size(&k, &item.value) as u64;
             self.current_memory.fetch_sub(size, Ordering::AcqRel);
             // Update prefix index and decrement key count
             self.update_prefix_indices(&k, false).await;
@@ -1285,7 +1249,7 @@ impl StorageEngine {
                 }
                 // Version matches - safe to delete
                 let (k, item) = entry.remove_entry();
-                let size = Self::calculate_size(&k, &item.value) as u64;
+                let size = Self::calculate_entry_size(&k, &item.value) as u64;
                 self.current_memory.fetch_sub(size, Ordering::AcqRel);
                 self.update_prefix_indices(&k, false).await;
                 self.key_count.fetch_sub(1, Ordering::AcqRel);
@@ -1441,7 +1405,7 @@ impl StorageEngine {
         let db_idx = Self::current_db_idx();
         let size: u64 = db
             .iter()
-            .map(|entry| Self::calculate_size(entry.key(), &entry.value().value) as u64)
+            .map(|entry| Self::calculate_entry_size(entry.key(), &entry.value().value) as u64)
             .sum();
         db.clear();
         self.current_memory.fetch_sub(
@@ -1748,11 +1712,17 @@ impl StorageEngine {
                         |existing| {
                             let elems: Vec<Vec<u8>> = elements.iter().map(|e| e.to_vec()).collect();
                             match existing {
-                                Some(data) => {
-                                    list_bytes::rpush(data, &elems)?;
-                                    Ok((Some(std::mem::take(data)), ()))
+                                Some(StoreValue::List(deque)) => {
+                                    for elem in elems {
+                                        deque.push_back(elem);
+                                    }
+                                    Ok((ModifyResult::Keep, ()))
                                 }
-                                None => Ok((Some(list_bytes::new_from_elements(&elems)), ())),
+                                None => {
+                                    let deque: std::collections::VecDeque<Vec<u8>> = elems.into_iter().collect();
+                                    Ok((ModifyResult::Set(StoreValue::List(deque)), ()))
+                                }
+                                _ => unreachable!(),
                             }
                         },
                     )?;
@@ -1766,14 +1736,22 @@ impl StorageEngine {
                         key,
                         crate::storage::item::RedisDataType::Set,
                         |existing| {
-                            let mut set: std::collections::HashSet<Vec<u8>> = existing
-                                .as_deref()
-                                .and_then(|v| bincode::deserialize(v).ok())
-                                .unwrap_or_default();
-                            for m in members {
-                                set.insert(m.clone());
+                            match existing {
+                                Some(StoreValue::Set(set)) => {
+                                    for m in members {
+                                        set.insert(m.clone());
+                                    }
+                                    Ok((ModifyResult::Keep, ()))
+                                }
+                                None => {
+                                    let mut set = NativeHashSet::default();
+                                    for m in members {
+                                        set.insert(m.clone());
+                                    }
+                                    Ok((ModifyResult::Set(StoreValue::Set(set)), ()))
+                                }
+                                _ => unreachable!(),
                             }
-                            Ok((Some(bincode::serialize(&set).unwrap()), ()))
                         },
                     )?;
                 }
@@ -1786,23 +1764,34 @@ impl StorageEngine {
                         key,
                         crate::storage::item::RedisDataType::ZSet,
                         |existing| {
-                            let mut zset: crate::command::types::sorted_set::SortedSetData =
-                                existing
-                                    .as_deref()
-                                    .and_then(|v| bincode::deserialize(v).ok())
-                                    .unwrap_or_else(
-                                        crate::command::types::sorted_set::SortedSetData::new,
-                                    );
-                            let mut i = 0;
-                            while i + 1 < pairs.len() {
-                                if let Ok(score_str) = std::str::from_utf8(&pairs[i])
-                                    && let Ok(score) = score_str.parse::<f64>()
-                                {
-                                    zset.insert(score, pairs[i + 1].clone());
+                            match existing {
+                                Some(StoreValue::ZSet(zset)) => {
+                                    let mut i = 0;
+                                    while i + 1 < pairs.len() {
+                                        if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                            && let Ok(score) = score_str.parse::<f64>()
+                                        {
+                                            zset.insert(score, pairs[i + 1].clone());
+                                        }
+                                        i += 2;
+                                    }
+                                    Ok((ModifyResult::Keep, ()))
                                 }
-                                i += 2;
+                                None => {
+                                    let mut zset = SortedSetData::new();
+                                    let mut i = 0;
+                                    while i + 1 < pairs.len() {
+                                        if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                            && let Ok(score) = score_str.parse::<f64>()
+                                        {
+                                            zset.insert(score, pairs[i + 1].clone());
+                                        }
+                                        i += 2;
+                                    }
+                                    Ok((ModifyResult::Set(StoreValue::ZSet(zset)), ()))
+                                }
+                                _ => unreachable!(),
                             }
-                            Ok((Some(bincode::serialize(&zset).unwrap()), ()))
                         },
                     )?;
                 }
@@ -1829,34 +1818,62 @@ impl StorageEngine {
                         key,
                         crate::storage::item::RedisDataType::Stream,
                         |existing| {
-                            let mut stream: crate::storage::stream::StreamData = existing
-                                .as_deref()
-                                .and_then(|v| bincode::deserialize(v).ok())
-                                .unwrap_or_else(crate::storage::stream::StreamData::new);
-                            if let Ok(id_str) = std::str::from_utf8(id_bytes)
-                                && let Some(id) =
-                                    crate::storage::stream::StreamEntryId::parse(id_str)
-                            {
-                                let mut fields = Vec::new();
-                                let mut j = 0;
-                                while j + 1 < field_args.len() {
-                                    fields.push((field_args[j].clone(), field_args[j + 1].clone()));
-                                    j += 2;
+                            match existing {
+                                Some(StoreValue::Stream(stream)) => {
+                                    if let Ok(id_str) = std::str::from_utf8(id_bytes)
+                                        && let Some(id) =
+                                            crate::storage::stream::StreamEntryId::parse(id_str)
+                                    {
+                                        let mut fields = Vec::new();
+                                        let mut j = 0;
+                                        while j + 1 < field_args.len() {
+                                            fields.push((field_args[j].clone(), field_args[j + 1].clone()));
+                                            j += 2;
+                                        }
+                                        let entry = crate::storage::stream::StreamEntry {
+                                            id: id.clone(),
+                                            fields,
+                                        };
+                                        stream.entries.insert(id.clone(), entry);
+                                        if id > stream.last_id {
+                                            stream.last_id = id.clone();
+                                        }
+                                        stream.entries_added += 1;
+                                        if stream.first_entry_id.is_none() {
+                                            stream.first_entry_id = Some(id);
+                                        }
+                                    }
+                                    Ok((ModifyResult::Keep, ()))
                                 }
-                                let entry = crate::storage::stream::StreamEntry {
-                                    id: id.clone(),
-                                    fields,
-                                };
-                                stream.entries.insert(id.clone(), entry);
-                                if id > stream.last_id {
-                                    stream.last_id = id.clone();
+                                None => {
+                                    let mut stream = crate::storage::stream::StreamData::new();
+                                    if let Ok(id_str) = std::str::from_utf8(id_bytes)
+                                        && let Some(id) =
+                                            crate::storage::stream::StreamEntryId::parse(id_str)
+                                    {
+                                        let mut fields = Vec::new();
+                                        let mut j = 0;
+                                        while j + 1 < field_args.len() {
+                                            fields.push((field_args[j].clone(), field_args[j + 1].clone()));
+                                            j += 2;
+                                        }
+                                        let entry = crate::storage::stream::StreamEntry {
+                                            id: id.clone(),
+                                            fields,
+                                        };
+                                        stream.entries.insert(id.clone(), entry);
+                                        if id > stream.last_id {
+                                            stream.last_id = id.clone();
+                                        }
+                                        stream.entries_added += 1;
+                                        if stream.first_entry_id.is_none() {
+                                            stream.first_entry_id = Some(id);
+                                        }
+                                    }
+                                    Ok((ModifyResult::Set(StoreValue::Stream(stream)), ()))
                                 }
-                                stream.entries_added += 1;
-                                if stream.first_entry_id.is_none() {
-                                    stream.first_entry_id = Some(id);
-                                }
+                                _ => unreachable!(),
                             }
-                            Ok((Some(bincode::serialize(&stream).unwrap()), ()))
                         },
                     )?;
                 }
@@ -1884,7 +1901,7 @@ impl StorageEngine {
             }
 
             // Use the stored data type authoritatively
-            let data_type = entry.value().data_type.as_str().to_string();
+            let data_type = entry.value().data_type().as_str().to_string();
 
             Ok(data_type)
         } else {
@@ -1902,7 +1919,7 @@ impl StorageEngine {
                 self.remove_expired_key(key).await;
                 return Ok("none".to_string());
             }
-            Ok(entry.value().data_type.as_str().to_string())
+            Ok(entry.value().data_type().as_str().to_string())
         } else {
             Ok("none".to_string())
         }
@@ -1966,7 +1983,7 @@ impl StorageEngine {
 
     /// Get a reference to a specific database by logical index (0-15).
     /// Uses db_mapping for logical-to-physical translation.
-    pub fn get_db(&self, index: usize) -> Option<&DashMap<Vec<u8>, StorageItem>> {
+    pub fn get_db(&self, index: usize) -> Option<&DashMap<Vec<u8>, Entry>> {
         if index < NUM_DATABASES {
             let mapping = self.db_mapping.load(Ordering::Acquire);
             let physical_idx = Self::physical_index_from_mapping(mapping, index);
@@ -2101,8 +2118,7 @@ impl StorageEngine {
         };
 
         // Clone with fresh timestamps but same TTL
-        let mut new_item =
-            StorageItem::new_with_type(src_item.value.clone(), src_item.data_type.clone());
+        let mut new_item = crate::storage::item::Entry::new(src_item.value.clone());
         if let Some(expires_at) = src_item.expires_at {
             let now = Instant::now();
             if expires_at > now {
@@ -2113,7 +2129,7 @@ impl StorageEngine {
             }
         }
 
-        let required_size = Self::calculate_size(&dst, &src_item.value);
+        let required_size = Self::calculate_entry_size(&dst, &src_item.value);
 
         // When replace=false, do a quick non-locking check to avoid evicting unrelated
         // keys for a COPY that will be a no-op.  The authoritative check is still inside
@@ -2138,7 +2154,7 @@ impl StorageEngine {
                 if !replace && !occ.get().is_expired() {
                     return Ok(false);
                 }
-                let old_size = Self::calculate_size(&dst, &occ.get().value) as u64;
+                let old_size = Self::calculate_entry_size(&dst, &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::AcqRel);
@@ -2194,7 +2210,7 @@ impl StorageEngine {
                 if occ.get().is_expired() {
                     let (k, item) = occ.remove_entry();
                     // Bookkeeping for expired key removal
-                    let size = Self::calculate_size(&k, &item.value) as u64;
+                    let size = Self::calculate_entry_size(&k, &item.value) as u64;
                     self.current_memory.fetch_sub(size, Ordering::AcqRel);
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     return Ok(false);
@@ -2360,7 +2376,8 @@ impl StorageEngine {
                 self.remove_expired_key(key).await;
                 return Ok(None);
             }
-            let idle = entry.value().last_accessed.elapsed().as_secs();
+            let idle = (crate::storage::item::lru_now() as u64)
+                .saturating_sub(entry.value().lru_clock as u64);
             Ok(Some(idle))
         } else {
             Ok(None)
@@ -2383,12 +2400,12 @@ impl StorageEngine {
                 self.remove_expired_key(key).await;
                 return Ok(None);
             }
-            let encoding = match &entry.value().data_type {
-                RedisDataType::String => {
-                    if let Ok(s) = std::str::from_utf8(&entry.value().value) {
+            let encoding = match &entry.value().value {
+                StoreValue::Str(bytes) => {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
                         if s.parse::<i64>().is_ok() {
                             "int"
-                        } else if entry.value().value.len() <= 44 {
+                        } else if bytes.len() <= 44 {
                             "embstr"
                         } else {
                             "raw"
@@ -2397,64 +2414,44 @@ impl StorageEngine {
                         "raw"
                     }
                 }
-                RedisDataType::List => {
-                    if let Ok(list) = list_bytes::deserialize_all(&entry.value().value) {
-                        if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
-                            "listpack"
-                        } else {
-                            "quicklist"
-                        }
+                StoreValue::List(list) => {
+                    if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
+                        "listpack"
                     } else {
                         "quicklist"
                     }
                 }
-                RedisDataType::Set => {
-                    if let Ok(set) = bincode::deserialize::<HashSet<Vec<u8>>>(&entry.value().value)
+                StoreValue::Set(set) => {
+                    // Redis 7 default: set-max-intset-entries = 512
+                    if set.len() <= 512
+                        && set.iter().all(|el| {
+                            std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok())
+                        })
                     {
-                        // Redis 7 default: set-max-intset-entries = 512
-                        if set.len() <= 512
-                            && set.iter().all(|el| {
-                                std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok())
-                            })
-                        {
-                            "intset"
-                        } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
-                            "listpack"
-                        } else {
-                            "hashtable"
-                        }
+                        "intset"
+                    } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
+                        "listpack"
                     } else {
                         "hashtable"
                     }
                 }
-                RedisDataType::Hash => {
-                    if let Ok(map) =
-                        bincode::deserialize::<HashMap<Vec<u8>, Vec<u8>>>(&entry.value().value)
+                StoreValue::Hash(map) => {
+                    if map.len() <= 128
+                        && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
                     {
-                        if map.len() <= 128
-                            && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
-                        {
-                            "listpack"
-                        } else {
-                            "hashtable"
-                        }
+                        "listpack"
                     } else {
                         "hashtable"
                     }
                 }
-                RedisDataType::ZSet => {
-                    use crate::command::types::sorted_set::SortedSetData;
-                    if let Ok(ss) = bincode::deserialize::<SortedSetData>(&entry.value().value) {
-                        if ss.scores.len() <= 128 && ss.scores.keys().all(|k| k.len() <= 64) {
-                            "listpack"
-                        } else {
-                            "skiplist"
-                        }
+                StoreValue::ZSet(ss) => {
+                    if ss.scores.len() <= 128 && ss.scores.keys().all(|k| k.len() <= 64) {
+                        "listpack"
                     } else {
                         "skiplist"
                     }
                 }
-                RedisDataType::Stream => "stream",
+                StoreValue::Stream(_) => "stream",
             };
             Ok(Some(encoding.to_string()))
         } else {
@@ -2466,8 +2463,7 @@ impl StorageEngine {
     pub async fn restore_key(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
-        data_type: RedisDataType,
+        value: StoreValue,
         ttl: Option<Duration>,
         replace: bool,
     ) -> StorageResult<bool> {
@@ -2480,7 +2476,7 @@ impl StorageEngine {
             self.del(&key).await?;
         }
 
-        self.set_with_type(key, value, data_type, ttl).await?;
+        self.set_with_type(key, value, ttl).await?;
         Ok(true)
     }
 
@@ -2513,8 +2509,8 @@ impl StorageEngine {
         keys
     }
 
-    /// Dump a key's value as serialized bytes (for MIGRATE)
-    pub async fn dump_key(&self, key: &[u8]) -> Option<Vec<u8>> {
+    /// Dump a key's value as a cloned StoreValue (for MIGRATE/DUMP)
+    pub async fn dump_key(&self, key: &[u8]) -> Option<StoreValue> {
         if let Some(entry) = self.active_db().get(key) {
             if entry.is_expired() {
                 // Key is expired; clean it up and return None
@@ -2522,7 +2518,7 @@ impl StorageEngine {
                 self.remove_expired_key(key).await;
                 None
             } else {
-                Some(entry.value.clone())
+                Some(entry.value().value.clone())
             }
         } else {
             None
@@ -2549,10 +2545,11 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let required_size = Self::calculate_size(&key, &value);
+        let store_value = StoreValue::Str(value);
+        let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
-        let mut item = StorageItem::new(value);
+        let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
             Some(Instant::now() + ttl)
@@ -2569,7 +2566,7 @@ impl StorageEngine {
             Entry::Occupied(occ) => {
                 // Key exists - check if expired
                 if occ.get().is_expired() {
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let mut occ = occ;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory
@@ -2624,10 +2621,11 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let required_size = Self::calculate_size(&key, &value);
+        let store_value = StoreValue::Str(value);
+        let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
-        let mut item = StorageItem::new(value);
+        let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
             Some(Instant::now() + ttl)
@@ -2640,13 +2638,13 @@ impl StorageEngine {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     // Expired key doesn't count as existing
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     occ.remove();
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     false
                 } else {
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory
                         .fetch_add(required_size as u64, Ordering::AcqRel);
@@ -2689,10 +2687,11 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let required_size = Self::calculate_size(&key, &value);
+        let store_value = StoreValue::Str(value);
+        let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
-        let mut item = StorageItem::new(value);
+        let mut item = crate::storage::item::Entry::new(store_value);
         let new_expires_at = if let Some(ttl) = ttl {
             item.expire(ttl);
             Some(Instant::now() + ttl)
@@ -2709,8 +2708,8 @@ impl StorageEngine {
 
                     if nx && effectively_exists {
                         // NX: don't set if key exists
-                        let old = if get_old {
-                            Some(occ.get().value.clone())
+                        let old: Option<Vec<u8>> = if get_old {
+                            occ.get().value.as_str().cloned()
                         } else {
                             None
                         };
@@ -2718,7 +2717,7 @@ impl StorageEngine {
                     } else if xx && !effectively_exists {
                         // XX: don't set if key doesn't exist
                         if expired {
-                            let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                            let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                             self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                             occ.remove();
                             self.key_count.fetch_sub(1, Ordering::AcqRel);
@@ -2726,8 +2725,8 @@ impl StorageEngine {
                         (false, None, false, None)
                     } else {
                         // Set the value
-                        let old = if get_old && effectively_exists {
-                            Some(occ.get().value.clone())
+                        let old: Option<Vec<u8>> = if get_old && effectively_exists {
+                            occ.get().value.as_str().cloned()
                         } else {
                             None
                         };
@@ -2737,7 +2736,7 @@ impl StorageEngine {
                         } else {
                             None
                         };
-                        let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                        let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                         self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                         self.current_memory
                             .fetch_add(required_size as u64, Ordering::AcqRel);
@@ -2803,34 +2802,37 @@ impl StorageEngine {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
                     // Treat expired as non-existent: set to delta
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val_str = delta.to_string();
                     let new_val_bytes = new_val_str.as_bytes().to_vec();
-                    let new_size = Self::calculate_size(occ.key(), &new_val_bytes) as u64;
+                    let new_sv = StoreValue::Str(new_val_bytes);
+                    let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
-                    let mut new_item = StorageItem::new(new_val_bytes);
+                    let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
                     self.bump_key_version(key);
                     return Ok(delta);
                 }
                 // Check type
-                if occ.get().data_type != RedisDataType::String {
+                if occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
                 // Parse current value
+                let bytes = occ.get().value.as_str().ok_or(StorageError::WrongType)?;
                 let current_str =
-                    std::str::from_utf8(&occ.get().value).map_err(|_| StorageError::NotANumber)?;
+                    std::str::from_utf8(bytes).map_err(|_| StorageError::NotANumber)?;
                 let current: i64 = current_str.parse().map_err(|_| StorageError::NotANumber)?;
                 let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
-                let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 let new_val_str = new_val.to_string();
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_size = Self::calculate_size(occ.key(), &new_val_bytes) as u64;
+                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(new_size, Ordering::AcqRel);
-                occ.get_mut().value = new_val_bytes;
+                occ.get_mut().value = new_sv;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_val)
@@ -2838,10 +2840,11 @@ impl StorageEngine {
             Entry::Vacant(vac) => {
                 let new_val_str = delta.to_string();
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let size = Self::calculate_size(key, &new_val_bytes) as u64;
+                let new_sv = StoreValue::Str(new_val_bytes);
+                let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
-                vac.insert(StorageItem::new(new_val_bytes));
+                vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(delta)
             }
@@ -2859,23 +2862,25 @@ impl StorageEngine {
         match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val_str = format_float(delta);
                     let new_val_bytes = new_val_str.as_bytes().to_vec();
-                    let new_size = Self::calculate_size(occ.key(), &new_val_bytes) as u64;
+                    let new_sv = StoreValue::Str(new_val_bytes);
+                    let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
-                    let mut new_item = StorageItem::new(new_val_bytes);
+                    let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
                     self.bump_key_version(key);
                     return Ok(delta);
                 }
-                if occ.get().data_type != RedisDataType::String {
+                if occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
+                let bytes = occ.get().value.as_str().ok_or(StorageError::WrongType)?;
                 let current_str =
-                    std::str::from_utf8(&occ.get().value).map_err(|_| StorageError::NotAFloat)?;
+                    std::str::from_utf8(bytes).map_err(|_| StorageError::NotAFloat)?;
                 let current: f64 = current_str.parse().map_err(|_| StorageError::NotAFloat)?;
                 if current.is_nan() || current.is_infinite() {
                     return Err(StorageError::NotAFloat);
@@ -2884,13 +2889,14 @@ impl StorageEngine {
                 if new_val.is_nan() || new_val.is_infinite() {
                     return Err(StorageError::NotAFloat);
                 }
-                let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 let new_val_str = format_float(new_val);
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_size = Self::calculate_size(occ.key(), &new_val_bytes) as u64;
+                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(new_size, Ordering::AcqRel);
-                occ.get_mut().value = new_val_bytes;
+                occ.get_mut().value = new_sv;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_val)
@@ -2898,10 +2904,11 @@ impl StorageEngine {
             Entry::Vacant(vac) => {
                 let new_val_str = format_float(delta);
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let size = Self::calculate_size(key, &new_val_bytes) as u64;
+                let new_sv = StoreValue::Str(new_val_bytes);
+                let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
-                vac.insert(StorageItem::new(new_val_bytes));
+                vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(delta)
             }
@@ -2916,25 +2923,28 @@ impl StorageEngine {
         match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(mut occ) => {
                 if occ.get().is_expired() {
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val = append_value.to_vec();
                     let new_len = new_val.len();
-                    let new_size = Self::calculate_size(occ.key(), &new_val) as u64;
+                    let new_sv = StoreValue::Str(new_val);
+                    let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
-                    let mut new_item = StorageItem::new(new_val);
+                    let mut new_item = crate::storage::item::Entry::new(new_sv);
                     new_item.expires_at = None;
                     occ.insert(new_item);
                     self.bump_key_version(key);
                     return Ok(new_len);
                 }
-                if occ.get().data_type != RedisDataType::String {
+                if occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                let old_val_size = occ.get().value.len();
-                let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
-                occ.get_mut().value.extend_from_slice(append_value);
-                let new_len = occ.get().value.len();
+                let old_val_size = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
+                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
+                if let Some(bytes) = occ.get_mut().value.as_str_mut() {
+                    bytes.extend_from_slice(append_value);
+                }
+                let new_len = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
                 let new_size = old_size + (new_len - old_val_size) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2945,10 +2955,11 @@ impl StorageEngine {
             Entry::Vacant(vac) => {
                 let new_val = append_value.to_vec();
                 let new_len = new_val.len();
-                let size = Self::calculate_size(key, &new_val) as u64;
+                let new_sv = StoreValue::Str(new_val);
+                let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
-                vac.insert(StorageItem::new(new_val));
+                vac.insert(crate::storage::item::Entry::new(new_sv));
                 self.bump_key_version(key);
                 Ok(new_len)
             }
@@ -2967,39 +2978,58 @@ impl StorageEngine {
         f: F,
     ) -> StorageResult<R>
     where
-        F: FnOnce(Option<&mut Vec<u8>>) -> Result<(Option<Vec<u8>>, R), StorageError>,
+        F: FnOnce(Option<&mut StoreValue>) -> Result<(ModifyResult, R), StorageError>,
     {
-        use dashmap::mapref::entry::Entry;
+        use dashmap::mapref::entry::Entry as DEntry;
         match self.active_db().entry(key.to_vec()) {
-            Entry::Occupied(mut occ) => {
+            DEntry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
-                if !expired && occ.get().data_type != data_type {
+                if !expired && occ.get().data_type() != data_type {
                     return Err(StorageError::WrongType);
                 }
-                let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
 
-                let (new_val, result) = if expired {
+                let (action, result) = if expired {
                     f(None)?
                 } else {
                     f(Some(&mut occ.get_mut().value))?
                 };
 
-                match new_val {
-                    Some(val) => {
-                        let new_size = Self::calculate_size(key, &val) as u64;
+                match action {
+                    ModifyResult::Keep => {
+                        if expired {
+                            // Expired key, closure got None but returned Keep = no-op
+                            // Clean up the expired entry
+                            self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
+                            occ.remove();
+                            self.key_count.fetch_sub(1, Ordering::AcqRel);
+                        } else {
+                            let new_size =
+                                Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
+                            if new_size != old_size {
+                                if old_size > new_size {
+                                    self.current_memory
+                                        .fetch_sub(old_size - new_size, Ordering::AcqRel);
+                                } else {
+                                    self.current_memory
+                                        .fetch_add(new_size - old_size, Ordering::AcqRel);
+                                }
+                            }
+                            occ.get_mut().touch();
+                        }
+                    }
+                    ModifyResult::Set(val) => {
+                        let new_size = Self::calculate_entry_size(key, &val) as u64;
                         self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                         self.current_memory.fetch_add(new_size, Ordering::AcqRel);
                         if expired {
-                            let mut new_item = StorageItem::new_with_type(val, data_type);
-                            new_item.expires_at = None;
-                            occ.insert(new_item);
+                            occ.insert(Entry::new(val));
                         } else {
                             occ.get_mut().value = val;
                             occ.get_mut().touch();
                         }
                     }
-                    None => {
-                        // Delete the key
+                    ModifyResult::Delete => {
                         self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                         occ.remove();
                         self.key_count.fetch_sub(1, Ordering::AcqRel);
@@ -3009,15 +3039,20 @@ impl StorageEngine {
                 self.increment_write_counters_sync();
                 Ok(result)
             }
-            Entry::Vacant(vac) => {
-                let (new_val, result) = f(None)?;
-                if let Some(val) = new_val {
-                    let size = Self::calculate_size(key, &val) as u64;
-                    self.current_memory.fetch_add(size, Ordering::AcqRel);
-                    self.key_count.fetch_add(1, Ordering::AcqRel);
-                    vac.insert(StorageItem::new_with_type(val, data_type));
-                    self.bump_key_version(key);
-                    self.increment_write_counters_sync();
+            DEntry::Vacant(vac) => {
+                let (action, result) = f(None)?;
+                match action {
+                    ModifyResult::Set(val) => {
+                        let size = Self::calculate_entry_size(key, &val) as u64;
+                        self.current_memory.fetch_add(size, Ordering::AcqRel);
+                        self.key_count.fetch_add(1, Ordering::AcqRel);
+                        vac.insert(Entry::new(val));
+                        self.bump_key_version(key);
+                        self.increment_write_counters_sync();
+                    }
+                    ModifyResult::Keep | ModifyResult::Delete => {
+                        // Nothing to keep or delete for vacant entry
+                    }
                 }
                 Ok(result)
             }
@@ -3030,13 +3065,13 @@ impl StorageEngine {
     /// `was_expired` indicates the caller should trigger lazy expiration cleanup.
     pub fn atomic_read<F, R>(&self, key: &[u8], data_type: RedisDataType, f: F) -> StorageResult<R>
     where
-        F: FnOnce(Option<&Vec<u8>>) -> Result<R, StorageError>,
+        F: FnOnce(Option<&StoreValue>) -> Result<R, StorageError>,
     {
         match self.active_db().get_mut(key) {
             Some(mut entry) => {
                 if entry.value().is_expired() {
                     f(None)
-                } else if entry.value().data_type != data_type {
+                } else if entry.value().data_type() != data_type {
                     Err(StorageError::WrongType)
                 } else {
                     entry.value_mut().touch();
@@ -3054,22 +3089,22 @@ impl StorageEngine {
         match self.active_db().entry(key.to_vec()) {
             Entry::Occupied(occ) => {
                 if occ.get().is_expired() {
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     occ.remove();
                     self.bump_key_version(key);
                     Ok(None)
-                } else if occ.get().data_type != RedisDataType::String {
+                } else if occ.get().data_type() != RedisDataType::String {
                     Err(StorageError::WrongType)
                 } else {
-                    let old_value = occ.get().value.clone();
-                    let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                    let old_value = occ.get().value.as_str().cloned();
+                    let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
                     occ.remove();
                     self.bump_key_version(key);
-                    Ok(Some(old_value))
+                    Ok(old_value)
                 }
             }
             Entry::Vacant(_) => Ok(None),
@@ -3097,10 +3132,10 @@ impl StorageEngine {
 
                 if item.is_expired() {
                     (None, None, false)
-                } else if item.data_type != RedisDataType::String {
+                } else if item.data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 } else {
-                    let value = item.value.clone();
+                    let value = item.value.as_str().cloned();
 
                     let (queue_action, changed) = match new_expiry {
                         None => (None, false),
@@ -3116,7 +3151,7 @@ impl StorageEngine {
                     };
 
                     item.touch();
-                    (Some(value), queue_action, changed)
+                    (value, queue_action, changed)
                 }
             } else {
                 (None, None, false)
@@ -3150,26 +3185,27 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let required_size = Self::calculate_size(&key, &value);
+        let store_value = StoreValue::Str(value);
+        let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
         use dashmap::mapref::entry::Entry;
         let old_value = match self.active_db().entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let expired = occ.get().is_expired();
-                if !expired && occ.get().data_type != RedisDataType::String {
+                if !expired && occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                let old = if expired {
+                let old: Option<Vec<u8>> = if expired {
                     None
                 } else {
-                    Some(occ.get().value.clone())
+                    occ.get().value.as_str().cloned()
                 };
-                let old_size = Self::calculate_size(occ.key(), &occ.get().value) as u64;
+                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::AcqRel);
-                let item = StorageItem::new(value);
+                let item = crate::storage::item::Entry::new(store_value);
                 occ.insert(item);
                 // Bump version while OccupiedEntry still holds the shard lock
                 self.bump_key_version(&key);
@@ -3180,7 +3216,7 @@ impl StorageEngine {
                     .fetch_add(required_size as u64, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
                 // Bind RefMut to keep shard lock held during version bump
-                let _ref = vac.insert(StorageItem::new(value));
+                let _ref = vac.insert(crate::storage::item::Entry::new(store_value));
                 self.bump_key_version(&key);
                 None
             }
@@ -3191,146 +3227,168 @@ impl StorageEngine {
     }
 
     // ========== Hash Primitives ==========
-    // Hash data is stored as a single key with RedisDataType::Hash.
-    // The value is a bincode-serialized HashMap<Vec<u8>, Vec<u8>>.
-
-    /// Deserialize hash data from bytes. Returns empty HashMap if bytes is None.
-    fn hash_deserialize(data: Option<&Vec<u8>>) -> HashMap<Vec<u8>, Vec<u8>> {
-        match data {
-            Some(bytes) if !bytes.is_empty() => bincode::deserialize(bytes).unwrap_or_default(),
-            _ => HashMap::new(),
-        }
-    }
-
-    /// Serialize hash data to bytes.
-    fn hash_serialize(map: &HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
-        bincode::serialize(map).unwrap_or_default()
-    }
+    // Hash data is stored natively as NativeHashMap (hashbrown + FxHash).
 
     /// Set one or more fields in a hash. Returns the number of NEW fields added.
     pub fn hash_set(&self, key: &[u8], fields: &[(&[u8], &[u8])]) -> StorageResult<i64> {
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let mut map = Self::hash_deserialize(existing.as_deref());
-            let mut new_count = 0i64;
-            for &(field, value) in fields {
-                if map.insert(field.to_vec(), value.to_vec()).is_none() {
-                    new_count += 1;
+            match existing {
+                Some(StoreValue::Hash(map)) => {
+                    let mut new_count = 0i64;
+                    for &(field, value) in fields {
+                        if map.insert(field.to_vec(), value.to_vec()).is_none() {
+                            new_count += 1;
+                        }
+                    }
+                    Ok((ModifyResult::Keep, new_count))
                 }
+                None => {
+                    let mut map = NativeHashMap::default();
+                    let mut new_count = 0i64;
+                    for &(field, value) in fields {
+                        if map.insert(field.to_vec(), value.to_vec()).is_none() {
+                            new_count += 1;
+                        }
+                    }
+                    Ok((ModifyResult::Set(StoreValue::Hash(map)), new_count))
+                }
+                _ => unreachable!(),
             }
-            Ok((Some(Self::hash_serialize(&map)), new_count))
         })
     }
 
     /// Set a field only if it does NOT exist. Returns true if the field was set.
     pub fn hash_set_nx(&self, key: &[u8], field: &[u8], value: &[u8]) -> StorageResult<bool> {
-        // Fast path: if the field already exists, return false without bumping
-        // key version (avoids spurious WATCH invalidation on no-op).
         let field_exists = self.atomic_read(key, RedisDataType::Hash, |existing| {
-            Ok(Self::hash_deserialize(existing).contains_key(field))
+            match existing {
+                Some(StoreValue::Hash(map)) => Ok(map.contains_key(field)),
+                None => Ok(false),
+                _ => unreachable!(),
+            }
         })?;
         if field_exists {
             return Ok(false);
         }
-        // Field doesn't exist (or key doesn't exist) - use atomic_modify to add it.
-        // Re-check inside the closure to handle the race where another client
-        // added the same field between our read and this modify.
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let mut map = Self::hash_deserialize(existing.as_deref());
-            if map.contains_key(field) {
-                Ok((Some(Self::hash_serialize(&map)), false))
-            } else {
-                map.insert(field.to_vec(), value.to_vec());
-                Ok((Some(Self::hash_serialize(&map)), true))
+        self.atomic_modify(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                if map.contains_key(field) {
+                    Ok((ModifyResult::Keep, false))
+                } else {
+                    map.insert(field.to_vec(), value.to_vec());
+                    Ok((ModifyResult::Keep, true))
+                }
             }
+            None => {
+                let mut map = NativeHashMap::default();
+                map.insert(field.to_vec(), value.to_vec());
+                Ok((ModifyResult::Set(StoreValue::Hash(map)), true))
+            }
+            _ => unreachable!(),
         })
     }
 
     /// Get a single field from a hash.
     pub fn hash_get(&self, key: &[u8], field: &[u8]) -> StorageResult<Option<Vec<u8>>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            Ok(map.get(field).cloned())
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => Ok(map.get(field).cloned()),
+            None => Ok(None),
+            _ => unreachable!(),
         })
     }
 
-    /// Get multiple fields from a hash. Returns a Vec of Option<Vec<u8>> in order.
+    /// Get multiple fields from a hash.
     pub fn hash_mget(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<Vec<Option<Vec<u8>>>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            let results: Vec<Option<Vec<u8>>> =
-                fields.iter().map(|f| map.get(*f).cloned()).collect();
-            Ok(results)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                Ok(fields.iter().map(|f| map.get(*f).cloned()).collect())
+            }
+            None => Ok(fields.iter().map(|_| None).collect()),
+            _ => unreachable!(),
         })
     }
 
     /// Get all field-value pairs from a hash.
     pub fn hash_getall(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
-            Ok(pairs)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            }
+            None => Ok(Vec::new()),
+            _ => unreachable!(),
         })
     }
 
-    /// Delete one or more fields from a hash. Returns the number of fields removed.
+    /// Delete one or more fields from a hash.
     pub fn hash_del(&self, key: &[u8], fields: &[&[u8]]) -> StorageResult<i64> {
-        self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            if existing.is_none() {
-                return Ok((None, 0));
-            }
-            let mut map = Self::hash_deserialize(existing.as_deref());
-            let mut removed = 0i64;
-            for &field in fields {
-                if map.remove(field).is_some() {
-                    removed += 1;
+        self.atomic_modify(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                let mut removed = 0i64;
+                for &field in fields {
+                    if map.remove(field).is_some() {
+                        removed += 1;
+                    }
+                }
+                if map.is_empty() {
+                    Ok((ModifyResult::Delete, removed))
+                } else {
+                    Ok((ModifyResult::Keep, removed))
                 }
             }
-            if map.is_empty() {
-                Ok((None, removed))
-            } else {
-                Ok((Some(Self::hash_serialize(&map)), removed))
-            }
+            None => Ok((ModifyResult::Delete, 0)),
+            _ => unreachable!(),
         })
     }
 
     /// Check if a field exists in a hash.
     pub fn hash_exists(&self, key: &[u8], field: &[u8]) -> StorageResult<bool> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            Ok(map.contains_key(field))
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => Ok(map.contains_key(field)),
+            None => Ok(false),
+            _ => unreachable!(),
         })
     }
 
     /// Get the number of fields in a hash.
     pub fn hash_len(&self, key: &[u8]) -> StorageResult<i64> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            Ok(map.len() as i64)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => Ok(map.len() as i64),
+            None => Ok(0),
+            _ => unreachable!(),
         })
     }
 
     /// Get all field names in a hash.
     pub fn hash_keys(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            let keys: Vec<Vec<u8>> = map.keys().cloned().collect();
-            Ok(keys)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => Ok(map.keys().cloned().collect()),
+            None => Ok(Vec::new()),
+            _ => unreachable!(),
         })
     }
 
     /// Get all values in a hash.
     pub fn hash_vals(&self, key: &[u8]) -> StorageResult<Vec<Vec<u8>>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            let vals: Vec<Vec<u8>> = map.values().cloned().collect();
-            Ok(vals)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => Ok(map.values().cloned().collect()),
+            None => Ok(Vec::new()),
+            _ => unreachable!(),
         })
     }
 
-    /// Increment a hash field's integer value by delta. Returns the new value.
+    /// Increment a hash field's integer value by delta.
     pub fn hash_incr_by(&self, key: &[u8], field: &[u8], delta: i64) -> StorageResult<i64> {
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let mut map = Self::hash_deserialize(existing.as_deref());
+            let (map, is_new) = match existing {
+                Some(StoreValue::Hash(map)) => (map, false),
+                None => {
+                    // Will create new hash below
+                    let mut map = NativeHashMap::default();
+                    let new_val = delta; // 0 + delta
+                    map.insert(field.to_vec(), new_val.to_string().into_bytes());
+                    return Ok((ModifyResult::Set(StoreValue::Hash(map)), new_val));
+                }
+                _ => unreachable!(),
+            };
             let current = match map.get(field) {
                 Some(v) => {
                     let s = std::str::from_utf8(v).map_err(|_| StorageError::NotANumber)?;
@@ -3340,11 +3398,11 @@ impl StorageEngine {
             };
             let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
             map.insert(field.to_vec(), new_val.to_string().into_bytes());
-            Ok((Some(Self::hash_serialize(&map)), new_val))
+            Ok((ModifyResult::Keep, new_val))
         })
     }
 
-    /// Increment a hash field's float value by delta. Returns the new value as string.
+    /// Increment a hash field's float value by delta.
     pub fn hash_incr_by_float(
         &self,
         key: &[u8],
@@ -3352,7 +3410,20 @@ impl StorageEngine {
         delta: f64,
     ) -> StorageResult<String> {
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let mut map = Self::hash_deserialize(existing.as_deref());
+            let (map, _is_new) = match existing {
+                Some(StoreValue::Hash(map)) => (map, false),
+                None => {
+                    let new_val = delta;
+                    if !new_val.is_finite() {
+                        return Err(StorageError::NotAFloat);
+                    }
+                    let mut map = NativeHashMap::default();
+                    let new_val_str = format_float(new_val);
+                    map.insert(field.to_vec(), new_val_str.as_bytes().to_vec());
+                    return Ok((ModifyResult::Set(StoreValue::Hash(map)), new_val_str));
+                }
+                _ => unreachable!(),
+            };
             let current = match map.get(field) {
                 Some(v) => {
                     let s = std::str::from_utf8(v).map_err(|_| StorageError::NotAFloat)?;
@@ -3370,25 +3441,29 @@ impl StorageEngine {
             }
             let new_val_str = format_float(new_val);
             map.insert(field.to_vec(), new_val_str.as_bytes().to_vec());
-            Ok((Some(Self::hash_serialize(&map)), new_val_str))
+            Ok((ModifyResult::Keep, new_val_str))
         })
     }
 
     /// Get the string length of a hash field's value.
     pub fn hash_strlen(&self, key: &[u8], field: &[u8]) -> StorageResult<i64> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            Ok(map.get(field).map(|v| v.len() as i64).unwrap_or(0))
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                Ok(map.get(field).map(|v| v.len() as i64).unwrap_or(0))
+            }
+            None => Ok(0),
+            _ => unreachable!(),
         })
     }
 
-    /// Get random fields from a hash. Returns (fields, values) pairs.
-    /// If the hash doesn't exist, returns empty vec.
+    /// Get random fields from a hash.
     pub fn hash_randfield(&self, key: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.atomic_read(key, RedisDataType::Hash, |existing| {
-            let map = Self::hash_deserialize(existing);
-            let pairs: Vec<(Vec<u8>, Vec<u8>)> = map.into_iter().collect();
-            Ok(pairs)
+        self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
+            Some(StoreValue::Hash(map)) => {
+                Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            }
+            None => Ok(Vec::new()),
+            _ => unreachable!(),
         })
     }
 }
@@ -3785,8 +3860,7 @@ mod tests {
         storage
             .set_with_type(
                 b"list_key".to_vec(),
-                b"data".to_vec(),
-                RedisDataType::List,
+                StoreValue::List(std::collections::VecDeque::from(vec![b"data".to_vec()])),
                 None,
             )
             .await
@@ -3832,9 +3906,8 @@ mod tests {
             .atomic_modify(b"my_list", RedisDataType::List, |existing| {
                 match existing {
                     None => {
-                        // Create new list with one element
-                        let data = list_bytes::new_from_elements(&[b"item1".to_vec()]);
-                        Ok((Some(data), 1))
+                        let deque = std::collections::VecDeque::from(vec![b"item1".to_vec()]);
+                        Ok((ModifyResult::Set(StoreValue::List(deque)), 1))
                     }
                     Some(_) => unreachable!(),
                 }
@@ -3845,12 +3918,12 @@ mod tests {
         // Modify the list to add another element
         let result: usize = storage
             .atomic_modify(b"my_list", RedisDataType::List, |existing| match existing {
-                Some(data) => {
-                    list_bytes::rpush(data, &[b"item2".to_vec()]).unwrap();
-                    let new_len = list_bytes::len(data).unwrap() as usize;
-                    Ok((Some(std::mem::take(data)), new_len))
+                Some(StoreValue::List(deque)) => {
+                    deque.push_back(b"item2".to_vec());
+                    let new_len = deque.len();
+                    Ok((ModifyResult::Keep, new_len))
                 }
-                None => unreachable!(),
+                _ => unreachable!(),
             })
             .unwrap();
         assert_eq!(result, 2);
@@ -3868,7 +3941,7 @@ mod tests {
 
         // Try to modify as a list - should fail with WrongType
         let result = storage.atomic_modify(b"str_key", RedisDataType::List, |_| {
-            Ok((Some(vec![1, 2, 3]), ()))
+            Ok((ModifyResult::Keep, ()))
         });
         assert!(matches!(result, Err(StorageError::WrongType)));
     }
@@ -4010,8 +4083,7 @@ mod tests {
         storage
             .set_with_type(
                 b"ttl_key".to_vec(),
-                b"original_value".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"original_value".to_vec()),
                 Some(ttl),
             )
             .await
@@ -4029,8 +4101,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"ttl_key".to_vec(),
-                b"new_value".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"new_value".to_vec()),
             )
             .await
             .unwrap();
@@ -4057,8 +4128,7 @@ mod tests {
         storage
             .set_with_type(
                 b"no_ttl_key".to_vec(),
-                b"original".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"original".to_vec()),
                 None,
             )
             .await
@@ -4068,8 +4138,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"no_ttl_key".to_vec(),
-                b"updated".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"updated".to_vec()),
             )
             .await
             .unwrap();
@@ -4090,8 +4159,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"brand_new_key".to_vec(),
-                b"value".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"value".to_vec()),
             )
             .await
             .unwrap();
@@ -4113,8 +4181,7 @@ mod tests {
         storage
             .set_with_type(
                 b"concurrent_ttl".to_vec(),
-                b"initial".to_vec(),
-                RedisDataType::ZSet,
+                StoreValue::Str(b"initial".to_vec()),
                 Some(ttl),
             )
             .await
@@ -4128,8 +4195,7 @@ mod tests {
                 let value = format!("value_{}", i).into_bytes();
                 s.set_with_type_preserve_ttl(
                     b"concurrent_ttl".to_vec(),
-                    value,
-                    RedisDataType::ZSet,
+                    StoreValue::Str(value),
                 )
                 .await
                 .unwrap();

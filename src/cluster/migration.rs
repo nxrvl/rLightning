@@ -29,11 +29,44 @@ pub async fn migrate_key(
 
     let timeout = Duration::from_millis(timeout_ms);
 
-    // Get the key data from local storage
-    let dump_data = engine
-        .dump_key(key)
+    // Get the key data from local storage using DUMP format: [type_byte][serialized_value]
+    let item = engine
+        .get_item(key)
         .await
+        .map_err(|e| format!("ERR {}", e))?
         .ok_or_else(|| "ERR no such key".to_string())?;
+    let type_byte: u8 = match item.data_type() {
+        crate::storage::item::RedisDataType::String => 0,
+        crate::storage::item::RedisDataType::List => 1,
+        crate::storage::item::RedisDataType::Set => 2,
+        crate::storage::item::RedisDataType::Hash => 3,
+        crate::storage::item::RedisDataType::ZSet => 4,
+        crate::storage::item::RedisDataType::Stream => 5,
+    };
+    let value_bytes: Vec<u8> = match &item.value {
+        crate::storage::value::StoreValue::Str(v) => v.clone(),
+        crate::storage::value::StoreValue::Hash(m) => {
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            bincode::serialize(&std_map).map_err(|e| format!("ERR serialization: {}", e))?
+        }
+        crate::storage::value::StoreValue::Set(s) => {
+            let std_set: std::collections::HashSet<Vec<u8>> = s.iter().cloned().collect();
+            bincode::serialize(&std_set).map_err(|e| format!("ERR serialization: {}", e))?
+        }
+        crate::storage::value::StoreValue::ZSet(ss) => {
+            bincode::serialize(ss).map_err(|e| format!("ERR serialization: {}", e))?
+        }
+        crate::storage::value::StoreValue::List(deque) => {
+            let vec: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            bincode::serialize(&vec).map_err(|e| format!("ERR serialization: {}", e))?
+        }
+        crate::storage::value::StoreValue::Stream(s) => {
+            bincode::serialize(s).map_err(|e| format!("ERR serialization: {}", e))?
+        }
+    };
+    let mut dump_data = Vec::with_capacity(1 + value_bytes.len());
+    dump_data.push(type_byte);
+    dump_data.extend_from_slice(&value_bytes);
 
     let ttl_ms = engine
         .ttl(key)

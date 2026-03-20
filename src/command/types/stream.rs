@@ -8,6 +8,7 @@ use crate::storage::engine::StorageEngine;
 use crate::storage::error::StorageError;
 use crate::storage::item::RedisDataType;
 use crate::storage::stream::{ConsumerGroup, PendingEntry, StreamData, StreamEntryId};
+use crate::storage::value::{ModifyResult, StoreValue};
 
 /// Helper: get stream data for multi-key read operations (XREAD, XREADGROUP).
 /// Uses get_item() for single atomic DashMap lookup (value + type in one read).
@@ -21,12 +22,13 @@ async fn get_stream_data(
         .map_err(|e| CommandError::StorageError(e.to_string()))?
     {
         Some(item) => {
-            if item.data_type != crate::storage::item::RedisDataType::Stream {
+            if item.data_type() != crate::storage::item::RedisDataType::Stream {
                 return Err(CommandError::WrongType);
             }
-            let stream: StreamData =
-                bincode::deserialize(&item.value).map_err(|_| CommandError::WrongType)?;
-            Ok(Some(stream))
+            match &item.value {
+                StoreValue::Stream(stream) => Ok(Some(stream.clone())),
+                _ => Err(CommandError::WrongType),
+            }
         }
         None => Ok(None),
     }
@@ -174,11 +176,11 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => {
                 if nomkstream {
-                    return Ok((None, RespValue::BulkString(None)));
+                    return Ok((ModifyResult::Keep, RespValue::BulkString(None)));
                 }
                 StreamData::new()
             }
@@ -200,10 +202,8 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             stream.trim_minid(min_entry_id, approximate);
         }
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
         Ok((
-            Some(serialized),
+            ModifyResult::Set(StoreValue::Stream(stream)),
             RespValue::BulkString(Some(added_id.to_string().into_bytes())),
         ))
     })?;
@@ -224,8 +224,8 @@ pub async fn xlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Ok(RespValue::Integer(0)),
         };
         Ok(RespValue::Integer(stream.len() as i64))
@@ -272,8 +272,8 @@ pub async fn xrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Ok(RespValue::Array(Some(vec![]))),
         };
 
@@ -319,8 +319,8 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Ok(RespValue::Array(Some(vec![]))),
         };
 
@@ -572,9 +572,9 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Integer(0))),
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
+            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
         };
 
         let removed = match &trim_strategy {
@@ -583,13 +583,9 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         };
 
         if removed > 0 {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(removed as i64)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(removed as i64)))
         } else {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(0)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
         }
     })?;
 
@@ -623,20 +619,16 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Integer(0))),
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
+            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
         };
 
         let deleted = stream.delete_entries(&ids);
         if deleted > 0 {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(deleted as i64)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(deleted as i64)))
         } else {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(0)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
         }
     })?;
 
@@ -682,8 +674,8 @@ async fn xinfo_stream(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -757,8 +749,8 @@ async fn xinfo_groups(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -811,8 +803,8 @@ async fn xinfo_consumers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -953,8 +945,8 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => {
                 if mkstream {
                     StreamData::new()
@@ -981,9 +973,7 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         group.entries_read = entries_read;
         stream.groups.insert(group_name.clone(), group);
 
-        let serialized = bincode::serialize(&stream)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::SimpleString("OK".to_string())))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::SimpleString("OK".to_string())))
     });
 
     match result {
@@ -1041,8 +1031,8 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -1061,9 +1051,7 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             group.entries_read = Some(er);
         }
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::SimpleString("OK".to_string())))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::SimpleString("OK".to_string())))
     });
 
     match result {
@@ -1090,20 +1078,16 @@ async fn xgroup_destroy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Integer(0))),
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
+            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
         };
 
         let removed = stream.groups.remove(&group_name).is_some();
         if removed {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(1)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(1)))
         } else {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(0)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
         }
     })?;
 
@@ -1122,8 +1106,8 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -1145,9 +1129,7 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             None => 0,
         };
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Integer(pending_count)))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(pending_count)))
     });
 
     match result {
@@ -1176,8 +1158,8 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -1195,9 +1177,7 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
             1
         };
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), RespValue::Integer(created)))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(created)))
     });
 
     match result {
@@ -1377,11 +1357,11 @@ async fn do_xreadgroup(
 
         let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
             let mut stream = match existing {
-                Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                    .map_err(|_| StorageError::WrongType)?,
+                Some(StoreValue::Stream(s)) => s.clone(),
+                Some(_) => return Err(StorageError::WrongType),
                 None => {
                     return Ok((
-                        None,
+                        ModifyResult::Keep,
                         (
                             false,
                             RespValue::Array(Some(vec![
@@ -1518,9 +1498,7 @@ async fn do_xreadgroup(
                 )
             };
 
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), (stream_has_data, entry_resp)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), (stream_has_data, entry_resp)))
         });
 
         match result {
@@ -1579,17 +1557,15 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
-            None => return Ok((None, RespValue::Integer(0))),
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
+            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
         };
 
         let group = match stream.groups.get_mut(&group_name) {
             Some(g) => g,
             None => {
-                let serialized = bincode::serialize(&stream)
-                    .map_err(|e| StorageError::InternalError(e.to_string()))?;
-                return Ok((Some(serialized), RespValue::Integer(0)));
+                return Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)));
             }
         };
 
@@ -1604,13 +1580,9 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
 
         if acked > 0 {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(acked)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(acked)))
         } else {
-            let serialized = bincode::serialize(&stream)
-                .map_err(|e| StorageError::InternalError(e.to_string()))?;
-            Ok((Some(serialized), RespValue::Integer(0)))
+            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
         }
     })?;
 
@@ -1683,8 +1655,8 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -1870,8 +1842,8 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -1955,9 +1927,7 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             RespValue::Array(Some(result))
         };
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), resp))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), resp))
     });
 
     match result {
@@ -2032,8 +2002,8 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         let mut stream = match existing {
-            Some(bytes) => bincode::deserialize::<StreamData>(&bytes[..])
-                .map_err(|_| StorageError::WrongType)?,
+            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(_) => return Err(StorageError::WrongType),
             None => return Err(StorageError::InternalError("no such key".to_string())),
         };
 
@@ -2134,9 +2104,7 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
             RespValue::Array(Some(deleted_resp)),
         ]));
 
-        let serialized =
-            bincode::serialize(&stream).map_err(|e| StorageError::InternalError(e.to_string()))?;
-        Ok((Some(serialized), resp))
+        Ok((ModifyResult::Set(StoreValue::Stream(stream)), resp))
     });
 
     match result {

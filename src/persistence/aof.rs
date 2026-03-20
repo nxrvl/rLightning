@@ -681,11 +681,12 @@ impl Clone for AofPersistence {
 /// For collection types, we emit the appropriate Redis command to reconstruct the data.
 /// If a key has a TTL, we append a PEXPIRE command.
 fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<u8>>> {
+    use crate::storage::value::StoreValue;
     let mut commands: Vec<Vec<Vec<u8>>> = Vec::new();
 
-    match item.data_type {
-        RedisDataType::String => {
-            let mut args = vec![b"SET".to_vec(), key.to_vec(), item.value.clone()];
+    match &item.value {
+        StoreValue::Str(v) => {
+            let mut args = vec![b"SET".to_vec(), key.to_vec(), v.clone()];
             if let Some(ttl) = item.ttl()
                 && ttl.as_millis() > 0
             {
@@ -694,32 +695,24 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
             }
             commands.push(args);
         }
-        RedisDataType::List => {
-            if let Ok(list) = crate::storage::list_bytes::deserialize_all(&item.value)
-                && !list.is_empty()
-            {
+        StoreValue::List(deque) => {
+            if !deque.is_empty() {
                 // Emit RPUSH key elem1 elem2 ...
                 let mut args = vec![b"RPUSH".to_vec(), key.to_vec()];
-                args.extend(list);
+                args.extend(deque.iter().cloned());
                 commands.push(args);
             }
         }
-        RedisDataType::Set => {
-            if let Ok(set) = bincode::deserialize::<std::collections::HashSet<Vec<u8>>>(&item.value)
-                && !set.is_empty()
-            {
+        StoreValue::Set(set) => {
+            if !set.is_empty() {
                 // Emit SADD key member1 member2 ...
                 let mut args = vec![b"SADD".to_vec(), key.to_vec()];
-                args.extend(set);
+                args.extend(set.iter().cloned());
                 commands.push(args);
             }
         }
-        RedisDataType::ZSet => {
-            // SortedSetData: BTreeSet<(OrderedFloat<f64>, Vec<u8>)> + HashMap<Vec<u8>, f64>
-            if let Ok(ss) = bincode::deserialize::<crate::command::types::sorted_set::SortedSetData>(
-                &item.value,
-            ) && !ss.is_empty()
-            {
+        StoreValue::ZSet(ss) => {
+            if !ss.is_empty() {
                 let mut args = vec![b"ZADD".to_vec(), key.to_vec()];
                 for (member, score) in &ss.scores {
                     args.push(score.to_string().into_bytes());
@@ -728,69 +721,61 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
                 commands.push(args);
             }
         }
-        RedisDataType::Hash => {
-            // Hash stored as bincode-serialized HashMap<Vec<u8>, Vec<u8>>
-            if let Ok(hash) =
-                bincode::deserialize::<std::collections::HashMap<Vec<u8>, Vec<u8>>>(&item.value)
-                && !hash.is_empty()
-            {
+        StoreValue::Hash(hash) => {
+            if !hash.is_empty() {
                 let mut args = vec![b"HSET".to_vec(), key.to_vec()];
-                for (field, value) in hash {
-                    args.push(field);
-                    args.push(value);
+                for (field, value) in hash.iter() {
+                    args.push(field.clone());
+                    args.push(value.clone());
                 }
                 commands.push(args);
             }
         }
-        RedisDataType::Stream => {
-            if let Ok(stream) =
-                bincode::deserialize::<crate::storage::stream::StreamData>(&item.value)
-            {
-                // Emit XADD for each entry in the stream
-                for entry in stream.entries.values() {
-                    let mut args = vec![
-                        b"XADD".to_vec(),
-                        key.to_vec(),
-                        entry.id.to_string().into_bytes(),
-                    ];
-                    for (field, value) in &entry.fields {
-                        args.push(field.clone());
-                        args.push(value.clone());
-                    }
-                    commands.push(args);
+        StoreValue::Stream(stream) => {
+            // Emit XADD for each entry in the stream
+            for entry in stream.entries.values() {
+                let mut args = vec![
+                    b"XADD".to_vec(),
+                    key.to_vec(),
+                    entry.id.to_string().into_bytes(),
+                ];
+                for (field, value) in &entry.fields {
+                    args.push(field.clone());
+                    args.push(value.clone());
                 }
+                commands.push(args);
+            }
 
-                // Emit XGROUP CREATE for each consumer group
-                for group in stream.groups.values() {
+            // Emit XGROUP CREATE for each consumer group
+            for group in stream.groups.values() {
+                commands.push(vec![
+                    b"XGROUP".to_vec(),
+                    b"CREATE".to_vec(),
+                    key.to_vec(),
+                    group.name.as_bytes().to_vec(),
+                    group.last_delivered_id.to_string().into_bytes(),
+                    b"MKSTREAM".to_vec(),
+                ]);
+
+                // Emit XCLAIM with FORCE for each pending entry to restore consumer PEL state.
+                // FORCE is needed because entries are not yet in the PEL after XGROUP CREATE.
+                for pending in group.pel.values() {
                     commands.push(vec![
-                        b"XGROUP".to_vec(),
-                        b"CREATE".to_vec(),
+                        b"XCLAIM".to_vec(),
                         key.to_vec(),
                         group.name.as_bytes().to_vec(),
-                        group.last_delivered_id.to_string().into_bytes(),
-                        b"MKSTREAM".to_vec(),
+                        pending.consumer.as_bytes().to_vec(),
+                        b"0".to_vec(),
+                        pending.id.to_string().into_bytes(),
+                        b"FORCE".to_vec(),
                     ]);
-
-                    // Emit XCLAIM with FORCE for each pending entry to restore consumer PEL state.
-                    // FORCE is needed because entries are not yet in the PEL after XGROUP CREATE.
-                    for pending in group.pel.values() {
-                        commands.push(vec![
-                            b"XCLAIM".to_vec(),
-                            key.to_vec(),
-                            group.name.as_bytes().to_vec(),
-                            pending.consumer.as_bytes().to_vec(),
-                            b"0".to_vec(),
-                            pending.id.to_string().into_bytes(),
-                            b"FORCE".to_vec(),
-                        ]);
-                    }
                 }
             }
         }
     }
 
     // For non-string types, append a PEXPIRE command if TTL is set
-    if item.data_type != RedisDataType::String
+    if item.data_type() != RedisDataType::String
         && let Some(ttl) = item.ttl()
         && ttl.as_millis() > 0
     {
@@ -1060,21 +1045,21 @@ mod tests {
     use super::*;
     use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
-    use crate::storage::item::RedisDataType;
-    use std::collections::{HashMap, HashSet};
+    use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
     fn create_test_engine() -> Arc<StorageEngine> {
         StorageEngine::new(Default::default())
     }
 
-    fn make_item(value: Vec<u8>, data_type: RedisDataType) -> StorageItem {
-        StorageItem::new_with_type(value, data_type)
+    fn make_item(value: StoreValue) -> StorageItem {
+        StorageItem::new(value)
     }
 
     #[test]
     fn test_aof_rewrite_string() {
         let key = b"mykey".to_vec();
-        let item = make_item(b"myval".to_vec(), RedisDataType::String);
+        let item = make_item(StoreValue::Str(b"myval".to_vec()));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"SET");
@@ -1085,11 +1070,8 @@ mod tests {
     #[test]
     fn test_aof_rewrite_list() {
         let key = b"mylist".to_vec();
-        let list: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-        let item = make_item(
-            crate::storage::list_bytes::new_from_elements(&list),
-            RedisDataType::List,
-        );
+        let list = VecDeque::from(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let item = make_item(StoreValue::List(list));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"RPUSH");
@@ -1102,10 +1084,10 @@ mod tests {
     #[test]
     fn test_aof_rewrite_set() {
         let key = b"myset".to_vec();
-        let mut set = HashSet::new();
+        let mut set = NativeHashSet::default();
         set.insert(b"x".to_vec());
         set.insert(b"y".to_vec());
-        let item = make_item(bincode::serialize(&set).unwrap(), RedisDataType::Set);
+        let item = make_item(StoreValue::Set(set));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"SADD");
@@ -1119,7 +1101,7 @@ mod tests {
         let mut zset = SortedSetData::new();
         zset.insert(1.5, b"alice".to_vec());
         zset.insert(2.0, b"bob".to_vec());
-        let item = make_item(bincode::serialize(&zset).unwrap(), RedisDataType::ZSet);
+        let item = make_item(StoreValue::ZSet(zset));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"ZADD");
@@ -1131,10 +1113,10 @@ mod tests {
     #[test]
     fn test_aof_rewrite_hash() {
         let key = b"myhash".to_vec();
-        let mut hash = HashMap::new();
+        let mut hash = NativeHashMap::default();
         hash.insert(b"f1".to_vec(), b"v1".to_vec());
         hash.insert(b"f2".to_vec(), b"v2".to_vec());
-        let item = make_item(bincode::serialize(&hash).unwrap(), RedisDataType::Hash);
+        let item = make_item(StoreValue::Hash(hash));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"HSET");
@@ -1153,7 +1135,7 @@ mod tests {
         };
         stream.entries.insert(entry.id.clone(), entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
-        let item = make_item(bincode::serialize(&stream).unwrap(), RedisDataType::Stream);
+        let item = make_item(StoreValue::Stream(stream));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"XADD");
@@ -1169,9 +1151,13 @@ mod tests {
             args: vec![b"mylist".to_vec(), b"a".to_vec(), b"b".to_vec()],
         };
         engine.process_command(&cmd).await.unwrap();
-        let val = engine.get(b"mylist").await.unwrap().unwrap();
-        let list: Vec<Vec<u8>> = bincode::deserialize(&val).unwrap();
-        assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec()]);
+        let item = engine.get_item(b"mylist").await.unwrap().unwrap();
+        if let StoreValue::List(deque) = &item.value {
+            let list: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec()]);
+        } else {
+            panic!("Expected List StoreValue");
+        }
         assert_eq!(engine.get_type(b"mylist").await.unwrap(), "list");
     }
 
@@ -1183,10 +1169,13 @@ mod tests {
             args: vec![b"myset".to_vec(), b"x".to_vec(), b"y".to_vec()],
         };
         engine.process_command(&cmd).await.unwrap();
-        let val = engine.get(b"myset").await.unwrap().unwrap();
-        let set: HashSet<Vec<u8>> = bincode::deserialize(&val).unwrap();
-        assert!(set.contains(&b"x".to_vec()));
-        assert!(set.contains(&b"y".to_vec()));
+        let item = engine.get_item(b"myset").await.unwrap().unwrap();
+        if let StoreValue::Set(set) = &item.value {
+            assert!(set.contains(&b"x".to_vec()));
+            assert!(set.contains(&b"y".to_vec()));
+        } else {
+            panic!("Expected Set StoreValue");
+        }
         assert_eq!(engine.get_type(b"myset").await.unwrap(), "set");
     }
 
@@ -1204,11 +1193,14 @@ mod tests {
             ],
         };
         engine.process_command(&cmd).await.unwrap();
-        let val = engine.get(b"myzset").await.unwrap().unwrap();
-        let zset: SortedSetData = bincode::deserialize(&val).unwrap();
-        assert_eq!(zset.len(), 2);
-        assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&1.5));
-        assert_eq!(zset.scores.get(&b"bob".to_vec()), Some(&2.0));
+        let item = engine.get_item(b"myzset").await.unwrap().unwrap();
+        if let StoreValue::ZSet(zset) = &item.value {
+            assert_eq!(zset.len(), 2);
+            assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&1.5));
+            assert_eq!(zset.scores.get(&b"bob".to_vec()), Some(&2.0));
+        } else {
+            panic!("Expected ZSet StoreValue");
+        }
         assert_eq!(engine.get_type(b"myzset").await.unwrap(), "zset");
     }
 
@@ -1243,9 +1235,12 @@ mod tests {
             ],
         };
         engine.process_command(&cmd).await.unwrap();
-        let val = engine.get(b"mystream").await.unwrap().unwrap();
-        let stream: crate::storage::stream::StreamData = bincode::deserialize(&val).unwrap();
-        assert_eq!(stream.entries.len(), 1);
+        let item = engine.get_item(b"mystream").await.unwrap().unwrap();
+        if let StoreValue::Stream(stream) = &item.value {
+            assert_eq!(stream.entries.len(), 1);
+        } else {
+            panic!("Expected Stream StoreValue");
+        }
         assert_eq!(engine.get_type(b"mystream").await.unwrap(), "stream");
     }
 
@@ -1271,7 +1266,7 @@ mod tests {
         let engine = create_test_engine();
 
         // String
-        let str_item = make_item(b"hello".to_vec(), RedisDataType::String);
+        let str_item = make_item(StoreValue::Str(b"hello".to_vec()));
         for args in aof_rewrite_commands_for_item(&b"str".to_vec(), &str_item) {
             engine
                 .process_command(&RespCommand {
@@ -1283,11 +1278,8 @@ mod tests {
         }
 
         // List
-        let list: Vec<Vec<u8>> = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
-        let list_item = make_item(
-            crate::storage::list_bytes::new_from_elements(&list),
-            RedisDataType::List,
-        );
+        let list = VecDeque::from(vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+        let list_item = make_item(StoreValue::List(list));
         for args in aof_rewrite_commands_for_item(&b"lst".to_vec(), &list_item) {
             engine
                 .process_command(&RespCommand {
@@ -1299,10 +1291,10 @@ mod tests {
         }
 
         // Set
-        let mut set = HashSet::new();
+        let mut set = NativeHashSet::default();
         set.insert(b"a".to_vec());
         set.insert(b"b".to_vec());
-        let set_item = make_item(bincode::serialize(&set).unwrap(), RedisDataType::Set);
+        let set_item = make_item(StoreValue::Set(set));
         for args in aof_rewrite_commands_for_item(&b"st".to_vec(), &set_item) {
             engine
                 .process_command(&RespCommand {
@@ -1314,9 +1306,9 @@ mod tests {
         }
 
         // Hash
-        let mut hash = HashMap::new();
+        let mut hash = NativeHashMap::default();
         hash.insert(b"f".to_vec(), b"v".to_vec());
-        let hash_item = make_item(bincode::serialize(&hash).unwrap(), RedisDataType::Hash);
+        let hash_item = make_item(StoreValue::Hash(hash));
         for args in aof_rewrite_commands_for_item(&b"hs".to_vec(), &hash_item) {
             engine
                 .process_command(&RespCommand {
@@ -1331,7 +1323,7 @@ mod tests {
         let mut zset = SortedSetData::new();
         zset.insert(1.0, b"m1".to_vec());
         zset.insert(2.0, b"m2".to_vec());
-        let zset_item = make_item(bincode::serialize(&zset).unwrap(), RedisDataType::ZSet);
+        let zset_item = make_item(StoreValue::ZSet(zset));
         for args in aof_rewrite_commands_for_item(&b"zs".to_vec(), &zset_item) {
             engine
                 .process_command(&RespCommand {
@@ -1346,23 +1338,33 @@ mod tests {
         assert_eq!(engine.get(b"str").await.unwrap(), Some(b"hello".to_vec()));
         assert_eq!(engine.get_type(b"str").await.unwrap(), "string");
 
-        let list_val = engine.get(b"lst").await.unwrap().unwrap();
-        let loaded_list = crate::storage::list_bytes::deserialize_all(&list_val).unwrap();
-        assert_eq!(
-            loaded_list,
-            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
-        );
+        let list_item = engine.get_item(b"lst").await.unwrap().unwrap();
+        if let StoreValue::List(deque) = &list_item.value {
+            let loaded_list: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            assert_eq!(
+                loaded_list,
+                vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
+            );
+        } else {
+            panic!("Expected List StoreValue");
+        }
 
-        let set_val = engine.get(b"st").await.unwrap().unwrap();
-        let loaded_set: HashSet<Vec<u8>> = bincode::deserialize(&set_val).unwrap();
-        assert!(loaded_set.contains(&b"a".to_vec()));
+        let set_item = engine.get_item(b"st").await.unwrap().unwrap();
+        if let StoreValue::Set(loaded_set) = &set_item.value {
+            assert!(loaded_set.contains(&b"a".to_vec()));
+        } else {
+            panic!("Expected Set StoreValue");
+        }
 
         let hash_fields = engine.hash_getall(b"hs").unwrap();
         assert_eq!(hash_fields.len(), 1);
 
-        let zset_val = engine.get(b"zs").await.unwrap().unwrap();
-        let loaded_zset: SortedSetData = bincode::deserialize(&zset_val).unwrap();
-        assert_eq!(loaded_zset.len(), 2);
+        let zset_item = engine.get_item(b"zs").await.unwrap().unwrap();
+        if let StoreValue::ZSet(loaded_zset) = &zset_item.value {
+            assert_eq!(loaded_zset.len(), 2);
+        } else {
+            panic!("Expected ZSet StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1548,9 +1550,13 @@ mod tests {
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
         // LPUSH pushes left, so order is a, b, c from left to right
-        let val = engine.get(b"mylist").await.unwrap().unwrap();
-        let list: Vec<Vec<u8>> = bincode::deserialize(&val).unwrap();
-        assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let item = engine.get_item(b"mylist").await.unwrap().unwrap();
+        if let StoreValue::List(deque) = &item.value {
+            let list: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            assert_eq!(list, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        } else {
+            panic!("Expected List StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1578,11 +1584,14 @@ mod tests {
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
-        let val = engine.get(b"myset").await.unwrap().unwrap();
-        let set: HashSet<Vec<u8>> = bincode::deserialize(&val).unwrap();
-        assert!(set.contains(&b"a".to_vec()));
-        assert!(!set.contains(&b"b".to_vec()));
-        assert!(set.contains(&b"c".to_vec()));
+        let item = engine.get_item(b"myset").await.unwrap().unwrap();
+        if let StoreValue::Set(set) = &item.value {
+            assert!(set.contains(&b"a".to_vec()));
+            assert!(!set.contains(&b"b".to_vec()));
+            assert!(set.contains(&b"c".to_vec()));
+        } else {
+            panic!("Expected Set StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1640,9 +1649,12 @@ mod tests {
         let engine = create_test_engine();
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
-        let val = engine.get(b"myzset").await.unwrap().unwrap();
-        let zset: SortedSetData = bincode::deserialize(&val).unwrap();
-        assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&3.5));
+        let item = engine.get_item(b"myzset").await.unwrap().unwrap();
+        if let StoreValue::ZSet(zset) = &item.value {
+            assert_eq!(zset.scores.get(&b"alice".to_vec()), Some(&3.5));
+        } else {
+            panic!("Expected ZSet StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1668,8 +1680,8 @@ mod tests {
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
         // Geo data is stored as a sorted set
-        let val = engine.get(b"mygeo").await.unwrap();
-        assert!(val.is_some(), "GEOADD should have created the geo key");
+        let item = engine.get_item(b"mygeo").await.unwrap();
+        assert!(item.is_some(), "GEOADD should have created the geo key");
         assert_eq!(engine.get_type(b"mygeo").await.unwrap(), "zset");
     }
 
@@ -1751,14 +1763,16 @@ mod tests {
         let aof = AofPersistence::new(engine.clone(), aof_path);
         aof.load().await.unwrap();
         // Verify the stream exists with the consumer group
-        let val = engine.get(b"mystream").await.unwrap();
-        assert!(val.is_some(), "XADD should have created the stream");
-        let stream: crate::storage::stream::StreamData =
-            bincode::deserialize(&val.unwrap()).unwrap();
-        assert!(
-            stream.groups.contains_key("mygroup"),
-            "XGROUP CREATE should have created the consumer group"
-        );
+        let item = engine.get_item(b"mystream").await.unwrap();
+        assert!(item.is_some(), "XADD should have created the stream");
+        if let StoreValue::Stream(stream) = &item.unwrap().value {
+            assert!(
+                stream.groups.contains_key("mygroup"),
+                "XGROUP CREATE should have created the consumer group"
+            );
+        } else {
+            panic!("Expected Stream StoreValue");
+        }
     }
 
     #[tokio::test]
@@ -1951,16 +1965,23 @@ mod tests {
         );
 
         // Verify list: RPUSH [1,2] then LPUSH [0] -> [0,1,2]
-        let list_val = engine.get(b"list").await.unwrap().unwrap();
-        let list = crate::storage::list_bytes::deserialize_all(&list_val).unwrap();
-        assert_eq!(list, vec![b"0".to_vec(), b"1".to_vec(), b"2".to_vec()]);
+        let list_item = engine.get_item(b"list").await.unwrap().unwrap();
+        if let StoreValue::List(deque) = &list_item.value {
+            let list: Vec<Vec<u8>> = deque.iter().cloned().collect();
+            assert_eq!(list, vec![b"0".to_vec(), b"1".to_vec(), b"2".to_vec()]);
+        } else {
+            panic!("Expected List StoreValue");
+        }
 
         // Verify set: {a, c} (b removed)
-        let set_val = engine.get(b"set").await.unwrap().unwrap();
-        let set: HashSet<Vec<u8>> = bincode::deserialize(&set_val).unwrap();
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&b"a".to_vec()));
-        assert!(set.contains(&b"c".to_vec()));
+        let set_item = engine.get_item(b"set").await.unwrap().unwrap();
+        if let StoreValue::Set(set) = &set_item.value {
+            assert_eq!(set.len(), 2);
+            assert!(set.contains(&b"a".to_vec()));
+            assert!(set.contains(&b"c".to_vec()));
+        } else {
+            panic!("Expected Set StoreValue");
+        }
 
         // Verify hash: {f2: v2} (f1 deleted)
         let fields = engine.hash_getall(b"hash").unwrap();
@@ -1968,10 +1989,13 @@ mod tests {
         assert!(fields.iter().any(|(k, v)| k == b"f2" && v == b"v2"));
 
         // Verify sorted set: x=4.0 (1.0 + 3.0), y=2.0
-        let zset_val = engine.get(b"zset").await.unwrap().unwrap();
-        let zset: SortedSetData = bincode::deserialize(&zset_val).unwrap();
-        assert_eq!(zset.scores.get(&b"x".to_vec()), Some(&4.0));
-        assert_eq!(zset.scores.get(&b"y".to_vec()), Some(&2.0));
+        let zset_item = engine.get_item(b"zset").await.unwrap().unwrap();
+        if let StoreValue::ZSet(zset) = &zset_item.value {
+            assert_eq!(zset.scores.get(&b"x".to_vec()), Some(&4.0));
+            assert_eq!(zset.scores.get(&b"y".to_vec()), Some(&2.0));
+        } else {
+            panic!("Expected ZSet StoreValue");
+        }
 
         // Verify counter: 2
         assert_eq!(engine.get(b"cnt").await.unwrap(), Some(b"2".to_vec()));
@@ -2087,7 +2111,7 @@ mod tests {
         };
         stream.groups.insert("mygroup".to_string(), group);
 
-        let item = make_item(bincode::serialize(&stream).unwrap(), RedisDataType::Stream);
+        let item = make_item(StoreValue::Stream(stream));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
 
         // Should have: 2 XADD + 1 XGROUP CREATE + 2 XCLAIM = 5 commands
@@ -2195,12 +2219,12 @@ mod tests {
         aof.load().await.unwrap();
 
         // Verify initial state: stream with group and pending entries
-        let val = engine
-            .get(b"mystream")
+        let stream_item = engine
+            .get_item(b"mystream")
             .await
             .unwrap()
             .expect("stream should exist");
-        let stream: StreamData = bincode::deserialize(&val).unwrap();
+        let stream = if let StoreValue::Stream(s) = &stream_item.value { s } else { panic!("Expected Stream StoreValue") };
         assert_eq!(stream.entries.len(), 3, "should have 3 entries");
         assert!(
             stream.groups.contains_key("mygroup"),
@@ -2241,12 +2265,12 @@ mod tests {
         aof2.load().await.unwrap();
 
         // Verify the consumer group state survived the round-trip
-        let val2 = engine2
-            .get(b"mystream")
+        let stream_item2 = engine2
+            .get_item(b"mystream")
             .await
             .unwrap()
             .expect("stream should exist after rewrite reload");
-        let stream2: StreamData = bincode::deserialize(&val2).unwrap();
+        let stream2 = if let StoreValue::Stream(s) = &stream_item2.value { s } else { panic!("Expected Stream StoreValue") };
         assert_eq!(stream2.entries.len(), 3, "entries should survive rewrite");
         assert!(
             stream2.groups.contains_key("mygroup"),
@@ -2337,12 +2361,12 @@ mod tests {
         aof1.load().await.unwrap();
 
         // Verify consumer state after initial load
-        let val1 = engine1
-            .get(b"events")
+        let item1 = engine1
+            .get_item(b"events")
             .await
             .unwrap()
             .expect("stream should exist");
-        let stream1: StreamData = bincode::deserialize(&val1).unwrap();
+        let stream1 = if let StoreValue::Stream(s) = &item1.value { s } else { panic!("Expected Stream StoreValue") };
         assert_eq!(stream1.entries.len(), 3, "should have 3 stream entries");
         let group1 = &stream1.groups["processors"];
         assert_eq!(
@@ -2366,12 +2390,12 @@ mod tests {
         let aof2 = AofPersistence::new(engine2.clone(), aof_path);
         aof2.load().await.unwrap();
 
-        let val2 = engine2
-            .get(b"events")
+        let item2 = engine2
+            .get_item(b"events")
             .await
             .unwrap()
             .expect("stream should exist after reload");
-        let stream2: StreamData = bincode::deserialize(&val2).unwrap();
+        let stream2 = if let StoreValue::Stream(s) = &item2.value { s } else { panic!("Expected Stream StoreValue") };
         assert_eq!(stream2.entries.len(), 3, "entries survive reload");
         assert!(
             stream2.groups.contains_key("processors"),

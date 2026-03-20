@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use futures::future::select_all;
@@ -8,7 +9,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::StorageEngine;
 use crate::storage::item::RedisDataType;
-use crate::storage::list_bytes;
+use crate::storage::value::{ModifyResult, StoreValue};
 
 /// Internal helper for LPOP/RPOP return types
 enum PopResult {
@@ -17,35 +18,61 @@ enum PopResult {
     Nil(bool), // bool = whether count was specified
 }
 
+/// Helper: resolve a possibly-negative index into a positive index, or None if out of range.
+fn resolve_index(idx: i64, len: usize) -> Option<usize> {
+    let len_i64 = len as i64;
+    let i = if idx < 0 { len_i64 + idx } else { idx };
+    if i < 0 || i >= len_i64 {
+        None
+    } else {
+        Some(i as usize)
+    }
+}
+
+/// Helper: list result for atomic_modify - delete if empty, keep otherwise.
+fn list_result(deque: &VecDeque<Vec<u8>>) -> ModifyResult {
+    if deque.is_empty() {
+        ModifyResult::Delete
+    } else {
+        ModifyResult::Keep
+    }
+}
+
 /// Redis LPUSH command - Push a value onto the beginning of a list
-/// Uses byte-level operations for O(N) memmove instead of O(N) deserialize+splice+serialize
 pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
 
     let key = &args[0];
-    let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
+    // Redis LPUSH pushes each element left-to-right onto the head.
+    // e.g. LPUSH key a b c → push a (head=a), push b (head=b,a), push c (head=c,b,a)
+    let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            list_bytes::lpush(data, &elements)?;
-            let new_len = list_bytes::len(data)? as i64;
-            Ok((Some(std::mem::take(data)), new_len))
+        Some(StoreValue::List(deque)) => {
+            for e in &elements {
+                deque.push_front(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Keep, new_len))
         }
         None => {
-            let new_data = list_bytes::new_from_elements(&elements);
-            let new_len = elements.len() as i64;
-            Ok((Some(new_data), new_len))
+            let mut deque = VecDeque::with_capacity(elements.len());
+            for e in &elements {
+                deque.push_front(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Set(StoreValue::List(deque)), new_len))
         }
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(length))
 }
 
 /// Redis RPUSH command - Push a value onto the end of a list
-/// Uses byte-level operations for O(k) append instead of O(N) deserialize+extend+serialize
 pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -56,22 +83,28 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let new_len = list_bytes::rpush(data, &elements)? as i64;
-            Ok((Some(std::mem::take(data)), new_len))
+        Some(StoreValue::List(deque)) => {
+            for e in &elements {
+                deque.push_back(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Keep, new_len))
         }
         None => {
-            let new_data = list_bytes::new_from_elements(&elements);
-            let new_len = elements.len() as i64;
-            Ok((Some(new_data), new_len))
+            let mut deque = VecDeque::with_capacity(elements.len());
+            for e in &elements {
+                deque.push_back(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Set(StoreValue::List(deque)), new_len))
         }
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(length))
 }
 
 /// Redis LPOP command - Remove and return the first element(s) of a list
-/// Uses byte-level operations for efficient element extraction
 pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -96,14 +129,19 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let total = list_bytes::len(data)?;
-            if total == 0 {
-                return Ok((Some(std::mem::take(data)), PopResult::Nil(count.is_some())));
+        Some(StoreValue::List(deque)) => {
+            if deque.is_empty() {
+                return Ok((ModifyResult::Keep, PopResult::Nil(count.is_some())));
             }
 
             let pop_count = count.unwrap_or(1);
-            let elements = list_bytes::lpop(data, pop_count)?;
+            let actual = pop_count.min(deque.len());
+            let mut elements = Vec::with_capacity(actual);
+            for _ in 0..actual {
+                if let Some(e) = deque.pop_front() {
+                    elements.push(e);
+                }
+            }
 
             let pop_result = if count.is_some() {
                 PopResult::Multi(elements)
@@ -114,14 +152,10 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
 
-            let remaining = list_bytes::len(data)?;
-            if remaining == 0 {
-                Ok((None, pop_result))
-            } else {
-                Ok((Some(std::mem::take(data)), pop_result))
-            }
+            Ok((list_result(deque), pop_result))
         }
-        None => Ok((None, PopResult::Nil(count.is_some()))),
+        None => Ok((ModifyResult::Keep, PopResult::Nil(count.is_some()))),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     match result {
@@ -144,7 +178,6 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis RPOP command - Remove and return the last element(s) of a list
-/// Uses byte-level operations for efficient element extraction
 pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.is_empty() || args.len() > 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -169,14 +202,19 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let total = list_bytes::len(data)?;
-            if total == 0 {
-                return Ok((Some(std::mem::take(data)), PopResult::Nil(count.is_some())));
+        Some(StoreValue::List(deque)) => {
+            if deque.is_empty() {
+                return Ok((ModifyResult::Keep, PopResult::Nil(count.is_some())));
             }
 
             let pop_count = count.unwrap_or(1);
-            let elements = list_bytes::rpop(data, pop_count)?;
+            let actual = pop_count.min(deque.len());
+            let mut elements = Vec::with_capacity(actual);
+            for _ in 0..actual {
+                if let Some(e) = deque.pop_back() {
+                    elements.push(e);
+                }
+            }
 
             let pop_result = if count.is_some() {
                 PopResult::Multi(elements)
@@ -187,14 +225,10 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
 
-            let remaining = list_bytes::len(data)?;
-            if remaining == 0 {
-                Ok((None, pop_result))
-            } else {
-                Ok((Some(std::mem::take(data)), pop_result))
-            }
+            Ok((list_result(deque), pop_result))
         }
-        None => Ok((None, PopResult::Nil(count.is_some()))),
+        None => Ok((ModifyResult::Keep, PopResult::Nil(count.is_some()))),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     match result {
@@ -217,7 +251,6 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis LRANGE command - Get a range of elements from a list
-/// Uses byte-level range scan for O(start + k) instead of full deserialization
 pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -234,8 +267,29 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
 
     let elements = engine.atomic_read(key, RedisDataType::List, |data| match data {
-        Some(d) => list_bytes::range(d, start, stop),
+        Some(StoreValue::List(deque)) => {
+            let len = deque.len();
+            if len == 0 {
+                return Ok(vec![]);
+            }
+            let len_i64 = len as i64;
+            let si = if start < 0 {
+                (len_i64 + start).max(0) as usize
+            } else {
+                start.min(len_i64) as usize
+            };
+            let ei = if stop < 0 {
+                (len_i64 + stop).max(-1) as usize
+            } else {
+                stop.min(len_i64 - 1) as usize
+            };
+            if si > ei || si >= len {
+                return Ok(vec![]);
+            }
+            Ok(deque.iter().skip(si).take(ei - si + 1).cloned().collect())
+        }
         None => Ok(vec![]),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     let result: Vec<RespValue> = elements
@@ -246,7 +300,6 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 }
 
 /// Redis LLEN command - Return the length of a list
-/// Uses byte-level O(1) length read instead of full deserialization
 pub async fn llen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -255,15 +308,15 @@ pub async fn llen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
 
     let count = engine.atomic_read(key, RedisDataType::List, |data| match data {
-        Some(d) => Ok(list_bytes::len(d)? as i64),
+        Some(StoreValue::List(deque)) => Ok(deque.len() as i64),
         None => Ok(0i64),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(count))
 }
 
 /// Redis LINDEX command - Get an element from a list by index
-/// Uses byte-level index scan for O(index) instead of full deserialization
 pub async fn lindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -276,15 +329,18 @@ pub async fn lindex(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         .map_err(|_| CommandError::InvalidArgument("Invalid index, not an integer".to_string()))?;
 
     let elem = engine.atomic_read(key, RedisDataType::List, |data| match data {
-        Some(d) => list_bytes::index(d, idx),
+        Some(StoreValue::List(deque)) => {
+            let resolved = resolve_index(idx, deque.len());
+            Ok(resolved.and_then(|i| deque.get(i).cloned()))
+        }
         None => Ok(None),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::BulkString(elem))
 }
 
 /// Redis LTRIM command - Trim a list to the specified range
-/// Uses byte-level trim for efficient in-place range extraction
 pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() != 3 {
         return Err(CommandError::WrongNumberOfArguments);
@@ -301,15 +357,33 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     })?;
 
     engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let should_delete = list_bytes::trim(data, start, stop)?;
-            if should_delete {
-                Ok((None, ()))
-            } else {
-                Ok((Some(std::mem::take(data)), ()))
+        Some(StoreValue::List(deque)) => {
+            let len = deque.len();
+            if len == 0 {
+                return Ok((ModifyResult::Delete, ()));
             }
+            let len_i64 = len as i64;
+            let si = if start < 0 {
+                (len_i64 + start).max(0) as usize
+            } else {
+                start.min(len_i64) as usize
+            };
+            let ei = if stop < 0 {
+                (len_i64 + stop).max(-1) as usize
+            } else {
+                stop.min(len_i64 - 1) as usize
+            };
+            if si > ei || si >= len {
+                // Empty result
+                return Ok((ModifyResult::Delete, ()));
+            }
+            let new_deque: VecDeque<Vec<u8>> =
+                deque.iter().skip(si).take(ei - si + 1).cloned().collect();
+            *deque = new_deque;
+            Ok((list_result(deque), ()))
         }
-        None => Ok((None, ())),
+        None => Ok((ModifyResult::Keep, ())),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -321,16 +395,19 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let key = &args[0];
-    let elements: Vec<Vec<u8>> = args[1..].iter().rev().cloned().collect();
+    let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            list_bytes::lpush(data, &elements)?;
-            let new_len = list_bytes::len(data)? as i64;
-            Ok((Some(std::mem::take(data)), new_len))
+        Some(StoreValue::List(deque)) => {
+            for e in &elements {
+                deque.push_front(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Keep, new_len))
         }
-        None => Ok((None, 0i64)),
+        None => Ok((ModifyResult::Keep, 0i64)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -346,11 +423,15 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let new_len = list_bytes::rpush(data, &elements)? as i64;
-            Ok((Some(std::mem::take(data)), new_len))
+        Some(StoreValue::List(deque)) => {
+            for e in &elements {
+                deque.push_back(e.clone());
+            }
+            let new_len = deque.len() as i64;
+            Ok((ModifyResult::Keep, new_len))
         }
-        None => Ok((None, 0i64)),
+        None => Ok((ModifyResult::Keep, 0i64)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -373,15 +454,26 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     let before = position == "BEFORE";
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let result = list_bytes::insert_pivot(data, &pivot, element.clone(), before)?;
-            if result == -1 {
-                Ok((Some(std::mem::take(data)), -1i64))
-            } else {
-                Ok((Some(std::mem::take(data)), result))
+        Some(StoreValue::List(deque)) => {
+            // Find the pivot element
+            let pivot_pos = deque.iter().position(|e| e == &pivot);
+            match pivot_pos {
+                Some(pos) => {
+                    let insert_pos = if before { pos } else { pos + 1 };
+                    // VecDeque doesn't have insert, so we convert to Vec, insert, convert back
+                    let mut vec: Vec<Vec<u8>> = deque.drain(..).collect();
+                    vec.insert(insert_pos, element.clone());
+                    *deque = vec.into();
+                    Ok((ModifyResult::Keep, deque.len() as i64))
+                }
+                None => {
+                    // Pivot not found
+                    Ok((ModifyResult::Keep, -1i64))
+                }
             }
         }
-        None => Ok((None, 0i64)),
+        None => Ok((ModifyResult::Keep, 0i64)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(length))
@@ -400,13 +492,17 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     engine.check_write_memory(0).await?;
     engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            list_bytes::set_element(data, index, element.clone())?;
-            Ok((Some(std::mem::take(data)), ()))
+        Some(StoreValue::List(deque)) => {
+            let resolved = resolve_index(index, deque.len()).ok_or_else(|| {
+                crate::storage::error::StorageError::InternalError("index out of range".to_string())
+            })?;
+            deque[resolved] = element.clone();
+            Ok((ModifyResult::Keep, ()))
         }
         None => Err(crate::storage::error::StorageError::InternalError(
             "no such key".to_string(),
         )),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -425,16 +521,47 @@ pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let element = args[2].clone();
 
     let removed = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let removed = list_bytes::remove(data, count, &element)?;
-            let remaining = list_bytes::len(data)?;
-            if remaining == 0 {
-                Ok((None, removed))
+        Some(StoreValue::List(deque)) => {
+            let mut removed_count = 0i64;
+            if count > 0 {
+                // Remove first N occurrences from head to tail
+                let max_remove = count as usize;
+                let mut i = 0;
+                while i < deque.len() && removed_count < max_remove as i64 {
+                    if deque[i] == element {
+                        deque.remove(i);
+                        removed_count += 1;
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else if count < 0 {
+                // Remove first N occurrences from tail to head
+                let max_remove = (-count) as usize;
+                let mut i = deque.len();
+                while i > 0 && removed_count < max_remove as i64 {
+                    i -= 1;
+                    if deque[i] == element {
+                        deque.remove(i);
+                        removed_count += 1;
+                    }
+                }
             } else {
-                Ok((Some(std::mem::take(data)), removed))
+                // count == 0: remove all occurrences
+                deque.retain(|e| {
+                    if e == &element {
+                        removed_count += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
+
+            Ok((list_result(deque), removed_count))
         }
-        None => Ok((None, 0i64)),
+        None => Ok((ModifyResult::Keep, 0i64)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(removed))
@@ -510,9 +637,61 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         i += 1;
     }
 
+    let element_clone = element.clone();
     let matches = engine.atomic_read(key, RedisDataType::List, |data| match data {
-        Some(d) => list_bytes::pos(d, element, rank, count, maxlen),
+        Some(StoreValue::List(deque)) => {
+            let len = deque.len();
+            if len == 0 {
+                return Ok(vec![]);
+            }
+            let scan_len = if maxlen > 0 { maxlen.min(len) } else { len };
+            let max_matches = count.unwrap_or(1);
+            let find_all = max_matches == 0;
+            let mut result = Vec::new();
+            let mut match_count = 0i64;
+
+            if rank > 0 {
+                // Forward scan
+                let mut skip = (rank - 1) as usize;
+                for idx in 0..scan_len {
+                    if deque[idx] == element_clone {
+                        if skip > 0 {
+                            skip -= 1;
+                        } else {
+                            result.push(idx as i64);
+                            match_count += 1;
+                            if !find_all && match_count >= max_matches {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Backward scan
+                let mut skip = ((-rank) - 1) as usize;
+                let start_from = if maxlen > 0 && maxlen < len {
+                    len - maxlen
+                } else {
+                    0
+                };
+                for idx in (start_from..len).rev() {
+                    if deque[idx] == element_clone {
+                        if skip > 0 {
+                            skip -= 1;
+                        } else {
+                            result.push(idx as i64);
+                            match_count += 1;
+                            if !find_all && match_count >= max_matches {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(result)
+        }
         None => Ok(vec![]),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     if matches.is_empty() && !engine.exists(key).await? {
@@ -559,28 +738,27 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         // Same-key: use atomic_modify for single-key atomicity
         let result =
             engine.atomic_modify(source, RedisDataType::List, |current| match current {
-                Some(data) => {
-                    let total = list_bytes::len(data)?;
-                    if total == 0 {
-                        return Ok((Some(std::mem::take(data)), None));
+                Some(StoreValue::List(deque)) => {
+                    if deque.is_empty() {
+                        return Ok((ModifyResult::Keep, None));
                     }
 
-                    let elements = if pop_left {
-                        list_bytes::lpop(data, 1)?
+                    let element = if pop_left {
+                        deque.pop_front().unwrap()
                     } else {
-                        list_bytes::rpop(data, 1)?
+                        deque.pop_back().unwrap()
                     };
-                    let element = elements.into_iter().next().unwrap();
 
                     if push_left {
-                        list_bytes::lpush(data, std::slice::from_ref(&element))?;
+                        deque.push_front(element.clone());
                     } else {
-                        list_bytes::rpush(data, std::slice::from_ref(&element))?;
+                        deque.push_back(element.clone());
                     }
 
-                    Ok((Some(std::mem::take(data)), Some(element)))
+                    Ok((ModifyResult::Keep, Some(element)))
                 }
-                None => Ok((None, None)),
+                None => Ok((ModifyResult::Keep, None)),
+                _ => Err(crate::storage::error::StorageError::WrongType),
             })?;
 
         return match result {
@@ -596,27 +774,21 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Pop from source
     let element = engine.atomic_modify(source, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let total = list_bytes::len(data)?;
-            if total == 0 {
-                return Ok((Some(std::mem::take(data)), None));
+        Some(StoreValue::List(deque)) => {
+            if deque.is_empty() {
+                return Ok((ModifyResult::Keep, None));
             }
 
-            let elements = if pop_left {
-                list_bytes::lpop(data, 1)?
+            let element = if pop_left {
+                deque.pop_front().unwrap()
             } else {
-                list_bytes::rpop(data, 1)?
+                deque.pop_back().unwrap()
             };
-            let element = elements.into_iter().next().unwrap();
 
-            let remaining = list_bytes::len(data)?;
-            if remaining == 0 {
-                Ok((None, Some(element)))
-            } else {
-                Ok((Some(std::mem::take(data)), Some(element)))
-            }
+            Ok((list_result(deque), Some(element)))
         }
-        None => Ok((None, None)),
+        None => Ok((ModifyResult::Keep, None)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     let element = match element {
@@ -628,18 +800,20 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let elem_for_push = element.clone();
     engine.atomic_modify(destination, RedisDataType::List, |current| match current {
-        Some(data) => {
+        Some(StoreValue::List(deque)) => {
             if push_left {
-                list_bytes::lpush(data, std::slice::from_ref(&elem_for_push))?;
+                deque.push_front(elem_for_push.clone());
             } else {
-                list_bytes::rpush(data, std::slice::from_ref(&elem_for_push))?;
+                deque.push_back(elem_for_push.clone());
             }
-            Ok((Some(std::mem::take(data)), ()))
+            Ok((ModifyResult::Keep, ()))
         }
         None => {
-            let new_data = list_bytes::new_from_elements(std::slice::from_ref(&elem_for_push));
-            Ok((Some(new_data), ()))
+            let mut deque = VecDeque::new();
+            deque.push_back(elem_for_push.clone());
+            Ok((ModifyResult::Set(StoreValue::List(deque)), ()))
         }
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::BulkString(Some(element)))
@@ -718,26 +892,27 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     for key in keys {
         let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-            Some(data) => {
-                let total = list_bytes::len(data)?;
-                if total == 0 {
-                    return Ok((Some(std::mem::take(data)), None));
+            Some(StoreValue::List(deque)) => {
+                if deque.is_empty() {
+                    return Ok((ModifyResult::Keep, None));
                 }
 
-                let popped = if left {
-                    list_bytes::lpop(data, count)?
-                } else {
-                    list_bytes::rpop(data, count)?
-                };
-
-                let remaining = list_bytes::len(data)?;
-                if remaining == 0 {
-                    Ok((None, Some(popped)))
-                } else {
-                    Ok((Some(std::mem::take(data)), Some(popped)))
+                let actual = count.min(deque.len());
+                let mut popped = Vec::with_capacity(actual);
+                for _ in 0..actual {
+                    if left {
+                        if let Some(e) = deque.pop_front() {
+                            popped.push(e);
+                        }
+                    } else if let Some(e) = deque.pop_back() {
+                        popped.push(e);
+                    }
                 }
+
+                Ok((list_result(deque), Some(popped)))
             }
-            None => Ok((None, None)),
+            None => Ok((ModifyResult::Keep, None)),
+            _ => Err(crate::storage::error::StorageError::WrongType),
         });
 
         let result = result?;
@@ -767,27 +942,21 @@ async fn try_pop(
     left: bool,
 ) -> Result<Option<Vec<u8>>, CommandError> {
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
-        Some(data) => {
-            let total = list_bytes::len(data)?;
-            if total == 0 {
-                return Ok((Some(std::mem::take(data)), None));
+        Some(StoreValue::List(deque)) => {
+            if deque.is_empty() {
+                return Ok((ModifyResult::Keep, None));
             }
 
-            let elements = if left {
-                list_bytes::lpop(data, 1)?
+            let element = if left {
+                deque.pop_front().unwrap()
             } else {
-                list_bytes::rpop(data, 1)?
+                deque.pop_back().unwrap()
             };
-            let element = elements.into_iter().next().unwrap();
 
-            let remaining = list_bytes::len(data)?;
-            if remaining == 0 {
-                Ok((None, Some(element)))
-            } else {
-                Ok((Some(std::mem::take(data)), Some(element)))
-            }
+            Ok((list_result(deque), Some(element)))
         }
-        None => Ok((None, None)),
+        None => Ok((ModifyResult::Keep, None)),
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(result)
@@ -1145,40 +1314,15 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        // Use a key with "list" in the name to ensure it's recognized as a list type
         let key = b"test_list_poplist".to_vec();
 
-        // Force delete the key to ensure it doesn't exist
-        engine.del(&key).await.unwrap();
-
-        // Create a list directly first using set_with_type to properly track type
-        let serialized = list_bytes::new_empty();
-        engine
-            .set_with_type(
-                key.clone(),
-                serialized,
-                crate::storage::item::RedisDataType::List,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // DEBUG: Check the key type
-        let key_type = engine.get_type(&key).await.unwrap();
-        println!("DEBUG: Key type after setting empty list: {}", key_type);
-        assert_eq!(key_type, "list"); // Assert that the key is recognized as a list
-
-        // Now push elements using rpush
+        // Push elements using rpush
         let mut args = vec![key.clone()];
         args.push(b"one".to_vec());
         args.push(b"two".to_vec());
         args.push(b"three".to_vec());
 
         rpush(&engine, &args).await.unwrap();
-
-        // DEBUG: Check key type again after rpush
-        let key_type = engine.get_type(&key).await.unwrap();
-        println!("DEBUG: Key type after rpush: {}", key_type);
 
         // Test LPOP - removes and returns first element
         let args = vec![key.clone()];
@@ -1326,28 +1470,7 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        // Use a key with "list" in the name to ensure it's recognized as a list type
         let key = b"test_list_lenlist".to_vec();
-
-        // Force delete the key to ensure it doesn't exist
-        engine.del(&key).await.unwrap();
-
-        // Create a list directly first using set_with_type to properly track type
-        let serialized = list_bytes::new_empty();
-        engine
-            .set_with_type(
-                key.clone(),
-                serialized,
-                crate::storage::item::RedisDataType::List,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // DEBUG: Check the key type
-        let key_type = engine.get_type(&key).await.unwrap();
-        println!("DEBUG: Key type after setting empty list: {}", key_type);
-        assert_eq!(key_type, "list"); // Assert that the key is recognized as a list
 
         // Empty list (key doesn't exist)
         let args = vec![b"nonexistent".to_vec()];

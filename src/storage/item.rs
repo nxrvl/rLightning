@@ -1,8 +1,11 @@
-use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use serde::{Serialize, Deserialize};
+use crate::storage::value::StoreValue;
+
 /// Redis data type
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RedisDataType {
     String,
     List,
@@ -25,58 +28,47 @@ impl RedisDataType {
     }
 }
 
-/// Represents a single key-value pair in the storage engine
+/// Epoch for LRU clock calculation.
+static LRU_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Get current LRU clock value (seconds since engine start).
+pub fn lru_now() -> u32 {
+    LRU_EPOCH.elapsed().as_secs() as u32
+}
+
+/// A single entry in the storage engine.
+/// Replaces the old `StorageItem` with native `StoreValue` types
+/// instead of bincode-serialized `Vec<u8>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageItem {
-    /// The actual data value
-    pub value: Vec<u8>,
-    /// The Redis data type for this item
-    pub data_type: RedisDataType,
-    /// When this item was created
-    #[allow(dead_code)]
-    #[serde(skip, default = "Instant::now")]
-    pub created_at: Instant,
-    /// When this item was last accessed
-    #[serde(skip, default = "Instant::now")]
-    pub last_accessed: Instant,
-    /// How many times this item has been accessed (for LFU eviction)
-    #[serde(skip)]
-    pub access_count: u64,
+pub struct Entry {
+    /// The native data value
+    pub value: StoreValue,
     /// When this item will expire (if set)
     #[serde(skip)]
     pub expires_at: Option<Instant>,
+    /// LRU clock (seconds since engine start)
+    pub lru_clock: u32,
+    /// Access counter for LFU eviction (u16 is sufficient)
+    pub access_count: u16,
 }
 
-impl StorageItem {
-    /// Create a new storage item with string type (for backwards compatibility)
-    pub fn new(value: Vec<u8>) -> Self {
-        let now = Instant::now();
-
-        StorageItem {
+impl Entry {
+    /// Create a new entry with a native value.
+    pub fn new(value: StoreValue) -> Self {
+        Entry {
             value,
-            data_type: RedisDataType::String,
-            created_at: now,
-            last_accessed: now,
-            access_count: 0,
             expires_at: None,
+            lru_clock: lru_now(),
+            access_count: 0,
         }
     }
 
-    /// Create a new storage item with explicit type
-    pub fn new_with_type(value: Vec<u8>, data_type: RedisDataType) -> Self {
-        let now = Instant::now();
-
-        StorageItem {
-            value,
-            data_type,
-            created_at: now,
-            last_accessed: now,
-            access_count: 0,
-            expires_at: None,
-        }
+    /// Create a new string entry (convenience for the most common case).
+    pub fn new_string(value: Vec<u8>) -> Self {
+        Self::new(StoreValue::Str(value))
     }
 
-    /// Check if this item has expired
+    /// Check if this entry has expired.
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
             Instant::now() > expires_at
@@ -85,7 +77,7 @@ impl StorageItem {
         }
     }
 
-    /// Calculate the remaining TTL (time-to-live)
+    /// Calculate the remaining TTL (time-to-live).
     pub fn ttl(&self) -> Option<Duration> {
         self.expires_at.map(|expires_at| {
             let now = Instant::now();
@@ -97,19 +89,27 @@ impl StorageItem {
         })
     }
 
-    /// Update the item's access time and increment access counter
+    /// Update the entry's access time and increment access counter.
     pub fn touch(&mut self) {
-        self.last_accessed = Instant::now();
+        self.lru_clock = lru_now();
         self.access_count = self.access_count.saturating_add(1);
     }
 
-    /// Set a new expiration time
+    /// Set a new expiration time.
     pub fn expire(&mut self, ttl: Duration) {
         self.expires_at = Some(Instant::now() + ttl);
     }
 
-    /// Remove the expiration time
+    /// Remove the expiration time.
     pub fn remove_expiry(&mut self) {
         self.expires_at = None;
     }
+
+    /// Get the Redis data type of this entry's value.
+    pub fn data_type(&self) -> RedisDataType {
+        self.value.data_type()
+    }
 }
+
+/// Backward-compatible type alias.
+pub type StorageItem = Entry;
