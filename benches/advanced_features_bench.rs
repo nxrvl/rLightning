@@ -370,38 +370,37 @@ fn bench_persistence(c: &mut Criterion) {
     });
 
     // AOF append throughput
-    group.bench_function("AOF Append 500 commands", |b| {
+    group.bench_function("AOF Append 100 commands", |b| {
         use rlightning::networking::resp::RespCommand;
         use rlightning::persistence::aof::AofPersistence;
         use rlightning::persistence::config::AofSyncPolicy;
 
-        b.iter_with_setup(
-            || {
-                let _guard = rt.enter();
-                let config = StorageConfig::default();
-                let storage = StorageEngine::new(config);
-                let tmp = tempfile::NamedTempFile::new().unwrap();
-                let path = tmp.path().to_path_buf();
-                let aof = AofPersistence::new(storage, path);
-                (aof, tmp)
-            },
-            |(aof, _tmp)| {
-                rt.block_on(async {
-                    for i in 0..500 {
-                        let resp_cmd = RespCommand {
-                            name: b"SET".to_vec(),
-                            args: vec![
-                                format!("aofkey:{}", i).into_bytes(),
-                                format!("aofval:{}", i).into_bytes(),
-                            ],
-                        };
-                        aof.append_command(resp_cmd, AofSyncPolicy::None)
-                            .await
-                            .unwrap();
-                    }
-                })
-            },
-        );
+        // Create AOF once for all iterations to avoid spawning excessive background tasks
+        let _guard = rt.enter();
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let aof = AofPersistence::new(storage, path);
+        let counter = std::sync::atomic::AtomicU64::new(0);
+
+        b.iter(|| {
+            let batch = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rt.block_on(async {
+                for i in 0..100 {
+                    let resp_cmd = RespCommand {
+                        name: b"SET".to_vec(),
+                        args: vec![
+                            format!("aofkey:{}:{}", batch, i).into_bytes(),
+                            format!("aofval:{}:{}", batch, i).into_bytes(),
+                        ],
+                    };
+                    aof.append_command(resp_cmd, AofSyncPolicy::None)
+                        .await
+                        .unwrap();
+                }
+            })
+        });
     });
 
     group.finish();

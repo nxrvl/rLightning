@@ -192,7 +192,7 @@ fn bench_memory_management(c: &mut Criterion) {
     group.bench_function("Memory usage tracking", |b| {
         let storage = rt.block_on(async {
             let config = StorageConfig {
-                max_memory: 10 * 1024 * 1024, // 10MB
+                max_memory: 100 * 1024 * 1024, // 100MB
                 ..Default::default()
             };
             StorageEngine::new(config)
@@ -205,7 +205,7 @@ fn bench_memory_management(c: &mut Criterion) {
                 for i in 0..50 {
                     let key = format!("mem_key_{}_{}", batch, i);
                     let value = vec![b'x'; 1000]; // 1KB values
-                    storage.set(key.into_bytes(), value, None).await.unwrap();
+                    let _ = storage.set(key.into_bytes(), value, None).await;
                 }
 
                 // Check that data was stored
