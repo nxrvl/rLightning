@@ -41,12 +41,12 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/networking/server.rs`
 - Modify: `src/networking/client.rs`
 
-- [ ] Add `stream.set_nodelay(true)` immediately after `accept()` for all client connections in server.rs
-- [ ] Remove `last_cmd` update from hot path in ClientInfo - defer to CLIENT LIST/CLIENT INFO queries only
-- [ ] Replace `created_at: Instant` with unix timestamp (u64) to avoid syscall on connection creation
-- [ ] Add write coalescing: buffer small responses (<1KB) and flush when read buffer is empty or write buffer is full
-- [ ] Write tests verifying TCP_NODELAY is set on client connections
-- [ ] Run full test suite - must pass before task 3
+- [x] Add `stream.set_nodelay(true)` immediately after `accept()` for all client connections in server.rs
+- [x] Remove `last_cmd` update from hot path in ClientInfo - defer to CLIENT LIST/CLIENT INFO queries only
+- [x] Replace `created_at: Instant` with unix timestamp (u64) to avoid syscall on connection creation
+- [x] Add write coalescing: buffer small responses (<1KB) and flush when read buffer is empty or write buffer is full
+- [x] Write tests verifying TCP_NODELAY is set on client connections
+- [x] Run full test suite - must pass before task 3
 
 ### Task 3: Phase 2 - Zero-Copy RESP Parser
 

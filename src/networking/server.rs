@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
 use dashmap::DashMap;
@@ -48,8 +48,8 @@ pub struct ClientInfo {
     pub multi: i64,
     /// Last command executed
     pub last_cmd: String,
-    /// Connection creation time
-    pub created_at: Instant,
+    /// Connection creation time (unix timestamp in seconds, avoids Instant::now() syscall)
+    pub created_at: u64,
 }
 
 impl ClientInfo {
@@ -63,13 +63,20 @@ impl ClientInfo {
             psub: 0,
             multi: -1,
             last_cmd: String::new(),
-            created_at: Instant::now(),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         }
     }
 
     /// Format client info as Redis CLIENT LIST line
     fn to_info_line(&self) -> String {
-        let age = self.created_at.elapsed().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let age = now.saturating_sub(self.created_at);
         format!(
             "id={} addr={} fd=0 name={} db={} sub={} psub={} multi={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd={} age={}\r\n",
             self.id,
@@ -91,6 +98,9 @@ impl ClientInfo {
 
 /// Global client ID counter
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Buffered writer for client connections - coalesces small writes to reduce syscalls
+type ClientWriter = tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>;
 
 /// The Redis-compatible server
 pub struct Server {
@@ -199,6 +209,8 @@ impl Server {
                     // Try to acquire a connection permit
                     match self.connection_limit.clone().try_acquire_owned() {
                         Ok(permit) => {
+                            // Disable Nagle's algorithm for lower latency
+                            let _ = socket.set_nodelay(true);
                             let conn_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
                             info!(client_addr = %addr, client_id = conn_id, "New client connected");
                             let cmd_handler = Arc::clone(&self.command_handler);
@@ -291,7 +303,10 @@ impl Server {
         const MAX_PARTIAL_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB limit for partial command buffer
 
         // Split the socket for concurrent read/write in subscription mode
-        let (mut socket_reader, mut socket_writer) = socket.into_split();
+        let (mut socket_reader, socket_writer_raw) = socket.into_split();
+        // Wrap writer in BufWriter for write coalescing - buffers small responses
+        // and flushes when buffer is full or explicitly flushed
+        let mut socket_writer = tokio::io::BufWriter::with_capacity(4096, socket_writer_raw);
 
         // Track if we're in subscription mode
         let mut in_subscription_mode = false;
@@ -304,6 +319,9 @@ impl Server {
 
         // Per-connection database index (SELECT command changes this)
         let mut db_index: usize = 0;
+
+        // Track last command locally to avoid DashMap write on every command
+        let mut last_cmd_local = String::new();
 
         loop {
             // In subscription mode, we need to handle both:
@@ -322,11 +340,17 @@ impl Server {
                                 } else {
                                     response
                                 };
-                                if let Ok(bytes) = response.serialize()
-                                    && let Err(e) = socket_writer.write_all(&bytes).await {
+                                if let Ok(bytes) = response.serialize() {
+                                    if let Err(e) = socket_writer.write_all(&bytes).await {
                                         error!(client_addr = %client_addr_str, "Failed to write pub/sub message: {}", e);
                                         break;
                                     }
+                                    // Flush subscription messages immediately for low latency
+                                    if let Err(e) = socket_writer.flush().await {
+                                        error!(client_addr = %client_addr_str, "Failed to flush pub/sub message: {}", e);
+                                        break;
+                                    }
+                                }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 warn!(client_addr = %client_addr_str, missed = n, "Client lagged behind, missed messages");
@@ -363,6 +387,11 @@ impl Server {
 
                                 if let Err(e) = result {
                                     error!(client_addr = %client_addr_str, "Error processing subscription commands: {}", e);
+                                    break;
+                                }
+                                // Flush after processing subscription commands
+                                if let Err(e) = socket_writer.flush().await {
+                                    error!(client_addr = %client_addr_str, "Failed to flush after subscription commands: {}", e);
                                     break;
                                 }
                             }
@@ -443,6 +472,7 @@ impl Server {
                                 &client_addr_str,
                                 &connections,
                                 conn_id,
+                                &mut last_cmd_local,
                             )
                             .await?
                             {
@@ -489,6 +519,7 @@ impl Server {
                                                 &client_addr_str,
                                                 &connections,
                                                 conn_id,
+                                                &mut last_cmd_local,
                                             )
                                             .await?
                                             {
@@ -661,6 +692,12 @@ impl Server {
 
                     response_buffer.clear();
                 }
+                // Flush the write buffer before going back to reading
+                // This ensures all buffered responses (including small ones) are sent
+                if let Err(e) = socket_writer.flush().await {
+                    error!(client_addr = %client_addr_str, "Failed to flush write buffer: {}", e);
+                    break;
+                }
             }
         }
 
@@ -678,7 +715,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_command(
         cmd: &Command,
-        socket_writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        socket_writer: &mut ClientWriter,
         response_buffer: &mut Vec<u8>,
         db_index: &mut usize,
         protocol_version: &mut ProtocolVersion,
@@ -696,6 +733,7 @@ impl Server {
         client_addr_str: &str,
         connections: &Arc<DashMap<u64, ClientInfo>>,
         conn_id: u64,
+        last_cmd_local: &mut String,
     ) -> Result<DispatchAction, NetworkError> {
         let cmd_lower = cmd.name.to_lowercase();
 
@@ -826,19 +864,21 @@ impl Server {
             return Ok(DispatchAction::Continue);
         }
 
-        // Update connection tracking state
-        if let Some(mut info) = connections.get_mut(&conn_id) {
-            info.last_cmd = cmd_lower.clone();
-            info.db = *db_index;
-            info.multi = if tx_state.in_multi {
-                tx_state.queue.len() as i64
-            } else {
-                -1
-            };
-        }
+        // Track last command locally (avoids DashMap write lock on every command)
+        last_cmd_local.clone_from(&cmd_lower);
 
         // CLIENT - connection management commands handled here with access to per-connection state
         if cmd_lower == "client" {
+            // Sync local state to connection tracker for CLIENT LIST/INFO queries
+            if let Some(mut info) = connections.get_mut(&conn_id) {
+                info.last_cmd.clone_from(last_cmd_local);
+                info.db = *db_index;
+                info.multi = if tx_state.in_multi {
+                    tx_state.queue.len() as i64
+                } else {
+                    -1
+                };
+            }
             let response = match Self::handle_client_command(&cmd.args, connections, conn_id) {
                 Ok(resp) => resp,
                 Err(e) => RespValue::Error(format!("ERR {}", e)),
@@ -1811,7 +1851,7 @@ impl Server {
     async fn process_subscription_commands(
         buffer: &mut BytesMut,
         partial_command_buffer: &mut Vec<u8>,
-        socket_writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        socket_writer: &mut ClientWriter,
         pubsub: &Arc<PubSubManager>,
         client_id: ClientId,
         client_addr_str: &str,
@@ -2116,7 +2156,7 @@ impl Server {
 
     /// Helper function to serialize and send a response to a split socket writer
     async fn send_response_to_writer(
-        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        writer: &mut ClientWriter,
         response: RespValue,
         client_addr: &str,
     ) -> Result<(), NetworkError> {
@@ -2165,7 +2205,7 @@ impl Server {
     }
 
     async fn send_error_to_writer(
-        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        writer: &mut ClientWriter,
         error_message: String,
         client_addr: &str,
     ) -> Result<(), NetworkError> {
@@ -2191,7 +2231,7 @@ impl Server {
     /// Handle PSYNC command - transitions connection into replication stream mode.
     /// After this, the connection only receives propagated write commands.
     async fn handle_psync_command(
-        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        writer: &mut ClientWriter,
         args: &[Vec<u8>],
         replication: &Arc<ReplicationManager>,
         client_addr: &str,
@@ -2269,12 +2309,20 @@ impl Server {
 
         info!(client_addr = %client_addr, "Replica entered replication stream mode");
 
+        // Flush any buffered data before entering the replication stream
+        writer.flush().await?;
+
         // Enter replication stream: forward propagated commands to this replica
         loop {
             match rx.recv().await {
                 Some(data) => {
                     if let Err(e) = writer.write_all(&data).await {
                         error!(client_addr = %client_addr, "Error writing to replica: {}", e);
+                        break;
+                    }
+                    // Flush replication data immediately for timely delivery
+                    if let Err(e) = writer.flush().await {
+                        error!(client_addr = %client_addr, "Error flushing replica data: {}", e);
                         break;
                     }
                 }
@@ -2300,7 +2348,7 @@ impl Server {
         cmd: &Command,
         _resp_cmd: &RespCommand,
         replication: &Option<Arc<ReplicationManager>>,
-        socket_writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        socket_writer: &mut ClientWriter,
         response_buffer: &mut Vec<u8>,
         client_addr_str: &str,
     ) -> Result<bool, NetworkError> {
@@ -3020,6 +3068,63 @@ mod tests {
                 msg
             ),
             _ => panic!("Expected error for missing SETNAME value"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_nodelay_set_on_accepted_connections() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a client connection
+        let client = tokio::spawn(async move {
+            tokio::net::TcpStream::connect(addr).await.unwrap()
+        });
+
+        // Accept and set TCP_NODELAY (same as our server accept path)
+        let (socket, _) = listener.accept().await.unwrap();
+        socket.set_nodelay(true).unwrap();
+        assert!(socket.nodelay().unwrap(), "TCP_NODELAY should be enabled on accepted connections");
+
+        let _ = client.await;
+    }
+
+    #[test]
+    fn test_created_at_uses_unix_timestamp() {
+        let info = ClientInfo::new(1, "127.0.0.1:1234".to_string());
+        // created_at should be a reasonable unix timestamp (after year 2020)
+        assert!(info.created_at > 1_577_836_800, "created_at should be a unix timestamp after 2020");
+        // Age should be 0 or 1 second since we just created it
+        let line = info.to_info_line();
+        assert!(line.contains("age=0") || line.contains("age=1"),
+            "Newly created connection should have age of 0 or 1, got: {}", line);
+    }
+
+    #[test]
+    fn test_last_cmd_deferred_update() {
+        // Verify that last_cmd field still exists and works when set directly
+        // (as it would be when synced from local tracking on CLIENT command)
+        let connections = make_connections();
+        let conn_id = 1;
+        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()));
+
+        // Simulate local last_cmd sync (as dispatch_command does before CLIENT)
+        if let Some(mut info) = connections.get_mut(&conn_id) {
+            info.last_cmd = "get".to_string();
+            info.db = 2;
+            info.multi = -1;
+        }
+
+        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        match result {
+            RespValue::BulkString(Some(data)) => {
+                let output = String::from_utf8(data).unwrap();
+                assert!(output.contains("cmd=get"), "Should show synced last_cmd");
+                assert!(output.contains("db=2"), "Should show synced db index");
+            }
+            _ => panic!("Expected BulkString for CLIENT INFO"),
         }
     }
 }

@@ -1,0 +1,95 @@
+# Ralphex Progress Log
+Plan: /Users/nax/dev/personal/altista.tech/rLightning/docs/plans/2026-03-20-performance-optimization-v3.md
+Branch: performance-optimization-v3
+Mode: full
+Started: 2026-03-20 17:44:33
+------------------------------------------------------------
+
+starting task execution phase
+
+--- task iteration 1 ---
+[26-03-20 17:45:11] TASK 1: Phase 0 - Release Profile (Cargo.toml)
+[26-03-20 17:45:11] This task configures the Rust release profile for maximum performance. It adds aggressive optimization settings (LTO, single codegen unit, symbol stripping, abort on panic) to Cargo.toml. These are foundational settings
+[26-03-20 17:45:11] that will benefit all subsequent optimization phases. The key file involved is Cargo.toml.
+[26-03-20 17:45:11] Let me start by reading the current Cargo.toml and checking for catch_unwind usage.
+[26-03-20 17:45:17] No `catch_unwind` usage found in the codebase - safe to use `panic = "abort"`. No existing `[profile.release]` section. Let me add it.
+[26-03-20 17:45:23] Now let me run the tests to verify everything still passes.
+[26-03-20 17:50:48] Let me check what that redis_compatibility_test failure is about - it's likely a Docker availability issue.
+[26-03-20 17:51:28] This is a Docker network connectivity issue, not related to our changes. Let me run the main test suite excluding the Docker-dependent test.
+[26-03-20 17:51:37] All 956 tests pass. The only failure is the redis_compatibility_test which requires Docker network access (failing to pull images). Now let me verify the release build compiles.
+[26-03-20 18:48:11] Benchmarks are still running (they take a while with fat LTO). Let me wait for them.
+[26-03-20 18:53:28] Benchmarks are taking a long time due to fat LTO compilation. Let me check if there's partial output.
+[26-03-20 18:53:45] Still compiling. The fat LTO release build for benchmarks takes significant time. Let me wait longer.
+[26-03-20 19:05:06] There may be a lock contention from the first benchmark run. Let me stop the stale first task and check.
+[26-03-20 19:05:21] Now let me run benchmarks fresh. I'll run just one benchmark suite quickly to establish a baseline rather than all of them, since fat LTO compilation takes very long.
+[26-03-20 19:07:33] Benchmarks run successfully. Storage operations show improvements (e.g., EXISTS improved 14-16%). Now let me run the protocol benchmark too for a fuller baseline.
+[26-03-20 19:16:18] All benchmarks pass and show improvements. Now let me mark Task 1 as complete in the plan and commit.
+[26-03-20 19:16:28] Now commit the changes.
+[26-03-20 19:16:40] Task 1 complete. The plan file was newly tracked (previously gitignored under docs/). 
+[26-03-20 19:16:40] Results:
+[26-03-20 19:16:40]   - Added [profile.release] with opt-level=3, fat LTO, codegen-units=1, strip=true, panic=abort
+[26-03-20 19:16:40]   - Confirmed no catch_unwind usage in codebase
+[26-03-20 19:16:40]   - All 956 tests pass (redis_compatibility_test skipped due to Docker network unavailability)
+[26-03-20 19:16:40]   - Release build compiles successfully
+[26-03-20 19:16:40]   - Benchmarks show improvements: storage EXISTS -15%, RESP parsing -3-6%, error handling -6%
+[26-03-20 19:16:40] More Task sections with [ ] remain in the plan. Stopping here for the loop to handle the next task.
+[26-03-20 19:16:44] That was the earlier background benchmark task completing. Task 1 is already committed and done. Ready for the next iteration when the loop calls back.
+[26-03-20 19:16:48] Another stale background task completing. Task 1 is done and committed. Waiting for the loop to invoke the next iteration for Task 2.
+
+--- task iteration 2 ---
+[26-03-20 19:17:06] Task 2: Phase 1 - Network Layer Optimization
+[26-03-20 19:17:06] This task optimizes the network layer for lower latency and higher throughput. It involves:
+[26-03-20 19:17:06]   - Enabling TCP_NODELAY on client connections to eliminate Nagle's algorithm delays
+[26-03-20 19:17:06]   - Removing last_cmd tracking from the hot path to reduce per-command overhead
+[26-03-20 19:17:06]   - Replacing Instant::now() with a simpler unix timestamp for connection creation
+[26-03-20 19:17:06]   - Adding write coalescing to buffer small responses
+[26-03-20 19:17:06]   - Key files: src/networking/server.rs, src/networking/client.rs
+[26-03-20 19:17:06] Let me start by reading the relevant source files.
+[26-03-20 19:17:12] Let me read the server file in sections and find the ClientInfo struct.
+[26-03-20 19:17:38] Now let me find the `handle_client_command` to see where `last_cmd` is read, and also check how socket is handled before spawning.
+[26-03-20 19:17:45] Now let me also check the line at 2851 where `last_cmd` is set (in tests):
+[26-03-20 19:17:50] Now let me also check where the `socket` variable is used before `into_split()` to understand where to add `set_nodelay`:
+[26-03-20 19:17:54] Now let me also check the tests section of server.rs to see existing tests:
+[26-03-20 19:18:03] Good, now I have a thorough understanding. Let me also look at how tests reference `created_at` and the end of test section:
+[26-03-20 19:22:17] Let me check if there are integration tests that start the server:
+[26-03-20 19:22:49] Now I have a thorough understanding of the codebase. Let me implement all the Task 2 changes. I'll start with the imports and ClientInfo changes, then the TCP_NODELAY, last_cmd optimization, and write coalescing.
+[26-03-20 19:23:08] Now add TCP_NODELAY after accept and permit acquisition:
+[26-03-20 19:23:15] Now add the `ClientWriter` type alias after the `NEXT_CLIENT_ID` static:
+[26-03-20 19:23:20] Now update `handle_client` to wrap socket_writer in BufWriter and add local last_cmd tracking:
+[26-03-20 19:23:27] Now add the local `last_cmd_local` variable in handle_client, right after `db_index`:
+[26-03-20 19:23:33] Now I need to add `flush()` after subscription message writes. Let me read the subscription select block:
+[26-03-20 19:23:37] I need to add flush after the successful subscription message write. Let me update the subscription message write block:
+[26-03-20 19:23:44] Now I need to add flush after `process_subscription_commands`. Let me read the current code after it:
+[26-03-20 19:23:55] Now I need to pass `&mut last_cmd_local` to `dispatch_command` calls. Let me find both call sites in the fast path and regular path. Let me read the current state:
+[26-03-20 19:23:59] I need to add `&mut last_cmd_local` to both dispatch_command call sites. Let me update the fast path first:
+[26-03-20 19:24:08] Now update the regular path dispatch_command call. Let me find it:
+[26-03-20 19:24:19] Now add flush after the batched response write. Let me find that section:
+[26-03-20 19:24:30] Now update the `dispatch_command` function signature and body. Let me read the current state:
+[26-03-20 19:24:41] Now replace the "Update connection tracking state" DashMap write block with local tracking. Let me read it:
+[26-03-20 19:24:55] Now update all the remaining function signatures that use `OwnedWriteHalf`. Let me replace them all:
+[26-03-20 19:25:04] Now I need to add flush calls in the `handle_psync_command` replication stream loop. Let me read it:
+[26-03-20 19:25:14] Add flush before entering the replication stream loop and after each write in the loop:
+[26-03-20 19:25:21] Now let me verify that the type alias definition line didn't break anything and check the remaining usage:
+[26-03-20 19:25:25] Good, only the type alias definition remains. Now let me also check for any remaining `use tokio::io::AsyncWriteExt;` inside `handle_psync_command` that might conflict with the outer import:
+[26-03-20 19:25:31] Good. Now let me try to build to check for compilation errors:
+[26-03-20 19:25:50] Clean compilation. Now let me add the tests. Let me read the test module to find the right place:
+[26-03-20 19:25:54] Now let me find the end of the test module:
+[26-03-20 19:25:58] Now add the new tests before the closing `}` of the test module:
+[26-03-20 19:26:13] Now let me run the tests:
+[26-03-20 19:32:21] The output only has 30 lines - the test run was likely still ongoing. Let me wait for the task to complete and check again:
+[26-03-20 19:37:02] All tests pass with zero failures. Let me verify our new tests ran specifically:
+[26-03-20 19:37:14] All three new tests pass. All 959 existing tests pass with zero failures. Now let me update the plan and commit.
+[26-03-20 19:37:24] Now update the progress file:
+[26-03-20] TASK 2: Phase 1 - Network Layer Optimization
+[26-03-20] Implemented four network optimizations:
+[26-03-20]   1. TCP_NODELAY: Added socket.set_nodelay(true) after accept() to disable Nagle's algorithm
+[26-03-20]   2. last_cmd hot path removal: Moved DashMap write from every command to CLIENT command only
+[26-03-20]      - Track last_cmd as local String in connection handler
+[26-03-20]      - Sync to DashMap only when CLIENT LIST/INFO is queried
+[26-03-20]   3. created_at: Replaced Instant with u64 unix timestamp (avoids syscall)
+[26-03-20]   4. Write coalescing: Wrapped socket writer in BufWriter(4096) with type alias ClientWriter
+[26-03-20]      - Added flush() at natural boundaries: after batch response, after subscription messages
+[26-03-20]      - Added flush in PSYNC replication stream for timely delivery
+[26-03-20] Added 3 new tests: TCP_NODELAY, unix timestamp, last_cmd deferred update
+[26-03-20] All 959 tests pass (3 new). Zero failures.
+[26-03-20 19:37:36] Now commit:
