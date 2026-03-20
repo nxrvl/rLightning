@@ -53,7 +53,7 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     // Atomic read-modify-write: type check, expand, get old bit, set new bit, preserve TTL
     let old_bit = engine.atomic_modify(key, RedisDataType::String, |current| {
         let mut bitmap = match current {
-            Some(StoreValue::Str(v)) => v.clone(),
+            Some(StoreValue::Str(v)) => v.to_vec(),
             None => Vec::new(),
             _ => return Err(crate::storage::error::StorageError::WrongType),
         };
@@ -73,7 +73,7 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             bitmap[byte_offset] &= !(1 << bit_offset);
         }
 
-        Ok((ModifyResult::Set(StoreValue::Str(bitmap)), old as i64))
+        Ok((ModifyResult::Set(StoreValue::Str(bitmap.into())), old as i64))
     })?;
 
     Ok(RespValue::Integer(old_bit))
@@ -479,7 +479,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         // Use atomic_read to avoid version bumps and write counter increments
         let results = engine.atomic_read(key, RedisDataType::String, |current| {
             let bitmap = match current {
-                Some(StoreValue::Str(v)) => v.clone(),
+                Some(StoreValue::Str(v)) => v.to_vec(),
                 None => Vec::new(),
                 _ => return Err(crate::storage::error::StorageError::WrongType),
             };
@@ -498,7 +498,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     // Atomic read-modify-write for BITFIELD operations with SET/INCRBY
     let results = engine.atomic_modify(key, RedisDataType::String, |current| {
         let mut bitmap = match current.as_ref() {
-            Some(StoreValue::Str(v)) => v.clone(),
+            Some(StoreValue::Str(v)) => v.to_vec(),
             None => Vec::new(),
             _ => return Err(crate::storage::error::StorageError::WrongType),
         };
@@ -547,7 +547,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
 
         if modified {
-            Ok((ModifyResult::Set(StoreValue::Str(bitmap)), results))
+            Ok((ModifyResult::Set(StoreValue::Str(bitmap.into())), results))
         } else {
             // No actual mutation: preserve existing key state (don't create phantom keys)
             Ok((ModifyResult::Keep, results))

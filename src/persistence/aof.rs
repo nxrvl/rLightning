@@ -686,7 +686,7 @@ fn aof_rewrite_commands_for_item(key: &[u8], item: &StorageItem) -> Vec<Vec<Vec<
 
     match &item.value {
         StoreValue::Str(v) => {
-            let mut args = vec![b"SET".to_vec(), key.to_vec(), v.clone()];
+            let mut args = vec![b"SET".to_vec(), key.to_vec(), v.to_vec()];
             if let Some(ttl) = item.ttl()
                 && ttl.as_millis() > 0
             {
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn test_aof_rewrite_string() {
         let key = b"mykey".to_vec();
-        let item = make_item(StoreValue::Str(b"myval".to_vec()));
+        let item = make_item(StoreValue::Str(b"myval".to_vec().into()));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0][0], b"SET");
@@ -1266,7 +1266,7 @@ mod tests {
         let engine = create_test_engine();
 
         // String
-        let str_item = make_item(StoreValue::Str(b"hello".to_vec()));
+        let str_item = make_item(StoreValue::Str(b"hello".to_vec().into()));
         for args in aof_rewrite_commands_for_item(&b"str".to_vec(), &str_item) {
             engine
                 .process_command(&RespCommand {

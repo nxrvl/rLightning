@@ -1570,6 +1570,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.2",
  "hashbrown 0.14.5",
+ "itoa",
  "jemallocator",
  "lazy_static",
  "lru",

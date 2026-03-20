@@ -169,7 +169,7 @@ pub async fn get(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Single DashMap lookup: type check + value read atomically
     let value = engine.atomic_read(key, RedisDataType::String, |data| match data {
-        Some(crate::storage::value::StoreValue::Str(v)) => Ok(Some(v.clone())),
+        Some(crate::storage::value::StoreValue::Str(v)) => Ok(Some(v.to_vec())),
         Some(_) => Err(crate::storage::error::StorageError::WrongType),
         None => Ok(None),
     })?;
@@ -413,7 +413,7 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     engine.check_write_memory(0).await?;
     let new_len = engine.atomic_modify(&key, RedisDataType::String, |current| {
         let mut val = match current {
-            Some(crate::storage::value::StoreValue::Str(v)) => v.clone(),
+            Some(crate::storage::value::StoreValue::Str(v)) => v.to_vec(),
             Some(_) => return Err(crate::storage::error::StorageError::WrongType),
             None => Vec::new(),
         };
@@ -428,7 +428,7 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
 
         let new_len = val.len() as i64;
-        Ok((crate::storage::value::ModifyResult::Set(crate::storage::value::StoreValue::Str(val)), new_len))
+        Ok((crate::storage::value::ModifyResult::Set(crate::storage::value::StoreValue::Str(val.into())), new_len))
     })?;
 
     Ok(RespValue::Integer(new_len))

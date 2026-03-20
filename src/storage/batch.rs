@@ -410,7 +410,7 @@ fn batch_get(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
     }
     match get_valid_entry(map, &args[0], now) {
         Some(entry) => match &entry.value {
-            StoreValue::Str(data) => Ok(RespValue::BulkString(Some(data.clone()))),
+            StoreValue::Str(data) => Ok(RespValue::BulkString(Some(data.to_vec()))),
             _ => Err(CommandError::WrongType),
         },
         None => Ok(RespValue::BulkString(None)),
@@ -739,7 +739,7 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
             let mem = (key.len() + entry.value.mem_size()) as i64;
             match entry.value {
                 StoreValue::Str(data) => {
-                    (Ok(RespValue::BulkString(Some(data))), -mem)
+                    (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem)
                 }
                 _ => {
                     // WRONGTYPE - put it back (getdel only works on strings)
@@ -919,7 +919,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         Some(entry) => match &mut entry.value {
             StoreValue::Str(data) => {
                 let added = value.len() as i64;
-                data.extend_from_slice(value);
+                data.append(value);
                 let total_len = data.len();
                 (Ok(RespValue::Integer(total_len as i64)), added)
             }

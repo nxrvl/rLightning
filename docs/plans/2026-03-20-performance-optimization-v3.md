@@ -156,11 +156,11 @@ Implement the full 11-phase performance optimization plan from docs/OPTIMIZATION
 - Modify: `src/storage/value.rs`
 - Modify: `src/networking/resp.rs`
 
-- [ ] Implement Small String Optimization (SSO): `CompactValue` enum with `Inline { len: u8, data: [u8; 23] }` for values <= 23 bytes, `Heap(Bytes)` for larger
-- [ ] Add static response interning: `OK_RESPONSE`, `PONG_RESPONSE`, `ZERO_RESPONSE`, `ONE_RESPONSE`, `NIL_RESPONSE`, `EMPTY_ARRAY` as `Bytes::from_static`
-- [ ] Add `itoa` dependency and implement direct response serialization to write buffer (skip intermediate RespValue for hot-path responses like bulk strings, integers)
-- [ ] Write tests for SSO (values at boundary: 0, 23, 24 bytes), response interning correctness
-- [ ] Run full test suite - must pass before task 9
+- [x] Implement Small String Optimization (SSO): `CompactValue` enum with `Inline { len: u8, data: [u8; 23] }` for values <= 23 bytes, `Heap(Vec<u8>)` for larger
+- [x] Add static response interning: `OK_RESPONSE`, `PONG_RESPONSE`, `ZERO_RESPONSE`, `ONE_RESPONSE`, `NIL_RESPONSE`, `EMPTY_ARRAY` as `Bytes::from_static`
+- [x] Add `itoa` dependency and implement direct response serialization to write buffer (skip intermediate RespValue for hot-path responses like bulk strings, integers)
+- [x] Write tests for SSO (values at boundary: 0, 23, 24 bytes), response interning correctness
+- [x] Run full test suite - must pass before task 9
 
 ### Task 9: Phase 8 - Lock-Free Fast Paths
 

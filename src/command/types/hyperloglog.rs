@@ -162,7 +162,7 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let changed = engine.atomic_modify(key, RedisDataType::String, |current| {
         let is_new = current.is_none();
         let mut hll_data = match current {
-            Some(StoreValue::Str(data)) if hll_is_valid(data) => data.clone(),
+            Some(StoreValue::Str(data)) if hll_is_valid(data) => data.to_vec(),
             Some(StoreValue::Str(data)) if data.is_empty() => hll_new_dense(),
             Some(StoreValue::Str(_)) => {
                 return Err(crate::storage::error::StorageError::WrongType);
@@ -174,9 +174,9 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         // If no elements provided, just ensure the key exists
         if elements.is_empty() {
             if is_new {
-                return Ok((ModifyResult::Set(StoreValue::Str(hll_data)), 1i64));
+                return Ok((ModifyResult::Set(StoreValue::Str(hll_data.into())), 1i64));
             }
-            return Ok((ModifyResult::Set(StoreValue::Str(hll_data)), 0i64));
+            return Ok((ModifyResult::Set(StoreValue::Str(hll_data.into())), 0i64));
         }
 
         let mut changed = false;
@@ -187,7 +187,7 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
 
-        Ok((ModifyResult::Set(StoreValue::Str(hll_data)), if changed { 1 } else { 0 }))
+        Ok((ModifyResult::Set(StoreValue::Str(hll_data.into())), if changed { 1 } else { 0 }))
     })?;
 
     Ok(RespValue::Integer(changed))
@@ -219,7 +219,7 @@ pub async fn pfcount(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         for key in args {
             let data_opt: Option<Vec<u8>> =
                 engine.atomic_read(key, RedisDataType::String, |data| match data {
-                    Some(StoreValue::Str(d)) if hll_is_valid(d) => Ok(Some(d.clone())),
+                    Some(StoreValue::Str(d)) if hll_is_valid(d) => Ok(Some(d.to_vec())),
                     Some(StoreValue::Str(d)) if d.is_empty() => Ok(None),
                     Some(StoreValue::Str(_)) => Err(crate::storage::error::StorageError::WrongType),
                     None => Ok(None),
@@ -280,7 +280,7 @@ pub async fn pfmerge(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     // Store merged result in dest key
     let ttl = engine.ttl(dest_key).await?;
     engine
-        .set_with_type(dest_key.clone(), StoreValue::Str(merged), ttl)
+        .set_with_type(dest_key.clone(), StoreValue::Str(merged.into()), ttl)
         .await?;
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -659,7 +659,7 @@ mod tests {
         engine
             .set_with_type(
                 b"hll_ttl".to_vec(),
-                crate::storage::value::StoreValue::Str(hll_data),
+                crate::storage::value::StoreValue::Str(hll_data.into()),
                 Some(std::time::Duration::from_secs(3600)),
             )
             .await

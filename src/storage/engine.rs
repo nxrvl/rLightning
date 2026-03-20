@@ -961,7 +961,7 @@ impl StorageEngine {
         value: Vec<u8>,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_value(key, StoreValue::Str(value), ttl, true).await
+        self.set_value(key, StoreValue::Str(value.into()), ttl, true).await
     }
 
     /// Set a key-value pair with native StoreValue type
@@ -981,7 +981,7 @@ impl StorageEngine {
         value: Vec<u8>,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_value(key, StoreValue::Str(value), ttl, false)
+        self.set_value(key, StoreValue::Str(value.into()), ttl, false)
             .await
     }
 
@@ -1133,7 +1133,7 @@ impl StorageEngine {
                 } else {
                     entry.touch();
                     let val = match &entry.value {
-                        StoreValue::Str(v) => Some(v.clone()),
+                        StoreValue::Str(v) => Some(v.to_vec()),
                         _ => None,
                     };
                     (val, false)
@@ -2526,7 +2526,7 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let store_value = StoreValue::Str(value);
+        let store_value = StoreValue::Str(value.into());
         let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
@@ -2599,7 +2599,7 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let store_value = StoreValue::Str(value);
+        let store_value = StoreValue::Str(value.into());
         let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
@@ -2664,7 +2664,7 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let store_value = StoreValue::Str(value);
+        let store_value = StoreValue::Str(value.into());
         let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
@@ -2685,7 +2685,7 @@ impl StorageEngine {
                     if nx && effectively_exists {
                         // NX: don't set if key exists
                         let old: Option<Vec<u8>> = if get_old {
-                            occ.get().value.as_str().cloned()
+                            occ.get().value.as_str().map(|b| b.to_vec())
                         } else {
                             None
                         };
@@ -2702,7 +2702,7 @@ impl StorageEngine {
                     } else {
                         // Set the value
                         let old: Option<Vec<u8>> = if get_old && effectively_exists {
-                            occ.get().value.as_str().cloned()
+                            occ.get().value.as_str().map(|b| b.to_vec())
                         } else {
                             None
                         };
@@ -2779,7 +2779,7 @@ impl StorageEngine {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val_str = delta.to_string();
                     let new_val_bytes = new_val_str.as_bytes().to_vec();
-                    let new_sv = StoreValue::Str(new_val_bytes);
+                    let new_sv = StoreValue::Str(new_val_bytes.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2802,7 +2802,7 @@ impl StorageEngine {
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 let new_val_str = new_val.to_string();
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_sv = StoreValue::Str(new_val_bytes.into());
                 let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2814,7 +2814,7 @@ impl StorageEngine {
             ShardEntry::Vacant(vac) => {
                 let new_val_str = delta.to_string();
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_sv = StoreValue::Str(new_val_bytes.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
@@ -2838,7 +2838,7 @@ impl StorageEngine {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val_str = format_float(delta);
                     let new_val_bytes = new_val_str.as_bytes().to_vec();
-                    let new_sv = StoreValue::Str(new_val_bytes);
+                    let new_sv = StoreValue::Str(new_val_bytes.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2865,7 +2865,7 @@ impl StorageEngine {
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 let new_val_str = format_float(new_val);
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_sv = StoreValue::Str(new_val_bytes.into());
                 let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                 self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2877,7 +2877,7 @@ impl StorageEngine {
             ShardEntry::Vacant(vac) => {
                 let new_val_str = format_float(delta);
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
-                let new_sv = StoreValue::Str(new_val_bytes);
+                let new_sv = StoreValue::Str(new_val_bytes.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
@@ -2898,7 +2898,7 @@ impl StorageEngine {
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     let new_val = append_value.to_vec();
                     let new_len = new_val.len();
-                    let new_sv = StoreValue::Str(new_val);
+                    let new_sv = StoreValue::Str(new_val.into());
                     let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.current_memory.fetch_add(new_size, Ordering::AcqRel);
@@ -2913,8 +2913,8 @@ impl StorageEngine {
                 }
                 let old_val_size = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                if let Some(bytes) = occ.get_mut().value.as_str_mut() {
-                    bytes.extend_from_slice(append_value);
+                if let Some(bytes) = occ.get_mut().value.as_compact_str_mut() {
+                    bytes.append(append_value);
                 }
                 let new_len = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
                 let new_size = old_size + (new_len - old_val_size) as u64;
@@ -2927,7 +2927,7 @@ impl StorageEngine {
             ShardEntry::Vacant(vac) => {
                 let new_val = append_value.to_vec();
                 let new_len = new_val.len();
-                let new_sv = StoreValue::Str(new_val);
+                let new_sv = StoreValue::Str(new_val.into());
                 let size = Self::calculate_entry_size(key, &new_sv) as u64;
                 self.current_memory.fetch_add(size, Ordering::AcqRel);
                 self.key_count.fetch_add(1, Ordering::AcqRel);
@@ -3068,7 +3068,7 @@ impl StorageEngine {
                 } else if occ.get().data_type() != RedisDataType::String {
                     Err(StorageError::WrongType)
                 } else {
-                    let old_value = occ.get().value.as_str().cloned();
+                    let old_value = occ.get().value.as_str().map(|b| b.to_vec());
                     let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                     self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
                     self.key_count.fetch_sub(1, Ordering::AcqRel);
@@ -3105,7 +3105,7 @@ impl StorageEngine {
                 } else if item.data_type() != RedisDataType::String {
                     Err(StorageError::WrongType)
                 } else {
-                    let value = item.value.as_str().cloned();
+                    let value = item.value.as_str().map(|b| b.to_vec());
 
                     let (queue_action, changed) = match new_expiry {
                         None => (None, false),
@@ -3156,7 +3156,7 @@ impl StorageEngine {
             return Err(StorageError::ValueTooLarge);
         }
 
-        let store_value = StoreValue::Str(value);
+        let store_value = StoreValue::Str(value.into());
         let required_size = Self::calculate_entry_size(&key, &store_value);
         self.maybe_evict(required_size).await?;
 
@@ -3169,7 +3169,7 @@ impl StorageEngine {
                 let old: Option<Vec<u8>> = if expired {
                     None
                 } else {
-                    occ.get().value.as_str().cloned()
+                    occ.get().value.as_str().map(|b| b.to_vec())
                 };
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 self.current_memory.fetch_sub(old_size, Ordering::AcqRel);
@@ -4052,7 +4052,7 @@ mod tests {
         storage
             .set_with_type(
                 b"ttl_key".to_vec(),
-                StoreValue::Str(b"original_value".to_vec()),
+                StoreValue::Str(b"original_value".to_vec().into()),
                 Some(ttl),
             )
             .await
@@ -4070,7 +4070,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"ttl_key".to_vec(),
-                StoreValue::Str(b"new_value".to_vec()),
+                StoreValue::Str(b"new_value".to_vec().into()),
             )
             .await
             .unwrap();
@@ -4097,7 +4097,7 @@ mod tests {
         storage
             .set_with_type(
                 b"no_ttl_key".to_vec(),
-                StoreValue::Str(b"original".to_vec()),
+                StoreValue::Str(b"original".to_vec().into()),
                 None,
             )
             .await
@@ -4107,7 +4107,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"no_ttl_key".to_vec(),
-                StoreValue::Str(b"updated".to_vec()),
+                StoreValue::Str(b"updated".to_vec().into()),
             )
             .await
             .unwrap();
@@ -4128,7 +4128,7 @@ mod tests {
         storage
             .set_with_type_preserve_ttl(
                 b"brand_new_key".to_vec(),
-                StoreValue::Str(b"value".to_vec()),
+                StoreValue::Str(b"value".to_vec().into()),
             )
             .await
             .unwrap();
@@ -4150,7 +4150,7 @@ mod tests {
         storage
             .set_with_type(
                 b"concurrent_ttl".to_vec(),
-                StoreValue::Str(b"initial".to_vec()),
+                StoreValue::Str(b"initial".to_vec().into()),
                 Some(ttl),
             )
             .await
@@ -4164,7 +4164,7 @@ mod tests {
                 let value = format!("value_{}", i).into_bytes();
                 s.set_with_type_preserve_ttl(
                     b"concurrent_ttl".to_vec(),
-                    StoreValue::Str(value),
+                    StoreValue::Str(value.into()),
                 )
                 .await
                 .unwrap();

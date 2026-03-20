@@ -1,8 +1,25 @@
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use memchr::memchr_iter;
 use std::str;
 use thiserror::Error;
 use tracing::{debug, warn};
+
+// ── Static interned responses ────────────────────────────────────────────────
+// Pre-serialized RESP byte sequences for the most common responses.
+// Using Bytes::from_static avoids allocation entirely.
+
+/// Pre-serialized "+OK\r\n"
+pub static OK_RESPONSE: Bytes = Bytes::from_static(b"+OK\r\n");
+/// Pre-serialized "+PONG\r\n"
+pub static PONG_RESPONSE: Bytes = Bytes::from_static(b"+PONG\r\n");
+/// Pre-serialized ":0\r\n"
+pub static ZERO_RESPONSE: Bytes = Bytes::from_static(b":0\r\n");
+/// Pre-serialized ":1\r\n"
+pub static ONE_RESPONSE: Bytes = Bytes::from_static(b":1\r\n");
+/// Pre-serialized "$-1\r\n"
+pub static NIL_RESPONSE: Bytes = Bytes::from_static(b"$-1\r\n");
+/// Pre-serialized "*0\r\n"
+pub static EMPTY_ARRAY: Bytes = Bytes::from_static(b"*0\r\n");
 
 /// Possible errors during RESP parsing
 #[derive(Debug, Error)]
@@ -99,13 +116,33 @@ impl RespValue {
         }
     }
 
+    /// Try to return a pre-serialized static response (zero allocation).
+    /// Returns None if this value doesn't match a known static response.
+    #[inline]
+    pub fn try_static_response(&self) -> Option<&'static Bytes> {
+        match self {
+            RespValue::SimpleString(s) if s == "OK" => Some(&OK_RESPONSE),
+            RespValue::SimpleString(s) if s == "PONG" => Some(&PONG_RESPONSE),
+            RespValue::Integer(0) => Some(&ZERO_RESPONSE),
+            RespValue::Integer(1) => Some(&ONE_RESPONSE),
+            RespValue::BulkString(None) => Some(&NIL_RESPONSE),
+            RespValue::Array(Some(arr)) if arr.is_empty() => Some(&EMPTY_ARRAY),
+            _ => None,
+        }
+    }
+
     /// Serializes the RespValue to a vector of bytes
     pub fn serialize(&self) -> Result<Vec<u8>, RespError> {
+        // Fast path: static interned responses (zero allocation)
+        if let Some(static_resp) = self.try_static_response() {
+            return Ok(static_resp.to_vec());
+        }
+
         // Calculate an approximate initial capacity to avoid reallocations
         let estimated_size = match self {
             RespValue::SimpleString(s) => s.len() + 3,
             RespValue::Error(s) => s.len() + 3,
-            RespValue::Integer(i) => i.to_string().len() + 3,
+            RespValue::Integer(_) => 24, // itoa max i64 is 20 digits + prefix + crlf
             RespValue::BulkString(None) => 5,
             RespValue::BulkString(Some(data)) => {
                 let len_str = data.len().to_string();
@@ -190,7 +227,8 @@ impl RespValue {
             }
             RespValue::Integer(i) => {
                 result.push(b':');
-                result.extend_from_slice(i.to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(*i).as_bytes());
                 result.extend_from_slice(b"\r\n");
             }
             RespValue::BulkString(None) => {
@@ -212,7 +250,8 @@ impl RespValue {
 
                 // Format according to RESP protocol: $<length>\r\n<data>\r\n
                 result.push(b'$');
-                result.extend_from_slice(data.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(data.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 result.extend_from_slice(data);
                 result.extend_from_slice(b"\r\n");
@@ -231,7 +270,8 @@ impl RespValue {
 
                 // Write array header
                 result.push(b'*');
-                result.extend_from_slice(items.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(items.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
 
                 // Serialize and write each element (single pass)
@@ -280,7 +320,8 @@ impl RespValue {
             }
             RespValue::BulkError(s) => {
                 result.push(b'!');
-                result.extend_from_slice(s.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(s.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 result.extend_from_slice(s.as_bytes());
                 result.extend_from_slice(b"\r\n");
@@ -288,7 +329,8 @@ impl RespValue {
             RespValue::VerbatimString { encoding, data } => {
                 let total_len = encoding.len() + 1 + data.len(); // encoding + ':' + data
                 result.push(b'=');
-                result.extend_from_slice(total_len.to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(total_len).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 result.extend_from_slice(encoding.as_bytes());
                 result.push(b':');
@@ -297,7 +339,8 @@ impl RespValue {
             }
             RespValue::Map(pairs) => {
                 result.push(b'%');
-                result.extend_from_slice(pairs.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(pairs.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 for (key, value) in pairs {
                     result.extend_from_slice(&key.serialize()?);
@@ -306,7 +349,8 @@ impl RespValue {
             }
             RespValue::Set(items) => {
                 result.push(b'~');
-                result.extend_from_slice(items.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(items.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 for item in items {
                     result.extend_from_slice(&item.serialize()?);
@@ -314,7 +358,8 @@ impl RespValue {
             }
             RespValue::Attribute(pairs) => {
                 result.push(b'|');
-                result.extend_from_slice(pairs.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(pairs.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 for (key, value) in pairs {
                     result.extend_from_slice(&key.serialize()?);
@@ -323,7 +368,8 @@ impl RespValue {
             }
             RespValue::Push(items) => {
                 result.push(b'>');
-                result.extend_from_slice(items.len().to_string().as_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                result.extend_from_slice(itoa_buf.format(items.len()).as_bytes());
                 result.extend_from_slice(b"\r\n");
                 for item in items {
                     result.extend_from_slice(&item.serialize()?);
@@ -2767,6 +2813,95 @@ mod tests {
                 RespValue::BulkString(Some(b"foo".to_vec())),
                 RespValue::BulkString(Some(b"bar".to_vec())),
             ])))
+        );
+    }
+
+    // ── Static response interning tests ──────────────────────────────────
+
+    #[test]
+    fn test_static_ok_response() {
+        let resp = RespValue::SimpleString("OK".to_string());
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b"+OK\r\n");
+    }
+
+    #[test]
+    fn test_static_pong_response() {
+        let resp = RespValue::SimpleString("PONG".to_string());
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b"+PONG\r\n");
+    }
+
+    #[test]
+    fn test_static_zero_response() {
+        let resp = RespValue::Integer(0);
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b":0\r\n");
+    }
+
+    #[test]
+    fn test_static_one_response() {
+        let resp = RespValue::Integer(1);
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b":1\r\n");
+    }
+
+    #[test]
+    fn test_static_nil_response() {
+        let resp = RespValue::BulkString(None);
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b"$-1\r\n");
+    }
+
+    #[test]
+    fn test_static_empty_array_response() {
+        let resp = RespValue::Array(Some(vec![]));
+        assert!(resp.try_static_response().is_some());
+        let bytes = resp.serialize().unwrap();
+        assert_eq!(bytes, b"*0\r\n");
+    }
+
+    #[test]
+    fn test_non_static_responses_still_serialize_correctly() {
+        // Non-static SimpleString
+        let resp = RespValue::SimpleString("QUEUED".to_string());
+        assert!(resp.try_static_response().is_none());
+        assert_eq!(resp.serialize().unwrap(), b"+QUEUED\r\n");
+
+        // Non-static integer
+        let resp = RespValue::Integer(42);
+        assert!(resp.try_static_response().is_none());
+        assert_eq!(resp.serialize().unwrap(), b":42\r\n");
+
+        // Negative integer
+        let resp = RespValue::Integer(-1);
+        assert!(resp.try_static_response().is_none());
+        assert_eq!(resp.serialize().unwrap(), b":-1\r\n");
+
+        // Large integer (itoa path)
+        let resp = RespValue::Integer(9999999999);
+        assert_eq!(resp.serialize().unwrap(), b":9999999999\r\n");
+    }
+
+    #[test]
+    fn test_itoa_integer_serialization() {
+        // Edge cases for itoa serialization
+        assert_eq!(
+            RespValue::Integer(i64::MAX).serialize().unwrap(),
+            format!(":{}\r\n", i64::MAX).into_bytes()
+        );
+        assert_eq!(
+            RespValue::Integer(i64::MIN).serialize().unwrap(),
+            format!(":{}\r\n", i64::MIN).into_bytes()
+        );
+        assert_eq!(
+            RespValue::Integer(0).serialize().unwrap(),
+            b":0\r\n"
         );
     }
 }

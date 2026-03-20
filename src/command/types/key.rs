@@ -411,7 +411,7 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             };
             // Serialize value based on type
             let value_bytes: Vec<u8> = match &item.value {
-                StoreValue::Str(v) => v.clone(),
+                StoreValue::Str(v) => v.to_vec(),
                 StoreValue::Hash(m) => {
                     let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                     bincode::serialize(&std_map).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
@@ -483,7 +483,7 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
     let type_byte = serialized[0];
     let value_bytes = &serialized[1..];
     let store_value = match type_byte {
-        0 => StoreValue::Str(value_bytes.to_vec()),
+        0 => StoreValue::Str(value_bytes.to_vec().into()),
         1 => {
             let vec: Vec<Vec<u8>> = bincode::deserialize(value_bytes)
                 .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;

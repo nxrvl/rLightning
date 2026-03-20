@@ -310,3 +310,119 @@ starting task execution phase
 [26-03-20]   7. 12+ tests for sharded storage: distribution, concurrent r/w, entry API, sampling, tx locks
 [26-03-20] All 1007+ tests pass across all suites. Zero failures.
 [26-03-20 22:37:30] Now let me commit all changes.
+[26-03-20 22:37:50] Task 6 (Phase 3 - Sharded Storage Engine) is complete. All 1007+ tests pass across all suites with zero failures.
+[26-03-20 22:37:50] What was implemented:
+[26-03-20 22:37:50]   - Created ShardedStore in src/storage/sharded.rs with cache-line aligned shards (#[repr(align(128))]), parking_lot::RwLock per shard, FxHash for shard selection, per-shard memory/key tracking, per-shard
+[26-03-20 22:37:50] transaction locks
+[26-03-20 22:37:50]   - Dynamic shard count: (num_cpus * 16).next_power_of_two().clamp(16, 1024)
+[26-03-20 22:37:50]   - DashMap-compatible API using MappedRwLockReadGuard/MappedRwLockWriteGuard and custom entry types
+[26-03-20 22:37:50]   - Migrated entire StorageEngine (4400+ lines) from DashMap to ShardedStore
+[26-03-20 22:37:50]   - Replaced per-key transaction locks with per-shard transaction locks (sorted for deadlock prevention)
+[26-03-20 22:37:50]   - Multi-database via array of ShardedStore
+[26-03-20 22:37:50]   - 12+ new tests for shard distribution, concurrent r/w, entry API, sampling, tx locks
+[26-03-20 22:37:50]   - 7 files changed, 1215 insertions, 534 deletions
+[26-03-20 22:37:50] More Task sections with [ ] remain in the plan. Stopping here for the loop to handle the next task.
+
+--- task iteration 7 ---
+[26-03-20 22:38:10] I'm picking up Task 7: Phase 4 - Pipeline Batching. This task implements intelligent pipeline batching that groups consecutive commands targeting the same shard so they can execute under a single lock
+[26-03-20 22:38:10] acquisition. It involves:
+[26-03-20 22:38:10]   - Creating a batch processing system that classifies commands as read/write
+[26-03-20 22:38:10]   - Grouping same-shard consecutive commands for batch execution
+[26-03-20 22:38:10]   - Preserving Redis ordering semantics and error isolation
+[26-03-20 22:38:10]   - Excluding special commands (MULTI/EXEC, EVAL, Pub/Sub, multi-key) from batching
+[26-03-20 22:38:10] Key files: src/networking/server.rs (wire in batch processing), src/storage/batch.rs (new - batch logic), src/storage/mod.rs (exports), src/storage/sharded.rs (shard-level execution)
+[26-03-20 22:38:10] Let me start by understanding the current codebase structure.
+[26-03-20 22:39:59] Now let me read the key files I'll need to modify.
+[26-03-20 22:40:11] Let me read the Command struct and more of the dispatch_command flow.
+[26-03-20 22:40:19] Let me look at the command handler's execute method and the process_with_transaction.
+[26-03-20 22:47:26] Now I have all the information I need. Let me implement the pipeline batching. I'll start with the core files.
+[26-03-20 22:50:59] Now add the `execute_on_shard_ref` and `execute_on_shard_mut` methods to `ShardedStore`, plus the test helper and make `ShardMap` public.
+[26-03-20 22:51:08] Now add the shard execution methods and shard-indexed counter methods before the tests section.
+[26-03-20 22:51:22] Now update the storage module exports.
+[26-03-20 22:51:27] Now let me wire the batch processing into the server. Let me read the full server connection handler structure more carefully.
+[26-03-20 22:53:03] `get_db_by_index(db_index)` is what I need. Now let me implement the server integration. I need to add a method for pipeline processing.
+[26-03-20 22:53:03] Let me create the integration cleanly. I'll add a `process_pipeline` function to the batch module that takes the engine reference and db_index, then modify the server loop.
+[26-03-20 22:53:08] Good. Now let me modify the server to use pipeline batching. The key section to modify starts at line 430 and goes through line 688. I'll restructure it into a two-phase approach: parse first, then
+[26-03-20 22:53:08] batch-execute.
+[26-03-20 22:53:17] Now I need to modify the command processing loop. Let me replace the section from line ~430 to ~688. First, let me get the exact content to replace.
+[26-03-20 22:55:48] The replacement is large, so let me do it in parts. First, I'll replace the inner command processing loop (parsing + dispatch) with the new two-phase approach.
+[26-03-20 22:56:53] Now let's try to compile and see if there are any issues.
+[26-03-20 22:57:04] There are compilation errors. Let me fix them. The main issues are:
+[26-03-20 22:57:04]   1. `ShardMap` (hashbrown::HashMap) `remove()` returns `Option<Entry>`, not `Option<(key, Entry)>` like DashMap
+[26-03-20 22:57:04]   2. `log_command` takes owned `RespCommand`, not a reference
+[26-03-20 22:57:04]   3. Unused import `CommandKind`
+[26-03-20 22:57:20] All errors are type mismatches. Let me fix batch.rs first - the hashbrown HashMap `remove()` returns `Option<V>`, not `Option<(K, V)>`. I need to use `remove_entry()` instead.
+[26-03-20 22:57:28] Let me fix all the hashbrown HashMap issues in batch.rs. The hashbrown `remove` returns `Option<V>`, and `remove_entry` returns `Option<(K, V)>`.
+[26-03-20 22:57:33] The issue is that hashbrown's `HashMap::remove()` returns `Option<V>`, not `Option<(K, V)>`. I need to fix all instances. Let me fix them all at once.
+[26-03-20 22:57:38] I need to change all `map.remove()` calls to use the correct hashbrown API. In hashbrown, `remove()` returns `Option<V>` and `remove_entry()` returns `Option<(K, V)>`. Let me fix all of them.
+[26-03-20 22:57:58] Now fix all the expired entry removal patterns. They all follow the pattern `if let Some((k, v)) = map.remove(key.as_slice())`.
+[26-03-20 22:58:03] Now fix the append function's expired entry removal:
+[26-03-20 22:58:09] Now fix the server.rs issue with log_command taking owned vs reference:
+[26-03-20 22:58:13] Now let me check the `log_command` signature:
+[26-03-20 22:58:18] `log_command` is async and takes owned `RespCommand`. I need to fix the server code to pass it properly and await.
+[26-03-20 22:58:49] It compiles successfully. Let me clean up the warnings.
+[26-03-20 22:59:16] Now let's build and run the tests.
+[26-03-20 22:59:29] Build succeeds with only pre-existing warnings. Let me run the batch-specific tests first.
+[26-03-20 22:59:46] All 19 batch tests pass. Now let me run the full test suite.
+[26-03-20 23:06:14] The background task output is empty - let me run the tests directly.
+[26-03-20 23:10:47] All tests pass. 0 failures across all test suites. Let me also run the integration tests.
+[26-03-20 23:10:54] All tests pass. Now let me update the plan file and commit.
+[26-03-20 23:11:13] Now commit the changes.
+[26-03-20 23:11:46] Task 7 (Phase 4 - Pipeline Batching) is complete. Here's what was implemented:
+[26-03-20 23:11:46]   - Created `src/storage/batch.rs` with command classification (read/write/excluded), pipeline grouping by consecutive same-shard commands, and direct shard-level execution for 30+ Redis commands (GET,
+[26-03-20 23:11:46] SET, DEL, INCR, DECR, EXPIRE, HSET, HGET, SADD, SREM, ZADD, LPUSH, RPUSH, etc.)
+[26-03-20 23:11:46]   - Added `execute_on_shard_ref()` and `execute_on_shard_mut()` to `ShardedStore` for batch access under a single lock
+[26-03-20 23:11:46]   - Added shard-indexed memory and key count tracking methods for batch updates
+[26-03-20 23:11:46]   - Modified `src/networking/server.rs` to use two-phase pipeline processing: pre-parse all commands, then batch-execute groups under single shard locks when conditions permit
+[26-03-20 23:11:46]   - Read batches use shard read lock, write batches use shard write lock with AOF logging and replication propagation
+[26-03-20 23:11:46]   - Excluded commands (MULTI/EXEC, EVAL, Pub/Sub, multi-key, blocking) fall through to normal dispatch
+[26-03-20 23:11:46]   - 19 unit tests covering classification, grouping, read/write batch execution, error isolation, and command ordering
+[26-03-20 23:11:46] All 1026+ tests pass with 0 failures.
+[26-03-20 23:11:53] The background test task also completed successfully (exit code 0). Task 7 is done and committed. Stopping here for the external loop to handle the next task.
+
+--- task iteration 8 ---
+[26-03-20 23:12:34] I'm picking up Task 8: Phase 7 - Memory Optimization. This task focuses on three performance improvements:
+[26-03-20 23:12:34]   1. Small String Optimization (SSO) - storing values <= 23 bytes inline without heap allocation
+[26-03-20 23:12:34]   2. Static response interning - pre-allocated Bytes for common responses like OK, PONG, NIL
+[26-03-20 23:12:34]   3. Direct response serialization using itoa - bypassing intermediate RespValue for hot-path integer/string responses
+[26-03-20 23:12:34] Key files: src/storage/value.rs and src/networking/resp.rs
+[26-03-20 23:12:34] Let me start by reading the current state of these files and related code.
+[26-03-20 23:12:57] Let me explore how responses are constructed and how string values are used throughout.
+[26-03-20 23:13:13] Now let me look at the main response serialization path more closely and understand how the server accumulates responses.
+[26-03-20 23:13:18] Now I have a good understanding. Let me implement all three items. I'll start by adding the `itoa` dependency, then implement SSO in `value.rs`, and then add static response interning + itoa-based
+[26-03-20 23:13:18] serialization in `resp.rs`.
+[26-03-20 23:13:23] Now let me implement CompactValue (SSO) in value.rs:
+[26-03-20 23:14:39] Let me check the specific usages of `as_str().cloned()` and the mutation path:
+[26-03-20 23:15:53] Now I have a clear picture. Let me implement all three items. I'll start with CompactValue in value.rs, then update resp.rs for static interning and itoa.
+[26-03-20 23:16:01] Now add the CompactValue type after the type aliases:
+[26-03-20 23:16:25] Now change StoreValue::Str variant and update the methods:
+[26-03-20 23:16:31] Now update the StoreValue methods:
+[26-03-20 23:16:36] Now update the default_for_type and accessor methods:
+[26-03-20 23:16:42] Now update the as_str() and as_str_mut() methods:
+[26-03-20 23:16:50] Good. Now I need to fix all the call sites. Let me first fix the engine.rs callers since those are the most critical. Let me also handle the construction sites across the codebase. I'll use parallel agents
+[26-03-20 23:16:50] for the file updates since there are many files to modify.
+[26-03-20 23:21:48] There are compilation errors in a few files. Let me fix them.
+[26-03-20 23:22:57] The diagnostics may be stale from the parallel edits. Let me try to compile and see the actual state.
+[26-03-20 23:23:01] No errors - just warnings. The code compiles. Now let me implement the second part: static response interning and itoa in resp.rs.
+[26-03-20 23:23:14] Now add the itoa-based integer serialization optimization to the `serialize()` method. Let me update the Integer serialization:
+[26-03-20 23:23:18] Now I'll add a `serialize_fast()` method that tries static interning first, and update the Integer path to use itoa:
+[26-03-20 23:23:29] Now update the Integer serialization to use itoa instead of `i.to_string()`:
+[26-03-20 23:23:35] Good - no errors, just warnings. Now let me also update the BulkString serialization to use itoa for the length prefix:
+[26-03-20 23:23:44] Now update the Array header serialization to use itoa too:
+[26-03-20 23:23:53] Now update the remaining `.to_string()` calls in the RESP3 serialization path to use itoa where applicable:
+[26-03-20 23:23:57] Let me update the RESP3 type length serializations to use itoa too:
+[26-03-20 23:24:11] Good - all warnings, no errors. Now let me also clean up the unused CompactValue import in engine.rs:
+[26-03-20 23:24:21] Now let me write the tests. I need tests for SSO (boundary values 0, 23, 24 bytes) and response interning correctness.
+[26-03-20 23:24:24] Now let me find the end of the test module to add my tests:
+[26-03-20 23:24:50] Now let me add the SSO tests in value.rs:
+[26-03-20 23:25:22] Now let me validate - run the tests:
+[26-03-20 23:25:58] There's a compilation error in my test - `CompactValue` doesn't implement `PartialEq<[u8; 4]>` (fixed-size array). Let me fix the test:
+[26-03-20 23:26:42] All 16 SSO tests pass. Now run the resp tests:
+[26-03-20 23:26:47] All 94 resp tests pass (including the new static response and itoa tests). Now let me run the full test suite:
+[26-03-20 23:34:08] All tests pass. Let me verify the full count:
+[26-03-20 23:49:45] The full test suite is still running. The first run already passed - let me just verify it didn't have failures. Let me check the output of the first run:
+[26-03-20 23:51:56] The output was truncated by `tail -40`. Let me check if the lib tests (the main ones with 1000+ tests) passed:
+[26-03-20 23:52:15] The output file only has 40 lines because the original command had `tail -40`. The main lib test results were cut off. Let me wait for the second full run that's still going and get the complete output:
+[26-03-21 00:02:43] The second run seems stuck (it pipes through `head -30` which may have issues with the grep filter). Let me kill it and run fresh:
+[26-03-21 00:07:23] All 2547 tests pass with 0 failures. Now let me update the plan and commit.
+[26-03-21 00:07:40] Now commit all changes:

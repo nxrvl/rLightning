@@ -65,7 +65,7 @@ impl Entry {
 
     /// Create a new string entry (convenience for the most common case).
     pub fn new_string(value: Vec<u8>) -> Self {
-        Self::new(StoreValue::Str(value))
+        Self::new(StoreValue::Str(value.into()))
     }
 
     /// Check if this entry has expired.

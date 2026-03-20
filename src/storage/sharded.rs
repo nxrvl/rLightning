@@ -479,7 +479,7 @@ mod tests {
     use crate::storage::value::StoreValue;
 
     fn make_entry(val: &[u8]) -> Entry {
-        Entry::new(StoreValue::Str(val.to_vec()))
+        Entry::new(StoreValue::Str(val.to_vec().into()))
     }
 
     #[test]
@@ -524,16 +524,16 @@ mod tests {
 
         // Get
         let entry = store.get(b"key1").unwrap();
-        assert_eq!(entry.value.as_str().unwrap(), &b"val1".to_vec());
+        assert_eq!(entry.value.as_str().unwrap(), b"val1".as_slice());
         drop(entry);
 
         // Get mut
         {
             let mut entry = store.get_mut(b"key1").unwrap();
-            entry.value = StoreValue::Str(b"val2".to_vec());
+            entry.value = StoreValue::Str(b"val2".to_vec().into());
         }
         let entry = store.get(b"key1").unwrap();
-        assert_eq!(entry.value.as_str().unwrap(), &b"val2".to_vec());
+        assert_eq!(entry.value.as_str().unwrap(), b"val2".as_slice());
         drop(entry);
 
         // Contains
@@ -543,7 +543,7 @@ mod tests {
         // Remove
         let (k, v) = store.remove(b"key1").unwrap();
         assert_eq!(k, b"key1".to_vec());
-        assert_eq!(v.value.as_str().unwrap(), &b"val2".to_vec());
+        assert_eq!(v.value.as_str().unwrap(), b"val2".as_slice());
         assert!(store.is_empty());
         assert!(store.remove(b"key1").is_none());
     }
@@ -556,15 +556,15 @@ mod tests {
         match store.entry(b"key1".to_vec()) {
             ShardEntry::Occupied(mut occ) => {
                 assert_eq!(occ.key(), &b"key1".to_vec());
-                assert_eq!(occ.get().value.as_str().unwrap(), &b"val1".to_vec());
+                assert_eq!(occ.get().value.as_str().unwrap(), b"val1".as_slice());
 
                 // Modify through entry
-                occ.get_mut().value = StoreValue::Str(b"val2".to_vec());
-                assert_eq!(occ.get().value.as_str().unwrap(), &b"val2".to_vec());
+                occ.get_mut().value = StoreValue::Str(b"val2".to_vec().into());
+                assert_eq!(occ.get().value.as_str().unwrap(), b"val2".as_slice());
 
                 // Insert replacement
                 let old = occ.insert(make_entry(b"val3"));
-                assert_eq!(old.value.as_str().unwrap(), &b"val2".to_vec());
+                assert_eq!(old.value.as_str().unwrap(), b"val2".as_slice());
             }
             ShardEntry::Vacant(_) => panic!("Expected occupied"),
         }
@@ -574,7 +574,7 @@ mod tests {
             ShardEntry::Occupied(occ) => {
                 let (k, v) = occ.remove_entry();
                 assert_eq!(k, b"key1".to_vec());
-                assert_eq!(v.value.as_str().unwrap(), &b"val3".to_vec());
+                assert_eq!(v.value.as_str().unwrap(), b"val3".as_slice());
             }
             _ => panic!("Expected occupied"),
         }

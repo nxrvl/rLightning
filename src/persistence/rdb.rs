@@ -20,7 +20,7 @@ use crate::storage::value::StoreValue;
 /// Serialize a StoreValue to bytes for RDB persistence.
 fn serialize_store_value(value: &StoreValue) -> Result<Vec<u8>, String> {
     match value {
-        StoreValue::Str(v) => Ok(v.clone()),
+        StoreValue::Str(v) => Ok(v.to_vec()),
         StoreValue::Hash(m) => {
             let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
                 m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -46,7 +46,7 @@ fn serialize_store_value(value: &StoreValue) -> Result<Vec<u8>, String> {
 /// Deserialize bytes to a StoreValue for RDB loading.
 fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8]) -> Result<StoreValue, String> {
     match data_type {
-        RedisDataType::String => Ok(StoreValue::Str(bytes.to_vec())),
+        RedisDataType::String => Ok(StoreValue::Str(bytes.to_vec().into())),
         RedisDataType::Hash => {
             let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
                 bincode::deserialize(bytes).map_err(|e| format!("Hash deserialization: {}", e))?;
