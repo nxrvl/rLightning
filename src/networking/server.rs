@@ -600,26 +600,19 @@ impl Server {
                                         }
                                     }
 
-                                    // Pre-batch eviction check: ensure memory is under maxmemory
-                                    if command_handler.storage().check_write_memory(0).await.is_err() {
-                                        for _ in &group.commands {
-                                            let resp = RespValue::Error(
-                                                "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
-                                            );
-                                            if let Ok(bytes) = resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
-                                            }
-                                            commands_processed += 1;
-                                        }
-                                        continue;
-                                    }
+                                    // Pre-batch eviction: try to free memory before the batch
+                                    // (best-effort; per-command budget in execute_write_batch
+                                    // handles individual OOM rejection, allowing freeing commands
+                                    // like DEL/HDEL/SREM/ZREM through even when over maxmemory).
+                                    let _ = command_handler.storage().check_write_memory(0).await;
 
                                     // Write batch: single shard write lock
                                     let max_key_size = command_handler.storage().max_key_size();
                                     let max_value_size = command_handler.storage().max_value_size();
+                                    let memory_budget = command_handler.storage().remaining_memory_budget();
                                     let results = active_db.execute_on_shard_mut(
                                         group.shard_idx,
-                                        |map| batch::execute_write_batch(map, &group.commands, max_key_size, max_value_size),
+                                        |map| batch::execute_write_batch(map, &group.commands, max_key_size, max_value_size, memory_budget),
                                     );
                                     let mut batch_write_count: u64 = 0;
                                     let mut batch_key_created: u32 = 0;
@@ -640,26 +633,91 @@ impl Server {
                                             command_handler.storage().adjust_global_memory(*mem_delta);
                                         }
 
-                                        // Track key count changes
+                                        // Track key count changes and update prefix index.
+                                        // Use explicit db_index since the batch path does not
+                                        // enter a CURRENT_DB_INDEX scope (unlike handler.rs:84).
                                         if *key_delta > 0 {
                                             batch_key_created += *key_delta as u32;
+                                            if let Some(key) = group.commands[i].args.first() {
+                                                command_handler.storage().update_prefix_indices_for_db(key, true, db_index).await;
+                                            }
                                         } else if *key_delta < 0 {
                                             batch_key_deleted += (-*key_delta) as u32;
+                                            if let Some(key) = group.commands[i].args.first() {
+                                                command_handler.storage().update_prefix_indices_for_db(key, false, db_index).await;
+                                            }
                                         }
 
                                         // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
                                             let cmd = group.commands[i];
                                             let cmd_lower = cmd.name.to_lowercase();
-                                            batch_write_count += 1;
+                                            let cmd_name_bytes = cmd.name.as_bytes();
 
-                                            // Bump key version for WATCH invalidation
-                                            if let Some(key) = cmd.args.first() {
-                                                command_handler.storage().bump_key_version_for_db(key, db_index);
+                                            // Only count actual mutations for RDB snapshot
+                                            // triggering (matches KeepUnchanged semantics
+                                            // in the non-batched atomic_modify path).
+                                            // Detect no-op writes for RDB snapshot counting.
+                                            // Expired-key cleanup (key_delta=-1 with zero-result)
+                                            // is treated as a no-op, matching the non-batched
+                                            // atomic_modify path which uses KeepUnchanged.
+                                            let is_no_op = match cmd_name_bytes.first().map(|b| b.to_ascii_uppercase()) {
+                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") =>
+                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") =>
+                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") =>
+                                                    matches!(result, Ok(RespValue::BulkString(None))),
+                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") =>
+                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                                Some(b'P') =>
+                                                    (cmd_eq(cmd_name_bytes, b"PEXPIRE") || cmd_eq(cmd_name_bytes, b"PERSIST"))
+                                                    && matches!(result, Ok(RespValue::Integer(0))),
+                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") =>
+                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") =>
+                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                                _ => false,
+                                            };
+                                            if !is_no_op {
+                                                batch_write_count += 1;
+                                            }
+
+                                            // Bump key version for WATCH invalidation.
+                                            // The non-batched path uses KeepUnchanged in
+                                            // atomic_modify to skip bumps for no-op
+                                            // HDEL/SREM/ZREM (matching Redis semantics
+                                            // where signalModifiedKey is only called on
+                                            // actual mutation). Match that here by checking
+                                            // the integer result for those commands.
+                                            // DEL, EXPIRE, PEXPIRE, PERSIST, and GETDEL
+                                            // also only bump on actual mutation.
+                                            let should_bump = match cmd_name_bytes.first().map(|b| b.to_ascii_uppercase()) {
+                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") =>
+                                                    *key_delta != 0,
+                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
+                                                Some(b'P') if cmd_eq(cmd_name_bytes, b"PEXPIRE") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                Some(b'P') if cmd_eq(cmd_name_bytes, b"PERSIST") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
+                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") =>
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
+                                                _ => true,
+                                            };
+                                            if should_bump {
+                                                if let Some(key) = cmd.args.first() {
+                                                    command_handler.storage().bump_key_version_for_db(key, db_index);
+                                                }
                                             }
 
                                             // Notify blocking manager for LPUSH/RPUSH
-                                            let cmd_name_bytes = cmd.name.as_bytes();
                                             if cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH")
                                             {
                                                 if let Some(key) = cmd.args.first() {

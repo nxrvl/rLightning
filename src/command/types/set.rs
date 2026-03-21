@@ -78,13 +78,15 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             }
 
-            if set.is_empty() {
+            if set.is_empty() && count > 0 {
                 Ok((ModifyResult::Delete, count))
-            } else {
+            } else if count > 0 {
                 Ok((ModifyResult::Keep, count))
+            } else {
+                Ok((ModifyResult::KeepUnchanged, 0))
             }
         }
-        None => Ok((ModifyResult::Keep, 0)),
+        None => Ok((ModifyResult::KeepUnchanged, 0)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 

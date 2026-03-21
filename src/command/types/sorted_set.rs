@@ -393,17 +393,25 @@ pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let key = &args[0];
     let members = args[1..].to_vec();
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |existing| {
-        if existing.is_none() {
-            return Ok((ModifyResult::Delete, 0i64));
-        }
-        let mut ss = take_zset_mut(existing)?;
-        let mut removed = 0i64;
-        for member in &members {
-            if ss.remove(member) {
-                removed += 1;
+        match existing {
+            Some(StoreValue::ZSet(ss)) => {
+                let mut removed = 0i64;
+                for member in &members {
+                    if ss.remove(member) {
+                        removed += 1;
+                    }
+                }
+                if removed == 0 {
+                    Ok((ModifyResult::KeepUnchanged, 0i64))
+                } else if ss.is_empty() {
+                    Ok((ModifyResult::Delete, removed))
+                } else {
+                    Ok((ModifyResult::Keep, removed))
+                }
             }
+            None => Ok((ModifyResult::KeepUnchanged, 0i64)),
+            _ => unreachable!(),
         }
-        Ok((zset_result(ss), removed))
     })?;
     Ok(RespValue::Integer(result))
 }

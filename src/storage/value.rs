@@ -329,6 +329,11 @@ pub enum StoreValue {
 pub enum ModifyResult {
     /// Value was modified in-place via the &mut reference, keep it
     Keep,
+    /// Value was NOT modified — true no-op. Unlike `Keep`, this skips
+    /// WATCH version bump and LRU touch. Use for commands like HDEL/SREM/ZREM
+    /// that examined an existing key but removed nothing (matching Redis
+    /// semantics where signalModifiedKey is only called on actual mutation).
+    KeepUnchanged,
     /// Replace/create with a new value
     Set(StoreValue),
     /// Delete the key

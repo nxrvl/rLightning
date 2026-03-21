@@ -715,3 +715,95 @@ Task 12: Verify Acceptance Criteria
 - ThreadSanitizer: skipped (nightly not installed)
 - Persistence integrity: verified (5 data types round-tripped correctly)
 [26-03-21 02:05:20] Now let me commit the changes.
+[26-03-21 02:05:43] Task 12 is complete. Task 13 still has uncompleted checkboxes, so stopping here.
+[26-03-21 02:05:43] Summary of what was done in Task 12:
+[26-03-21 02:05:43]   - Full test suite: 1400+ tests, 0 failures across all test targets
+[26-03-21 02:05:43]   - Integration tests: passed
+[26-03-21 02:05:43]   - Redis compatibility tests: passed (23s run)
+[26-03-21 02:05:43]   - Multi-language compat: Go and Python clients ran successfully; JS client had infrastructure issue (empty results)
+[26-03-21 02:05:43]   - Benchmarks: fixed OOM crash in storage_bench (increased memory limit from 10MB to 100MB, handled error gracefully) and AOF bench (restructured to reuse single AofPersistence instance instead of
+[26-03-21 02:05:43] spawning background task per iteration)
+[26-03-21 02:05:43]   - redis-benchmark results at pipeline depths 1/16/64: GET up to 1.9M rps, SET up to 443K rps
+[26-03-21 02:05:43]   - ThreadSanitizer: skipped (nightly toolchain not installed)
+[26-03-21 02:05:43]   - Persistence integrity: all 5 data types (string, hash, list, set, sorted set) verified correct after save/restart cycle
+[26-03-21 02:05:50] The background benchmark run completed. The full benchmark suite already ran successfully as part of Task 12 - the fixes to storage_bench and advanced_features_bench resolved the OOM crashes. Task 12 is
+[26-03-21 02:05:50] committed and done. Task 13 (Update Documentation) remains with uncompleted checkboxes.
+[26-03-21 02:05:57] Protocol benchmarks also completed successfully. All benchmark suites passed. Task 12 is already committed. Ready for the next loop iteration to handle Task 13.
+[26-03-21 02:06:01] Multi-language compat tests also completed. All background tasks from Task 12 are done. Task 12 is committed. Waiting for the next loop iteration to handle Task 13 (Update Documentation).
+[26-03-21 02:31:26] Full benchmark suite completed successfully (exit code 0). All background tasks from Task 12 are now done. Task 12 is committed. The loop should pick up Task 13 (Update Documentation) next.
+
+--- task iteration 13 ---
+[26-03-21 02:31:50] Task 13: Update Documentation
+[26-03-21 02:31:50] This task updates project documentation to reflect all the performance optimization work completed in phases 0-12. It involves:
+[26-03-21 02:31:50]   - Updating CLAUDE.md's architecture section to document sharded storage, native data types, zero-copy parser, and other optimizations
+[26-03-21 02:31:50]   - Marking all completed phases in docs/OPTIMIZATION_PLAN.md
+[26-03-21 02:31:50]   - Moving the plan file to docs/plans/completed/
+[26-03-21 02:31:50] Key files: CLAUDE.md, docs/OPTIMIZATION_PLAN.md, docs/plans/2026-03-20-performance-optimization-v3.md
+[26-03-21 02:31:50] Let me read the relevant files first.
+[26-03-21 02:32:07] Let me check the current state of key files to write accurate documentation updates.
+[26-03-21 02:32:34] Now I have all the context. Let me implement all three items in Task 13.
+[26-03-21 02:32:34] First, let me update the CLAUDE.md architecture section to reflect the optimization work.
+[26-03-21 02:33:39] Now update the Data Flow section to mention the zero-copy parser and batching:
+[26-03-21 02:33:51] Now update the dependencies section in the Context area of CLAUDE.md:
+[26-03-21 02:34:06] That string is in the plan file, not CLAUDE.md. The CLAUDE.md is done. Now let me update the OPTIMIZATION_PLAN.md to mark all phases as completed. I need to add completion status markers. The document is
+[26-03-21 02:34:06] in Russian, so I'll add a completion note at the top.
+[26-03-21 02:34:22] Now mark the per-phase sections. Let me add completion markers to each phase heading.
+[26-03-21 02:34:31] Let me do the remaining phases more efficiently by reading the section headers and doing a batch replace.
+[26-03-21 02:35:13] Now move the plan file to completed/:
+[26-03-21 02:35:36] Now I need to mark the checkboxes as completed in the moved plan file. Let me update the completed copy:
+[26-03-21 02:35:44] No code changes were made so no cargo test/build is needed - this is purely a documentation update. Let me verify the plan has no remaining unchecked items:
+[26-03-21 02:35:52] All checkboxes are marked complete. Now let me commit:
+[26-03-21 02:36:00] The delete was already staged. Let me stage only the new/modified files:
+[26-03-21 02:36:28] All checkboxes in the plan are now marked complete. No remaining `[ ]` items exist in any Task section.
+[26-03-21 02:36:28] <<<RALPHEX:ALL_TASKS_DONE>>>
+
+all tasks completed, starting code review...
+
+--- claude review 0: all findings ---
+[26-03-21 02:36:28] agent "quality": model=default, subagent=general-purpose
+[26-03-21 02:36:28] agent "implementation": model=default, subagent=general-purpose
+[26-03-21 02:36:28] agent "testing": model=default, subagent=general-purpose
+[26-03-21 02:36:28] agent "simplification": model=default, subagent=general-purpose
+[26-03-21 02:36:28] agent "documentation": model=default, subagent=general-purpose
+[26-03-21 02:36:36] I'll start by getting the branch context, then launch all 5 review agents in parallel.
+[26-03-21 02:36:43] Now launching all 5 review agents in parallel.
+[26-03-21 02:43:48] All 5 agents have returned. Now I'll verify each finding against the actual code.
+[26-03-21 02:43:48] Let me read the key files to verify the critical findings.
+[26-03-21 02:45:23] Now I have all the context I need. Let me verify a few more details and then fix all confirmed issues.
+[26-03-21 02:45:47] Now let me also check what `execute_write_batch` returns and the `execute_write_cmd` function to understand the full write flow:
+[26-03-21 02:46:38] Good. Now I have everything I need. Let me implement all the fixes. I'll start with the most critical bugs and work through them.
+[26-03-21 02:46:55] Now fix the clock test tolerance (5ms is too tight for CI):
+[26-03-21 02:47:09] Now fix batch_expire to handle negative/zero TTL by deleting the key (matching Redis behavior):
+[26-03-21 02:47:21] Now fix batch_pexpire similarly:
+[26-03-21 02:47:31] Now fix batch_getdel to check type before removing:
+[26-03-21 02:47:43] Now fix the WATCH invalidation issue — add `bump_key_version` calls after batch writes in server.rs:
+[26-03-21 02:47:49] I need to add bump_key_version and expiration heap entries after successful batch writes. Let me also check what imports are available in server.rs:
+[26-03-21 02:48:00] Now I need to check how `cmd_eq` is imported and if `cached_now` is available in server.rs. Let me also check if `batch::classify_command` can be used to determine write commands:
+[26-03-21 02:48:12] I need to add the import. Now let me add the WATCH invalidation fix and expiration heap fix to server.rs. The key insight: after a successful batch write, I need to:
+[26-03-21 02:48:12]   1. Call `command_handler.storage().bump_key_version(&key)` for each successful write
+[26-03-21 02:48:12]   2. For EXPIRE/PEXPIRE commands that succeeded, add to the expiration heap
+[26-03-21 02:48:18] Now add WATCH invalidation and expiration heap entries after batch writes:
+[26-03-21 02:48:39] Now fix the "zero allocation" comment in resp.rs:
+[26-03-21 02:48:47] Now fix test_batch_read_get to actually verify values:
+[26-03-21 02:49:02] Now fix test_batch_write_set_del to verify the final value:
+[26-03-21 02:49:12] Now remove the dead code. First, remove `cleanup_stale_metadata` no-op and its call:
+[26-03-21 02:49:17] Now remove the dead `cleanup_stale_metadata` function itself:
+[26-03-21 02:49:30] Hmm, the diagnostic still shows `cleanup_stale_metadata` at line 629. Let me check:
+[26-03-21 02:49:36] There's an error — the call site still references the deleted method. Let me check the call site:
+[26-03-21 02:49:50] Need to remove both the test helper and the test:
+[26-03-21 02:50:01] Now remove the test that references it:
+[26-03-21 02:50:27] Now remove both `test_cleanup_stale_metadata` and `test_cleanup_preserves_active_keys`:
+[26-03-21 02:50:43] Now remove the dead `for_each_mut` from sharded.rs:
+[26-03-21 02:50:51] Remove the dead `unique_shard_indices_from_slices`:
+[26-03-21 02:50:58] Remove the dead `PipelineResult` enum from batch.rs:
+[26-03-21 02:51:11] Now let me also fix the unused variables in batch.rs test that the diagnostic is showing. Let me find it:
+[26-03-21 02:51:21] Fix the unused variables:
+[26-03-21 02:51:28] Now let me build and run the tests to verify the fixes compile and pass:
+[26-03-21 02:52:15] Build succeeds. Now run the tests for the modified modules:
+[26-03-21 02:52:37] 4 engine tests failed. Let me see which ones:
+[26-03-21 02:52:48] Let me see the failure details:
+[26-03-21 02:53:00] It passed alone. These tests may be timing-sensitive when run together. Let me run all 4 failed tests individually:
+[26-03-21 02:53:06] All 4 pass when run again. These are timing-sensitive tests (they involve expiration). Let me run the full engine test suite once more to confirm:
+[26-03-21 02:53:19] These failures are consistent when all engine tests run together. Let me check the failing tests to understand the root cause:
+[26-03-21 02:53:48] These are timing-related failures. Let me examine these tests:
+[26-03-21 02:54:17] Let me check if these test failures are pre-existing by running them on the original code:

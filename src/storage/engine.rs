@@ -270,27 +270,36 @@ impl StorageEngine {
                 const SHARDS_PER_TICK: usize = 4;
                 const MAX_EXPIRES_PER_SHARD: usize = 25;
 
-                for _ in 0..SHARDS_PER_TICK {
-                    let db = engine.get_db_by_index(rr_db);
-                    let num_shards = db.num_shards();
+                // Hold cross_db_lock read guard to prevent SWAPDB from
+                // changing db_mapping between get_db_by_index and
+                // bump_key_version_for_db, which would cause the version
+                // bump to target the wrong logical database.
+                {
+                    let _db_guard = engine.cross_db_lock.read().await;
+                    for _ in 0..SHARDS_PER_TICK {
+                        let db = engine.get_db_by_index(rr_db);
+                        let num_shards = db.num_shards();
 
-                    if rr_shard < num_shards {
-                        let removed = db.expire_shard(rr_shard, now, MAX_EXPIRES_PER_SHARD);
-                        for (k, entry) in &removed {
-                            let size = Self::calculate_entry_size(k, &entry.value) as u64;
-                            engine.current_memory.fetch_sub(size, Ordering::Relaxed);
-                            engine.key_count.fetch_sub(1, Ordering::Relaxed);
+                        if rr_shard < num_shards {
+                            let removed = db.expire_shard(rr_shard, now, MAX_EXPIRES_PER_SHARD);
+                            for (k, entry) in &removed {
+                                let size = Self::calculate_entry_size(k, &entry.value) as u64;
+                                engine.current_memory.fetch_sub(size, Ordering::Relaxed);
+                                engine.key_count.fetch_sub(1, Ordering::Relaxed);
+                                // Bump key version so WATCH detects expiry
+                                engine.bump_key_version_for_db(k, rr_db);
+                            }
                         }
-                    }
 
-                    // Advance round-robin
-                    rr_shard += 1;
-                    let db_shards = engine.get_db_by_index(rr_db).num_shards();
-                    if rr_shard >= db_shards {
-                        rr_shard = 0;
-                        rr_db += 1;
-                        if rr_db >= NUM_DATABASES {
-                            rr_db = 0;
+                        // Advance round-robin
+                        rr_shard += 1;
+                        let db_shards = engine.get_db_by_index(rr_db).num_shards();
+                        if rr_shard >= db_shards {
+                            rr_shard = 0;
+                            rr_db += 1;
+                            if rr_db >= NUM_DATABASES {
+                                rr_db = 0;
+                            }
                         }
                     }
                 }
@@ -298,6 +307,10 @@ impl StorageEngine {
                 // Also do probabilistic sampling every 10 ticks (1 second)
                 metadata_cleanup_counter += 1;
                 if metadata_cleanup_counter % 10 == 0 {
+                    // Hold cross_db_lock read guard to prevent SWAPDB from
+                    // changing db_mapping between get_db_by_index and
+                    // bump_key_version_for_db inside probabilistic cleanup.
+                    let _db_guard = engine.cross_db_lock.read().await;
                     engine.probabilistic_cleanup_sharded(now);
                 }
                 if metadata_cleanup_counter >= 600 {
@@ -615,6 +628,8 @@ impl StorageEngine {
                 if removed {
                     self.current_memory.fetch_sub(entry_size, Ordering::Relaxed);
                     self.key_count.fetch_sub(1, Ordering::Relaxed);
+                    // Bump key version so WATCH detects expiry
+                    self.bump_key_version_for_db(&key, db_idx);
                 }
             }
         }
@@ -645,6 +660,8 @@ impl StorageEngine {
         if removed {
             self.current_memory.fetch_sub(entry_size, Ordering::Relaxed);
             self.key_count.fetch_sub(1, Ordering::Relaxed);
+            // Bump key version so WATCH detects expiry
+            self.bump_key_version(key);
         }
     }
 
@@ -689,15 +706,16 @@ impl StorageEngine {
     ];
 
     /// Update prefix indices when a key is added or removed (DB-scoped)
-    async fn update_prefix_indices(&self, key: &[u8], is_insert: bool) {
+    pub async fn update_prefix_indices(&self, key: &[u8], is_insert: bool) {
         let db_idx = Self::current_db_idx();
         self.update_prefix_indices_for_db(key, is_insert, db_idx)
             .await;
     }
 
     /// Update prefix indices for a specific database index.
-    /// Used by cross-DB operations (MOVE) that need to update the destination DB's prefix index.
-    async fn update_prefix_indices_for_db(&self, key: &[u8], is_insert: bool, db_idx: usize) {
+    /// Used by cross-DB operations (MOVE) and the batch pipeline path (which lacks
+    /// a CURRENT_DB_INDEX scope) to update the correct DB's prefix index.
+    pub async fn update_prefix_indices_for_db(&self, key: &[u8], is_insert: bool, db_idx: usize) {
         if let Ok(key_str) = std::str::from_utf8(key) {
             let mut index = self.prefix_index.write().await;
 
@@ -1342,6 +1360,17 @@ impl StorageEngine {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         }
+    }
+
+    /// Return the remaining memory budget before maxmemory is hit.
+    /// Returns None if no memory limit is configured (unlimited).
+    pub fn remaining_memory_budget(&self) -> Option<usize> {
+        let max_memory = self.active_max_memory.load(Ordering::Acquire);
+        if max_memory == usize::MAX {
+            return None;
+        }
+        let current = self.current_memory.load(Ordering::Relaxed) as usize;
+        Some(max_memory.saturating_sub(current))
     }
 
     /// Adjust the global memory counter by a signed delta (for batch path synchronization).
@@ -2892,7 +2921,21 @@ impl StorageEngine {
                     f(Some(&mut occ.get_mut().value))?
                 };
 
+                let is_unchanged = matches!(&action, ModifyResult::KeepUnchanged);
+
                 match action {
+                    ModifyResult::KeepUnchanged => {
+                        if expired {
+                            // Expired key, closure got None — clean up
+                            self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                            occ.remove();
+                            self.key_count.fetch_sub(1, Ordering::Relaxed);
+                            // Physical removal of an expired entry is a state change
+                            // that WATCH must detect — bump the key version
+                            self.bump_key_version(key);
+                        }
+                        // Non-expired: true no-op — no touch, no memory update
+                    }
                     ModifyResult::Keep => {
                         if expired {
                             // Expired key, closure got None but returned Keep = no-op
@@ -2932,8 +2975,10 @@ impl StorageEngine {
                         self.key_count.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
-                self.bump_key_version(key);
-                self.increment_write_counters_sync();
+                if !is_unchanged {
+                    self.bump_key_version(key);
+                    self.increment_write_counters_sync();
+                }
                 Ok(result)
             }
             ShardEntry::Vacant(vac) => {
@@ -2947,7 +2992,7 @@ impl StorageEngine {
                         self.bump_key_version(key);
                         self.increment_write_counters_sync();
                     }
-                    ModifyResult::Keep | ModifyResult::Delete => {
+                    ModifyResult::Keep | ModifyResult::KeepUnchanged | ModifyResult::Delete => {
                         // Nothing to keep or delete for vacant entry
                     }
                 }
@@ -3223,13 +3268,15 @@ impl StorageEngine {
                         removed += 1;
                     }
                 }
-                if map.is_empty() {
+                if map.is_empty() && removed > 0 {
                     Ok((ModifyResult::Delete, removed))
-                } else {
+                } else if removed > 0 {
                     Ok((ModifyResult::Keep, removed))
+                } else {
+                    Ok((ModifyResult::KeepUnchanged, 0))
                 }
             }
-            None => Ok((ModifyResult::Delete, 0)),
+            None => Ok((ModifyResult::KeepUnchanged, 0)),
             _ => unreachable!(),
         })
     }

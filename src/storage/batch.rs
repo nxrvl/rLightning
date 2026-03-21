@@ -325,41 +325,66 @@ pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandR
 /// Execute a batch of write commands under a single shard write lock.
 /// Returns one (CommandResult, mem_delta, key_delta) per command in order.
 /// key_delta: +1 = key created, -1 = key deleted, 0 = no change.
+///
+/// `memory_budget`: optional remaining bytes before maxmemory is hit.
+/// When set, the batch tracks accumulated memory growth and returns OOM
+/// errors for commands that would exceed the budget.
 pub fn execute_write_batch(
     map: &mut ShardMap,
     commands: &[&Command],
     max_key_size: usize,
     max_value_size: usize,
+    memory_budget: Option<usize>,
 ) -> Vec<(CommandResult, i64, i32)> {
-    commands
-        .iter()
-        .map(|cmd| {
-            // Validate key size for commands that have a key arg
-            if let Some(key) = cmd.args.first() {
-                if key.len() > max_key_size {
-                    return (Err(CommandError::InvalidArgument(format!(
-                        "key size {} exceeds maximum {}",
-                        key.len(),
-                        max_key_size
-                    ))), 0, 0);
-                }
+    let mut results = Vec::with_capacity(commands.len());
+    let mut accumulated_mem: i64 = 0;
+
+    for cmd in commands {
+        // Per-command memory budget check: if accumulated allocations have reached
+        // or exceeded the remaining budget, reject allocating commands with OOM.
+        // Memory-exempt commands (DEL, HDEL, SREM, ZREM, GETDEL, EXPIRE, PEXPIRE,
+        // PERSIST) are always allowed, matching Redis semantics where memory-freeing
+        // or metadata-only commands run even when over maxmemory.
+        if let Some(budget) = memory_budget {
+            let cmd_name = cmd.name.as_bytes();
+            if !is_memory_exempt_command(cmd_name) && accumulated_mem >= budget as i64 {
+                results.push((Err(CommandError::StorageError(
+                    "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+                )), 0, 0));
+                continue;
             }
-            // Validate value size for SET (args[1]) and APPEND (args[1])
-            let name = cmd.name.as_bytes();
-            if cmd.args.len() >= 2 {
-                let is_set = name.len() == 3 && cmd_eq(name, b"SET");
-                let is_append = name.len() == 6 && cmd_eq(name, b"APPEND");
-                if (is_set || is_append) && cmd.args[1].len() > max_value_size {
-                    return (Err(CommandError::InvalidArgument(format!(
-                        "value size {} exceeds maximum {}",
-                        cmd.args[1].len(),
-                        max_value_size
-                    ))), 0, 0);
-                }
+        }
+
+        // Validate key size for commands that have a key arg
+        if let Some(key) = cmd.args.first() {
+            if key.len() > max_key_size {
+                results.push((Err(CommandError::InvalidArgument(format!(
+                    "key size {} exceeds maximum {}",
+                    key.len(),
+                    max_key_size
+                ))), 0, 0));
+                continue;
             }
-            execute_write_cmd(map, cmd)
-        })
-        .collect()
+        }
+        // Validate value size for SET (args[1]) and APPEND (args[1])
+        let name = cmd.name.as_bytes();
+        if cmd.args.len() >= 2 {
+            let is_set = name.len() == 3 && cmd_eq(name, b"SET");
+            let is_append = name.len() == 6 && cmd_eq(name, b"APPEND");
+            if (is_set || is_append) && cmd.args[1].len() > max_value_size {
+                results.push((Err(CommandError::InvalidArgument(format!(
+                    "value size {} exceeds maximum {}",
+                    cmd.args[1].len(),
+                    max_value_size
+                ))), 0, 0));
+                continue;
+            }
+        }
+        let (result, mem_delta, key_delta) = execute_write_cmd(map, cmd);
+        accumulated_mem += mem_delta;
+        results.push((result, mem_delta, key_delta));
+    }
+    results
 }
 
 // --- Read command implementations ---
@@ -628,6 +653,24 @@ fn batch_zscore(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult
             _ => Err(CommandError::WrongType),
         },
         None => Ok(RespValue::BulkString(None)),
+    }
+}
+
+/// Returns true for commands that are memory-neutral or only free memory.
+/// These are allowed even when over maxmemory, matching Redis semantics:
+/// - DEL, GETDEL, HDEL, SREM, ZREM: freeing commands
+/// - EXPIRE, PEXPIRE, PERSIST: metadata-only (modify expiration, no allocation)
+#[inline]
+fn is_memory_exempt_command(name: &[u8]) -> bool {
+    match name.first().map(|b| b.to_ascii_uppercase()) {
+        Some(b'D') => cmd_eq(name, b"DEL"),
+        Some(b'E') => cmd_eq(name, b"EXPIRE"),
+        Some(b'G') => cmd_eq(name, b"GETDEL"),
+        Some(b'H') => cmd_eq(name, b"HDEL"),
+        Some(b'P') => cmd_eq(name, b"PEXPIRE") || cmd_eq(name, b"PERSIST"),
+        Some(b'S') => cmd_eq(name, b"SREM"),
+        Some(b'Z') => cmd_eq(name, b"ZREM"),
+        _ => false,
     }
 }
 
@@ -1043,6 +1086,11 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
+                // Remove expired entry (lazy cleanup) and signal key removal
+                if let Some(v) = map.remove(key.as_slice()) {
+                    let mem = (key.len() + v.value.mem_size()) as i64;
+                    return (Ok(RespValue::Integer(0)), -mem, -1);
+                }
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
@@ -1130,6 +1178,11 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
+                // Remove expired entry (lazy cleanup) and signal key removal
+                if let Some(v) = map.remove(key.as_slice()) {
+                    let mem = (key.len() + v.value.mem_size()) as i64;
+                    return (Ok(RespValue::Integer(0)), -mem, -1);
+                }
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
@@ -1232,6 +1285,11 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
+                // Remove expired entry (lazy cleanup) and signal key removal
+                if let Some(v) = map.remove(key.as_slice()) {
+                    let mem = (key.len() + v.value.mem_size()) as i64;
+                    return (Ok(RespValue::Integer(0)), -mem, -1);
+                }
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
@@ -1642,7 +1700,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024, None)
         });
         assert_eq!(results.len(), 2);
         assert!(results[0].0.is_ok());
@@ -1664,7 +1722,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024, None)
         });
         assert_eq!(results.len(), 2);
         match &results[0].0 {
@@ -1690,7 +1748,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024, None)
         });
         assert_eq!(results.len(), 2);
         assert!(results[0].0.is_err()); // WRONGTYPE error
@@ -1708,7 +1766,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2, &cmd3];
 
         store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024, None)
         });
 
         // After batch, key should have the last value
@@ -1777,7 +1835,7 @@ mod tests {
                     } else {
                         let batch_results =
                             store.execute_on_shard_mut(group.shard_idx, |map| {
-                                execute_write_batch(map, &group.commands, 1024, 5 * 1024 * 1024)
+                                execute_write_batch(map, &group.commands, 1024, 5 * 1024 * 1024, None)
                             });
                         results.extend(batch_results.into_iter().map(|(r, _, _)| r));
                     }
