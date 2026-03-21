@@ -10,7 +10,7 @@ use crate::networking::raw_command::cmd_eq;
 use crate::networking::resp::RespValue;
 use crate::storage::item::Entry;
 use crate::storage::sharded::ShardMap;
-use crate::storage::value::StoreValue;
+use crate::storage::value::{CompactValue, StoreValue};
 use std::time::{Duration, Instant};
 use crate::storage::clock::cached_now;
 
@@ -768,7 +768,7 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
     }
     let key = &args[0];
     let value = &args[1];
-    let new_mem = (key.len() + value.len()) as i64;
+    let new_mem = (key.len() + CompactValue::mem_for_data_len(value.len())) as i64;
 
     let (old_mem, physically_exists) = map
         .get(key)
@@ -872,7 +872,7 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
     };
 
     let new_bytes = new_val.to_string().into_bytes();
-    let new_mem = (key.len() + new_bytes.len()) as i64;
+    let new_mem = (key.len() + CompactValue::mem_for_data_len(new_bytes.len())) as i64;
 
     let key_delta = if physically_exists { 0 } else { 1 };
     // Remove expired entry if needed, then insert new value
@@ -998,7 +998,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
             map.insert(key.clone(), Entry::new_string(value.clone()));
             return (
                 Ok(RespValue::Integer(new_len as i64)),
-                (key.len() + new_len) as i64 - old_mem,
+                (key.len() + CompactValue::mem_for_data_len(new_len)) as i64 - old_mem,
                 0, // replacing expired entry: remove + create cancel out
             );
         }
@@ -1018,7 +1018,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
         None => {
             // New key
             let new_len = value.len();
-            let mem = (key.len() + new_len) as i64;
+            let mem = (key.len() + CompactValue::mem_for_data_len(new_len)) as i64;
             map.insert(key.clone(), Entry::new_string(value.clone()));
             (Ok(RespValue::Integer(new_len as i64)), mem, 1)
         }

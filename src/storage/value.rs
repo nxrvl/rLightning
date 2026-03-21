@@ -76,6 +76,18 @@ impl CompactValue {
         }
     }
 
+    /// Predict memory size for a value of the given byte length.
+    /// Used by batch operations to avoid constructing a CompactValue just
+    /// to measure its size.
+    #[inline]
+    pub fn mem_for_data_len(len: usize) -> usize {
+        if len <= COMPACT_INLINE_MAX {
+            std::mem::size_of::<CompactValue>()
+        } else {
+            std::mem::size_of::<CompactValue>() + len
+        }
+    }
+
     /// Convert to an owned Vec<u8>.
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_bytes().to_vec()
