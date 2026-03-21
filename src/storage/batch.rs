@@ -749,9 +749,7 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
             }
         }
         Some(b'Z') => {
-            if cmd_eq(name, b"ZADD") {
-                batch_zadd(map, &cmd.args)
-            } else if cmd_eq(name, b"ZREM") {
+            if cmd_eq(name, b"ZREM") {
                 batch_zrem(map, &cmd.args)
             } else {
                 (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
@@ -773,20 +771,21 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
     let new_mem = (key.len() + value.len()) as i64;
     let now = cached_now();
 
-    let (old_mem, existed_in_map) = map
+    let (old_mem, logically_exists) = map
         .get(key)
         .map(|e| {
             let mem = (key.len() + e.value.mem_size()) as i64;
             if e.expires_at.map_or(false, |t| now > t) {
-                // Expired entry: still account for its memory since map.insert replaces it
-                (mem, true)
+                // Expired entry: account for its memory (map.insert replaces it)
+                // but treat as logically absent for key_delta
+                (mem, false)
             } else {
                 (mem, true)
             }
         })
         .unwrap_or((0, false));
 
-    let key_delta = if existed_in_map { 0 } else { 1 };
+    let key_delta = if logically_exists { 0 } else { 1 };
     map.insert(key.clone(), Entry::new_string(value.clone()));
     let delta = new_mem - old_mem;
     (Ok(RespValue::SimpleString("OK".to_string())), delta, key_delta)
@@ -871,6 +870,12 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
         None => None,
     };
 
+    // Capture old memory and physical existence during initial lookup
+    let (old_mem, physically_exists) = map
+        .get(key)
+        .map(|e| ((key.len() + e.value.mem_size()) as i64, true))
+        .unwrap_or((0, false));
+
     let old_val = current_val.unwrap_or(0);
     let new_val = match old_val.checked_add(delta) {
         Some(v) => v,
@@ -879,15 +884,10 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
 
     let new_bytes = new_val.to_string().into_bytes();
     let new_mem = (key.len() + new_bytes.len()) as i64;
-    // Determine if key physically exists in the map (even if expired) for correct accounting
-    let (old_mem, key_existed) = map
-        .get(key)
-        .map(|e| ((key.len() + e.value.mem_size()) as i64, true))
-        .unwrap_or((0, false));
 
-    let key_delta = if key_existed { 0 } else { 1 };
+    let key_delta = if physically_exists { 0 } else { 1 };
     // Remove expired entry if needed, then insert new value
-    if current_val.is_none() && key_existed {
+    if current_val.is_none() && physically_exists {
         // Key was expired — remove it before inserting (already accounted for in old_mem)
         map.remove(key.as_slice());
     }
@@ -1008,10 +1008,11 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     match map.get_mut(key) {
         Some(entry) => match &mut entry.value {
             StoreValue::Str(data) => {
-                let added = value.len() as i64;
+                let old_mem = data.mem_size() as i64;
                 data.append(value);
+                let new_mem = data.mem_size() as i64;
                 let total_len = data.len();
-                (Ok(RespValue::Integer(total_len as i64)), added, 0)
+                (Ok(RespValue::Integer(total_len as i64)), new_mem - old_mem, 0)
             }
             _ => (Err(CommandError::WrongType), 0, 0),
         },
@@ -1211,68 +1212,6 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
         }
     }
     (Ok(RespValue::Integer(removed)), mem_delta, 0)
-}
-
-fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    // ZADD key score member [score member ...]
-    if args.len() < 3 || (args.len() - 1) % 2 != 0 {
-        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
-    }
-    let key = &args[0];
-    let now = cached_now();
-    let mut mem_delta: i64 = 0;
-
-    // Remove expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            if let Some(v) = map.remove(key.as_slice()) {
-                mem_delta -= (key.len() + v.value.mem_size()) as i64;
-            }
-        }
-    }
-
-    // Parse score-member pairs
-    let mut pairs = Vec::new();
-    for pair in args[1..].chunks(2) {
-        let score = match std::str::from_utf8(&pair[0])
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-        {
-            Some(s) => s,
-            None => return (Err(CommandError::NotANumber), 0, 0),
-        };
-        pairs.push((score, pair[1].clone()));
-    }
-
-    if let Some(entry) = map.get_mut(key) {
-        match &mut entry.value {
-            StoreValue::ZSet(zset) => {
-                let mut added = 0i64;
-                for (score, member) in pairs {
-                    let is_new = zset.insert(score, member.clone());
-                    if is_new {
-                        added += 1;
-                        mem_delta += (member.len() * 2 + 40) as i64;
-                    }
-                }
-                return (Ok(RespValue::Integer(added)), mem_delta, 0);
-            }
-            _ => return (Err(CommandError::WrongType), 0, 0),
-        }
-    }
-
-    // Key doesn't exist - create new sorted set
-    let mut zset = crate::storage::value::SortedSetData::new();
-    mem_delta += key.len() as i64;
-    let mut added = 0i64;
-    for (score, member) in pairs {
-        if zset.insert(score, member.clone()) {
-            added += 1;
-            mem_delta += (member.len() * 2 + 40) as i64;
-        }
-    }
-    map.insert(key.clone(), Entry::new(StoreValue::ZSet(zset)));
-    (Ok(RespValue::Integer(added)), mem_delta, 1)
 }
 
 fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {

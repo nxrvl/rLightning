@@ -67,6 +67,15 @@ impl CompactValue {
         self.len() == 0
     }
 
+    /// Memory size of this CompactValue (including heap allocation if any).
+    #[inline]
+    pub fn mem_size(&self) -> usize {
+        match self {
+            CompactValue::Inline { .. } => std::mem::size_of::<CompactValue>(),
+            CompactValue::Heap(h) => std::mem::size_of::<CompactValue>() + h.capacity(),
+        }
+    }
+
     /// Convert to an owned Vec<u8>.
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_bytes().to_vec()
@@ -356,10 +365,7 @@ impl StoreValue {
     /// Estimate the memory usage of this value in bytes.
     pub fn mem_size(&self) -> usize {
         match self {
-            StoreValue::Str(v) => match v {
-                CompactValue::Inline { .. } => std::mem::size_of::<CompactValue>(),
-                CompactValue::Heap(h) => std::mem::size_of::<CompactValue>() + h.capacity(),
-            },
+            StoreValue::Str(v) => v.mem_size(),
             StoreValue::Hash(map) => map
                 .iter()
                 .map(|(k, v)| k.len() + v.len() + 64)
