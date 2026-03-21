@@ -703,18 +703,20 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
     let new_mem = (key.len() + value.len()) as i64;
     let now = cached_now();
 
-    let old_mem = map
+    let (old_mem, existed_in_map) = map
         .get(key)
-        .and_then(|e| {
+        .map(|e| {
+            let mem = (key.len() + e.value.mem_size()) as i64;
             if e.expires_at.map_or(false, |t| now > t) {
-                None // Expired entry — treat as non-existent for memory delta
+                // Expired entry: still account for its memory since map.insert replaces it
+                (mem, true)
             } else {
-                Some((key.len() + e.value.mem_size()) as i64)
+                (mem, true)
             }
         })
-        .unwrap_or(0);
+        .unwrap_or((0, false));
 
-    let key_delta = if old_mem == 0 { 1 } else { 0 };
+    let key_delta = if existed_in_map { 0 } else { 1 };
     map.insert(key.clone(), Entry::new_string(value.clone()));
     let delta = new_mem - old_mem;
     (Ok(RespValue::SimpleString("OK".to_string())), delta, key_delta)
@@ -744,9 +746,10 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     match map.get(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                // Expired — remove lazily
-                map.remove(key);
-                return (Ok(RespValue::BulkString(None)), 0, 0);
+                // Expired — remove lazily and account for freed memory
+                let entry = map.remove(key).unwrap();
+                let mem = (key.len() + entry.value.mem_size()) as i64;
+                return (Ok(RespValue::BulkString(None)), -mem, -1);
             }
             if !matches!(&entry.value, StoreValue::Str(_)) {
                 return (Err(CommandError::WrongType), 0, 0);
@@ -806,18 +809,16 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
 
     let new_bytes = new_val.to_string().into_bytes();
     let new_mem = (key.len() + new_bytes.len()) as i64;
-    let old_mem = if current_val.is_some() {
-        map.get(key)
-            .map(|e| (key.len() + e.value.mem_size()) as i64)
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // Determine if key physically exists in the map (even if expired) for correct accounting
+    let (old_mem, key_existed) = map
+        .get(key)
+        .map(|e| ((key.len() + e.value.mem_size()) as i64, true))
+        .unwrap_or((0, false));
 
-    let key_delta = if current_val.is_none() { 1 } else { 0 };
+    let key_delta = if key_existed { 0 } else { 1 };
     // Remove expired entry if needed, then insert new value
-    if current_val.is_none() {
-        // Key didn't exist or was expired
+    if current_val.is_none() && key_existed {
+        // Key was expired — remove it before inserting (already accounted for in old_mem)
         map.remove(key.as_slice());
     }
     map.insert(key.clone(), Entry::new_string(new_bytes));

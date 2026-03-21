@@ -653,7 +653,7 @@ impl Server {
 
                                             // Bump key version for WATCH invalidation
                                             if let Some(key) = cmd.args.first() {
-                                                command_handler.storage().bump_key_version(key);
+                                                command_handler.storage().bump_key_version_for_db(key, db_index);
                                             }
 
                                             // Notify blocking manager for LPUSH/RPUSH

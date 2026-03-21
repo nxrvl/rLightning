@@ -618,9 +618,17 @@ mod tests {
         let rdb2 = RdbPersistence::new(engine2.clone(), path);
         rdb2.load().await.unwrap();
 
-        // Verify type
+        // Verify type and data
         let tp = engine2.get_type(b"mylist").await.unwrap();
         assert_eq!(tp, "list");
+        let item = engine2.get_item(b"mylist").await.unwrap().unwrap();
+        match item.value {
+            StoreValue::List(list) => {
+                let vals: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+                assert_eq!(vals, vec![b"a".as_slice(), b"b", b"c"]);
+            }
+            _ => panic!("Expected list"),
+        }
     }
 
     #[tokio::test]
@@ -647,6 +655,15 @@ mod tests {
 
         let tp = engine2.get_type(b"myset").await.unwrap();
         assert_eq!(tp, "set");
+        let item = engine2.get_item(b"myset").await.unwrap().unwrap();
+        match item.value {
+            StoreValue::Set(set) => {
+                assert!(set.contains(&b"x".to_vec()));
+                assert!(set.contains(&b"y".to_vec()));
+                assert_eq!(set.len(), 2);
+            }
+            _ => panic!("Expected set"),
+        }
     }
 
     #[tokio::test]
@@ -673,6 +690,15 @@ mod tests {
 
         let tp = engine2.get_type(b"myzset").await.unwrap();
         assert_eq!(tp, "zset");
+        let item = engine2.get_item(b"myzset").await.unwrap().unwrap();
+        match item.value {
+            StoreValue::ZSet(zset) => {
+                assert_eq!(zset.get_score(b"alice"), Some(1.0));
+                assert_eq!(zset.get_score(b"bob"), Some(2.5));
+                assert_eq!(zset.len(), 2);
+            }
+            _ => panic!("Expected zset"),
+        }
     }
 
     #[tokio::test]
@@ -699,6 +725,11 @@ mod tests {
 
         let tp = engine2.get_type(b"myhash").await.unwrap();
         assert_eq!(tp, "hash");
+        let fields = engine2.hash_getall(b"myhash").unwrap();
+        let field_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = fields.into_iter().collect();
+        assert_eq!(field_map.get(&b"field1".to_vec()), Some(&b"val1".to_vec()));
+        assert_eq!(field_map.get(&b"field2".to_vec()), Some(&b"val2".to_vec()));
+        assert_eq!(field_map.len(), 2);
     }
 
     #[tokio::test]
