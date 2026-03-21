@@ -1066,7 +1066,7 @@ mod tests {
     use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
     use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::VecDeque;
 
     fn create_test_engine() -> Arc<StorageEngine> {
         StorageEngine::new(Default::default())

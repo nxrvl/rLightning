@@ -1,7 +1,7 @@
 //! Native data types for the storage engine.
 //! Eliminates bincode serialization from the data access hot path.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::ops::Deref;
 
@@ -233,11 +233,11 @@ impl<'de> Deserialize<'de> for CompactValue {
     }
 }
 
-/// Sorted set data structure using BTreeSet for ordered iteration and HashMap for O(1) lookups.
+/// Sorted set data structure using BTreeSet for ordered iteration and FxHashMap for O(1) lookups.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortedSetData {
     pub entries: BTreeSet<(OrderedFloat<f64>, Vec<u8>)>,
-    pub scores: HashMap<Vec<u8>, f64>,
+    pub scores: HBHashMap<Vec<u8>, f64, FxBuildHasher>,
 }
 
 impl Default for SortedSetData {
@@ -250,7 +250,7 @@ impl SortedSetData {
     pub fn new() -> Self {
         SortedSetData {
             entries: BTreeSet::new(),
-            scores: HashMap::new(),
+            scores: HBHashMap::with_hasher(FxBuildHasher),
         }
     }
 

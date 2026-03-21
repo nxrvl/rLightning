@@ -690,10 +690,17 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     let key = &args[0];
     let value = &args[1];
     let new_mem = (key.len() + value.len()) as i64;
+    let now = cached_now();
 
     let old_mem = map
         .get(key)
-        .map(|e| (key.len() + e.value.mem_size()) as i64)
+        .and_then(|e| {
+            if e.expires_at.map_or(false, |t| now > t) {
+                None // Expired entry — treat as non-existent for memory delta
+            } else {
+                Some((key.len() + e.value.mem_size()) as i64)
+            }
+        })
         .unwrap_or(0);
 
     map.insert(key.clone(), Entry::new_string(value.clone()));

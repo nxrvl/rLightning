@@ -3243,7 +3243,7 @@ impl StorageEngine {
     /// Increment a hash field's integer value by delta.
     pub fn hash_incr_by(&self, key: &[u8], field: &[u8], delta: i64) -> StorageResult<i64> {
         self.atomic_modify(key, RedisDataType::Hash, |existing| {
-            let (map, is_new) = match existing {
+            let (map, _is_new) = match existing {
                 Some(StoreValue::Hash(map)) => (map, false),
                 None => {
                     // Will create new hash below

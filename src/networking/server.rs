@@ -600,6 +600,20 @@ impl Server {
                                         }
                                     }
 
+                                    // Pre-batch eviction check: ensure memory is under maxmemory
+                                    if command_handler.storage().check_write_memory(0).await.is_err() {
+                                        for _ in &group.commands {
+                                            let resp = RespValue::Error(
+                                                "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+                                            );
+                                            if let Ok(bytes) = resp.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
+                                            }
+                                            commands_processed += 1;
+                                        }
+                                        continue;
+                                    }
+
                                     // Write batch: single shard write lock
                                     let results = active_db.execute_on_shard_mut(
                                         group.shard_idx,
@@ -634,7 +648,7 @@ impl Server {
 
                                             // Notify blocking manager for LPUSH/RPUSH
                                             let cmd_name_bytes = cmd.name.as_bytes();
-                                            if (cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH"))
+                                            if cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH")
                                             {
                                                 if let Some(key) = cmd.args.first() {
                                                     command_handler.blocking_mgr().notify_key(key);
@@ -667,6 +681,21 @@ impl Server {
                                                 }
                                             } else if cmd_eq(cmd_name_bytes, b"PERSIST")
                                                 && matches!(result, Ok(RespValue::Integer(1)))
+                                            {
+                                                if let Some(key) = cmd.args.first() {
+                                                    active_db.remove_expiration(key);
+                                                }
+                                            }
+
+                                            // Clean up expiration heap for commands that delete keys
+                                            if cmd_eq(cmd_name_bytes, b"DEL")
+                                                && matches!(result, Ok(RespValue::Integer(1)))
+                                            {
+                                                if let Some(key) = cmd.args.first() {
+                                                    active_db.remove_expiration(key);
+                                                }
+                                            } else if cmd_eq(cmd_name_bytes, b"GETDEL")
+                                                && matches!(result, Ok(RespValue::BulkString(Some(_))))
                                             {
                                                 if let Some(key) = cmd.args.first() {
                                                     active_db.remove_expiration(key);
