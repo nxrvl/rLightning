@@ -77,6 +77,10 @@ pub fn classify_command(name: &[u8], args: &[Vec<u8>]) -> CommandKind {
                     return CommandKind::Read;
                 }
                 if cmd_eq(name, b"EXPIRE") {
+                    // EXPIRE with condition flags (NX/XX/GT/LT) is complex - exclude
+                    if args.len() > 2 {
+                        return CommandKind::Excluded;
+                    }
                     return CommandKind::Write;
                 }
             }
@@ -135,6 +139,10 @@ pub fn classify_command(name: &[u8], args: &[Vec<u8>]) -> CommandKind {
             }
             if name.len() == 7 {
                 if cmd_eq(name, b"PEXPIRE") {
+                    // PEXPIRE with condition flags (NX/XX/GT/LT) is complex - exclude
+                    if args.len() > 2 {
+                        return CommandKind::Excluded;
+                    }
                     return CommandKind::Write;
                 }
                 if cmd_eq(name, b"PERSIST") {
@@ -315,11 +323,12 @@ pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandR
 }
 
 /// Execute a batch of write commands under a single shard write lock.
-/// Returns one CommandResult per command in order, plus memory delta info.
+/// Returns one (CommandResult, mem_delta, key_delta) per command in order.
+/// key_delta: +1 = key created, -1 = key deleted, 0 = no change.
 pub fn execute_write_batch(
     map: &mut ShardMap,
     commands: &[&Command],
-) -> Vec<(CommandResult, i64)> {
+) -> Vec<(CommandResult, i64, i32)> {
     commands
         .iter()
         .map(|cmd| execute_write_cmd(map, cmd))
@@ -423,7 +432,7 @@ fn batch_ttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
     match get_valid_entry(map, &args[0], now) {
         Some(entry) => match entry.expires_at {
             Some(expires_at) => {
-                let remaining = expires_at.duration_since(now);
+                let remaining = expires_at.saturating_duration_since(now);
                 Ok(RespValue::Integer(remaining.as_secs() as i64))
             }
             None => Ok(RespValue::Integer(-1)),
@@ -439,7 +448,7 @@ fn batch_pttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
     match get_valid_entry(map, &args[0], now) {
         Some(entry) => match entry.expires_at {
             Some(expires_at) => {
-                let remaining = expires_at.duration_since(now);
+                let remaining = expires_at.saturating_duration_since(now);
                 Ok(RespValue::Integer(remaining.as_millis() as i64))
             }
             None => Ok(RespValue::Integer(-1)),
@@ -596,9 +605,11 @@ fn batch_zscore(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult
 }
 
 // --- Write command implementations ---
-// Returns (CommandResult, memory_delta) where memory_delta is the change in bytes.
+// Returns (CommandResult, mem_delta, key_delta) where:
+//   mem_delta = change in bytes
+//   key_delta = +1 (key created), -1 (key deleted), 0 (no change)
 
-fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) {
+fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, i32) {
     let name = cmd.name.as_bytes();
     match name.first().map(|b| b.to_ascii_uppercase()) {
         Some(b'A') if cmd_eq(name, b"APPEND") => batch_append(map, &cmd.args),
@@ -609,14 +620,14 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
                 batch_incr_by(map, &cmd.args, -1)
             } else if cmd_eq(name, b"DECRBY") {
                 if cmd.args.len() < 2 {
-                    return (Err(CommandError::WrongNumberOfArguments), 0);
+                    return (Err(CommandError::WrongNumberOfArguments), 0, 0);
                 }
                 match parse_i64(&cmd.args[1]) {
                     Some(delta) => batch_incr_by(map, &cmd.args, -delta),
-                    None => (Err(CommandError::NotANumber), 0),
+                    None => (Err(CommandError::NotANumber), 0, 0),
                 }
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
         Some(b'E') if cmd_eq(name, b"EXPIRE") => batch_expire(map, &cmd.args),
@@ -627,7 +638,7 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
             } else if cmd_eq(name, b"HDEL") {
                 batch_hdel(map, &cmd.args)
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
         Some(b'I') => {
@@ -635,14 +646,14 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
                 batch_incr_by(map, &cmd.args, 1)
             } else if cmd_eq(name, b"INCRBY") {
                 if cmd.args.len() < 2 {
-                    return (Err(CommandError::WrongNumberOfArguments), 0);
+                    return (Err(CommandError::WrongNumberOfArguments), 0, 0);
                 }
                 match parse_i64(&cmd.args[1]) {
                     Some(delta) => batch_incr_by(map, &cmd.args, delta),
-                    None => (Err(CommandError::NotANumber), 0),
+                    None => (Err(CommandError::NotANumber), 0, 0),
                 }
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
         Some(b'L') if cmd_eq(name, b"LPUSH") => batch_lpush(map, &cmd.args),
@@ -652,7 +663,7 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
             } else if cmd_eq(name, b"PERSIST") {
                 batch_persist(map, &cmd.args)
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
         Some(b'R') if cmd_eq(name, b"RPUSH") => batch_rpush(map, &cmd.args),
@@ -664,7 +675,7 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
             } else if cmd_eq(name, b"SREM") {
                 batch_srem(map, &cmd.args)
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
         Some(b'Z') => {
@@ -673,19 +684,19 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64) 
             } else if cmd_eq(name, b"ZREM") {
                 batch_zrem(map, &cmd.args)
             } else {
-                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0)
+                (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0)
             }
         }
-        _ => (Err(CommandError::UnknownCommand(cmd.name.clone())), 0),
+        _ => (Err(CommandError::UnknownCommand(cmd.name.clone())), 0, 0),
     }
 }
 
 // Note: get_valid_entry_mut was removed - each write command handles
 // expiry inline to avoid borrow-checker issues with the two-phase check.
 
-fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let value = &args[1];
@@ -703,28 +714,29 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         })
         .unwrap_or(0);
 
+    let key_delta = if old_mem == 0 { 1 } else { 0 };
     map.insert(key.clone(), Entry::new_string(value.clone()));
     let delta = new_mem - old_mem;
-    (Ok(RespValue::SimpleString("OK".to_string())), delta)
+    (Ok(RespValue::SimpleString("OK".to_string())), delta, key_delta)
 }
 
-fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.is_empty() {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     match map.remove(key) {
         Some(entry) => {
             let mem = (key.len() + entry.value.mem_size()) as i64;
-            (Ok(RespValue::Integer(1)), -mem)
+            (Ok(RespValue::Integer(1)), -mem, -1)
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => (Ok(RespValue::Integer(0)), 0, 0),
     }
 }
 
-fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.is_empty() {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let now = cached_now();
     let key = &args[0];
@@ -734,20 +746,20 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
             if entry.expires_at.map_or(false, |t| now > t) {
                 // Expired — remove lazily
                 map.remove(key);
-                return (Ok(RespValue::BulkString(None)), 0);
+                return (Ok(RespValue::BulkString(None)), 0, 0);
             }
             if !matches!(&entry.value, StoreValue::Str(_)) {
-                return (Err(CommandError::WrongType), 0);
+                return (Err(CommandError::WrongType), 0, 0);
             }
         }
-        None => return (Ok(RespValue::BulkString(None)), 0),
+        None => return (Ok(RespValue::BulkString(None)), 0, 0),
     }
     // Safe to remove — we know key exists and is a String
     let entry = map.remove(key).unwrap();
     let mem = (key.len() + entry.value.mem_size()) as i64;
     match entry.value {
         StoreValue::Str(data) => {
-            (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem)
+            (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem, -1)
         }
         _ => unreachable!(), // Type already checked above
     }
@@ -758,9 +770,9 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
-fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandResult, i64) {
+fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandResult, i64, i32) {
     if args.is_empty() {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -776,10 +788,10 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
                         // Parse current integer value
                         match std::str::from_utf8(data).ok().and_then(|s| s.parse::<i64>().ok()) {
                             Some(v) => Some(v),
-                            None => return (Err(CommandError::NotANumber), 0),
+                            None => return (Err(CommandError::NotANumber), 0, 0),
                         }
                     }
-                    _ => return (Err(CommandError::WrongType), 0),
+                    _ => return (Err(CommandError::WrongType), 0, 0),
                 }
             }
         }
@@ -789,7 +801,7 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
     let old_val = current_val.unwrap_or(0);
     let new_val = match old_val.checked_add(delta) {
         Some(v) => v,
-        None => return (Err(CommandError::IntegerOverflow), 0),
+        None => return (Err(CommandError::IntegerOverflow), 0, 0),
     };
 
     let new_bytes = new_val.to_string().into_bytes();
@@ -802,31 +814,32 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
         0
     };
 
+    let key_delta = if current_val.is_none() { 1 } else { 0 };
     // Remove expired entry if needed, then insert new value
     if current_val.is_none() {
         // Key didn't exist or was expired
         map.remove(key.as_slice());
     }
     map.insert(key.clone(), Entry::new_string(new_bytes));
-    (Ok(RespValue::Integer(new_val)), new_mem - old_mem)
+    (Ok(RespValue::Integer(new_val)), new_mem - old_mem, key_delta)
 }
 
-fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let seconds = match parse_i64(&args[1]) {
         Some(s) => s,
-        None => return (Err(CommandError::NotANumber), 0),
+        None => return (Err(CommandError::NotANumber), 0, 0),
     };
     // Redis: TTL <= 0 means delete the key immediately
     if seconds <= 0 {
         return match map.remove(&args[0]) {
             Some(entry) => {
                 let mem = (args[0].len() + entry.value.mem_size()) as i64;
-                (Ok(RespValue::Integer(1)), -mem)
+                (Ok(RespValue::Integer(1)), -mem, -1)
             }
-            None => (Ok(RespValue::Integer(0)), 0),
+            None => (Ok(RespValue::Integer(0)), 0, 0),
         };
     }
     let now = cached_now();
@@ -834,70 +847,70 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
                 // Expired
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             entry.expires_at = Some(now + Duration::from_secs(seconds as u64));
-            (Ok(RespValue::Integer(1)), 0)
+            (Ok(RespValue::Integer(1)), 0, 0)
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => (Ok(RespValue::Integer(0)), 0, 0),
     }
 }
 
-fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let millis = match parse_i64(&args[1]) {
         Some(m) => m,
-        None => return (Err(CommandError::NotANumber), 0),
+        None => return (Err(CommandError::NotANumber), 0, 0),
     };
     // Redis: TTL <= 0 means delete the key immediately
     if millis <= 0 {
         return match map.remove(&args[0]) {
             Some(entry) => {
                 let mem = (args[0].len() + entry.value.mem_size()) as i64;
-                (Ok(RespValue::Integer(1)), -mem)
+                (Ok(RespValue::Integer(1)), -mem, -1)
             }
-            None => (Ok(RespValue::Integer(0)), 0),
+            None => (Ok(RespValue::Integer(0)), 0, 0),
         };
     }
     let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             entry.expires_at = Some(now + Duration::from_millis(millis as u64));
-            (Ok(RespValue::Integer(1)), 0)
+            (Ok(RespValue::Integer(1)), 0, 0)
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => (Ok(RespValue::Integer(0)), 0, 0),
     }
 }
 
-fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.is_empty() {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             if entry.expires_at.is_some() {
                 entry.expires_at = None;
-                (Ok(RespValue::Integer(1)), 0)
+                (Ok(RespValue::Integer(1)), 0, 0)
             } else {
-                (Ok(RespValue::Integer(0)), 0)
+                (Ok(RespValue::Integer(0)), 0, 0)
             }
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => (Ok(RespValue::Integer(0)), 0, 0),
     }
 }
 
-fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let value = &args[1];
@@ -916,6 +929,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
             return (
                 Ok(RespValue::Integer(new_len as i64)),
                 (key.len() + new_len) as i64 - old_mem,
+                1, // expired entry replaced = new key
             );
         }
     }
@@ -926,23 +940,23 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                 let added = value.len() as i64;
                 data.append(value);
                 let total_len = data.len();
-                (Ok(RespValue::Integer(total_len as i64)), added)
+                (Ok(RespValue::Integer(total_len as i64)), added, 0)
             }
-            _ => (Err(CommandError::WrongType), 0),
+            _ => (Err(CommandError::WrongType), 0, 0),
         },
         None => {
             // New key
             let new_len = value.len();
             let mem = (key.len() + new_len) as i64;
             map.insert(key.clone(), Entry::new_string(value.clone()));
-            (Ok(RespValue::Integer(new_len as i64)), mem)
+            (Ok(RespValue::Integer(new_len as i64)), mem, 1)
         }
     }
 }
 
-fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 3 || (args.len() - 1) % 2 != 0 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -973,9 +987,9 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                         mem_delta += pair[1].len() as i64 - old_mem as i64;
                     }
                 }
-                return (Ok(RespValue::Integer(new_fields)), mem_delta);
+                return (Ok(RespValue::Integer(new_fields)), mem_delta, 0);
             }
-            _ => return (Err(CommandError::WrongType), 0),
+            _ => return (Err(CommandError::WrongType), 0, 0),
         }
     }
 
@@ -988,20 +1002,20 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         mem_delta += (pair[0].len() + pair[1].len() + 64) as i64;
     }
     map.insert(key.clone(), Entry::new(StoreValue::Hash(hash)));
-    (Ok(RespValue::Integer(new_fields)), mem_delta)
+    (Ok(RespValue::Integer(new_fields)), mem_delta, 1)
 }
 
-fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
 
-    match map.get_mut(key) {
+    let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
                 StoreValue::Hash(hash) => {
@@ -1013,18 +1027,27 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                             mem_delta -= (field.len() + old_val.len() + 64) as i64;
                         }
                     }
-                    (Ok(RespValue::Integer(removed)), mem_delta)
+                    (removed, mem_delta, hash.is_empty())
                 }
-                _ => (Err(CommandError::WrongType), 0),
+                _ => return (Err(CommandError::WrongType), 0, 0),
             }
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => return (Ok(RespValue::Integer(0)), 0, 0),
+    };
+
+    // Auto-delete empty container (Redis compatibility)
+    if is_empty && removed > 0 {
+        if let Some(entry) = map.remove(key) {
+            let key_mem = (key.len() + entry.value.mem_size()) as i64;
+            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
+        }
     }
+    (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
 
-fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -1049,9 +1072,9 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                         mem_delta += (member.len() + 32) as i64;
                     }
                 }
-                return (Ok(RespValue::Integer(added)), mem_delta);
+                return (Ok(RespValue::Integer(added)), mem_delta, 0);
             }
-            _ => return (Err(CommandError::WrongType), 0),
+            _ => return (Err(CommandError::WrongType), 0, 0),
         }
     }
 
@@ -1066,20 +1089,20 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         }
     }
     map.insert(key.clone(), Entry::new(StoreValue::Set(set)));
-    (Ok(RespValue::Integer(added)), mem_delta)
+    (Ok(RespValue::Integer(added)), mem_delta, 1)
 }
 
-fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
 
-    match map.get_mut(key) {
+    let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
                 StoreValue::Set(set) => {
@@ -1091,19 +1114,28 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                             mem_delta -= (member.len() + 32) as i64;
                         }
                     }
-                    (Ok(RespValue::Integer(removed)), mem_delta)
+                    (removed, mem_delta, set.is_empty())
                 }
-                _ => (Err(CommandError::WrongType), 0),
+                _ => return (Err(CommandError::WrongType), 0, 0),
             }
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => return (Ok(RespValue::Integer(0)), 0, 0),
+    };
+
+    // Auto-delete empty container (Redis compatibility)
+    if is_empty && removed > 0 {
+        if let Some(entry) = map.remove(key) {
+            let key_mem = (key.len() + entry.value.mem_size()) as i64;
+            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
+        }
     }
+    (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
 
-fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     // ZADD key score member [score member ...]
     if args.len() < 3 || (args.len() - 1) % 2 != 0 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -1126,7 +1158,7 @@ fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
             .and_then(|s| s.parse::<f64>().ok())
         {
             Some(s) => s,
-            None => return (Err(CommandError::NotANumber), 0),
+            None => return (Err(CommandError::NotANumber), 0, 0),
         };
         pairs.push((score, pair[1].clone()));
     }
@@ -1142,9 +1174,9 @@ fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                         mem_delta += (member.len() * 2 + 40) as i64;
                     }
                 }
-                return (Ok(RespValue::Integer(added)), mem_delta);
+                return (Ok(RespValue::Integer(added)), mem_delta, 0);
             }
-            _ => return (Err(CommandError::WrongType), 0),
+            _ => return (Err(CommandError::WrongType), 0, 0),
         }
     }
 
@@ -1159,20 +1191,20 @@ fn batch_zadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
         }
     }
     map.insert(key.clone(), Entry::new(StoreValue::ZSet(zset)));
-    (Ok(RespValue::Integer(added)), mem_delta)
+    (Ok(RespValue::Integer(added)), mem_delta, 1)
 }
 
-fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
 
-    match map.get_mut(key) {
+    let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
             if entry.expires_at.map_or(false, |t| now > t) {
-                return (Ok(RespValue::Integer(0)), 0);
+                return (Ok(RespValue::Integer(0)), 0, 0);
             }
             match &mut entry.value {
                 StoreValue::ZSet(zset) => {
@@ -1184,18 +1216,27 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                             mem_delta -= (member.len() * 2 + 40) as i64;
                         }
                     }
-                    (Ok(RespValue::Integer(removed)), mem_delta)
+                    (removed, mem_delta, zset.is_empty())
                 }
-                _ => (Err(CommandError::WrongType), 0),
+                _ => return (Err(CommandError::WrongType), 0, 0),
             }
         }
-        None => (Ok(RespValue::Integer(0)), 0),
+        None => return (Ok(RespValue::Integer(0)), 0, 0),
+    };
+
+    // Auto-delete empty container (Redis compatibility)
+    if is_empty && removed > 0 {
+        if let Some(entry) = map.remove(key) {
+            let key_mem = (key.len() + entry.value.mem_size()) as i64;
+            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
+        }
     }
+    (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
 
-fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -1217,9 +1258,9 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                     list.push_front(value.clone());
                     mem_delta += (value.len() + 24) as i64;
                 }
-                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta);
+                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta, 0);
             }
-            _ => return (Err(CommandError::WrongType), 0),
+            _ => return (Err(CommandError::WrongType), 0, 0),
         }
     }
 
@@ -1232,12 +1273,12 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     }
     let len = list.len() as i64;
     map.insert(key.clone(), Entry::new(StoreValue::List(list)));
-    (Ok(RespValue::Integer(len)), mem_delta)
+    (Ok(RespValue::Integer(len)), mem_delta, 1)
 }
 
-fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
+fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0);
+        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
     let now = cached_now();
@@ -1259,9 +1300,9 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
                     list.push_back(value.clone());
                     mem_delta += (value.len() + 24) as i64;
                 }
-                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta);
+                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta, 0);
             }
-            _ => return (Err(CommandError::WrongType), 0),
+            _ => return (Err(CommandError::WrongType), 0, 0),
         }
     }
 
@@ -1274,7 +1315,7 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64) {
     }
     let len = list.len() as i64;
     map.insert(key.clone(), Entry::new(StoreValue::List(list)));
-    (Ok(RespValue::Integer(len)), mem_delta)
+    (Ok(RespValue::Integer(len)), mem_delta, 1)
 }
 
 #[cfg(test)]
@@ -1354,6 +1395,9 @@ mod tests {
         assert_eq!(classify_command(b"BLPOP", &[b"k".to_vec(), b"0".to_vec()]), CommandKind::Excluded);
         // PING (no key)
         assert_eq!(classify_command(b"PING", &[]), CommandKind::Excluded);
+        // EXPIRE/PEXPIRE with condition flags
+        assert_eq!(classify_command(b"EXPIRE", &[b"k".to_vec(), b"60".to_vec(), b"NX".to_vec()]), CommandKind::Excluded);
+        assert_eq!(classify_command(b"PEXPIRE", &[b"k".to_vec(), b"1000".to_vec(), b"GT".to_vec()]), CommandKind::Excluded);
     }
 
     #[test]
@@ -1707,7 +1751,7 @@ mod tests {
                             store.execute_on_shard_mut(group.shard_idx, |map| {
                                 execute_write_batch(map, &group.commands)
                             });
-                        results.extend(batch_results.into_iter().map(|(r, _)| r));
+                        results.extend(batch_results.into_iter().map(|(r, _, _)| r));
                     }
                 }
                 PipelineEntry::Individual(cmd) => {
@@ -1724,7 +1768,7 @@ mod tests {
                                 results.push(r);
                             }
                             CommandKind::Write => {
-                                let (r, _) = store.execute_on_shard_mut(shard_idx, |map| {
+                                let (r, _, _) = store.execute_on_shard_mut(shard_idx, |map| {
                                     execute_write_cmd(map, cmd)
                                 });
                                 results.push(r);

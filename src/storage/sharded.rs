@@ -380,9 +380,11 @@ impl ShardedStore {
     /// Subtract from the memory counter for the shard containing `key`.
     pub fn sub_memory(&self, key: &[u8], amount: u64) {
         let shard_idx = self.shard_index(key);
-        self.shards[shard_idx]
-            .used_memory
-            .fetch_sub(amount, Ordering::Relaxed);
+        let _ = self.shards[shard_idx].used_memory.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |cur| Some(cur.saturating_sub(amount)),
+        );
     }
 
     /// Increment the key count for the shard containing `key`.
@@ -396,9 +398,11 @@ impl ShardedStore {
     /// Decrement the key count for the shard containing `key`.
     pub fn dec_key_count(&self, key: &[u8]) {
         let shard_idx = self.shard_index(key);
-        self.shards[shard_idx]
-            .key_count
-            .fetch_sub(1, Ordering::Relaxed);
+        let _ = self.shards[shard_idx].key_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |cur| Some(cur.saturating_sub(1)),
+        );
     }
 
     /// Get total memory usage across all shards.
@@ -469,9 +473,11 @@ impl ShardedStore {
 
     /// Subtract from the memory counter for a specific shard by index.
     pub fn sub_memory_by_shard(&self, shard_idx: usize, amount: u64) {
-        self.shards[shard_idx]
-            .used_memory
-            .fetch_sub(amount, Ordering::Relaxed);
+        let _ = self.shards[shard_idx].used_memory.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |cur| Some(cur.saturating_sub(amount)),
+        );
     }
 
     /// Increment the key count for a specific shard by index.
@@ -483,9 +489,11 @@ impl ShardedStore {
 
     /// Decrement the key count for a specific shard by index.
     pub fn dec_key_count_by_shard(&self, shard_idx: usize, count: u32) {
-        self.shards[shard_idx]
-            .key_count
-            .fetch_sub(count, Ordering::Relaxed);
+        let _ = self.shards[shard_idx].key_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |cur| Some(cur.saturating_sub(count)),
+        );
     }
 
     // --- Per-shard expiration methods ---

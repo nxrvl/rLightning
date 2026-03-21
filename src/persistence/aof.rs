@@ -2170,8 +2170,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_aof_rewrite_stream_consumer_group_round_trip() {
-        use crate::storage::stream::StreamData;
-
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
 
@@ -2311,8 +2309,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_aof_xreadgroup_persistence_round_trip() {
-        use crate::storage::stream::StreamData;
-
         let dir = tempfile::tempdir().unwrap();
         let aof_path = dir.path().join("test.aof");
 

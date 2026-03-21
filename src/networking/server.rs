@@ -620,7 +620,9 @@ impl Server {
                                         |map| batch::execute_write_batch(map, &group.commands),
                                     );
                                     let mut batch_write_count: u64 = 0;
-                                    for (i, (result, mem_delta)) in results.iter().enumerate() {
+                                    let mut batch_key_created: u32 = 0;
+                                    let mut batch_key_deleted: u32 = 0;
+                                    for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
                                             active_db.add_memory_by_shard(
@@ -635,6 +637,14 @@ impl Server {
                                             );
                                             command_handler.storage().adjust_global_memory(*mem_delta);
                                         }
+
+                                        // Track key count changes
+                                        if *key_delta > 0 {
+                                            batch_key_created += *key_delta as u32;
+                                        } else if *key_delta < 0 {
+                                            batch_key_deleted += (-*key_delta) as u32;
+                                        }
+
                                         // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
                                             let cmd = group.commands[i];
@@ -674,6 +684,9 @@ impl Server {
                                                                         key.clone(),
                                                                         expires_at,
                                                                     );
+                                                                } else {
+                                                                    // TTL <= 0 deleted the key — clean up expiration heap
+                                                                    active_db.remove_expiration(key);
                                                                 }
                                                             }
                                                         }
@@ -688,15 +701,7 @@ impl Server {
                                             }
 
                                             // Clean up expiration heap for commands that delete keys
-                                            if cmd_eq(cmd_name_bytes, b"DEL")
-                                                && matches!(result, Ok(RespValue::Integer(1)))
-                                            {
-                                                if let Some(key) = cmd.args.first() {
-                                                    active_db.remove_expiration(key);
-                                                }
-                                            } else if cmd_eq(cmd_name_bytes, b"GETDEL")
-                                                && matches!(result, Ok(RespValue::BulkString(Some(_))))
-                                            {
+                                            if *key_delta < 0 {
                                                 if let Some(key) = cmd.args.first() {
                                                     active_db.remove_expiration(key);
                                                 }
@@ -734,6 +739,13 @@ impl Server {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
                                         commands_processed += 1;
+                                    }
+                                    // Update per-shard key counts
+                                    if batch_key_created > 0 {
+                                        active_db.inc_key_count_by_shard(group.shard_idx, batch_key_created);
+                                    }
+                                    if batch_key_deleted > 0 {
+                                        active_db.dec_key_count_by_shard(group.shard_idx, batch_key_deleted);
                                     }
                                     // Increment write counters for RDB snapshot triggering
                                     if batch_write_count > 0 {
