@@ -1011,6 +1011,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
                 data.append(value);
                 let new_mem = data.mem_size() as i64;
                 let total_len = data.len();
+                entry.touch();
                 (Ok(RespValue::Integer(total_len as i64)), new_mem - old_mem, 0)
             }
             _ => (Err(CommandError::WrongType), 0, 0),
@@ -1060,6 +1061,7 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         mem_delta += pair[1].len() as i64 - old_mem as i64;
                     }
                 }
+                entry.touch();
                 return (Ok(RespValue::Integer(new_fields)), mem_delta, 0);
             }
             _ => return (Err(CommandError::WrongType), 0, 0),
@@ -1154,6 +1156,7 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         mem_delta += (member.len() + 32) as i64;
                     }
                 }
+                entry.touch();
                 return (Ok(RespValue::Integer(added)), mem_delta, 0);
             }
             _ => return (Err(CommandError::WrongType), 0, 0),
@@ -1292,7 +1295,9 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
                     list.push_front(value.clone());
                     mem_delta += (value.len() + 24) as i64;
                 }
-                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta, 0);
+                let len = list.len() as i64;
+                entry.touch();
+                return (Ok(RespValue::Integer(len)), mem_delta, 0);
             }
             _ => return (Err(CommandError::WrongType), 0, 0),
         }
@@ -1338,7 +1343,9 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
                     list.push_back(value.clone());
                     mem_delta += (value.len() + 24) as i64;
                 }
-                return (Ok(RespValue::Integer(list.len() as i64)), mem_delta, 0);
+                let len = list.len() as i64;
+                entry.touch();
+                return (Ok(RespValue::Integer(len)), mem_delta, 0);
             }
             _ => return (Err(CommandError::WrongType), 0, 0),
         }
