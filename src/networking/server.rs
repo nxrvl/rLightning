@@ -548,9 +548,24 @@ impl Server {
 
                 // Phase 2: Execute commands with optional pipeline batching
                 // Batch when: multiple commands, no MULTI, no subscription, RESP2,
-                // no cluster (avoid slot routing), no security (ACL handled by dispatch).
+                // no cluster (avoid slot routing), no security (ACL handled by dispatch),
+                // and no transaction commands in the pipeline (MULTI/EXEC/WATCH/DISCARD
+                // must go through individual dispatch to maintain transaction semantics).
+                let has_tx_cmd = parsed_commands.iter().any(|cmd| {
+                    let name = cmd.name.as_bytes();
+                    matches!(name.len(), 4 | 5 | 7) && matches!(
+                        name.first().map(|b| b.to_ascii_uppercase()),
+                        Some(b'M') | Some(b'E') | Some(b'W') | Some(b'D')
+                    ) && (
+                        cmd_eq(name, b"MULTI")
+                        || cmd_eq(name, b"EXEC")
+                        || cmd_eq(name, b"WATCH")
+                        || cmd_eq(name, b"DISCARD")
+                    )
+                });
                 let batch_eligible = parsed_commands.len() > 1
                     && !tx_state.in_multi
+                    && !has_tx_cmd
                     && !in_subscription_mode
                     && protocol_version == ProtocolVersion::RESP2
                     && cluster.is_none()
