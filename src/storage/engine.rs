@@ -602,17 +602,19 @@ impl StorageEngine {
             });
 
             for key in keys_to_remove {
-                if let Some((k, item)) = db.remove(&key) {
+                let mut entry_size = 0u64;
+                let removed = db.remove_if(&key, |k, item| {
                     if let Some(exp) = item.expires_at {
                         if exp <= now {
-                            let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                            self.current_memory.fetch_sub(size, Ordering::Relaxed);
-                            self.key_count.fetch_sub(1, Ordering::Relaxed);
-                            continue;
+                            entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                            return true;
                         }
                     }
-                    // Key was refreshed concurrently — put it back
-                    db.insert(k, item);
+                    false
+                });
+                if removed {
+                    self.current_memory.fetch_sub(entry_size, Ordering::Relaxed);
+                    self.key_count.fetch_sub(1, Ordering::Relaxed);
                 }
             }
         }
@@ -623,21 +625,26 @@ impl StorageEngine {
         key.len() + value.mem_size()
     }
 
-    /// Helper method to remove expired key and update memory/counters
+    /// Helper method to remove expired key and update memory/counters.
+    /// Uses remove_if to atomically check expiration and remove under the same lock,
+    /// avoiding TOCTOU races where a concurrent writer could refresh the key between
+    /// remove and re-insert.
     async fn remove_expired_key(&self, key: &[u8]) {
         let now = cached_now();
         let db = self.active_db();
-        if let Some((k, item)) = db.remove(key) {
+        let mut entry_size = 0u64;
+        let removed = db.remove_if(key, |k, item| {
             if let Some(exp) = item.expires_at {
                 if exp <= now {
-                    let size = Self::calculate_entry_size(&k, &item.value) as u64;
-                    self.current_memory.fetch_sub(size, Ordering::Relaxed);
-                    self.key_count.fetch_sub(1, Ordering::Relaxed);
-                    return;
+                    entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                    return true;
                 }
             }
-            // Key was refreshed concurrently — put it back
-            db.insert(k, item);
+            false
+        });
+        if removed {
+            self.current_memory.fetch_sub(entry_size, Ordering::Relaxed);
+            self.key_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -1350,6 +1357,19 @@ impl StorageEngine {
         }
     }
 
+    /// Adjust the global key count by a delta (positive = keys created, negative = keys deleted).
+    /// Used by the batch pipeline path which tracks key creations/deletions separately.
+    pub fn adjust_key_count(&self, delta: i64) {
+        if delta > 0 {
+            self.key_count.fetch_add(delta as u64, Ordering::Relaxed);
+        } else if delta < 0 {
+            let sub = (-delta) as u64;
+            self.key_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(sub))
+            }).ok();
+        }
+    }
+
     /// Increment write counters by a batch count (for batch path RDB snapshot triggering).
     pub async fn increment_write_counters_batch(&self, count: u64) {
         let counters = self.write_counters.read().await;
@@ -1779,6 +1799,16 @@ impl StorageEngine {
     /// Get the current number of keys (O(1) operation for DBSIZE)
     pub fn get_key_count(&self) -> u64 {
         self.key_count.load(Ordering::Relaxed)
+    }
+
+    /// Get the configured maximum key size in bytes.
+    pub fn max_key_size(&self) -> usize {
+        self.config.max_key_size
+    }
+
+    /// Get the configured maximum value size in bytes.
+    pub fn max_value_size(&self) -> usize {
+        self.config.max_value_size
     }
 
     /// Get the key count for a specific database (logical index, uses db_mapping).

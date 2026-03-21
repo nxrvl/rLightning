@@ -328,10 +328,37 @@ pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandR
 pub fn execute_write_batch(
     map: &mut ShardMap,
     commands: &[&Command],
+    max_key_size: usize,
+    max_value_size: usize,
 ) -> Vec<(CommandResult, i64, i32)> {
     commands
         .iter()
-        .map(|cmd| execute_write_cmd(map, cmd))
+        .map(|cmd| {
+            // Validate key size for commands that have a key arg
+            if let Some(key) = cmd.args.first() {
+                if key.len() > max_key_size {
+                    return (Err(CommandError::InvalidArgument(format!(
+                        "key size {} exceeds maximum {}",
+                        key.len(),
+                        max_key_size
+                    ))), 0, 0);
+                }
+            }
+            // Validate value size for SET (args[1]) and APPEND (args[1])
+            let name = cmd.name.as_bytes();
+            if cmd.args.len() >= 2 {
+                let is_set = name.len() == 3 && cmd_eq(name, b"SET");
+                let is_append = name.len() == 6 && cmd_eq(name, b"APPEND");
+                if (is_set || is_append) && cmd.args[1].len() > max_value_size {
+                    return (Err(CommandError::InvalidArgument(format!(
+                        "value size {} exceeds maximum {}",
+                        cmd.args[1].len(),
+                        max_value_size
+                    ))), 0, 0);
+                }
+            }
+            execute_write_cmd(map, cmd)
+        })
         .collect()
 }
 
@@ -1615,7 +1642,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
         });
         assert_eq!(results.len(), 2);
         assert!(results[0].0.is_ok());
@@ -1637,7 +1664,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
         });
         assert_eq!(results.len(), 2);
         match &results[0].0 {
@@ -1663,7 +1690,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2];
 
         let results = store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
         });
         assert_eq!(results.len(), 2);
         assert!(results[0].0.is_err()); // WRONGTYPE error
@@ -1681,7 +1708,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd1, &cmd2, &cmd3];
 
         store.execute_on_shard_mut(shard_idx, |map| {
-            execute_write_batch(map, &cmds)
+            execute_write_batch(map, &cmds, 1024, 5 * 1024 * 1024)
         });
 
         // After batch, key should have the last value
@@ -1750,7 +1777,7 @@ mod tests {
                     } else {
                         let batch_results =
                             store.execute_on_shard_mut(group.shard_idx, |map| {
-                                execute_write_batch(map, &group.commands)
+                                execute_write_batch(map, &group.commands, 1024, 5 * 1024 * 1024)
                             });
                         results.extend(batch_results.into_iter().map(|(r, _, _)| r));
                     }

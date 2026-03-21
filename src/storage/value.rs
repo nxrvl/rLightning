@@ -352,8 +352,8 @@ impl StoreValue {
     pub fn mem_size(&self) -> usize {
         match self {
             StoreValue::Str(v) => match v {
-                CompactValue::Inline { len, .. } => *len as usize,
-                CompactValue::Heap(h) => h.capacity(),
+                CompactValue::Inline { .. } => std::mem::size_of::<CompactValue>(),
+                CompactValue::Heap(h) => std::mem::size_of::<CompactValue>() + h.capacity(),
             },
             StoreValue::Hash(map) => map
                 .iter()

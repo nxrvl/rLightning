@@ -557,7 +557,7 @@ impl Server {
                     && security.is_none();
 
                 if batch_eligible {
-                    let active_db = command_handler.storage().get_db_by_index(db_index);
+                    let mut active_db = command_handler.storage().get_db_by_index(db_index);
                     let groups = batch::group_pipeline(
                         &parsed_commands,
                         |k| active_db.shard_index(k),
@@ -615,9 +615,11 @@ impl Server {
                                     }
 
                                     // Write batch: single shard write lock
+                                    let max_key_size = command_handler.storage().max_key_size();
+                                    let max_value_size = command_handler.storage().max_value_size();
                                     let results = active_db.execute_on_shard_mut(
                                         group.shard_idx,
-                                        |map| batch::execute_write_batch(map, &group.commands),
+                                        |map| batch::execute_write_batch(map, &group.commands, max_key_size, max_value_size),
                                     );
                                     let mut batch_write_count: u64 = 0;
                                     let mut batch_key_created: u32 = 0;
@@ -740,12 +742,14 @@ impl Server {
                                         }
                                         commands_processed += 1;
                                     }
-                                    // Update per-shard key counts
+                                    // Update per-shard and global key counts
                                     if batch_key_created > 0 {
                                         active_db.inc_key_count_by_shard(group.shard_idx, batch_key_created);
+                                        command_handler.storage().adjust_key_count(batch_key_created as i64);
                                     }
                                     if batch_key_deleted > 0 {
                                         active_db.dec_key_count_by_shard(group.shard_idx, batch_key_deleted);
+                                        command_handler.storage().adjust_key_count(-(batch_key_deleted as i64));
                                     }
                                     // Increment write counters for RDB snapshot triggering
                                     if batch_write_count > 0 {
@@ -784,6 +788,11 @@ impl Server {
                                     }
                                     DispatchAction::Continue => {
                                         commands_processed += 1;
+                                        // If SELECT changed the database, re-capture active_db
+                                        // so subsequent batch groups target the correct DB
+                                        if cmd_eq(cmd.name.as_bytes(), b"SELECT") {
+                                            active_db = command_handler.storage().get_db_by_index(db_index);
+                                        }
                                     }
                                 }
                             }
