@@ -605,31 +605,43 @@ impl Server {
                                         group.shard_idx,
                                         |map| batch::execute_write_batch(map, &group.commands),
                                     );
+                                    let mut batch_write_count: u64 = 0;
                                     for (i, (result, mem_delta)) in results.iter().enumerate() {
-                                        // Update memory counters
+                                        // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
                                             active_db.add_memory_by_shard(
                                                 group.shard_idx,
                                                 *mem_delta as u64,
                                             );
+                                            command_handler.storage().adjust_global_memory(*mem_delta);
                                         } else if *mem_delta < 0 {
                                             active_db.sub_memory_by_shard(
                                                 group.shard_idx,
                                                 (-*mem_delta) as u64,
                                             );
+                                            command_handler.storage().adjust_global_memory(*mem_delta);
                                         }
                                         // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
                                             let cmd = group.commands[i];
                                             let cmd_lower = cmd.name.to_lowercase();
+                                            batch_write_count += 1;
 
                                             // Bump key version for WATCH invalidation
                                             if let Some(key) = cmd.args.first() {
                                                 command_handler.storage().bump_key_version(key);
                                             }
 
-                                            // Add to expiration heap for EXPIRE/PEXPIRE
+                                            // Notify blocking manager for LPUSH/RPUSH
                                             let cmd_name_bytes = cmd.name.as_bytes();
+                                            if (cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH"))
+                                            {
+                                                if let Some(key) = cmd.args.first() {
+                                                    command_handler.blocking_mgr().notify_key(key);
+                                                }
+                                            }
+
+                                            // Add to expiration heap for EXPIRE/PEXPIRE, remove for PERSIST
                                             if (cmd_eq(cmd_name_bytes, b"EXPIRE") || cmd_eq(cmd_name_bytes, b"PEXPIRE"))
                                                 && matches!(result, Ok(RespValue::Integer(1)))
                                             {
@@ -653,6 +665,12 @@ impl Server {
                                                         }
                                                     }
                                                 }
+                                            } else if cmd_eq(cmd_name_bytes, b"PERSIST")
+                                                && matches!(result, Ok(RespValue::Integer(1)))
+                                            {
+                                                if let Some(key) = cmd.args.first() {
+                                                    active_db.remove_expiration(key);
+                                                }
                                             }
 
                                             if let Some(ref pm) = persistence {
@@ -660,7 +678,7 @@ impl Server {
                                                     name: cmd.name.as_bytes().to_vec(),
                                                     args: cmd.args.clone(),
                                                 };
-                                                let _ = pm.log_command(resp_cmd, aof_sync_policy).await;
+                                                let _ = pm.log_command_for_db(resp_cmd, aof_sync_policy, db_index).await;
                                             }
                                             if let Some(ref repl) = replication {
                                                 if ReplicationManager::is_write_command(&cmd_lower) {
@@ -687,6 +705,10 @@ impl Server {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
                                         commands_processed += 1;
+                                    }
+                                    // Increment write counters for RDB snapshot triggering
+                                    if batch_write_count > 0 {
+                                        command_handler.storage().increment_write_counters_batch(batch_write_count).await;
                                     }
                                 }
                             }

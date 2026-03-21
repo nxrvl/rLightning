@@ -55,6 +55,11 @@ impl CommandHandler {
         &self.storage
     }
 
+    /// Get a reference to the blocking manager (for batch path notifications)
+    pub fn blocking_mgr(&self) -> &Arc<BlockingManager> {
+        &self.blocking_mgr
+    }
+
     /// Get a reference to the scripting engine
     #[allow(dead_code)]
     pub fn scripting(&self) -> &Arc<ScriptingEngine> {

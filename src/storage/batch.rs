@@ -189,9 +189,7 @@ pub fn classify_command(name: &[u8], args: &[Vec<u8>]) -> CommandKind {
         }
         Some(b'Z') => {
             if name.len() == 4 {
-                if cmd_eq(name, b"ZADD") {
-                    return CommandKind::Write;
-                }
+                // ZADD excluded from batching: batch_zadd doesn't handle NX/XX/GT/LT/CH flags
                 if cmd_eq(name, b"ZREM") {
                     return CommandKind::Write;
                 }

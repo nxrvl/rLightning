@@ -1337,6 +1337,27 @@ impl StorageEngine {
         }
     }
 
+    /// Adjust the global memory counter by a signed delta (for batch path synchronization).
+    pub fn adjust_global_memory(&self, delta: i64) {
+        if delta > 0 {
+            self.current_memory.fetch_add(delta as u64, Ordering::Relaxed);
+        } else if delta < 0 {
+            // Use saturating subtraction to avoid wrapping
+            let sub = (-delta) as u64;
+            self.current_memory.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(sub))
+            }).ok();
+        }
+    }
+
+    /// Increment write counters by a batch count (for batch path RDB snapshot triggering).
+    pub async fn increment_write_counters_batch(&self, count: u64) {
+        let counters = self.write_counters.read().await;
+        for counter in counters.iter() {
+            counter.fetch_add(count, Ordering::SeqCst);
+        }
+    }
+
     /// Bump the version counter for a specific key (DB-scoped for WATCH isolation)
     pub fn bump_key_version(&self, key: &[u8]) {
         let db_idx = Self::current_db_idx();
