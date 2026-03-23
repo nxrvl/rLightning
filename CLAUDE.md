@@ -124,6 +124,7 @@ cargo bench --bench storage_bench -- set_get
    - RESP3 response conversion: Map type for HGETALL/CONFIG/XINFO/HSCAN/ZSCAN/SSCAN/XRANGE/XREAD/COMMAND DOCS, Set type for SMEMBERS, Double for float commands, native Null/Boolean/Push types
    - Pipeline error isolation: per-command errors in a pipeline are captured as RespValue::Error instead of killing the entire pipeline
    - Pipeline batching (`src/storage/batch.rs`): consecutive same-shard commands are grouped and executed under a single lock acquisition, with read/write classification for optimal lock selection
+   - Batched pipeline post-processing: prefix index updates, AOF logging, and replication propagation are collected during the batch loop and flushed in single bulk calls after completion, avoiding per-command overhead
    - Static response interning: OK, PONG, NIL, 0, 1, and empty array responses use `Bytes::from_static` to avoid allocation
    - TCP_NODELAY enabled on all client connections immediately after accept
    - Connection tracking via `Arc<DashMap<u64, ClientInfo>>` for real CLIENT LIST/INFO/ID/SETNAME
@@ -186,7 +187,8 @@ cargo bench --bench storage_bench -- set_get
 
 9. **Cluster (`src/cluster/`)**:
    - Hash slot calculation (CRC16 mod 16384) with hash tags
-   - Gossip protocol, MOVED/ASK redirections
+   - Gossip protocol with active bus listener (`start_cluster_bus`) and periodic cron (`cluster_cron`), spawned on startup when cluster mode is enabled
+   - MOVED/ASK redirections with per-connection `asking` flag in command dispatch; slot-exempt commands (PING, INFO, CLUSTER, AUTH, etc.) bypass redirection checks
    - Slot migration, automatic failover
 
 10. **Sentinel (`src/sentinel/`)**:
@@ -206,7 +208,7 @@ cargo bench --bench storage_bench -- set_get
 1. Clients connect via TCP (TCP_NODELAY enabled) using the Redis protocol
 2. The zero-copy RESP parser extracts commands as byte slices from the read buffer (`RawCommand`)
 3. Two-level byte dispatch routes commands to handlers without string allocation
-4. For pipelines, consecutive same-shard commands are batched under a single lock acquisition
+4. For pipelines, consecutive same-shard commands are batched under a single lock acquisition; post-batch processing (prefix index updates, AOF logging, replication propagation) is done in bulk
 5. Command handlers interact with the sharded storage engine using native data types (no serialization)
 6. Results are serialized back as RESP responses (with static interning for common responses)
 7. If replication is enabled, commands are propagated to replicas

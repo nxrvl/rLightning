@@ -126,5 +126,5 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 
 ### Task 9: Update documentation
 
-- [ ] Update CLAUDE.md if internal patterns changed (e.g., new batch methods, cluster startup sequence)
-- [ ] Move plan to docs/plans/completed/
+- [x] Update CLAUDE.md if internal patterns changed (e.g., new batch methods, cluster startup sequence)
+- [x] Move plan to docs/plans/completed/
