@@ -41,10 +41,10 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 
 - Modify: `src/networking/server.rs`
 
-- [ ] In the post-batch loop (around lines 785-791), collect AOF-eligible commands into a Vec instead of calling log_command_for_db() per command
-- [ ] Call log_commands_batch_for_db() once after the loop with the collected Vec
-- [ ] Write a test that pipelines write commands and verifies AOF entries are logged correctly
-- [ ] Run cargo test -- must pass before Task 3
+- [x] In the post-batch loop (around lines 785-791), collect AOF-eligible commands into a Vec instead of calling log_command_for_db() per command
+- [x] Call log_commands_batch_for_db() once after the loop with the collected Vec
+- [x] Write a test that pipelines write commands and verifies AOF entries are logged correctly
+- [x] Run cargo test -- must pass before Task 3
 
 ### Task 3: Batch replication propagation in pipeline loop (A3)
 

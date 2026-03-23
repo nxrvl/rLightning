@@ -634,6 +634,8 @@ impl Server {
                                     let mut batch_key_deleted: u32 = 0;
                                     // Collect prefix index updates to batch into a single lock acquisition
                                     let mut prefix_updates: Vec<(Vec<u8>, bool)> = Vec::new();
+                                    // Collect AOF-eligible commands to batch into a single log call
+                                    let mut aof_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
                                     for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
@@ -784,12 +786,11 @@ impl Server {
                                                 }
                                             }
 
-                                            if let Some(ref pm) = persistence {
-                                                let resp_cmd = RespCommand {
+                                            if persistence.is_some() {
+                                                aof_batch.push(RespCommand {
                                                     name: cmd.name.as_bytes().to_vec(),
                                                     args: cmd.args.clone(),
-                                                };
-                                                let _ = pm.log_command_for_db(resp_cmd, aof_sync_policy, db_index).await;
+                                                });
                                             }
                                             if let Some(ref repl) = replication {
                                                 if ReplicationManager::is_write_command(&cmd_lower) {
@@ -821,6 +822,12 @@ impl Server {
                                     if !prefix_updates.is_empty() {
                                         let refs: Vec<(&[u8], bool)> = prefix_updates.iter().map(|(k, i)| (k.as_slice(), *i)).collect();
                                         command_handler.storage().update_prefix_indices_batch_for_db(&refs, db_index).await;
+                                    }
+                                    // Batch AOF logging with a single call
+                                    if !aof_batch.is_empty() {
+                                        if let Some(ref pm) = persistence {
+                                            let _ = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await;
+                                        }
                                     }
                                     // Update per-shard and global key counts
                                     if batch_key_created > 0 {

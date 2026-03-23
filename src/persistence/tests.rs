@@ -998,6 +998,90 @@ mod tests {
         assert!(val.is_some());
     }
 
+    /// Test that pipeline-batched AOF logging via log_commands_batch_for_db
+    /// correctly writes multiple commands in a single call and that they
+    /// replay correctly on load. This mirrors the pipeline batch loop in
+    /// server.rs which collects write commands and logs them in one batch.
+    #[tokio::test]
+    async fn test_pipeline_batch_aof_logging() {
+        let engine = StorageEngine::new(StorageConfig::default());
+        let dir = tempdir().unwrap();
+        let aof_path = dir.path().join("pipeline_batch.aof");
+
+        let config = PersistenceConfig {
+            mode: PersistenceMode::AOF,
+            rdb_path: None,
+            aof_path: Some(aof_path.clone()),
+            aof_sync_policy: AofSyncPolicy::Always,
+            rdb_snapshot_interval: Duration::from_secs(300),
+            rdb_snapshot_threshold: 10000,
+            aof_rewrite_min_size: 64 * 1024 * 1024,
+            aof_rewrite_percentage: 100,
+        };
+
+        let manager = PersistenceManager::new(engine.clone(), config);
+        manager.init().await.unwrap();
+
+        // Simulate a pipeline batch: collect multiple write commands
+        let batch = vec![
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"pipe_key1".to_vec(), b"val1".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"pipe_key2".to_vec(), b"val2".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"pipe_key3".to_vec(), b"val3".to_vec()],
+            },
+            RespCommand {
+                name: b"SET".to_vec(),
+                args: vec![b"pipe_key4".to_vec(), b"val4".to_vec()],
+            },
+        ];
+
+        // Log the batch in a single call (as the pipeline loop now does)
+        let result = manager
+            .log_commands_batch_for_db(batch, AofSyncPolicy::Always, 0)
+            .await;
+        assert!(result.is_ok(), "Batch AOF logging should succeed");
+
+        // Wait for the writer task to flush
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the AOF file was written
+        assert!(aof_path.exists(), "AOF file should exist");
+        let content = fs::read(&aof_path).unwrap();
+        assert!(!content.is_empty(), "AOF file should not be empty");
+
+        // Load into a fresh engine and verify all commands were replayed
+        let engine2 = StorageEngine::new(StorageConfig::default());
+        let config2 = PersistenceConfig {
+            mode: PersistenceMode::AOF,
+            rdb_path: None,
+            aof_path: Some(aof_path.clone()),
+            aof_sync_policy: AofSyncPolicy::Always,
+            rdb_snapshot_interval: Duration::from_secs(300),
+            rdb_snapshot_threshold: 10000,
+            aof_rewrite_min_size: 64 * 1024 * 1024,
+            aof_rewrite_percentage: 100,
+        };
+        let manager2 = PersistenceManager::new(engine2.clone(), config2);
+        manager2.init().await.unwrap();
+
+        // Verify all SET commands were replayed
+        let val1 = engine2.get(b"pipe_key1").await.unwrap();
+        assert_eq!(val1, Some(b"val1".to_vec()), "pipe_key1 should be restored");
+        let val2 = engine2.get(b"pipe_key2").await.unwrap();
+        assert_eq!(val2, Some(b"val2".to_vec()), "pipe_key2 should be restored");
+        let val3 = engine2.get(b"pipe_key3").await.unwrap();
+        assert_eq!(val3, Some(b"val3".to_vec()), "pipe_key3 should be restored");
+        let val4 = engine2.get(b"pipe_key4").await.unwrap();
+        assert_eq!(val4, Some(b"val4".to_vec()), "pipe_key4 should be restored");
+    }
+
     /// Test AOF batch-drain with multiple rapid sends.
     /// Sends many commands in quick succession to verify that
     /// the batch-drain mechanism collects and writes them correctly.
