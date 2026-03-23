@@ -28,7 +28,7 @@ fn read_zset(existing: Option<&StoreValue>) -> Result<SortedSetData, StorageErro
 /// Takes ownership of the data via std::mem::take, caller must put it back or return ModifyResult::Set.
 fn take_zset_mut(existing: Option<&mut StoreValue>) -> Result<SortedSetData, StorageError> {
     match existing {
-        Some(StoreValue::ZSet(ss)) => Ok(std::mem::replace(ss, SortedSetData::new())),
+        Some(StoreValue::ZSet(ss)) => Ok(std::mem::take(ss)),
         Some(_) => Err(StorageError::WrongType),
         None => Ok(SortedSetData::new()),
     }

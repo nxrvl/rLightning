@@ -653,8 +653,8 @@ pub async fn lpos(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             if rank > 0 {
                 // Forward scan
                 let mut skip = (rank - 1) as usize;
-                for idx in 0..scan_len {
-                    if deque[idx] == element_clone {
+                for (idx, item) in deque.iter().enumerate().take(scan_len) {
+                    if *item == element_clone {
                         if skip > 0 {
                             skip -= 1;
                         } else {

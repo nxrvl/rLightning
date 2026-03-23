@@ -173,10 +173,8 @@ pub fn classify_command(name: &[u8], args: &[Vec<u8>]) -> CommandKind {
                     return CommandKind::Write;
                 }
             }
-            if name.len() == 5 {
-                if cmd_eq(name, b"SCARD") {
-                    return CommandKind::Read;
-                }
+            if name.len() == 5 && cmd_eq(name, b"SCARD") {
+                return CommandKind::Read;
             }
             if name.len() == 6 && cmd_eq(name, b"STRLEN") {
                 return CommandKind::Read;
@@ -356,15 +354,15 @@ pub fn execute_write_batch(
         }
 
         // Validate key size for commands that have a key arg
-        if let Some(key) = cmd.args.first() {
-            if key.len() > max_key_size {
-                results.push((Err(CommandError::InvalidArgument(format!(
-                    "key size {} exceeds maximum {}",
-                    key.len(),
-                    max_key_size
-                ))), 0, 0));
-                continue;
-            }
+        if let Some(key) = cmd.args.first()
+            && key.len() > max_key_size
+        {
+            results.push((Err(CommandError::InvalidArgument(format!(
+                "key size {} exceeds maximum {}",
+                key.len(),
+                max_key_size
+            ))), 0, 0));
+            continue;
         }
         // Validate value size for SET (args[1]) and APPEND (args[1])
         let name = cmd.name.as_bytes();
@@ -448,7 +446,7 @@ fn get_valid_entry<'a>(
     now: Instant,
 ) -> Option<&'a Entry> {
     map.get(key).and_then(|entry| {
-        if entry.expires_at.map_or(false, |t| now > t) {
+        if entry.expires_at.is_some_and(|t| now > t) {
             None // expired
         } else {
             Some(entry)
@@ -809,7 +807,7 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     // Check type before removing to avoid remove-then-reinsert on WRONGTYPE
     match map.get(key) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 // Expired — remove lazily and account for freed memory
                 let entry = map.remove(key).unwrap();
                 let mem = (key.len() + entry.value.mem_size()) as i64;
@@ -848,7 +846,7 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
     let (current_val, old_mem, physically_exists) = match map.get(key) {
         Some(entry) => {
             let mem = (key.len() + entry.value.mem_size()) as i64;
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 (None, mem, true) // expired, treat as 0
             } else {
                 match &entry.value {
@@ -896,7 +894,7 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     // Redis: TTL <= 0 means delete the key immediately
     if seconds <= 0 {
         return match map.get(&args[0]) {
-            Some(entry) if entry.expires_at.map_or(false, |t| now > t) => {
+            Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
                 // Already expired — treat as nonexistent
                 (Ok(RespValue::Integer(0)), 0, 0)
             }
@@ -910,7 +908,7 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     }
     match map.get_mut(&args[0]) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 // Expired
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
@@ -933,7 +931,7 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
     // Redis: TTL <= 0 means delete the key immediately
     if millis <= 0 {
         return match map.get(&args[0]) {
-            Some(entry) if entry.expires_at.map_or(false, |t| now > t) => {
+            Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
                 // Already expired — treat as nonexistent
                 (Ok(RespValue::Integer(0)), 0, 0)
             }
@@ -947,7 +945,7 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
     }
     match map.get_mut(&args[0]) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
             entry.expires_at = Some(now + Duration::from_millis(millis as u64));
@@ -964,7 +962,7 @@ fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
     let now = cached_now();
     match map.get_mut(&args[0]) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 return (Ok(RespValue::Integer(0)), 0, 0);
             }
             if entry.expires_at.is_some() {
@@ -987,21 +985,21 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     let now = cached_now();
 
     // Check for expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            let old_mem = map
-                .remove(key.as_slice())
-                .map(|v| (key.len() + v.value.mem_size()) as i64)
-                .unwrap_or(0);
-            // Create new key (replacing expired = net key_delta 0)
-            let new_len = value.len();
-            map.insert(key.clone(), Entry::new_string(value.clone()));
-            return (
-                Ok(RespValue::Integer(new_len as i64)),
-                (key.len() + CompactValue::mem_for_data_len(new_len)) as i64 - old_mem,
-                0, // replacing expired entry: remove + create cancel out
-            );
-        }
+    if let Some(entry) = map.get(key)
+        && entry.expires_at.is_some_and(|t| now > t)
+    {
+        let old_mem = map
+            .remove(key.as_slice())
+            .map(|v| (key.len() + v.value.mem_size()) as i64)
+            .unwrap_or(0);
+        // Create new key (replacing expired = net key_delta 0)
+        let new_len = value.len();
+        map.insert(key.clone(), Entry::new_string(value.clone()));
+        return (
+            Ok(RespValue::Integer(new_len as i64)),
+            (key.len() + CompactValue::mem_for_data_len(new_len)) as i64 - old_mem,
+            0, // replacing expired entry: remove + create cancel out
+        );
     }
 
     match map.get_mut(key) {
@@ -1027,7 +1025,7 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
 }
 
 fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
@@ -1036,13 +1034,11 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            if let Some(v) = map.remove(key.as_slice()) {
-                mem_delta -= (key.len() + v.value.mem_size()) as i64;
-                replaced_expired = true;
-            }
-        }
+    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+        && let Some(v) = map.remove(key.as_slice())
+    {
+        mem_delta -= (key.len() + v.value.mem_size()) as i64;
+        replaced_expired = true;
     }
 
     let mut new_fields = 0i64;
@@ -1091,7 +1087,7 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
 
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 // Remove expired entry (lazy cleanup) and signal key removal
                 if let Some(v) = map.remove(key.as_slice()) {
                     let mem = (key.len() + v.value.mem_size()) as i64;
@@ -1118,11 +1114,11 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0 {
-        if let Some(entry) = map.remove(key) {
-            let key_mem = (key.len() + entry.value.mem_size()) as i64;
-            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
-        }
+    if is_empty && removed > 0
+        && let Some(entry) = map.remove(key)
+    {
+        let key_mem = (key.len() + entry.value.mem_size()) as i64;
+        return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
     }
     (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
@@ -1137,13 +1133,11 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            if let Some(v) = map.remove(key.as_slice()) {
-                mem_delta -= (key.len() + v.value.mem_size()) as i64;
-                replaced_expired = true;
-            }
-        }
+    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+        && let Some(v) = map.remove(key.as_slice())
+    {
+        mem_delta -= (key.len() + v.value.mem_size()) as i64;
+        replaced_expired = true;
     }
 
     if let Some(entry) = map.get_mut(key) {
@@ -1188,7 +1182,7 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
 
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 // Remove expired entry (lazy cleanup) and signal key removal
                 if let Some(v) = map.remove(key.as_slice()) {
                     let mem = (key.len() + v.value.mem_size()) as i64;
@@ -1215,11 +1209,11 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0 {
-        if let Some(entry) = map.remove(key) {
-            let key_mem = (key.len() + entry.value.mem_size()) as i64;
-            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
-        }
+    if is_empty && removed > 0
+        && let Some(entry) = map.remove(key)
+    {
+        let key_mem = (key.len() + entry.value.mem_size()) as i64;
+        return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
     }
     (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
@@ -1233,7 +1227,7 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
 
     let (removed, mem_delta, is_empty) = match map.get_mut(key) {
         Some(entry) => {
-            if entry.expires_at.map_or(false, |t| now > t) {
+            if entry.expires_at.is_some_and(|t| now > t) {
                 // Remove expired entry (lazy cleanup) and signal key removal
                 if let Some(v) = map.remove(key.as_slice()) {
                     let mem = (key.len() + v.value.mem_size()) as i64;
@@ -1260,11 +1254,11 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0 {
-        if let Some(entry) = map.remove(key) {
-            let key_mem = (key.len() + entry.value.mem_size()) as i64;
-            return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
-        }
+    if is_empty && removed > 0
+        && let Some(entry) = map.remove(key)
+    {
+        let key_mem = (key.len() + entry.value.mem_size()) as i64;
+        return (Ok(RespValue::Integer(removed)), mem_delta - key_mem, -1);
     }
     (Ok(RespValue::Integer(removed)), mem_delta, 0)
 }
@@ -1279,13 +1273,11 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            if let Some(v) = map.remove(key.as_slice()) {
-                mem_delta -= (key.len() + v.value.mem_size()) as i64;
-                replaced_expired = true;
-            }
-        }
+    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+        && let Some(v) = map.remove(key.as_slice())
+    {
+        mem_delta -= (key.len() + v.value.mem_size()) as i64;
+        replaced_expired = true;
     }
 
     if let Some(entry) = map.get_mut(key) {
@@ -1327,13 +1319,11 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.map_or(false, |t| now > t) {
-            if let Some(v) = map.remove(key.as_slice()) {
-                mem_delta -= (key.len() + v.value.mem_size()) as i64;
-                replaced_expired = true;
-            }
-        }
+    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+        && let Some(v) = map.remove(key.as_slice())
+    {
+        mem_delta -= (key.len() + v.value.mem_size()) as i64;
+        replaced_expired = true;
     }
 
     if let Some(entry) = map.get_mut(key) {

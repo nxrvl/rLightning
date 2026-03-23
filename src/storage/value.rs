@@ -125,6 +125,7 @@ impl CompactValue {
     }
 
     /// Replace all bytes with new content (used by SETRANGE and similar).
+    #[allow(dead_code)]
     pub fn set_bytes(&mut self, bytes: Vec<u8>) {
         *self = CompactValue::from(bytes);
     }
@@ -396,8 +397,8 @@ impl StoreValue {
             StoreValue::Stream(s) => {
                 let entries_size: usize = s
                     .entries
-                    .iter()
-                    .map(|(_, entry)| {
+                    .values()
+                    .map(|entry| {
                         entry
                             .fields
                             .iter()
@@ -412,6 +413,7 @@ impl StoreValue {
     }
 
     /// Create a default/empty value for a given data type.
+    #[allow(dead_code)]
     pub fn default_for_type(data_type: RedisDataType) -> Self {
         match data_type {
             RedisDataType::String => StoreValue::Str(CompactValue::new()),
@@ -441,6 +443,7 @@ impl StoreValue {
     }
 
     /// Get reference to hash map, or None if not a hash.
+    #[allow(dead_code)]
     pub fn as_hash(&self) -> Option<&NativeHashMap> {
         match self {
             StoreValue::Hash(m) => Some(m),
@@ -449,6 +452,7 @@ impl StoreValue {
     }
 
     /// Get mutable reference to hash map, or None if not a hash.
+    #[allow(dead_code)]
     pub fn as_hash_mut(&mut self) -> Option<&mut NativeHashMap> {
         match self {
             StoreValue::Hash(m) => Some(m),
@@ -457,6 +461,7 @@ impl StoreValue {
     }
 
     /// Get reference to set, or None if not a set.
+    #[allow(dead_code)]
     pub fn as_set(&self) -> Option<&NativeHashSet> {
         match self {
             StoreValue::Set(s) => Some(s),
@@ -465,6 +470,7 @@ impl StoreValue {
     }
 
     /// Get mutable reference to set, or None if not a set.
+    #[allow(dead_code)]
     pub fn as_set_mut(&mut self) -> Option<&mut NativeHashSet> {
         match self {
             StoreValue::Set(s) => Some(s),
@@ -473,6 +479,7 @@ impl StoreValue {
     }
 
     /// Get reference to sorted set, or None if not a sorted set.
+    #[allow(dead_code)]
     pub fn as_zset(&self) -> Option<&SortedSetData> {
         match self {
             StoreValue::ZSet(ss) => Some(ss),
@@ -481,6 +488,7 @@ impl StoreValue {
     }
 
     /// Get mutable reference to sorted set, or None if not a sorted set.
+    #[allow(dead_code)]
     pub fn as_zset_mut(&mut self) -> Option<&mut SortedSetData> {
         match self {
             StoreValue::ZSet(ss) => Some(ss),
@@ -489,6 +497,7 @@ impl StoreValue {
     }
 
     /// Get reference to list, or None if not a list.
+    #[allow(dead_code)]
     pub fn as_list(&self) -> Option<&VecDeque<Vec<u8>>> {
         match self {
             StoreValue::List(l) => Some(l),
@@ -497,6 +506,7 @@ impl StoreValue {
     }
 
     /// Get mutable reference to list, or None if not a list.
+    #[allow(dead_code)]
     pub fn as_list_mut(&mut self) -> Option<&mut VecDeque<Vec<u8>>> {
         match self {
             StoreValue::List(l) => Some(l),
@@ -505,6 +515,7 @@ impl StoreValue {
     }
 
     /// Get reference to stream, or None if not a stream.
+    #[allow(dead_code)]
     pub fn as_stream(&self) -> Option<&StreamData> {
         match self {
             StoreValue::Stream(s) => Some(s),
@@ -513,6 +524,7 @@ impl StoreValue {
     }
 
     /// Get mutable reference to stream, or None if not a stream.
+    #[allow(dead_code)]
     pub fn as_stream_mut(&mut self) -> Option<&mut StreamData> {
         match self {
             StoreValue::Stream(s) => Some(s),

@@ -306,7 +306,7 @@ impl StorageEngine {
 
                 // Also do probabilistic sampling every 10 ticks (1 second)
                 metadata_cleanup_counter += 1;
-                if metadata_cleanup_counter % 10 == 0 {
+                if metadata_cleanup_counter.is_multiple_of(10) {
                     // Hold cross_db_lock read guard to prevent SWAPDB from
                     // changing db_mapping between get_db_by_index and
                     // bump_key_version_for_db inside probabilistic cleanup.
@@ -616,23 +616,21 @@ impl StorageEngine {
                 continue;
             }
             let keys_to_remove: Vec<Vec<u8>> = db.sample(SAMPLE_SIZE, |key, entry| {
-                if let Some(exp) = entry.expires_at {
-                    if exp <= now {
+                if let Some(exp) = entry.expires_at
+                    && exp <= now {
                         return Some(key.clone());
                     }
-                }
                 None
             });
 
             for key in keys_to_remove {
                 let mut entry_size = 0u64;
                 let removed = db.remove_if(&key, |k, item| {
-                    if let Some(exp) = item.expires_at {
-                        if exp <= now {
+                    if let Some(exp) = item.expires_at
+                        && exp <= now {
                             entry_size = Self::calculate_entry_size(k, &item.value) as u64;
                             return true;
                         }
-                    }
                     false
                 });
                 if removed {
@@ -659,12 +657,11 @@ impl StorageEngine {
         let db = self.active_db();
         let mut entry_size = 0u64;
         let removed = db.remove_if(key, |k, item| {
-            if let Some(exp) = item.expires_at {
-                if exp <= now {
+            if let Some(exp) = item.expires_at
+                && exp <= now {
                     entry_size = Self::calculate_entry_size(k, &item.value) as u64;
                     return true;
                 }
-            }
             false
         });
         if removed {
@@ -1264,11 +1261,10 @@ impl StorageEngine {
             if entry.is_expired() {
                 return None;
             }
-            if let Ok(key_str) = std::str::from_utf8(key) {
-                if crate::utils::glob::glob_match(pattern, key_str) {
+            if let Ok(key_str) = std::str::from_utf8(key)
+                && crate::utils::glob::glob_match(pattern, key_str) {
                     return Some(key.clone());
                 }
-            }
             None
         });
 
@@ -2482,6 +2478,7 @@ impl StorageEngine {
     }
 
     /// Dump a key's value as a cloned StoreValue (for MIGRATE/DUMP)
+    #[allow(dead_code)]
     pub async fn dump_key(&self, key: &[u8]) -> Option<StoreValue> {
         let result = {
             if let Some(entry) = self.active_db().get(key) {

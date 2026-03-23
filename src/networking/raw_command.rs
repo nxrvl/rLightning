@@ -67,10 +67,10 @@ impl<'buf> RawCommand<'buf> {
 
         // Parse element count
         let count_str = std::str::from_utf8(&buffer[count_start..crlf_pos])
-            .map_err(|e| RespError::Utf8Error(e))?;
+            .map_err(RespError::Utf8Error)?;
         let count: i64 = count_str
             .parse()
-            .map_err(|e| RespError::IntegerParseError(e))?;
+            .map_err(RespError::IntegerParseError)?;
 
         if count <= 0 {
             return Ok(None); // Null array or empty - let standard parser handle
@@ -111,10 +111,10 @@ impl<'buf> RawCommand<'buf> {
 
             // Parse bulk string length
             let len_str = std::str::from_utf8(&buffer[pos..len_crlf])
-                .map_err(|e| RespError::Utf8Error(e))?;
+                .map_err(RespError::Utf8Error)?;
             let element_len: i64 = len_str
                 .parse()
-                .map_err(|e| RespError::IntegerParseError(e))?;
+                .map_err(RespError::IntegerParseError)?;
 
             if element_len < 0 {
                 // Null bulk string in command - unusual but let standard parser handle
@@ -181,6 +181,7 @@ impl<'buf> RawCommand<'buf> {
 
     /// Convert to an owned `RespValue` for paths that need ownership:
     /// MULTI command queuing, AOF logging, RESP3 protocol features.
+    #[allow(dead_code)]
     pub fn to_resp_value(&self) -> RespValue {
         let mut parts = Vec::with_capacity(1 + self.args.len());
         parts.push(RespValue::BulkString(Some(self.name.to_vec())));

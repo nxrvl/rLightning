@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Byte-level operations on list data stored as `Vec<u8>` in `StorageItem.value`.
 //!
 //! ## V0 Format (bincode-compatible, lists <= 128 elements)

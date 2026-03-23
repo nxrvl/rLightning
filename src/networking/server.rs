@@ -603,19 +603,19 @@ impl Server {
                                     }
                                 } else {
                                     // Write batch: check read-only replica first
-                                    if let Some(ref repl) = replication {
-                                        if repl.is_read_only() {
-                                            for _ in &group.commands {
-                                                let resp = RespValue::Error(
-                                                    "READONLY You can't write against a read only replica.".to_string(),
-                                                );
-                                                if let Ok(bytes) = resp.serialize() {
-                                                    response_buffer.extend_from_slice(&bytes);
-                                                }
-                                                commands_processed += 1;
+                                    if let Some(ref repl) = replication
+                                        && repl.is_read_only()
+                                    {
+                                        for _ in &group.commands {
+                                            let resp = RespValue::Error(
+                                                "READONLY You can't write against a read only replica.".to_string(),
+                                            );
+                                            if let Ok(bytes) = resp.serialize() {
+                                                response_buffer.extend_from_slice(&bytes);
                                             }
-                                            continue;
+                                            commands_processed += 1;
                                         }
+                                        continue;
                                     }
 
                                     // Pre-batch eviction: try to free memory before the batch
@@ -735,60 +735,54 @@ impl Server {
                                                     matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 _ => true,
                                             };
-                                            if should_bump {
-                                                if let Some(key) = cmd.args.first() {
-                                                    command_handler.storage().bump_key_version_for_db(key, db_index);
-                                                }
+                                            if should_bump
+                                                && let Some(key) = cmd.args.first()
+                                            {
+                                                command_handler.storage().bump_key_version_for_db(key, db_index);
                                             }
 
                                             // Notify blocking manager for LPUSH/RPUSH
-                                            if cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH")
+                                            if (cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH"))
+                                                && let Some(key) = cmd.args.first()
                                             {
-                                                if let Some(key) = cmd.args.first() {
-                                                    command_handler.blocking_mgr().notify_key(key);
-                                                }
+                                                command_handler.blocking_mgr().notify_key(key);
                                             }
 
                                             // Add to expiration heap for EXPIRE/PEXPIRE, remove for PERSIST
                                             if (cmd_eq(cmd_name_bytes, b"EXPIRE") || cmd_eq(cmd_name_bytes, b"PEXPIRE"))
                                                 && matches!(result, Ok(RespValue::Integer(1)))
+                                                && let Some(key) = cmd.args.first()
+                                                && let Some(ttl_bytes) = cmd.args.get(1)
+                                                && let Ok(ttl_str) = std::str::from_utf8(ttl_bytes)
+                                                && let Ok(ttl) = ttl_str.parse::<i64>()
                                             {
-                                                if let Some(key) = cmd.args.first() {
-                                                    if let Some(ttl_bytes) = cmd.args.get(1) {
-                                                        if let Ok(ttl_str) = std::str::from_utf8(ttl_bytes) {
-                                                            if let Ok(ttl) = ttl_str.parse::<i64>() {
-                                                                if ttl > 0 {
-                                                                    let expires_at = if cmd_eq(cmd_name_bytes, b"EXPIRE") {
-                                                                        cached_now() + std::time::Duration::from_secs(ttl as u64)
-                                                                    } else {
-                                                                        cached_now() + std::time::Duration::from_millis(ttl as u64)
-                                                                    };
-                                                                    active_db.add_expiration_by_shard(
-                                                                        group.shard_idx,
-                                                                        key.clone(),
-                                                                        expires_at,
-                                                                    );
-                                                                } else {
-                                                                    // TTL <= 0 deleted the key — clean up expiration heap
-                                                                    active_db.remove_expiration(key);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                if ttl > 0 {
+                                                    let expires_at = if cmd_eq(cmd_name_bytes, b"EXPIRE") {
+                                                        cached_now() + std::time::Duration::from_secs(ttl as u64)
+                                                    } else {
+                                                        cached_now() + std::time::Duration::from_millis(ttl as u64)
+                                                    };
+                                                    active_db.add_expiration_by_shard(
+                                                        group.shard_idx,
+                                                        key.clone(),
+                                                        expires_at,
+                                                    );
+                                                } else {
+                                                    // TTL <= 0 deleted the key — clean up expiration heap
+                                                    active_db.remove_expiration(key);
                                                 }
                                             } else if cmd_eq(cmd_name_bytes, b"PERSIST")
                                                 && matches!(result, Ok(RespValue::Integer(1)))
+                                                && let Some(key) = cmd.args.first()
                                             {
-                                                if let Some(key) = cmd.args.first() {
-                                                    active_db.remove_expiration(key);
-                                                }
+                                                active_db.remove_expiration(key);
                                             }
 
                                             // Clean up expiration heap for commands that delete keys
-                                            if *key_delta < 0 {
-                                                if let Some(key) = cmd.args.first() {
-                                                    active_db.remove_expiration(key);
-                                                }
+                                            if *key_delta < 0
+                                                && let Some(key) = cmd.args.first()
+                                            {
+                                                active_db.remove_expiration(key);
                                             }
 
                                             if persistence.is_some() {
@@ -797,17 +791,17 @@ impl Server {
                                                     args: cmd.args.clone(),
                                                 });
                                             }
-                                            if replication.is_some() {
-                                                if ReplicationManager::is_write_command(&cmd_lower) {
-                                                    repl_batch.push(RespCommand {
-                                                        name: b"SELECT".to_vec(),
-                                                        args: vec![db_index.to_string().into_bytes()],
-                                                    });
-                                                    repl_batch.push(RespCommand {
-                                                        name: cmd.name.as_bytes().to_vec(),
-                                                        args: cmd.args.clone(),
-                                                    });
-                                                }
+                                            if replication.is_some()
+                                                && ReplicationManager::is_write_command(&cmd_lower)
+                                            {
+                                                repl_batch.push(RespCommand {
+                                                    name: b"SELECT".to_vec(),
+                                                    args: vec![db_index.to_string().into_bytes()],
+                                                });
+                                                repl_batch.push(RespCommand {
+                                                    name: cmd.name.as_bytes().to_vec(),
+                                                    args: cmd.args.clone(),
+                                                });
                                             }
                                         }
                                         let resp = match result {
@@ -825,16 +819,16 @@ impl Server {
                                         command_handler.storage().update_prefix_indices_batch_for_db(&refs, db_index).await;
                                     }
                                     // Batch AOF logging with a single call
-                                    if !aof_batch.is_empty() {
-                                        if let Some(ref pm) = persistence {
-                                            let _ = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await;
-                                        }
+                                    if !aof_batch.is_empty()
+                                        && let Some(ref pm) = persistence
+                                    {
+                                        let _ = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await;
                                     }
                                     // Batch replication propagation with a single call
-                                    if !repl_batch.is_empty() {
-                                        if let Some(ref repl) = replication {
-                                            repl.propagate_commands_batch(&repl_batch).await;
-                                        }
+                                    if !repl_batch.is_empty()
+                                        && let Some(ref repl) = replication
+                                    {
+                                        repl.propagate_commands_batch(&repl_batch).await;
                                     }
                                     // Update per-shard and global key counts
                                     if batch_key_created > 0 {
@@ -1695,19 +1689,18 @@ impl Server {
                     None
                 };
 
-                if let Some(key) = first_key {
-                    if let Some(redirect) =
+                if let Some(key) = first_key
+                    && let Some(redirect) =
                         cluster_mgr.get_redirect(key, current_asking).await
-                    {
-                        let error_msg = redirect.to_string();
-                        Self::send_error_to_writer(
-                            socket_writer,
-                            error_msg,
-                            client_addr_str,
-                        )
-                        .await?;
-                        return Ok(DispatchAction::Continue);
-                    }
+                {
+                    let error_msg = redirect.to_string();
+                    Self::send_error_to_writer(
+                        socket_writer,
+                        error_msg,
+                        client_addr_str,
+                    )
+                    .await?;
+                    return Ok(DispatchAction::Continue);
                 }
             }
         }

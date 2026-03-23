@@ -48,6 +48,7 @@ pub const EVICTION_SAMPLE_SIZE: usize = 16;
 /// A candidate for eviction, holding enough info to pick a victim without
 /// re-acquiring the shard lock.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EvictionCandidate {
     pub key: Vec<u8>,
     pub lru_clock: u32,
@@ -139,6 +140,7 @@ impl<'a> OccupiedShardEntry<'a> {
 
 impl<'a> VacantShardEntry<'a> {
     /// Get a reference to the key.
+    #[allow(dead_code)]
     pub fn key(&self) -> &Vec<u8> {
         &self.key
     }
@@ -149,9 +151,16 @@ impl<'a> VacantShardEntry<'a> {
     }
 }
 
+impl Default for ShardedStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShardedStore {
     /// Create a new ShardedStore with shard count based on CPU count.
     /// Shard count = (num_cpus * 16).next_power_of_two().clamp(16, 1024)
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let shard_count = (num_cpus::get() * 16)
             .next_power_of_two()
@@ -167,6 +176,7 @@ impl ShardedStore {
         Self::with_shard_count_and_capacity(shard_count, capacity)
     }
 
+    #[allow(dead_code)]
     fn with_shard_count(shard_count: usize) -> Self {
         Self::with_shard_count_and_capacity(shard_count, 0)
     }
@@ -358,18 +368,18 @@ impl ShardedStore {
     {
         let shard_idx = self.shard_index(key);
         let mut guard = self.shards[shard_idx].inner.write();
-        if let Some((k, v)) = guard.map.get_key_value(key) {
-            if f(k, v) {
+        if let Some((k, v)) = guard.map.get_key_value(key)
+            && f(k, v) {
                 guard.map.remove(key);
                 return true;
             }
-        }
         false
     }
 
     // --- Per-shard memory tracking ---
 
     /// Add to the memory counter for the shard containing `key`.
+    #[allow(dead_code)]
     pub fn add_memory(&self, key: &[u8], amount: u64) {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
@@ -378,6 +388,7 @@ impl ShardedStore {
     }
 
     /// Subtract from the memory counter for the shard containing `key`.
+    #[allow(dead_code)]
     pub fn sub_memory(&self, key: &[u8], amount: u64) {
         let shard_idx = self.shard_index(key);
         let _ = self.shards[shard_idx].used_memory.fetch_update(
@@ -388,6 +399,7 @@ impl ShardedStore {
     }
 
     /// Increment the key count for the shard containing `key`.
+    #[allow(dead_code)]
     pub fn inc_key_count(&self, key: &[u8]) {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
@@ -396,6 +408,7 @@ impl ShardedStore {
     }
 
     /// Decrement the key count for the shard containing `key`.
+    #[allow(dead_code)]
     pub fn dec_key_count(&self, key: &[u8]) {
         let shard_idx = self.shard_index(key);
         let _ = self.shards[shard_idx].key_count.fetch_update(
@@ -406,6 +419,7 @@ impl ShardedStore {
     }
 
     /// Get total memory usage across all shards.
+    #[allow(dead_code)]
     pub fn total_used_memory(&self) -> u64 {
         self.shards
             .iter()
@@ -414,6 +428,7 @@ impl ShardedStore {
     }
 
     /// Get total key count across all shards.
+    #[allow(dead_code)]
     pub fn total_key_count(&self) -> u64 {
         self.shards
             .iter()
@@ -561,13 +576,11 @@ impl ShardedStore {
         for key in expired_keys {
             if let Some(entry) = guard.map.get(&key) {
                 // Verify the key is actually expired (may have been refreshed)
-                if let Some(exp) = entry.expires_at {
-                    if exp <= now {
-                        if let Some(entry) = guard.map.remove(&key) {
-                            removed.push((key, entry));
-                        }
+                if let Some(exp) = entry.expires_at
+                    && exp <= now
+                    && let Some(entry) = guard.map.remove(&key) {
+                        removed.push((key, entry));
                     }
-                }
                 // else: key has no expiry anymore (PERSIST was called), skip
             }
             // else: key was already deleted, skip

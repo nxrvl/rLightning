@@ -1414,7 +1414,7 @@ async fn test_cluster_nodes_format_redis7_compatible() {
 
 #[tokio::test]
 async fn test_info_reports_cluster_enabled_1_when_cluster_on() {
-    let (addr, _cluster) = setup_cluster_server(960).await.unwrap();
+    let (addr, _cluster) = setup_cluster_server(965).await.unwrap();
     let mut client = create_client(addr).await.unwrap();
 
     let response = client

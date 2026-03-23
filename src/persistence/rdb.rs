@@ -423,9 +423,7 @@ impl RdbPersistence {
 
                     // Serialize value to bytes for RDB storage
                     let serialized_value: Vec<u8> = serialize_store_value(&item.value)
-                        .map_err(|e| PersistenceError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other, e,
-                        )))?;
+                        .map_err(|e| PersistenceError::Io(std::io::Error::other(e)))?;
 
                     writer
                         .write_u32::<BigEndian>(serialized_value.len() as u32)
