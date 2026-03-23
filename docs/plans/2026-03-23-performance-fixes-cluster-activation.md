@@ -52,10 +52,10 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 
 - Modify: `src/networking/server.rs`
 
-- [ ] In the post-batch loop (around lines 802-805), collect all (SELECT cmd, write cmd) pairs into a Vec instead of calling propagate_commands_batch per command
-- [ ] Call propagate_commands_batch once after the loop with all accumulated pairs
-- [ ] Write a test verifying batched replication preserves command ordering (SELECT + command pairs)
-- [ ] Run cargo test -- must pass before Task 4
+- [x] In the post-batch loop (around lines 802-805), collect all (SELECT cmd, write cmd) pairs into a Vec instead of calling propagate_commands_batch per command
+- [x] Call propagate_commands_batch once after the loop with all accumulated pairs
+- [x] Write a test verifying batched replication preserves command ordering (SELECT + command pairs)
+- [x] Run cargo test -- must pass before Task 4
 
 ### Task 4: Eliminate double-clone in list operations (B1)
 

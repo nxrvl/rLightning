@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::networking::resp::RespCommand;
 use crate::replication::config::ReplicationConfig;
 use crate::replication::{
     MasterLinkStatus, ReplicationBacklog, ReplicationManager, ReplicationRole,
@@ -207,4 +208,84 @@ async fn test_replicaof_no_one() {
 
     let state = mgr.get_state().await;
     assert_eq!(state.role, ReplicationRole::Master);
+}
+
+#[tokio::test]
+async fn test_batched_replication_preserves_command_ordering() {
+    let storage_config = StorageConfig::default();
+    let engine = StorageEngine::new(storage_config);
+    let replication_config = ReplicationConfig::default();
+    let mgr = ReplicationManager::new(engine.clone(), replication_config);
+
+    // Register a replica to receive propagated commands
+    let mut rx = mgr
+        .register_replica("replica-batch".to_string(), "127.0.0.1".to_string(), 6381)
+        .await;
+
+    // Build a batch of SELECT + write command pairs, simulating
+    // what the pipeline batch loop now collects before calling
+    // propagate_commands_batch once.
+    let mut batch: Vec<RespCommand> = Vec::new();
+    batch.push(RespCommand {
+        name: b"SELECT".to_vec(),
+        args: vec![b"0".to_vec()],
+    });
+    batch.push(RespCommand {
+        name: b"SET".to_vec(),
+        args: vec![b"key1".to_vec(), b"val1".to_vec()],
+    });
+    batch.push(RespCommand {
+        name: b"SELECT".to_vec(),
+        args: vec![b"0".to_vec()],
+    });
+    batch.push(RespCommand {
+        name: b"SET".to_vec(),
+        args: vec![b"key2".to_vec(), b"val2".to_vec()],
+    });
+    batch.push(RespCommand {
+        name: b"SELECT".to_vec(),
+        args: vec![b"0".to_vec()],
+    });
+    batch.push(RespCommand {
+        name: b"DEL".to_vec(),
+        args: vec![b"key1".to_vec()],
+    });
+
+    // Propagate all pairs in a single batch call
+    mgr.propagate_commands_batch(&batch).await;
+
+    // Receive the serialized data from the replica channel
+    let data = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("should receive within timeout")
+        .expect("channel should not be closed");
+
+    // Parse the RESP-serialized commands and verify ordering.
+    // Each command is: *N\r\n $len\r\n name\r\n $len\r\n arg1\r\n ...
+    let text = String::from_utf8_lossy(&data);
+    let commands: Vec<&str> = text
+        .split('*')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // We should have 6 commands: SELECT, SET, SELECT, SET, SELECT, DEL
+    assert_eq!(commands.len(), 6, "expected 6 commands in batch, got {}", commands.len());
+
+    // Verify order: extract command names from each RESP array
+    let extract_name = |resp: &str| -> String {
+        let lines: Vec<&str> = resp.lines().collect();
+        // lines[0] = "N" (arg count), lines[1] = "$len", lines[2] = command name
+        lines.get(2).unwrap_or(&"").to_string()
+    };
+
+    assert_eq!(extract_name(commands[0]), "SELECT");
+    assert_eq!(extract_name(commands[1]), "SET");
+    assert_eq!(extract_name(commands[2]), "SELECT");
+    assert_eq!(extract_name(commands[3]), "SET");
+    assert_eq!(extract_name(commands[4]), "SELECT");
+    assert_eq!(extract_name(commands[5]), "DEL");
+
+    // Verify the master offset advanced by the total serialized length
+    let offset = mgr.get_master_repl_offset();
+    assert_eq!(offset as usize, data.len(), "master offset should match serialized batch size");
 }

@@ -636,6 +636,8 @@ impl Server {
                                     let mut prefix_updates: Vec<(Vec<u8>, bool)> = Vec::new();
                                     // Collect AOF-eligible commands to batch into a single log call
                                     let mut aof_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
+                                    // Collect replication commands to batch into a single propagation call
+                                    let mut repl_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
                                     for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
@@ -792,20 +794,16 @@ impl Server {
                                                     args: cmd.args.clone(),
                                                 });
                                             }
-                                            if let Some(ref repl) = replication {
+                                            if replication.is_some() {
                                                 if ReplicationManager::is_write_command(&cmd_lower) {
-                                                    let select_cmd = RespCommand {
+                                                    repl_batch.push(RespCommand {
                                                         name: b"SELECT".to_vec(),
                                                         args: vec![db_index.to_string().into_bytes()],
-                                                    };
-                                                    let repl_cmd = RespCommand {
+                                                    });
+                                                    repl_batch.push(RespCommand {
                                                         name: cmd.name.as_bytes().to_vec(),
                                                         args: cmd.args.clone(),
-                                                    };
-                                                    repl.propagate_commands_batch(
-                                                        &[select_cmd, repl_cmd],
-                                                    )
-                                                    .await;
+                                                    });
                                                 }
                                             }
                                         }
@@ -827,6 +825,12 @@ impl Server {
                                     if !aof_batch.is_empty() {
                                         if let Some(ref pm) = persistence {
                                             let _ = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await;
+                                        }
+                                    }
+                                    // Batch replication propagation with a single call
+                                    if !repl_batch.is_empty() {
+                                        if let Some(ref repl) = replication {
+                                            repl.propagate_commands_batch(&repl_batch).await;
                                         }
                                     }
                                     // Update per-shard and global key counts
