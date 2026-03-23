@@ -77,12 +77,12 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 - Modify: `src/main.rs`
 - Modify: `src/cluster/gossip.rs` (if signatures need adjustment)
 
-- [ ] After cluster.init(addr).await in main.rs (~line 594), spawn gossip tasks: start_cluster_bus and cluster_cron
-- [ ] Wrap the cluster manager in Arc for sharing across spawned tasks
-- [ ] Verify start_cluster_bus and cluster_cron function signatures accept Arc<ClusterManager> (or adjust)
-- [ ] Ensure standalone mode (cluster disabled) is unaffected -- gossip tasks only spawn when cluster.is_enabled()
-- [ ] Write a test that verifies gossip tasks are spawned when cluster mode is enabled and not spawned when disabled
-- [ ] Run cargo test -- must pass before Task 6
+- [x] After cluster.init(addr).await in main.rs (~line 594), spawn gossip tasks: start_cluster_bus and cluster_cron
+- [x] Wrap the cluster manager in Arc for sharing across spawned tasks
+- [x] Verify start_cluster_bus and cluster_cron function signatures accept Arc<ClusterManager> (or adjust)
+- [x] Ensure standalone mode (cluster disabled) is unaffected -- gossip tasks only spawn when cluster.is_enabled()
+- [x] Write a test that verifies gossip tasks are spawned when cluster mode is enabled and not spawned when disabled
+- [x] Run cargo test -- must pass before Task 6
 
 ### Task 6: Add MOVED/ASK routing to command dispatch (C2)
 

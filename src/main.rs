@@ -29,6 +29,7 @@ mod sentinel;
 mod storage;
 mod utils;
 
+use crate::cluster::gossip::{cluster_cron, start_cluster_bus};
 use crate::cluster::{ClusterConfig, ClusterManager};
 use crate::networking::server::Server;
 use crate::persistence::PersistenceManager;
@@ -592,6 +593,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
     if cluster.is_enabled() {
         cluster.init(addr).await;
+
+        // Spawn gossip protocol tasks for inter-node communication
+        let bus_mgr = Arc::clone(&cluster);
+        let bus_addr = addr;
+        tokio::spawn(async move {
+            start_cluster_bus(bus_mgr, bus_addr).await;
+        });
+
+        let cron_mgr = Arc::clone(&cluster);
+        tokio::spawn(async move {
+            cluster_cron(cron_mgr).await;
+        });
+
         info!("Cluster mode enabled, node initialized at {}", addr);
     }
 

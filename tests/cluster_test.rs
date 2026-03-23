@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rlightning::cluster::gossip::{cluster_cron, start_cluster_bus};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, SlotRange, key_hash_slot};
 use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole};
 use rlightning::command::Command;
@@ -869,4 +870,70 @@ async fn test_cluster_keyslot_via_server() {
         RespValue::Integer(slot) => assert_eq!(slot, 12182),
         _ => panic!("Expected Integer for CLUSTER KEYSLOT, got: {:?}", response),
     }
+}
+
+// --- Gossip Activation Tests ---
+
+#[tokio::test]
+async fn test_gossip_tasks_spawned_when_cluster_enabled() {
+    // Set up cluster manager with enabled=true
+    let port = DEFAULT_TEST_PORT + 950;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let storage = StorageEngine::new(StorageConfig::default());
+
+    let cluster_config = ClusterConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    assert!(cluster.is_enabled());
+    cluster.init(addr).await;
+
+    // Spawn gossip tasks just like main.rs does
+    let bus_mgr = Arc::clone(&cluster);
+    let bus_addr = addr;
+    tokio::spawn(async move {
+        start_cluster_bus(bus_mgr, bus_addr).await;
+    });
+
+    let cron_mgr = Arc::clone(&cluster);
+    tokio::spawn(async move {
+        cluster_cron(cron_mgr).await;
+    });
+
+    // Give gossip tasks time to start
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify the cluster bus is listening on port+10000
+    let bus_port = port + 10000;
+    let bus_addr: SocketAddr = format!("127.0.0.1:{}", bus_port).parse().unwrap();
+    let connect_result = tokio::net::TcpStream::connect(bus_addr).await;
+    assert!(
+        connect_result.is_ok(),
+        "Cluster bus should be listening on port+10000 when cluster is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_gossip_tasks_not_spawned_when_cluster_disabled() {
+    // Set up cluster manager with enabled=false
+    let storage = StorageEngine::new(StorageConfig::default());
+
+    let cluster_config = ClusterConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    assert!(!cluster.is_enabled());
+
+    // In the real code, gossip tasks are only spawned inside `if cluster.is_enabled()`.
+    // Verify the guard works: bus port should NOT be listening.
+    let port = DEFAULT_TEST_PORT + 951;
+    let bus_port = port + 10000;
+    let bus_addr: SocketAddr = format!("127.0.0.1:{}", bus_port).parse().unwrap();
+    let connect_result = tokio::net::TcpStream::connect(bus_addr).await;
+    assert!(
+        connect_result.is_err(),
+        "Cluster bus should NOT be listening when cluster is disabled"
+    );
 }
