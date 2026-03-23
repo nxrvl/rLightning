@@ -632,6 +632,8 @@ impl Server {
                                     let mut batch_write_count: u64 = 0;
                                     let mut batch_key_created: u32 = 0;
                                     let mut batch_key_deleted: u32 = 0;
+                                    // Collect prefix index updates to batch into a single lock acquisition
+                                    let mut prefix_updates: Vec<(Vec<u8>, bool)> = Vec::new();
                                     for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
@@ -648,18 +650,18 @@ impl Server {
                                             command_handler.storage().adjust_global_memory(*mem_delta);
                                         }
 
-                                        // Track key count changes and update prefix index.
+                                        // Track key count changes and collect prefix index updates.
                                         // Use explicit db_index since the batch path does not
                                         // enter a CURRENT_DB_INDEX scope (unlike handler.rs:84).
                                         if *key_delta > 0 {
                                             batch_key_created += *key_delta as u32;
                                             if let Some(key) = group.commands[i].args.first() {
-                                                command_handler.storage().update_prefix_indices_for_db(key, true, db_index).await;
+                                                prefix_updates.push((key.to_vec(), true));
                                             }
                                         } else if *key_delta < 0 {
                                             batch_key_deleted += (-*key_delta) as u32;
                                             if let Some(key) = group.commands[i].args.first() {
-                                                command_handler.storage().update_prefix_indices_for_db(key, false, db_index).await;
+                                                prefix_updates.push((key.to_vec(), false));
                                             }
                                         }
 
@@ -814,6 +816,11 @@ impl Server {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
                                         commands_processed += 1;
+                                    }
+                                    // Batch update prefix indices with a single lock acquisition
+                                    if !prefix_updates.is_empty() {
+                                        let refs: Vec<(&[u8], bool)> = prefix_updates.iter().map(|(k, i)| (k.as_slice(), *i)).collect();
+                                        command_handler.storage().update_prefix_indices_batch_for_db(&refs, db_index).await;
                                     }
                                     // Update per-shard and global key counts
                                     if batch_key_created > 0 {

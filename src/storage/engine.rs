@@ -738,6 +738,40 @@ impl StorageEngine {
         }
     }
 
+    /// Batch update prefix indices for a specific database index.
+    /// Accepts a slice of (key, is_insert) pairs and acquires the write lock once,
+    /// reducing lock contention in the pipeline batch path.
+    pub async fn update_prefix_indices_batch_for_db(
+        &self,
+        updates: &[(&[u8], bool)],
+        db_idx: usize,
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        let mut index = self.prefix_index.write().await;
+
+        for &(key, is_insert) in updates {
+            if let Ok(key_str) = std::str::from_utf8(key) {
+                for &prefix in Self::INDEXED_PREFIXES {
+                    if key_str.starts_with(prefix) {
+                        let idx_key = (db_idx, prefix.to_string());
+                        let entry = index.entry(idx_key.clone()).or_insert_with(Vec::new);
+                        if is_insert {
+                            entry.push(key.to_vec());
+                        } else {
+                            entry.retain(|k| k != key);
+                            if entry.is_empty() {
+                                index.remove(&idx_key);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Extract prefix from a pattern for index lookup (returns DB-scoped key)
     fn extract_prefix_from_pattern(&self, pattern: &str) -> Option<(usize, String)> {
         // Check if pattern is a simple prefix pattern like "user:*"
@@ -4355,5 +4389,72 @@ mod tests {
         // Memory tracking should be non-zero
         let mem = storage.get_used_memory();
         assert!(mem > 0, "Memory usage should be tracked");
+    }
+
+    #[tokio::test]
+    async fn test_update_prefix_indices_batch_for_db() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+        let db_idx = 0;
+
+        // Batch insert multiple keys with indexed prefixes
+        let updates: Vec<(&[u8], bool)> = vec![
+            (b"user:alice", true),
+            (b"user:bob", true),
+            (b"cache:page1", true),
+            (b"nonindexed:key", true), // should be ignored
+        ];
+        storage
+            .update_prefix_indices_batch_for_db(&updates, db_idx)
+            .await;
+
+        // Verify prefix index state
+        let index = storage.prefix_index.read().await;
+        let user_keys = index.get(&(db_idx, "user:".to_string())).unwrap();
+        assert_eq!(user_keys.len(), 2);
+        assert!(user_keys.contains(&b"user:alice".to_vec()));
+        assert!(user_keys.contains(&b"user:bob".to_vec()));
+
+        let cache_keys = index.get(&(db_idx, "cache:".to_string())).unwrap();
+        assert_eq!(cache_keys.len(), 1);
+        assert!(cache_keys.contains(&b"cache:page1".to_vec()));
+
+        // Non-indexed prefix should not appear
+        assert!(index.get(&(db_idx, "nonindexed:".to_string())).is_none());
+        drop(index);
+
+        // Batch delete one key and insert another
+        let updates2: Vec<(&[u8], bool)> = vec![
+            (b"user:alice", false), // delete
+            (b"user:charlie", true), // insert
+        ];
+        storage
+            .update_prefix_indices_batch_for_db(&updates2, db_idx)
+            .await;
+
+        let index = storage.prefix_index.read().await;
+        let user_keys = index.get(&(db_idx, "user:".to_string())).unwrap();
+        assert_eq!(user_keys.len(), 2);
+        assert!(!user_keys.contains(&b"user:alice".to_vec()));
+        assert!(user_keys.contains(&b"user:bob".to_vec()));
+        assert!(user_keys.contains(&b"user:charlie".to_vec()));
+        drop(index);
+
+        // Delete all keys from a prefix -- entry should be cleaned up
+        let updates3: Vec<(&[u8], bool)> = vec![
+            (b"cache:page1", false),
+        ];
+        storage
+            .update_prefix_indices_batch_for_db(&updates3, db_idx)
+            .await;
+
+        let index = storage.prefix_index.read().await;
+        assert!(index.get(&(db_idx, "cache:".to_string())).is_none());
+        drop(index);
+
+        // Empty batch should be a no-op
+        storage
+            .update_prefix_indices_batch_for_db(&[], db_idx)
+            .await;
     }
 }
