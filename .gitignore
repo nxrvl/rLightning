@@ -21,3 +21,6 @@ test-config.toml
 
 # Internal development docs
 /docs/
+
+# Test run infrastructure (Docker Compose, configs, results)
+.test-runs/
