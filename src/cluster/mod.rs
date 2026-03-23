@@ -1181,8 +1181,9 @@ impl ClusterManager {
         keys.iter().any(|k| key_hash_slot(k) != first_slot)
     }
 
-    /// Get the redirect information for a key if it doesn't belong to this node
-    pub async fn get_redirect(&self, key: &[u8]) -> Option<RedirectInfo> {
+    /// Get the redirect information for a key if it doesn't belong to this node.
+    /// When `asking` is true, importing slots are handled locally (ASK protocol).
+    pub async fn get_redirect(&self, key: &[u8], asking: bool) -> Option<RedirectInfo> {
         let state = self.state.read().await;
         let slot = key_hash_slot(key);
 
@@ -1190,8 +1191,7 @@ impl ClusterManager {
         if let Some(migration_state) = state.migration_states.get(&slot) {
             match migration_state {
                 SlotState::Migrating(target_id) => {
-                    // Key is being migrated - check if the key still exists locally
-                    // If not, redirect with ASK to the target
+                    // Key is being migrated - redirect with ASK to the target
                     if let Some(target_node) = state.nodes.get(target_id) {
                         return Some(RedirectInfo {
                             redirect_type: RedirectType::Ask,
@@ -1201,8 +1201,11 @@ impl ClusterManager {
                     }
                 }
                 SlotState::Importing(_) => {
-                    // We're importing - if ASKING flag is set, handle locally
-                    // Otherwise, the key belongs to the original owner
+                    if asking {
+                        // Client sent ASKING - handle the command locally
+                        return None;
+                    }
+                    // No ASKING flag - fall through to normal ownership check
                 }
                 SlotState::Normal => {}
             }

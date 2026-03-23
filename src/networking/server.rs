@@ -327,6 +327,9 @@ impl Server {
         // Track last command locally to avoid DashMap write on every command
         let mut last_cmd_local = String::new();
 
+        // Per-connection ASKING flag for cluster ASK protocol
+        let mut asking = false;
+
         loop {
             // In subscription mode, we need to handle both:
             // 1. Incoming commands from the client
@@ -870,6 +873,7 @@ impl Server {
                                     &connections,
                                     conn_id,
                                     &mut last_cmd_local,
+                                    &mut asking,
                                 )
                                 .await?
                                 {
@@ -926,6 +930,7 @@ impl Server {
                             &connections,
                             conn_id,
                             &mut last_cmd_local,
+                            &mut asking,
                         )
                         .await?
                         {
@@ -1001,8 +1006,22 @@ impl Server {
         connections: &Arc<DashMap<u64, ClientInfo>>,
         conn_id: u64,
         last_cmd_local: &mut String,
+        asking: &mut bool,
     ) -> Result<DispatchAction, NetworkError> {
         let cmd_lower = cmd.name.to_lowercase();
+
+        // ASKING command: set the per-connection flag and return +OK
+        if cmd_lower == "asking" {
+            *asking = true;
+            let response = RespValue::SimpleString("OK".to_string());
+            if let Ok(bytes) = response.serialize() {
+                response_buffer.extend_from_slice(&bytes);
+            }
+            return Ok(DispatchAction::Continue);
+        }
+
+        // Consume and reset the asking flag for non-ASKING commands
+        let current_asking = std::mem::replace(asking, false);
 
         // HELLO - protocol negotiation
         if cmd_lower == "hello" {
@@ -1613,6 +1632,83 @@ impl Server {
                 )
                 .await?;
                 return Ok(DispatchAction::Continue);
+            }
+
+            // MOVED/ASK redirect: check slot ownership for key-bearing commands
+            let slot_exempt = matches!(
+                cmd_lower.as_str(),
+                "ping"
+                    | "info"
+                    | "cluster"
+                    | "command"
+                    | "auth"
+                    | "multi"
+                    | "exec"
+                    | "discard"
+                    | "watch"
+                    | "unwatch"
+                    | "config"
+                    | "dbsize"
+                    | "flushdb"
+                    | "flushall"
+                    | "randomkey"
+                    | "keys"
+                    | "scan"
+                    | "time"
+                    | "debug"
+                    | "slowlog"
+                    | "latency"
+                    | "memory"
+                    | "module"
+                    | "swapdb"
+                    | "object"
+                    | "wait"
+                    | "save"
+                    | "bgsave"
+                    | "bgrewriteaof"
+                    | "lastsave"
+                    | "asking"
+                    | "subscribe"
+                    | "unsubscribe"
+                    | "psubscribe"
+                    | "punsubscribe"
+                    | "ssubscribe"
+                    | "sunsubscribe"
+                    | "publish"
+                    | "spublish"
+                    | "select"
+                    | "client"
+                    | "hello"
+                    | "quit"
+                    | "reset"
+                    | "lolwut"
+                    | "echo"
+            );
+
+            if !slot_exempt {
+                // Get the first key: prefer already-extracted multi-key refs, else args[0]
+                let first_key: Option<&[u8]> = if !key_refs.is_empty() {
+                    Some(key_refs[0])
+                } else if !cmd.args.is_empty() {
+                    Some(cmd.args[0].as_slice())
+                } else {
+                    None
+                };
+
+                if let Some(key) = first_key {
+                    if let Some(redirect) =
+                        cluster_mgr.get_redirect(key, current_asking).await
+                    {
+                        let error_msg = redirect.to_string();
+                        Self::send_error_to_writer(
+                            socket_writer,
+                            error_msg,
+                            client_addr_str,
+                        )
+                        .await?;
+                        return Ok(DispatchAction::Continue);
+                    }
+                }
             }
         }
 

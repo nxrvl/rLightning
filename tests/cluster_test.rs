@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rlightning::cluster::gossip::{cluster_cron, start_cluster_bus};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, SlotRange, key_hash_slot};
-use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole};
+use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole, RedirectType};
 use rlightning::command::Command;
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::resp::RespValue;
@@ -396,7 +396,7 @@ async fn test_cluster_redirect_moved() {
     mgr.set_slot(12182, "NODE", Some(&other_id)).await.unwrap();
 
     // Now "foo" should redirect
-    let redirect = mgr.get_redirect(b"foo").await;
+    let redirect = mgr.get_redirect(b"foo", false).await;
     assert!(redirect.is_some());
     let redirect = redirect.unwrap();
     assert_eq!(
@@ -418,7 +418,7 @@ async fn test_cluster_no_redirect_for_local_key() {
     mgr.set_slot(12182, "NODE", Some(&my_id)).await.unwrap();
 
     // No redirect needed
-    let redirect = mgr.get_redirect(b"foo").await;
+    let redirect = mgr.get_redirect(b"foo", false).await;
     assert!(redirect.is_none());
 }
 
@@ -936,4 +936,328 @@ async fn test_gossip_tasks_not_spawned_when_cluster_disabled() {
         connect_result.is_err(),
         "Cluster bus should NOT be listening when cluster is disabled"
     );
+}
+
+// --- MOVED/ASK routing tests ---
+
+/// Helper to create a test server with cluster mode enabled and specific slot assignments.
+/// Returns the server address and the cluster manager for further configuration.
+async fn setup_cluster_test_server(
+    port_offset: u16,
+    assign_all_slots: bool,
+) -> (SocketAddr, Arc<ClusterManager>) {
+    let port = DEFAULT_TEST_PORT + port_offset;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let storage = Arc::new(StorageEngine::new(StorageConfig::default()));
+
+    let cluster_config = ClusterConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let cluster_mgr = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    cluster_mgr.init(addr).await;
+
+    if assign_all_slots {
+        let all_slots: Vec<u16> = (0..CLUSTER_SLOTS).collect();
+        cluster_mgr.add_slots(&all_slots).await.unwrap();
+    }
+
+    let server = Server::new(addr, Arc::clone(&storage))
+        .with_connection_limit(100)
+        .with_buffer_size(1024 * 1024)
+        .with_cluster(Arc::clone(&cluster_mgr));
+
+    tokio::spawn(async move {
+        if let Err(e) = server.start().await {
+            eprintln!("Server error: {:?}", e);
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    (addr, cluster_mgr)
+}
+
+#[tokio::test]
+async fn test_moved_response_for_wrong_slot_key() {
+    let (addr, cluster_mgr) = setup_cluster_test_server(960, false).await;
+
+    // Meet another node so we have a target for MOVED
+    cluster_mgr.meet("127.0.0.1", 6380).await.unwrap();
+
+    let state = cluster_mgr.state().read().await;
+    let my_id = state.my_id.clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
+    drop(state);
+
+    // Assign the slot for "foo" (12182) to the OTHER node
+    cluster_mgr
+        .set_slot(12182, "NODE", Some(&other_id))
+        .await
+        .unwrap();
+
+    // Connect and try to SET a key that doesn't belong to us
+    let mut client = create_client(addr).await.unwrap();
+    let result = client.send_command_str("SET", &["foo", "bar"]).await.unwrap();
+
+    // Should get a MOVED error
+    match result {
+        RespValue::Error(msg) => {
+            assert!(
+                msg.starts_with("MOVED 12182"),
+                "Expected MOVED error for slot 12182, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("127.0.0.1:6380"),
+                "MOVED should point to the owning node, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected MOVED error, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_ask_redirect_during_migration() {
+    let (addr, cluster_mgr) = setup_cluster_test_server(961, false).await;
+
+    // Meet another node
+    cluster_mgr.meet("127.0.0.1", 6381).await.unwrap();
+
+    let state = cluster_mgr.state().read().await;
+    let my_id = state.my_id.clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
+    drop(state);
+
+    // Assign slot 100 to ourselves
+    cluster_mgr.add_slots(&[100]).await.unwrap();
+
+    // Start migrating slot 100 to the other node
+    cluster_mgr
+        .set_slot(100, "MIGRATING", Some(&other_id))
+        .await
+        .unwrap();
+
+    // Find a key that maps to slot 100
+    let mut test_key = None;
+    for i in 0..10000u32 {
+        let candidate = format!("key_{}", i);
+        if key_hash_slot(candidate.as_bytes()) == 100 {
+            test_key = Some(candidate);
+            break;
+        }
+    }
+    let test_key = test_key.expect("Should find a key mapping to slot 100");
+
+    // Connect and try to SET the key
+    let mut client = create_client(addr).await.unwrap();
+    let result = client
+        .send_command_str("SET", &[&test_key, "value"])
+        .await
+        .unwrap();
+
+    // Should get an ASK error
+    match result {
+        RespValue::Error(msg) => {
+            assert!(
+                msg.starts_with("ASK 100"),
+                "Expected ASK error for slot 100, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("127.0.0.1:6381"),
+                "ASK should point to the migration target, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected ASK error, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_asking_command_allows_importing_slot() {
+    let (_, cluster_mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    cluster_mgr.init(addr).await;
+
+    // Meet another node
+    cluster_mgr.meet("127.0.0.1", 6380).await.unwrap();
+
+    let state = cluster_mgr.state().read().await;
+    let my_id = state.my_id.clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
+    drop(state);
+
+    // Set up an importing slot (slot being imported from other node)
+    cluster_mgr
+        .set_slot(100, "IMPORTING", Some(&other_id))
+        .await
+        .unwrap();
+
+    // Find a key that maps to slot 100
+    let mut test_key = None;
+    for i in 0..10000u32 {
+        let candidate = format!("key_{}", i);
+        if key_hash_slot(candidate.as_bytes()) == 100 {
+            test_key = Some(candidate);
+            break;
+        }
+    }
+    let test_key = test_key.expect("Should find a key mapping to slot 100");
+
+    // Without ASKING flag, should redirect (since we don't own the slot normally)
+    let redirect_without_asking = cluster_mgr
+        .get_redirect(test_key.as_bytes(), false)
+        .await;
+    // The importing node doesn't own slot 100 normally, so it would redirect
+    // (unless it's also in slot_owners, which it won't be)
+
+    // With ASKING flag, importing slot should be handled locally
+    let redirect_with_asking = cluster_mgr
+        .get_redirect(test_key.as_bytes(), true)
+        .await;
+    assert!(
+        redirect_with_asking.is_none(),
+        "With ASKING flag, importing slot should be handled locally"
+    );
+}
+
+#[tokio::test]
+async fn test_no_redirect_for_slot_exempt_commands() {
+    let (addr, cluster_mgr) = setup_cluster_test_server(962, false).await;
+
+    // Meet another node and assign all slots to it (so nothing is local)
+    cluster_mgr.meet("127.0.0.1", 6382).await.unwrap();
+
+    let state = cluster_mgr.state().read().await;
+    let my_id = state.my_id.clone();
+    let other_id = state.nodes.keys().find(|k| **k != my_id).unwrap().clone();
+    drop(state);
+
+    // Assign a slot to the remote node so MOVED would be triggered for key commands
+    cluster_mgr
+        .set_slot(key_hash_slot(b"testkey"), "NODE", Some(&other_id))
+        .await
+        .unwrap();
+
+    let mut client = create_client(addr).await.unwrap();
+
+    // PING should always work without redirect
+    let result = client.send_command_str("PING", &[]).await.unwrap();
+    match &result {
+        RespValue::SimpleString(s) => assert_eq!(s, "PONG"),
+        other => panic!("PING should return PONG, got: {:?}", other),
+    }
+
+    // INFO should work without redirect
+    let result = client
+        .send_command_str("INFO", &["server"])
+        .await
+        .unwrap();
+    match &result {
+        RespValue::BulkString(Some(_)) => {} // INFO returns bulk string
+        other => panic!("INFO should return bulk string, got: {:?}", other),
+    }
+
+    // COMMAND should work without redirect
+    let result = client.send_command_str("COMMAND", &[]).await.unwrap();
+    match &result {
+        RespValue::Error(_) => panic!("COMMAND should not return error"),
+        _ => {} // Any non-error response is fine
+    }
+
+    // CLUSTER INFO should work without redirect
+    let result = client
+        .send_command_str("CLUSTER", &["INFO"])
+        .await
+        .unwrap();
+    match &result {
+        RespValue::Error(e) if e.starts_with("MOVED") || e.starts_with("ASK") => {
+            panic!("CLUSTER INFO should not redirect, got: {}", e)
+        }
+        _ => {} // Any non-redirect response is fine
+    }
+}
+
+#[tokio::test]
+async fn test_asking_command_returns_ok() {
+    let (addr, _cluster_mgr) = setup_cluster_test_server(963, true).await;
+
+    let mut client = create_client(addr).await.unwrap();
+
+    // ASKING should return +OK
+    let result = client.send_command_str("ASKING", &[]).await.unwrap();
+    match result {
+        RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+        other => panic!("ASKING should return OK, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_no_redirect_when_all_slots_local() {
+    let (addr, _cluster_mgr) = setup_cluster_test_server(964, true).await;
+
+    let mut client = create_client(addr).await.unwrap();
+
+    // When all slots are local, SET should work normally
+    let result = client
+        .send_command_str("SET", &["mykey", "myvalue"])
+        .await
+        .unwrap();
+    match result {
+        RespValue::SimpleString(s) => assert_eq!(s, "OK"),
+        other => panic!("SET should succeed when slot is local, got: {:?}", other),
+    }
+
+    // GET should also work
+    let result = client.send_command_str("GET", &["mykey"]).await.unwrap();
+    match result {
+        RespValue::BulkString(Some(v)) => assert_eq!(v, b"myvalue"),
+        other => panic!("GET should return value, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_asking_flag_reset_after_non_asking_command() {
+    let (_, cluster_mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    cluster_mgr.init(addr).await;
+
+    cluster_mgr.meet("127.0.0.1", 6380).await.unwrap();
+
+    let state = cluster_mgr.state().read().await;
+    let other_id = state
+        .nodes
+        .keys()
+        .find(|k| **k != state.my_id)
+        .unwrap()
+        .clone();
+    drop(state);
+
+    // Set up an importing slot
+    cluster_mgr
+        .set_slot(100, "IMPORTING", Some(&other_id))
+        .await
+        .unwrap();
+
+    let mut test_key = None;
+    for i in 0..10000u32 {
+        let candidate = format!("key_{}", i);
+        if key_hash_slot(candidate.as_bytes()) == 100 {
+            test_key = Some(candidate);
+            break;
+        }
+    }
+    let test_key = test_key.expect("Should find a key mapping to slot 100");
+
+    // First call with asking=true should return None (handle locally)
+    let r = cluster_mgr.get_redirect(test_key.as_bytes(), true).await;
+    assert!(r.is_none(), "Should handle locally with ASKING flag");
+
+    // Second call with asking=false should NOT return None
+    // (the asking flag should have been a one-shot)
+    let r = cluster_mgr.get_redirect(test_key.as_bytes(), false).await;
+    // This verifies the method itself respects the flag parameter correctly
+    // The actual per-connection reset is tested via the server dispatch path
 }

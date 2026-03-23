@@ -90,15 +90,15 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 
 - Modify: `src/networking/server.rs`
 
-- [ ] Add `asking: bool` field to per-connection state
-- [ ] Intercept the ASKING command -- set the flag and return +OK
-- [ ] Before executing key-bearing commands in dispatch_command, call cluster_mgr.get_redirect(key, asking) if cluster mode is enabled
-- [ ] If MOVED, return RespValue::Error("MOVED {slot} {host}:{port}")
-- [ ] If ASK, return RespValue::Error("ASK {slot} {host}:{port}")
-- [ ] Reset the asking flag after each non-ASKING command
-- [ ] Skip slot checks for: PING, INFO, CLUSTER, COMMAND, AUTH, MULTI, EXEC, DISCARD, WATCH
-- [ ] Write tests: MOVED response for wrong-slot key, ASK flow, no redirect for slot-exempt commands
-- [ ] Run cargo test -- must pass before Task 7
+- [x] Add `asking: bool` field to per-connection state
+- [x] Intercept the ASKING command -- set the flag and return +OK
+- [x] Before executing key-bearing commands in dispatch_command, call cluster_mgr.get_redirect(key, asking) if cluster mode is enabled
+- [x] If MOVED, return RespValue::Error("MOVED {slot} {host}:{port}")
+- [x] If ASK, return RespValue::Error("ASK {slot} {host}:{port}")
+- [x] Reset the asking flag after each non-ASKING command
+- [x] Skip slot checks for: PING, INFO, CLUSTER, COMMAND, AUTH, MULTI, EXEC, DISCARD, WATCH
+- [x] Write tests: MOVED response for wrong-slot key, ASK flow, no redirect for slot-exempt commands
+- [x] Run cargo test -- must pass before Task 7
 
 ### Task 7: Fix CLUSTER NODES format and dynamic INFO (C3 + C4)
 

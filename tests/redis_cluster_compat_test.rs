@@ -53,7 +53,7 @@ async fn test_cluster_moved_redirect_format() {
     // Assign slot for "foo" (12182) to other node
     mgr.set_slot(12182, "NODE", Some(&other_id)).await.unwrap();
 
-    let redirect = mgr.get_redirect(b"foo").await;
+    let redirect = mgr.get_redirect(b"foo", false).await;
     assert!(
         redirect.is_some(),
         "Should get redirect for key on remote node"
@@ -101,7 +101,7 @@ async fn test_cluster_ask_redirect_during_migration() {
 
     if let Some(key) = test_key {
         // When the key doesn't exist locally during migration, it may redirect
-        let redirect = mgr.get_redirect(key.as_bytes()).await;
+        let redirect = mgr.get_redirect(key.as_bytes(), false).await;
         // During migration, if key is not found locally, ASK redirect is expected
         if let Some(r) = redirect {
             assert_eq!(r.redirect_type, RedirectType::Ask);
@@ -124,7 +124,7 @@ async fn test_cluster_no_redirect_for_local_slots() {
 
     // No key should redirect
     for key in &["foo", "bar", "hello", "world", "test"] {
-        let redirect = mgr.get_redirect(key.as_bytes()).await;
+        let redirect = mgr.get_redirect(key.as_bytes(), false).await;
         assert!(
             redirect.is_none(),
             "Key '{}' should not redirect when all slots are local",
