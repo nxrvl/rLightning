@@ -108,12 +108,12 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 - Modify: `src/command/types/connection.rs`
 - Modify: `src/storage/engine.rs` (if needed for runtime config access)
 
-- [ ] Verify to_cluster_nodes_line() output matches Redis 7 format (node-id, ip:port@cport, flags, master-id, ping-sent, pong-recv, config-epoch, link-state, slots)
-- [ ] Fix any format discrepancies found
-- [ ] In connection.rs INFO handler (~line 745), replace hardcoded cluster_enabled:0 with dynamic value from cluster config
-- [ ] Write a test for CLUSTER NODES output format validation
-- [ ] Write a test verifying INFO reports cluster_enabled:1 when cluster mode is on
-- [ ] Run cargo test -- must pass before Task 8
+- [x] Verify to_cluster_nodes_line() output matches Redis 7 format (node-id, ip:port@cport, flags, master-id, ping-sent, pong-recv, config-epoch, link-state, slots)
+- [x] Fix any format discrepancies found
+- [x] In connection.rs INFO handler (~line 745), replace hardcoded cluster_enabled:0 with dynamic value from cluster config
+- [x] Write a test for CLUSTER NODES output format validation
+- [x] Write a test verifying INFO reports cluster_enabled:1 when cluster mode is on
+- [x] Run cargo test -- must pass before Task 8
 
 ### Task 8: Full verification -- compilation, tests, performance, compatibility
 

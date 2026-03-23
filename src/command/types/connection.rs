@@ -742,7 +742,15 @@ pub async fn info_expanded(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandR
     }
 
     if include_all || section == "cluster" {
-        sections.push("# Cluster\r\ncluster_enabled:0\r\n".to_string());
+        let cluster_enabled = engine
+            .config_get("cluster-enabled")
+            .first()
+            .map(|(_, v)| if v == "yes" { 1 } else { 0 })
+            .unwrap_or(0);
+        sections.push(format!(
+            "# Cluster\r\ncluster_enabled:{}\r\n",
+            cluster_enabled
+        ));
     }
 
     if include_all || section == "keyspace" {

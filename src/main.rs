@@ -591,6 +591,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         announce_bus_port: settings.cluster.announce_bus_port,
     };
     let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    storage.set_cluster_enabled(cluster.is_enabled());
     if cluster.is_enabled() {
         cluster.init(addr).await;
 

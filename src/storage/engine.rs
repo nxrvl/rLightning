@@ -370,6 +370,8 @@ impl StorageEngine {
             .insert("appendfsync".to_string(), "everysec".to_string());
         self.runtime_config
             .insert("save".to_string(), "3600 1 300 100 60 10000".to_string());
+        self.runtime_config
+            .insert("cluster-enabled".to_string(), "no".to_string());
     }
 
     /// Seed additional runtime config values from the application settings (called from main after engine creation).
@@ -402,6 +404,14 @@ impl StorageEngine {
             self.runtime_config
                 .insert("save".to_string(), save.to_string());
         }
+    }
+
+    /// Set the cluster-enabled runtime config flag.
+    pub fn set_cluster_enabled(&self, enabled: bool) {
+        self.runtime_config.insert(
+            "cluster-enabled".to_string(),
+            if enabled { "yes" } else { "no" }.to_string(),
+        );
     }
 
     /// Get all runtime config entries matching a glob pattern.

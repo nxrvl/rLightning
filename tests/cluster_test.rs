@@ -789,6 +789,7 @@ async fn setup_cluster_server(
         ..Default::default()
     };
     let cluster = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    storage.set_cluster_enabled(cluster.is_enabled());
     cluster.init(addr).await;
 
     let server = Server::new(addr, Arc::clone(&storage))
@@ -955,6 +956,7 @@ async fn setup_cluster_test_server(
         ..Default::default()
     };
     let cluster_mgr = ClusterManager::new(Arc::clone(&storage), cluster_config);
+    storage.set_cluster_enabled(cluster_mgr.is_enabled());
     cluster_mgr.init(addr).await;
 
     if assign_all_slots {
@@ -1257,7 +1259,203 @@ async fn test_asking_flag_reset_after_non_asking_command() {
 
     // Second call with asking=false should NOT return None
     // (the asking flag should have been a one-shot)
-    let r = cluster_mgr.get_redirect(test_key.as_bytes(), false).await;
+    let _r = cluster_mgr.get_redirect(test_key.as_bytes(), false).await;
     // This verifies the method itself respects the flag parameter correctly
     // The actual per-connection reset is tested via the server dispatch path
+}
+
+// --- CLUSTER NODES Format Validation Tests (C3) ---
+
+#[tokio::test]
+async fn test_cluster_nodes_format_redis7_compatible() {
+    let (_, mgr) = create_cluster_env();
+    let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
+    mgr.init(addr).await;
+
+    // Assign some slots so the output includes slot ranges
+    mgr.add_slots(&(0..100).collect::<Vec<u16>>()).await.unwrap();
+
+    let nodes_output = mgr.get_cluster_nodes().await;
+    let lines: Vec<&str> = nodes_output.trim().lines().collect();
+    assert!(!lines.is_empty(), "Should have at least one node line");
+
+    for line in &lines {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // Redis 7 format: node-id ip:port@cport flags master-id ping-sent pong-recv config-epoch link-state [slots...]
+        assert!(
+            parts.len() >= 8,
+            "Node line must have at least 8 fields, got {}: {}",
+            parts.len(),
+            line
+        );
+
+        // Field 0: node-id (40 hex chars)
+        let node_id = parts[0];
+        assert_eq!(
+            node_id.len(),
+            40,
+            "Node ID must be 40 chars, got {}",
+            node_id.len()
+        );
+        assert!(
+            node_id.chars().all(|c| c.is_ascii_hexdigit()),
+            "Node ID must be hex: {}",
+            node_id
+        );
+
+        // Field 1: ip:port@cport
+        let addr_part = parts[1];
+        assert!(
+            addr_part.contains(':') && addr_part.contains('@'),
+            "Address must be ip:port@cport format: {}",
+            addr_part
+        );
+        let at_idx = addr_part.find('@').unwrap();
+        let colon_idx = addr_part.find(':').unwrap();
+        assert!(
+            colon_idx < at_idx,
+            "Colon must come before @ in address: {}",
+            addr_part
+        );
+        // Verify port and cport are numeric
+        let port_str = &addr_part[colon_idx + 1..at_idx];
+        assert!(
+            port_str.parse::<u16>().is_ok(),
+            "Port must be numeric: {}",
+            port_str
+        );
+        let cport_str = &addr_part[at_idx + 1..];
+        assert!(
+            cport_str.parse::<u16>().is_ok(),
+            "Cluster bus port must be numeric: {}",
+            cport_str
+        );
+
+        // Field 2: flags (comma-separated, must contain master or slave)
+        let flags = parts[2];
+        assert!(
+            flags.contains("master") || flags.contains("slave"),
+            "Flags must contain master or slave: {}",
+            flags
+        );
+
+        // Field 3: master-id (40 hex chars or "-")
+        let master_id = parts[3];
+        assert!(
+            master_id == "-" || (master_id.len() == 40 && master_id.chars().all(|c| c.is_ascii_hexdigit())),
+            "Master ID must be '-' or 40 hex chars: {}",
+            master_id
+        );
+
+        // Fields 4, 5: ping-sent, pong-recv (numeric)
+        assert!(
+            parts[4].parse::<u64>().is_ok(),
+            "ping-sent must be numeric: {}",
+            parts[4]
+        );
+        assert!(
+            parts[5].parse::<u64>().is_ok(),
+            "pong-recv must be numeric: {}",
+            parts[5]
+        );
+
+        // Field 6: config-epoch (numeric)
+        assert!(
+            parts[6].parse::<u64>().is_ok(),
+            "config-epoch must be numeric: {}",
+            parts[6]
+        );
+
+        // Field 7: link-state (connected or disconnected)
+        let link_state = parts[7];
+        assert!(
+            link_state == "connected" || link_state == "disconnected",
+            "link-state must be connected or disconnected: {}",
+            link_state
+        );
+
+        // Fields 8+: slot ranges (optional, format like "0-99" or single "5")
+        for slot_part in &parts[8..] {
+            // Slot ranges: "0-99", single: "5", migration: "[100-<-nodeid]" or "[100->-nodeid]"
+            if slot_part.starts_with('[') {
+                // Migration state
+                assert!(
+                    slot_part.contains("->-") || slot_part.contains("-<-"),
+                    "Migration slot must contain ->- or -<-: {}",
+                    slot_part
+                );
+            } else if slot_part.contains('-') {
+                // Range
+                let range_parts: Vec<&str> = slot_part.split('-').collect();
+                assert_eq!(
+                    range_parts.len(),
+                    2,
+                    "Slot range must be start-end: {}",
+                    slot_part
+                );
+                assert!(
+                    range_parts[0].parse::<u16>().is_ok() && range_parts[1].parse::<u16>().is_ok(),
+                    "Slot range values must be numeric: {}",
+                    slot_part
+                );
+            } else {
+                // Single slot
+                assert!(
+                    slot_part.parse::<u16>().is_ok(),
+                    "Single slot must be numeric: {}",
+                    slot_part
+                );
+            }
+        }
+    }
+}
+
+// --- INFO cluster_enabled dynamic reporting tests (C4) ---
+
+#[tokio::test]
+async fn test_info_reports_cluster_enabled_1_when_cluster_on() {
+    let (addr, _cluster) = setup_cluster_server(960).await.unwrap();
+    let mut client = create_client(addr).await.unwrap();
+
+    let response = client
+        .send_command_str("INFO", &["cluster"])
+        .await
+        .unwrap();
+    let info = resp_string(&response);
+    assert!(
+        info.contains("cluster_enabled:1"),
+        "INFO should report cluster_enabled:1 when cluster mode is on, got: {}",
+        info
+    );
+}
+
+#[tokio::test]
+async fn test_info_reports_cluster_enabled_0_when_cluster_off() {
+    // Set up a server without cluster mode
+    let port = DEFAULT_TEST_PORT + 961;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let storage = StorageEngine::new(StorageConfig::default());
+
+    let server = Server::new(addr, Arc::clone(&storage))
+        .with_connection_limit(100)
+        .with_buffer_size(1024 * 1024);
+
+    tokio::spawn(async move {
+        if let Err(e) = server.start().await {
+            eprintln!("Server error: {:?}", e);
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut client = create_client(addr).await.unwrap();
+    let response = client
+        .send_command_str("INFO", &["cluster"])
+        .await
+        .unwrap();
+    let info = resp_string(&response);
+    assert!(
+        info.contains("cluster_enabled:0"),
+        "INFO should report cluster_enabled:0 when cluster mode is off, got: {}",
+        info
+    );
 }
