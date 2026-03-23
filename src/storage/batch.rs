@@ -1734,21 +1734,41 @@ mod tests {
         hash.insert(b"f1".to_vec(), b"v1".to_vec());
         store.insert(b"hash".to_vec(), Entry::new(StoreValue::Hash(hash)));
 
-        let cmd1 = make_cmd("TYPE", &[b"str"]);
-        let _cmd2 = make_cmd("TYPE", &[b"hash"]);
-        let _cmd3 = make_cmd("TYPE", &[b"missing"]);
-
-        // These may be on different shards, just test the execution logic
+        // Test TYPE on string key - execute on the correct shard
         let now = cached_now();
-        let shard_idx = store.shard_index(b"str");
-        store.execute_on_shard_ref(shard_idx, |map| {
-            let result = execute_read_cmd(map, &cmd1, now);
-            if map.contains_key(b"str".as_slice()) {
-                match result {
-                    Ok(RespValue::SimpleString(ref s)) => assert_eq!(s, "string"),
-                    _ => {} // Key may not be in this shard
-                }
-            }
+        let str_shard = store.shard_index(b"str");
+        let cmd_str = make_cmd("TYPE", &[b"str"]);
+        store.execute_on_shard_ref(str_shard, |map| {
+            let result = execute_read_cmd(map, &cmd_str, now);
+            assert!(
+                matches!(result, Ok(RespValue::SimpleString(ref s)) if s == "string"),
+                "TYPE on string key should return 'string', got: {:?}",
+                result
+            );
+        });
+
+        // Test TYPE on hash key - execute on the correct shard
+        let hash_shard = store.shard_index(b"hash");
+        let cmd_hash = make_cmd("TYPE", &[b"hash"]);
+        store.execute_on_shard_ref(hash_shard, |map| {
+            let result = execute_read_cmd(map, &cmd_hash, now);
+            assert!(
+                matches!(result, Ok(RespValue::SimpleString(ref s)) if s == "hash"),
+                "TYPE on hash key should return 'hash', got: {:?}",
+                result
+            );
+        });
+
+        // Test TYPE on missing key - execute on any shard
+        let missing_shard = store.shard_index(b"missing");
+        let cmd_missing = make_cmd("TYPE", &[b"missing"]);
+        store.execute_on_shard_ref(missing_shard, |map| {
+            let result = execute_read_cmd(map, &cmd_missing, now);
+            assert!(
+                matches!(result, Ok(RespValue::SimpleString(ref s)) if s == "none"),
+                "TYPE on missing key should return 'none', got: {:?}",
+                result
+            );
         });
     }
 
@@ -1820,6 +1840,32 @@ mod tests {
         }
 
         assert_eq!(results.len(), 4);
+
+        // Verify actual result values (not just count)
+        // GET k1 -> BulkString("v1")
+        assert!(
+            matches!(&results[0], Ok(RespValue::BulkString(Some(v))) if v == b"v1"),
+            "GET k1 should return 'v1', got: {:?}",
+            results[0]
+        );
+        // GET k2 -> BulkString("v2")
+        assert!(
+            matches!(&results[1], Ok(RespValue::BulkString(Some(v))) if v == b"v2"),
+            "GET k2 should return 'v2', got: {:?}",
+            results[1]
+        );
+        // INCR counter -> Integer(1)
+        assert!(
+            matches!(&results[2], Ok(RespValue::Integer(1))),
+            "INCR counter should return 1, got: {:?}",
+            results[2]
+        );
+        // EXISTS k1 -> Integer(1)
+        assert!(
+            matches!(&results[3], Ok(RespValue::Integer(1))),
+            "EXISTS k1 should return 1, got: {:?}",
+            results[3]
+        );
     }
 
     #[test]

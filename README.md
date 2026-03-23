@@ -9,7 +9,7 @@ A high-performance, Redis 7.x compatible in-memory data store built from the gro
 
 ## Why rLightning?
 
-- **High Performance**: Lock-free DashMap storage, Tokio async I/O, sub-millisecond latency
+- **High Performance**: Sharded storage with cache-line aligned locks, Tokio async I/O, sub-millisecond latency
 - **Full Redis 7.x Compatibility**: RESP2/RESP3 protocols, 400+ commands, drop-in replacement
 - **All Data Types**: Strings, hashes, lists, sets, sorted sets, streams, bitmaps, HyperLogLog, geospatial
 - **Transactions**: MULTI/EXEC with WATCH-based optimistic locking
@@ -303,7 +303,7 @@ rLightning is built with a modular architecture:
 
 - **Networking Layer**: RESP protocol implementation with async I/O
 - **Command Handler**: Multi-threaded command processing
-- **Storage Engine**: Lock-free data structures with DashMap
+- **Storage Engine**: Sharded storage with parking_lot RwLock per shard
 - **Persistence Layer**: Background RDB snapshots and AOF logging
 - **Replication**: Async replication with automatic reconnection
 - **Security**: Authentication and authorization layer

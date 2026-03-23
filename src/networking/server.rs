@@ -440,10 +440,7 @@ impl Server {
                 // Phase 1: Pre-parse all commands from buffer
                 // (separates parsing from execution to enable pipeline batching)
                 const MAX_BATCH_COMMANDS: usize = 100;
-                #[allow(dead_code)]
-                const MAX_BATCH_SIZE: usize = 64 * 1024; // 64KB
                 let mut parsed_commands: Vec<Command> = Vec::new();
-                let mut _had_parse_error = false;
 
                 while !buffer.is_empty() && parsed_commands.len() < MAX_BATCH_COMMANDS {
                     if !partial_command_buffer.is_empty() {
@@ -483,7 +480,6 @@ impl Server {
                                             if let Ok(bytes) = error_resp.serialize() {
                                                 response_buffer.extend_from_slice(&bytes);
                                             }
-                                            _had_parse_error = true;
                                         }
                                     }
                                 }
@@ -521,7 +517,6 @@ impl Server {
                                     }
                                     buffer.clear();
                                     partial_command_buffer.clear();
-                                    _had_parse_error = true;
                                     break;
                                 }
                             }
@@ -543,7 +538,6 @@ impl Server {
                             }
                             buffer.clear();
                             partial_command_buffer.clear();
-                            _had_parse_error = true;
                             break;
                         }
                     }
@@ -794,10 +788,14 @@ impl Server {
                                             if replication.is_some()
                                                 && ReplicationManager::is_write_command(&cmd_lower)
                                             {
-                                                repl_batch.push(RespCommand {
-                                                    name: b"SELECT".to_vec(),
-                                                    args: vec![db_index.to_string().into_bytes()],
-                                                });
+                                                // Only emit SELECT once per batch group (db_index
+                                                // is constant within a group)
+                                                if repl_batch.is_empty() {
+                                                    repl_batch.push(RespCommand {
+                                                        name: b"SELECT".to_vec(),
+                                                        args: vec![db_index.to_string().into_bytes()],
+                                                    });
+                                                }
                                                 repl_batch.push(RespCommand {
                                                     name: cmd.name.as_bytes().to_vec(),
                                                     args: cmd.args.clone(),
@@ -1051,12 +1049,12 @@ impl Server {
             && security_mgr.require_auth()
             && !security_mgr.is_authenticated(client_addr_str)
         {
-            Self::send_error_to_writer(
-                socket_writer,
-                "NOAUTH Authentication required.".to_string(),
-                client_addr_str,
-            )
-            .await?;
+            // Write to response_buffer (not directly to socket) to maintain
+            // correct response ordering in pipelined commands
+            let error_resp = RespValue::Error("NOAUTH Authentication required.".to_string());
+            if let Ok(bytes) = error_resp.serialize() {
+                response_buffer.extend_from_slice(&bytes);
+            }
             return Ok(DispatchAction::Continue);
         }
 
@@ -1078,7 +1076,12 @@ impl Server {
                     "NOPERM this user has no permissions to run the '{}' command",
                     cmd_lower
                 );
-                Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                // Write to response_buffer (not directly to socket) to maintain
+                // correct response ordering in pipelined commands
+                let error_resp = RespValue::Error(error_msg);
+                if let Ok(bytes) = error_resp.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                }
                 return Ok(DispatchAction::Continue);
             }
 
@@ -1099,11 +1102,14 @@ impl Server {
                         &cmd_lower,
                         &format!("key '{}'", key_str),
                     );
-                    Self::send_error_to_writer(
-                            socket_writer,
-                            "NOPERM this user has no permissions to access one of the keys used as arguments".to_string(),
-                            client_addr_str,
-                        ).await?;
+                    // Write to response_buffer (not directly to socket) to maintain
+                    // correct response ordering in pipelined commands
+                    let error_resp = RespValue::Error(
+                        "NOPERM this user has no permissions to access one of the keys used as arguments".to_string(),
+                    );
+                    if let Ok(bytes) = error_resp.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
                     return Ok(DispatchAction::Continue);
                 }
             }
@@ -1694,12 +1700,12 @@ impl Server {
                         cluster_mgr.get_redirect(key, current_asking).await
                 {
                     let error_msg = redirect.to_string();
-                    Self::send_error_to_writer(
-                        socket_writer,
-                        error_msg,
-                        client_addr_str,
-                    )
-                    .await?;
+                    // Write to response_buffer (not directly to socket) to maintain
+                    // correct response ordering in pipelined commands
+                    let error_resp = RespValue::Error(error_msg);
+                    if let Ok(bytes) = error_resp.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
                     return Ok(DispatchAction::Continue);
                 }
             }

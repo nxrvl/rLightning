@@ -1,5 +1,6 @@
 /// Debug test to understand buffer behavior with large values
 use bytes::BytesMut;
+use rlightning::networking::raw_command::RawCommand;
 use rlightning::networking::resp::RespValue;
 
 #[test]
@@ -104,7 +105,7 @@ fn test_parse_large_set_command_in_chunks() {
 
 #[test]
 fn test_fast_path_with_large_value() {
-    // Test if the fast path (try_parse_common_command) handles large values correctly
+    // Test if the zero-copy fast path (RawCommand::try_parse) handles large values correctly
 
     let key = b"testkey";
     let value_size = 50000;
@@ -125,11 +126,12 @@ fn test_fast_path_with_large_value() {
 
     println!("Testing fast path with {} byte buffer", buffer.len());
 
-    // Try fast path
-    match RespValue::try_parse_common_command(&mut buffer) {
-        Ok(Some(cmd)) => {
+    // Try zero-copy fast path
+    match RawCommand::try_parse(&buffer) {
+        Ok(Some(raw_cmd)) => {
+            let cmd = raw_cmd.to_command();
             println!("✓ Fast path succeeded");
-            println!("Command: {:?}", String::from_utf8_lossy(&cmd.name));
+            println!("Command: {:?}", cmd.name);
             println!("Args: {}", cmd.args.len());
             for (i, arg) in cmd.args.iter().enumerate() {
                 println!("  Arg {}: {} bytes", i, arg.len());
@@ -139,7 +141,8 @@ fn test_fast_path_with_large_value() {
         }
         Ok(None) => {
             println!("○ Fast path returned None, trying regular parse");
-            match RespValue::parse(&mut buffer) {
+            let mut buf_clone = buffer.clone();
+            match RespValue::parse(&mut buf_clone) {
                 Ok(Some(_)) => println!("✓ Regular parse succeeded"),
                 Ok(None) => panic!("Regular parse returned None (incomplete)"),
                 Err(e) => panic!("Regular parse failed: {}", e),

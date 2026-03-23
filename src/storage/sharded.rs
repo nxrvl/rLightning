@@ -376,10 +376,10 @@ impl ShardedStore {
         false
     }
 
-    // --- Per-shard memory tracking ---
+    // --- Per-shard memory tracking (test helpers) ---
 
     /// Add to the memory counter for the shard containing `key`.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn add_memory(&self, key: &[u8], amount: u64) {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
@@ -387,19 +387,8 @@ impl ShardedStore {
             .fetch_add(amount, Ordering::Relaxed);
     }
 
-    /// Subtract from the memory counter for the shard containing `key`.
-    #[allow(dead_code)]
-    pub fn sub_memory(&self, key: &[u8], amount: u64) {
-        let shard_idx = self.shard_index(key);
-        let _ = self.shards[shard_idx].used_memory.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |cur| Some(cur.saturating_sub(amount)),
-        );
-    }
-
     /// Increment the key count for the shard containing `key`.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn inc_key_count(&self, key: &[u8]) {
         let shard_idx = self.shard_index(key);
         self.shards[shard_idx]
@@ -407,19 +396,8 @@ impl ShardedStore {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement the key count for the shard containing `key`.
-    #[allow(dead_code)]
-    pub fn dec_key_count(&self, key: &[u8]) {
-        let shard_idx = self.shard_index(key);
-        let _ = self.shards[shard_idx].key_count.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |cur| Some(cur.saturating_sub(1)),
-        );
-    }
-
     /// Get total memory usage across all shards.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn total_used_memory(&self) -> u64 {
         self.shards
             .iter()
@@ -428,7 +406,7 @@ impl ShardedStore {
     }
 
     /// Get total key count across all shards.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn total_key_count(&self) -> u64 {
         self.shards
             .iter()
