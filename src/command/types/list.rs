@@ -50,18 +50,18 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+    let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
-            for e in &elements {
-                deque.push_front(e.clone());
+            for e in elements {
+                deque.push_front(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Keep, new_len))
         }
         None => {
             let mut deque = VecDeque::with_capacity(elements.len());
-            for e in &elements {
-                deque.push_front(e.clone());
+            for e in elements {
+                deque.push_front(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Set(StoreValue::List(deque)), new_len))
@@ -82,18 +82,18 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+    let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
-            for e in &elements {
-                deque.push_back(e.clone());
+            for e in elements {
+                deque.push_back(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Keep, new_len))
         }
         None => {
             let mut deque = VecDeque::with_capacity(elements.len());
-            for e in &elements {
-                deque.push_back(e.clone());
+            for e in elements {
+                deque.push_back(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Set(StoreValue::List(deque)), new_len))
@@ -398,10 +398,10 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+    let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
-            for e in &elements {
-                deque.push_front(e.clone());
+            for e in elements {
+                deque.push_front(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Keep, new_len))
@@ -422,10 +422,10 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elements: Vec<Vec<u8>> = args[1..].to_vec();
 
     engine.check_write_memory(0).await?;
-    let length = engine.atomic_modify(key, RedisDataType::List, |current| match current {
+    let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
-            for e in &elements {
-                deque.push_back(e.clone());
+            for e in elements {
+                deque.push_back(e);
             }
             let new_len = deque.len() as i64;
             Ok((ModifyResult::Keep, new_len))
@@ -2543,5 +2543,135 @@ mod tests {
         // All 100 elements should be present
         let result = llen(&engine, &[b"race_list".to_vec()]).await.unwrap();
         assert_eq!(result, RespValue::Integer(100));
+    }
+
+    // Test LPUSH/RPUSH with multiple elements consume by value (no double-clone)
+    #[tokio::test]
+    async fn test_lpush_rpush_multi_elements() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // LPUSH with multiple elements: LPUSH key a b c -> list is [c, b, a]
+        let args = vec![
+            b"mlist".to_vec(),
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+        ];
+        let result = lpush(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        let range_args = vec![b"mlist".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 3);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"c".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"b".to_vec())));
+            assert_eq!(values[2], RespValue::BulkString(Some(b"a".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
+
+        // RPUSH with multiple elements: RPUSH key2 x y z -> list is [x, y, z]
+        let args = vec![
+            b"mlist2".to_vec(),
+            b"x".to_vec(),
+            b"y".to_vec(),
+            b"z".to_vec(),
+        ];
+        let result = rpush(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        let range_args = vec![b"mlist2".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 3);
+            assert_eq!(values[0], RespValue::BulkString(Some(b"x".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"y".to_vec())));
+            assert_eq!(values[2], RespValue::BulkString(Some(b"z".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
+
+        // LPUSH onto existing list: LPUSH mlist2 w -> list is [w, x, y, z]
+        let args = vec![b"mlist2".to_vec(), b"w".to_vec()];
+        let result = lpush(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(4));
+
+        let range_args = vec![b"mlist2".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values[0], RespValue::BulkString(Some(b"w".to_vec())));
+            assert_eq!(values[3], RespValue::BulkString(Some(b"z".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
+
+        // RPUSH onto existing list: RPUSH mlist2 end -> list is [w, x, y, z, end]
+        let args = vec![b"mlist2".to_vec(), b"end".to_vec()];
+        let result = rpush(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(5));
+
+        let range_args = vec![b"mlist2".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 5);
+            assert_eq!(values[4], RespValue::BulkString(Some(b"end".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
+    }
+
+    // Test LPUSHX/RPUSHX with multiple elements consume by value
+    #[tokio::test]
+    async fn test_lpushx_rpushx_multi_elements() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // LPUSHX on non-existent key returns 0
+        let args = vec![b"nxlist".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        let result = lpushx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // RPUSHX on non-existent key returns 0
+        let args = vec![b"nxlist".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        let result = rpushx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+
+        // Create the list first
+        let args = vec![b"nxlist".to_vec(), b"init".to_vec()];
+        rpush(&engine, &args).await.unwrap();
+
+        // LPUSHX with multiple elements on existing key
+        let args = vec![b"nxlist".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        let result = lpushx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        let range_args = vec![b"nxlist".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 3);
+            // LPUSHX pushes a then b to front: [b, a, init]
+            assert_eq!(values[0], RespValue::BulkString(Some(b"b".to_vec())));
+            assert_eq!(values[1], RespValue::BulkString(Some(b"a".to_vec())));
+            assert_eq!(values[2], RespValue::BulkString(Some(b"init".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
+
+        // RPUSHX with multiple elements on existing key
+        let args = vec![b"nxlist".to_vec(), b"x".to_vec(), b"y".to_vec()];
+        let result = rpushx(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::Integer(5));
+
+        let range_args = vec![b"nxlist".to_vec(), b"0".to_vec(), b"-1".to_vec()];
+        let result = lrange(&engine, &range_args).await.unwrap();
+        if let RespValue::Array(Some(values)) = result {
+            assert_eq!(values.len(), 5);
+            assert_eq!(values[3], RespValue::BulkString(Some(b"x".to_vec())));
+            assert_eq!(values[4], RespValue::BulkString(Some(b"y".to_vec())));
+        } else {
+            panic!("Expected array from LRANGE");
+        }
     }
 }

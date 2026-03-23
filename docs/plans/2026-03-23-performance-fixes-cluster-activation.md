@@ -63,12 +63,12 @@ At the end, a full run with performance benchmarks and compatibility tests is ma
 
 - Modify: `src/command/types/list.rs`
 
-- [ ] In lpush() (around lines 50-70): change the closure to consume elements by value instead of cloning -- replace `for e in &elements { deque.push_front(e.clone()) }` with `for e in elements { deque.push_front(e) }`
-- [ ] Apply the same change to rpush() (around lines 82-105)
-- [ ] Apply the same change to lpushx() and rpushx()
-- [ ] Verify atomic_modify closure signature allows FnOnce/consuming; adjust if needed
-- [ ] Write a test that verifies LPUSH/RPUSH with multiple elements works correctly (values stored and retrievable)
-- [ ] Run cargo test -- must pass before Task 5
+- [x] In lpush() (around lines 50-70): change the closure to consume elements by value instead of cloning -- replace `for e in &elements { deque.push_front(e.clone()) }` with `for e in elements { deque.push_front(e) }`
+- [x] Apply the same change to rpush() (around lines 82-105)
+- [x] Apply the same change to lpushx() and rpushx()
+- [x] Verify atomic_modify closure signature allows FnOnce/consuming; adjust if needed
+- [x] Write a test that verifies LPUSH/RPUSH with multiple elements works correctly (values stored and retrievable)
+- [x] Run cargo test -- must pass before Task 5
 
 ### Task 5: Activate gossip protocol (C1)
 
