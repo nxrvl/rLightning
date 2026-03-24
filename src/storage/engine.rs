@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -206,6 +206,9 @@ pub struct StorageEngine {
     /// Count of connections that currently have active WATCH keys.
     /// Used to skip bump_key_version when no connections are watching (common case).
     active_watch_count: AtomicU32,
+    /// Whether prefix indexing is enabled for KEYS optimization.
+    /// Default false (disabled) to avoid write-path overhead from index updates.
+    prefix_index_enabled: AtomicBool,
 }
 
 impl StorageEngine {
@@ -244,6 +247,7 @@ impl StorageEngine {
             active_eviction_policy: AtomicU8::new(initial_policy),
             active_max_memory: AtomicUsize::new(initial_max_memory),
             active_watch_count: AtomicU32::new(0),
+            prefix_index_enabled: AtomicBool::new(false),
         });
 
         // Seed runtime config from startup config
@@ -383,6 +387,8 @@ impl StorageEngine {
             .insert("save".to_string(), "3600 1 300 100 60 10000".to_string());
         self.runtime_config
             .insert("cluster-enabled".to_string(), "no".to_string());
+        self.runtime_config
+            .insert("prefix-index-enabled".to_string(), "no".to_string());
     }
 
     /// Seed additional runtime config values from the application settings (called from main after engine creation).
@@ -498,6 +504,12 @@ impl StorageEngine {
                 Err(
                     "ERR CONFIG SET requirepass is not supported at runtime. Use ACL SETUSER to manage authentication.".to_string()
                 )
+            }
+            "prefix-index-enabled" => {
+                let enabled = matches!(value.to_lowercase().as_str(), "yes" | "1" | "true");
+                self.prefix_index_enabled.store(enabled, Ordering::Relaxed);
+                self.runtime_config.insert(key, if enabled { "yes".to_string() } else { "no".to_string() });
+                Ok(())
             }
             // Known runtime-configurable parameters that we store but don't need
             // special handling for (Redis accepts these via CONFIG SET)
@@ -734,8 +746,12 @@ impl StorageEngine {
         "log:", "queue:", "job:",
     ];
 
-    /// Update prefix indices when a key is added or removed (DB-scoped)
+    /// Update prefix indices when a key is added or removed (DB-scoped).
+    /// No-op when prefix indexing is disabled (default).
     pub async fn update_prefix_indices(&self, key: &[u8], is_insert: bool) {
+        if !self.prefix_index_enabled.load(Ordering::Relaxed) {
+            return;
+        }
         let db_idx = Self::current_db_idx();
         self.update_prefix_indices_for_db(key, is_insert, db_idx)
             .await;
@@ -744,7 +760,11 @@ impl StorageEngine {
     /// Update prefix indices for a specific database index.
     /// Used by cross-DB operations (MOVE) and the batch pipeline path (which lacks
     /// a CURRENT_DB_INDEX scope) to update the correct DB's prefix index.
+    /// No-op when prefix indexing is disabled (default).
     pub async fn update_prefix_indices_for_db(&self, key: &[u8], is_insert: bool, db_idx: usize) {
+        if !self.prefix_index_enabled.load(Ordering::Relaxed) {
+            return;
+        }
         if let Ok(key_str) = std::str::from_utf8(key) {
             let mut index = self.prefix_index.write().await;
 
@@ -770,12 +790,13 @@ impl StorageEngine {
     /// Batch update prefix indices for a specific database index.
     /// Accepts a slice of (key, is_insert) pairs and acquires the write lock once,
     /// reducing lock contention in the pipeline batch path.
+    /// No-op when prefix indexing is disabled (default).
     pub async fn update_prefix_indices_batch_for_db(
         &self,
         updates: &[(&[u8], bool)],
         db_idx: usize,
     ) {
-        if updates.is_empty() {
+        if updates.is_empty() || !self.prefix_index_enabled.load(Ordering::Relaxed) {
             return;
         }
         let mut index = self.prefix_index.write().await;
@@ -820,6 +841,10 @@ impl StorageEngine {
     /// async eviction internally). Call with estimated_additional=0 to match Redis
     /// behavior (evict if already over limit before executing the write command).
     pub async fn check_write_memory(&self, estimated_additional: usize) -> StorageResult<()> {
+        // Fast-path: when maxmemory is unlimited (0 / usize::MAX), skip async eviction entirely
+        if self.active_max_memory.load(Ordering::Relaxed) == usize::MAX {
+            return Ok(());
+        }
         self.maybe_evict(estimated_additional).await
     }
 
@@ -1406,11 +1431,12 @@ impl StorageEngine {
         write_counters.push(counter);
     }
 
-    /// Increment all registered write counters
+    /// Increment all registered write counters (used for BGSAVE threshold only;
+    /// Relaxed ordering is sufficient since atomicity guarantees uniqueness).
     async fn increment_write_counters(&self) {
         let counters = self.write_counters.read().await;
         for counter in counters.iter() {
-            counter.fetch_add(1, Ordering::SeqCst);
+            counter.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1419,7 +1445,7 @@ impl StorageEngine {
     fn increment_write_counters_sync(&self) {
         if let Ok(counters) = self.write_counters.try_read() {
             for counter in counters.iter() {
-                counter.fetch_add(1, Ordering::SeqCst);
+                counter.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1465,12 +1491,16 @@ impl StorageEngine {
     pub async fn increment_write_counters_batch(&self, count: u64) {
         let counters = self.write_counters.read().await;
         for counter in counters.iter() {
-            counter.fetch_add(count, Ordering::SeqCst);
+            counter.fetch_add(count, Ordering::Relaxed);
         }
     }
 
-    /// Bump the version counter for a specific key (DB-scoped for WATCH isolation)
+    /// Bump the version counter for a specific key (DB-scoped for WATCH isolation).
+    /// Skipped when no connections have active WATCH keys (common case).
     pub fn bump_key_version(&self, key: &[u8]) {
+        if self.active_watch_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
         let db_idx = Self::current_db_idx();
         self.bump_key_version_for_db(key, db_idx);
     }
@@ -1481,7 +1511,7 @@ impl StorageEngine {
     pub fn bump_and_get_key_version(&self, key: &[u8]) -> u64 {
         let db_idx = Self::current_db_idx();
         let scoped = Self::db_scoped_key(db_idx, key);
-        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
+        let new_version = self.global_version.fetch_add(1, Ordering::Relaxed);
         self.key_versions.insert(scoped, new_version);
         new_version
     }
@@ -1489,9 +1519,13 @@ impl StorageEngine {
     /// Bump the version counter for a specific key in a specific database.
     /// Used by cross-DB operations (e.g. MOVE) that need to invalidate WATCH
     /// in the destination database.
+    /// Skipped when no connections have active WATCH keys.
     pub fn bump_key_version_for_db(&self, key: &[u8], db_index: usize) {
+        if self.active_watch_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
         let scoped = Self::db_scoped_key(db_index, key);
-        let new_version = self.global_version.fetch_add(1, Ordering::SeqCst);
+        let new_version = self.global_version.fetch_add(1, Ordering::Relaxed);
         self.key_versions.insert(scoped, new_version);
     }
 
@@ -4510,6 +4544,8 @@ mod tests {
     async fn test_update_prefix_indices_batch_for_db() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
+        // Enable prefix indexing for this test
+        storage.prefix_index_enabled.store(true, Ordering::Relaxed);
         let db_idx = 0;
 
         // Batch insert multiple keys with indexed prefixes
@@ -4577,6 +4613,9 @@ mod tests {
     async fn test_key_versions_cleanup_after_expiry() {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
+
+        // Simulate an active WATCH connection so bump_key_version is not a no-op
+        storage.increment_watch_count();
 
         // Set keys with short TTL
         for i in 0..5 {
@@ -4825,5 +4864,67 @@ mod tests {
                 entry.cached_mem_size, actual
             );
         });
+    }
+
+    #[tokio::test]
+    async fn test_conditional_bump_key_version_with_active_watch() {
+        // When active_watch_count > 0, bump_key_version must actually bump versions
+        // so that WATCH can detect concurrent modifications.
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        storage.set(b"watched_key".to_vec(), b"v1".to_vec(), None).await.unwrap();
+
+        // Simulate a connection starting WATCH
+        storage.increment_watch_count();
+
+        // Record the version after WATCH
+        let version_at_watch = storage.bump_and_get_key_version(b"watched_key");
+
+        // Simulate another connection modifying the key (this should bump the version)
+        storage.bump_key_version(b"watched_key");
+
+        // The version should have changed
+        let version_after_set = storage.get_key_version(b"watched_key");
+        assert!(
+            version_after_set > version_at_watch,
+            "Version should increase after SET when a WATCH is active: {} vs {}",
+            version_after_set,
+            version_at_watch
+        );
+
+        storage.decrement_watch_count();
+    }
+
+    #[tokio::test]
+    async fn test_conditional_bump_key_version_skipped_without_watch() {
+        // When active_watch_count == 0, bump_key_version should be a no-op
+        // (key_versions map should not grow).
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        storage.set(b"mykey".to_vec(), b"v1".to_vec(), None).await.unwrap();
+
+        // No WATCH active - bump_key_version should be a no-op
+        assert_eq!(storage.active_watch_count(), 0);
+        storage.bump_key_version(b"mykey");
+
+        // key_versions should remain empty since no WATCH is active
+        assert_eq!(
+            storage.key_versions_len(),
+            0,
+            "key_versions should not grow when no WATCH is active"
+        );
+
+        // Now activate a WATCH and verify it works
+        storage.increment_watch_count();
+        storage.bump_key_version(b"mykey");
+        assert_eq!(
+            storage.key_versions_len(),
+            1,
+            "key_versions should grow when WATCH is active"
+        );
+
+        storage.decrement_watch_count();
     }
 }

@@ -68,14 +68,14 @@ This is the core performance fix. Changes ModifyResult::Keep to carry a byte del
 **Files:**
 - Modify: `src/storage/engine.rs` (conditionals, ordering, fast-paths, prefix_index config)
 
-- [ ] Make `bump_key_version` conditional: early return when `active_watch_count.load(Relaxed) == 0`
-- [ ] Change write_counters `fetch_add` from SeqCst to Relaxed (lines ~1391, 1400) - only used for BGSAVE threshold
-- [ ] Change `global_version` `fetch_add` from SeqCst to Relaxed (lines ~1462, 1472) - uniqueness guaranteed by atomicity, not ordering
-- [ ] Add fast-path in `check_write_memory`: when maxmemory == 0 (unlimited), return Ok immediately without async overhead
-- [ ] Add `enable_prefix_index: bool` to runtime config (default false); skip `update_prefix_indices` calls when disabled
-- [ ] Write test: WATCH + concurrent SET still correctly invalidates transaction when active_watch_count > 0
-- [ ] Write test: WATCH behavior unchanged when bump_key_version is conditional
-- [ ] Run `cargo test` - all tests must pass
+- [x] Make `bump_key_version` conditional: early return when `active_watch_count.load(Relaxed) == 0`
+- [x] Change write_counters `fetch_add` from SeqCst to Relaxed (lines ~1391, 1400) - only used for BGSAVE threshold
+- [x] Change `global_version` `fetch_add` from SeqCst to Relaxed (lines ~1462, 1472) - uniqueness guaranteed by atomicity, not ordering
+- [x] Add fast-path in `check_write_memory`: when maxmemory == 0 (unlimited), return Ok immediately without async overhead
+- [x] Add `enable_prefix_index: bool` to runtime config (default false); skip `update_prefix_indices` calls when disabled
+- [x] Write test: WATCH + concurrent SET still correctly invalidates transaction when active_watch_count > 0
+- [x] Write test: WATCH behavior unchanged when bump_key_version is conditional
+- [x] Run `cargo test` - all tests must pass
 
 ### Task 4: Verify Acceptance Criteria
 

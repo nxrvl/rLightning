@@ -839,7 +839,8 @@ mod tests {
             .await
             .unwrap();
 
-        // WATCH the key
+        // WATCH the key (simulate server-layer watch count management)
+        engine.increment_watch_count();
         handle_watch(&mut state, &engine, &[b"watched_key".to_vec()], 0).unwrap();
 
         // Modify the key (simulating another client)
@@ -924,7 +925,8 @@ mod tests {
             .await
             .unwrap();
 
-        // WATCH both keys
+        // WATCH both keys (simulate server-layer watch count management)
+        engine.increment_watch_count();
         handle_watch(
             &mut state,
             &engine,
@@ -1048,7 +1050,8 @@ mod tests {
         let handler = CommandHandler::new(Arc::clone(&engine));
         let mut state = TransactionState::new();
 
-        // WATCH a key that doesn't exist
+        // WATCH a key that doesn't exist (simulate server-layer watch count management)
+        engine.increment_watch_count();
         handle_watch(&mut state, &engine, &[b"nonexistent".to_vec()], 0).unwrap();
 
         // Create the key (modification)
@@ -1083,7 +1086,8 @@ mod tests {
             .await
             .unwrap();
 
-        // WATCH the key
+        // WATCH the key (simulate server-layer watch count management)
+        engine.increment_watch_count();
         handle_watch(&mut state, &engine, &[b"mykey".to_vec()], 0).unwrap();
 
         // Delete the key
@@ -1255,8 +1259,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Client 1: WATCH balance
+        // Client 1: WATCH balance (simulate server-layer watch count management)
         let mut state = TransactionState::new();
+        engine.increment_watch_count();
         handle_watch(&mut state, &engine, &[b"balance".to_vec()], 0).unwrap();
 
         // Client 2: modifies balance between WATCH and EXEC
