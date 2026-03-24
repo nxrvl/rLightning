@@ -51,22 +51,34 @@ pub struct Entry {
     pub lru_clock: u32,
     /// Access counter for LFU eviction (u16 is sufficient)
     pub access_count: u16,
+    /// Cached value.mem_size() for O(1) memory tracking in atomic_modify.
+    /// Updated via deltas on mutation; recalculated on RDB/AOF restore.
+    #[serde(skip, default)]
+    pub cached_mem_size: u64,
 }
 
 impl Entry {
     /// Create a new entry with a native value.
     pub fn new(value: StoreValue) -> Self {
+        let cached_mem_size = value.mem_size() as u64;
         Entry {
             value,
             expires_at: None,
             lru_clock: lru_now(),
             access_count: 0,
+            cached_mem_size,
         }
     }
 
     /// Create a new string entry (convenience for the most common case).
     pub fn new_string(value: Vec<u8>) -> Self {
         Self::new(StoreValue::Str(value.into()))
+    }
+
+    /// Recalculate cached_mem_size from the current value.
+    /// Called after RDB/AOF restore where cached_mem_size defaults to 0.
+    pub fn refresh_cached_mem_size(&mut self) {
+        self.cached_mem_size = self.value.mem_size() as u64;
     }
 
     /// Check if this entry has expired.

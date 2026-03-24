@@ -180,7 +180,7 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             Some(_) => return Err(StorageError::WrongType),
             None => {
                 if nomkstream {
-                    return Ok((ModifyResult::Keep, RespValue::BulkString(None)));
+                    return Ok((ModifyResult::Keep(0), RespValue::BulkString(None)));
                 }
                 StreamData::new()
             }
@@ -574,7 +574,7 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let mut stream = match existing {
             Some(StoreValue::Stream(s)) => s.clone(),
             Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
+            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
         };
 
         let removed = match &trim_strategy {
@@ -621,7 +621,7 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let mut stream = match existing {
             Some(StoreValue::Stream(s)) => s.clone(),
             Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
+            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
         };
 
         let deleted = stream.delete_entries(&ids);
@@ -1080,7 +1080,7 @@ async fn xgroup_destroy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         let mut stream = match existing {
             Some(StoreValue::Stream(s)) => s.clone(),
             Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
+            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
         };
 
         let removed = stream.groups.remove(&group_name).is_some();
@@ -1361,7 +1361,7 @@ async fn do_xreadgroup(
                 Some(_) => return Err(StorageError::WrongType),
                 None => {
                     return Ok((
-                        ModifyResult::Keep,
+                        ModifyResult::Keep(0),
                         (
                             false,
                             RespValue::Array(Some(vec![
@@ -1559,7 +1559,7 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let mut stream = match existing {
             Some(StoreValue::Stream(s)) => s.clone(),
             Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep, RespValue::Integer(0))),
+            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
         };
 
         let group = match stream.groups.get_mut(&group_name) {

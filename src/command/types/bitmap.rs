@@ -550,7 +550,7 @@ pub async fn bitfield(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             Ok((ModifyResult::Set(StoreValue::Str(bitmap.into())), results))
         } else {
             // No actual mutation: preserve existing key state (don't create phantom keys)
-            Ok((ModifyResult::Keep, results))
+            Ok((ModifyResult::Keep(0), results))
         }
     })?;
 

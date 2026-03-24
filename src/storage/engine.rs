@@ -287,7 +287,11 @@ impl StorageEngine {
                         if rr_shard < num_shards {
                             let removed = db.expire_shard(rr_shard, now, MAX_EXPIRES_PER_SHARD);
                             for (k, entry) in &removed {
-                                let size = Self::calculate_entry_size(k, &entry.value) as u64;
+                                let size = if entry.cached_mem_size > 0 {
+                                    k.len() as u64 + entry.cached_mem_size
+                                } else {
+                                    Self::calculate_entry_size(k, &entry.value) as u64
+                                };
                                 engine.current_memory.fetch_sub(size, Ordering::Relaxed);
                                 engine.key_count.fetch_sub(1, Ordering::Relaxed);
                                 // Bump key version so WATCH detects expiry
@@ -647,6 +651,17 @@ impl StorageEngine {
                     self.bump_key_version_for_db(&key, db_idx);
                 }
             }
+        }
+    }
+
+    /// Refresh cached_mem_size for all entries across all databases.
+    /// Called after RDB/AOF restore to ensure accurate O(1) memory tracking.
+    pub fn refresh_all_cached_mem_sizes(&self) {
+        for db_idx in 0..NUM_DATABASES {
+            let db = self.get_db_by_index(db_idx);
+            db.for_each_mut(|_key, entry| {
+                entry.refresh_cached_mem_size();
+            });
         }
     }
 
@@ -1695,10 +1710,12 @@ impl StorageEngine {
                             let elems: Vec<Vec<u8>> = elements.iter().map(|e| e.to_vec()).collect();
                             match existing {
                                 Some(StoreValue::List(deque)) => {
+                                    let mut delta: i64 = 0;
                                     for elem in elems {
+                                        delta += elem.len() as i64 + 24;
                                         deque.push_back(elem);
                                     }
-                                    Ok((ModifyResult::Keep, ()))
+                                    Ok((ModifyResult::Keep(delta), ()))
                                 }
                                 None => {
                                     let deque: std::collections::VecDeque<Vec<u8>> = elems.into_iter().collect();
@@ -1720,10 +1737,13 @@ impl StorageEngine {
                         |existing| {
                             match existing {
                                 Some(StoreValue::Set(set)) => {
+                                    let mut delta: i64 = 0;
                                     for m in members {
-                                        set.insert(m.clone());
+                                        if set.insert(m.clone()) {
+                                            delta += m.len() as i64 + 32;
+                                        }
                                     }
-                                    Ok((ModifyResult::Keep, ()))
+                                    Ok((ModifyResult::Keep(delta), ()))
                                 }
                                 None => {
                                     let mut set = NativeHashSet::default();
@@ -1748,16 +1768,18 @@ impl StorageEngine {
                         |existing| {
                             match existing {
                                 Some(StoreValue::ZSet(zset)) => {
+                                    let mut delta: i64 = 0;
                                     let mut i = 0;
                                     while i + 1 < pairs.len() {
                                         if let Ok(score_str) = std::str::from_utf8(&pairs[i])
                                             && let Ok(score) = score_str.parse::<f64>()
+                                            && zset.insert(score, pairs[i + 1].clone())
                                         {
-                                            zset.insert(score, pairs[i + 1].clone());
+                                            delta += pairs[i + 1].len() as i64 * 2 + 40;
                                         }
                                         i += 2;
                                     }
-                                    Ok((ModifyResult::Keep, ()))
+                                    Ok((ModifyResult::Keep(delta), ()))
                                 }
                                 None => {
                                     let mut zset = SortedSetData::new();
@@ -1802,6 +1824,7 @@ impl StorageEngine {
                         |existing| {
                             match existing {
                                 Some(StoreValue::Stream(stream)) => {
+                                    let mut delta: i64 = 0;
                                     if let Ok(id_str) = std::str::from_utf8(id_bytes)
                                         && let Some(id) =
                                             crate::storage::stream::StreamEntryId::parse(id_str)
@@ -1809,9 +1832,11 @@ impl StorageEngine {
                                         let mut fields = Vec::new();
                                         let mut j = 0;
                                         while j + 1 < field_args.len() {
+                                            delta += field_args[j].len() as i64 + field_args[j + 1].len() as i64 + 16;
                                             fields.push((field_args[j].clone(), field_args[j + 1].clone()));
                                             j += 2;
                                         }
+                                        delta += 32; // per-entry overhead
                                         let entry = crate::storage::stream::StreamEntry {
                                             id: id.clone(),
                                             fields,
@@ -1825,7 +1850,7 @@ impl StorageEngine {
                                             stream.first_entry_id = Some(id);
                                         }
                                     }
-                                    Ok((ModifyResult::Keep, ()))
+                                    Ok((ModifyResult::Keep(delta), ()))
                                 }
                                 None => {
                                     let mut stream = crate::storage::stream::StreamData::new();
@@ -3004,7 +3029,14 @@ impl StorageEngine {
                 if !expired && occ.get().data_type() != data_type {
                     return Err(StorageError::WrongType);
                 }
-                let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
+                // O(1) old_size: use cached_mem_size + key.len() instead of O(n) calculate_entry_size.
+                // Falls back to full calculation when cached_mem_size is 0 (pre-cache entries from RDB/AOF restore).
+                let cached = occ.get().cached_mem_size;
+                let old_size = if cached > 0 {
+                    occ.key().len() as u64 + cached
+                } else {
+                    Self::calculate_entry_size(occ.key(), &occ.get().value) as u64
+                };
 
                 let (action, result) = if expired {
                     f(None)?
@@ -3027,7 +3059,7 @@ impl StorageEngine {
                         }
                         // Non-expired: true no-op — no touch, no memory update
                     }
-                    ModifyResult::Keep => {
+                    ModifyResult::Keep(delta) => {
                         if expired {
                             // Expired key, closure got None but returned Keep = no-op
                             // Clean up the expired entry
@@ -3035,29 +3067,38 @@ impl StorageEngine {
                             occ.remove();
                             self.key_count.fetch_sub(1, Ordering::Relaxed);
                         } else {
-                            let new_size =
-                                Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
-                            if new_size != old_size {
-                                if old_size > new_size {
+                            // O(1) memory update using delta instead of recalculating entry size
+                            if delta != 0 {
+                                let entry = occ.get_mut();
+                                // Lazy-init cached_mem_size for pre-cache entries (serde default 0)
+                                if entry.cached_mem_size == 0 {
+                                    entry.cached_mem_size = entry.value.mem_size() as u64;
+                                }
+                                entry.cached_mem_size =
+                                    (entry.cached_mem_size as i64 + delta) as u64;
+                                if delta > 0 {
                                     self.current_memory
-                                        .fetch_sub(old_size - new_size, Ordering::Relaxed);
+                                        .fetch_add(delta as u64, Ordering::Relaxed);
                                 } else {
                                     self.current_memory
-                                        .fetch_add(new_size - old_size, Ordering::Relaxed);
+                                        .fetch_sub((-delta) as u64, Ordering::Relaxed);
                                 }
                             }
                             occ.get_mut().touch();
                         }
                     }
                     ModifyResult::Set(val) => {
-                        let new_size = Self::calculate_entry_size(key, &val) as u64;
+                        let new_val_mem = val.mem_size() as u64;
+                        let new_size = key.len() as u64 + new_val_mem;
                         self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                         self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                         if expired {
                             occ.insert(Entry::new(val));
                         } else {
-                            occ.get_mut().value = val;
-                            occ.get_mut().touch();
+                            let entry = occ.get_mut();
+                            entry.value = val;
+                            entry.cached_mem_size = new_val_mem;
+                            entry.touch();
                         }
                     }
                     ModifyResult::Delete => {
@@ -3083,7 +3124,7 @@ impl StorageEngine {
                         self.bump_key_version(key);
                         self.increment_write_counters_sync();
                     }
-                    ModifyResult::Keep | ModifyResult::KeepUnchanged | ModifyResult::Delete => {
+                    ModifyResult::Keep(_) | ModifyResult::KeepUnchanged | ModifyResult::Delete => {
                         // Nothing to keep or delete for vacant entry
                     }
                 }
@@ -3266,12 +3307,20 @@ impl StorageEngine {
             match existing {
                 Some(StoreValue::Hash(map)) => {
                     let mut new_count = 0i64;
+                    let mut delta: i64 = 0;
                     for &(field, value) in fields {
-                        if map.insert(field.to_vec(), value.to_vec()).is_none() {
-                            new_count += 1;
+                        match map.insert(field.to_vec(), value.to_vec()) {
+                            None => {
+                                new_count += 1;
+                                delta += field.len() as i64 + value.len() as i64 + 64;
+                            }
+                            Some(old_val) => {
+                                // Field existed: delta is difference in value size
+                                delta += value.len() as i64 - old_val.len() as i64;
+                            }
                         }
                     }
-                    Ok((ModifyResult::Keep, new_count))
+                    Ok((ModifyResult::Keep(delta), new_count))
                 }
                 None => {
                     let mut map = NativeHashMap::default();
@@ -3303,10 +3352,11 @@ impl StorageEngine {
         self.atomic_modify(key, RedisDataType::Hash, |existing| match existing {
             Some(StoreValue::Hash(map)) => {
                 if map.contains_key(field) {
-                    Ok((ModifyResult::Keep, false))
+                    Ok((ModifyResult::Keep(0), false))
                 } else {
+                    let delta = field.len() as i64 + value.len() as i64 + 64;
                     map.insert(field.to_vec(), value.to_vec());
-                    Ok((ModifyResult::Keep, true))
+                    Ok((ModifyResult::Keep(delta), true))
                 }
             }
             None => {
@@ -3354,15 +3404,17 @@ impl StorageEngine {
         self.atomic_modify(key, RedisDataType::Hash, |existing| match existing {
             Some(StoreValue::Hash(map)) => {
                 let mut removed = 0i64;
+                let mut delta: i64 = 0;
                 for &field in fields {
-                    if map.remove(field).is_some() {
+                    if let Some(old_val) = map.remove(field) {
                         removed += 1;
+                        delta -= field.len() as i64 + old_val.len() as i64 + 64;
                     }
                 }
                 if map.is_empty() && removed > 0 {
                     Ok((ModifyResult::Delete, removed))
                 } else if removed > 0 {
-                    Ok((ModifyResult::Keep, removed))
+                    Ok((ModifyResult::Keep(delta), removed))
                 } else {
                     Ok((ModifyResult::KeepUnchanged, 0))
                 }
@@ -3422,16 +3474,19 @@ impl StorageEngine {
                 }
                 _ => unreachable!(),
             };
-            let current = match map.get(field) {
+            let (current, old_val_len) = match map.get(field) {
                 Some(v) => {
+                    let old_len = v.len();
                     let s = std::str::from_utf8(v).map_err(|_| StorageError::NotANumber)?;
-                    s.parse::<i64>().map_err(|_| StorageError::NotANumber)?
+                    (s.parse::<i64>().map_err(|_| StorageError::NotANumber)?, old_len as i64)
                 }
-                None => 0,
+                None => (0, -(field.len() as i64 + 64)), // new field: account for key+overhead
             };
             let new_val = current.checked_add(delta).ok_or(StorageError::NotANumber)?;
-            map.insert(field.to_vec(), new_val.to_string().into_bytes());
-            Ok((ModifyResult::Keep, new_val))
+            let new_bytes = new_val.to_string().into_bytes();
+            let mem_delta = new_bytes.len() as i64 - old_val_len;
+            map.insert(field.to_vec(), new_bytes);
+            Ok((ModifyResult::Keep(mem_delta), new_val))
         })
     }
 
@@ -3457,24 +3512,27 @@ impl StorageEngine {
                 }
                 _ => unreachable!(),
             };
-            let current = match map.get(field) {
+            let (current, old_val_len) = match map.get(field) {
                 Some(v) => {
+                    let old_len = v.len();
                     let s = std::str::from_utf8(v).map_err(|_| StorageError::NotAFloat)?;
                     let f: f64 = s.parse().map_err(|_| StorageError::NotAFloat)?;
                     if !f.is_finite() {
                         return Err(StorageError::NotAFloat);
                     }
-                    f
+                    (f, old_len as i64)
                 }
-                None => 0.0,
+                None => (0.0, -(field.len() as i64 + 64)), // new field: account for key+overhead
             };
             let new_val = current + delta;
             if !new_val.is_finite() {
                 return Err(StorageError::NotAFloat);
             }
             let new_val_str = format_float(new_val);
-            map.insert(field.to_vec(), new_val_str.as_bytes().to_vec());
-            Ok((ModifyResult::Keep, new_val_str))
+            let new_bytes = new_val_str.as_bytes().to_vec();
+            let mem_delta = new_bytes.len() as i64 - old_val_len;
+            map.insert(field.to_vec(), new_bytes);
+            Ok((ModifyResult::Keep(mem_delta), new_val_str))
         })
     }
 
@@ -3954,7 +4012,7 @@ mod tests {
                 Some(StoreValue::List(deque)) => {
                     deque.push_back(b"item2".to_vec());
                     let new_len = deque.len();
-                    Ok((ModifyResult::Keep, new_len))
+                    Ok((ModifyResult::Keep(0), new_len))
                 }
                 _ => unreachable!(),
             })
@@ -3974,7 +4032,7 @@ mod tests {
 
         // Try to modify as a list - should fail with WrongType
         let result = storage.atomic_modify(b"str_key", RedisDataType::List, |_| {
-            Ok((ModifyResult::Keep, ()))
+            Ok((ModifyResult::Keep(0), ()))
         });
         assert!(matches!(result, Err(StorageError::WrongType)));
     }
@@ -4602,5 +4660,170 @@ mod tests {
 
         // Invalid scoped key (too short) should return false
         assert!(!storage.key_exists_in_any_db(&[1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn test_lpush_lpop_memory_returns_to_baseline() {
+        // Test: LPUSH N items then LPOP N items - verify used_memory returns to baseline
+        let storage = StorageEngine::new(StorageConfig::default());
+
+        let baseline = storage.current_memory.load(Ordering::Relaxed);
+
+        // LPUSH 100 items
+        let n = 100;
+        for i in 0..n {
+            let val = format!("value_{:04}", i).into_bytes();
+            storage
+                .atomic_modify(b"testlist", RedisDataType::List, {
+                    let val = val.clone();
+                    move |current| match current {
+                        Some(StoreValue::List(deque)) => {
+                            let delta = val.len() as i64 + 24;
+                            deque.push_front(val);
+                            Ok((ModifyResult::Keep(delta), ()))
+                        }
+                        None => {
+                            let deque = std::collections::VecDeque::from(vec![val]);
+                            Ok((ModifyResult::Set(StoreValue::List(deque)), ()))
+                        }
+                        _ => unreachable!(),
+                    }
+                })
+                .unwrap();
+        }
+
+        let after_push = storage.current_memory.load(Ordering::Relaxed);
+        assert!(after_push > baseline, "Memory should increase after LPUSH");
+
+        // LPOP all 100 items
+        for _ in 0..n {
+            let result: Option<Vec<u8>> = storage
+                .atomic_modify(b"testlist", RedisDataType::List, |current| match current {
+                    Some(StoreValue::List(deque)) => {
+                        if let Some(e) = deque.pop_front() {
+                            let delta = -(e.len() as i64 + 24);
+                            if deque.is_empty() {
+                                Ok((ModifyResult::Delete, Some(e)))
+                            } else {
+                                Ok((ModifyResult::Keep(delta), Some(e)))
+                            }
+                        } else {
+                            Ok((ModifyResult::Keep(0), None))
+                        }
+                    }
+                    None => Ok((ModifyResult::Keep(0), None)),
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            assert!(result.is_some());
+        }
+
+        let after_pop = storage.current_memory.load(Ordering::Relaxed);
+        assert_eq!(
+            after_pop, baseline,
+            "Memory should return to baseline after popping all items"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_mem_size_matches_calculate_entry_size() {
+        use crate::storage::value::NativeHashSet;
+        let storage = StorageEngine::new(StorageConfig::default());
+
+        // Test List: push some items
+        for i in 0..10 {
+            let val = format!("item_{}", i).into_bytes();
+            storage
+                .atomic_modify(b"list_key", RedisDataType::List, {
+                    let val = val.clone();
+                    move |current| match current {
+                        Some(StoreValue::List(deque)) => {
+                            let delta = val.len() as i64 + 24;
+                            deque.push_back(val);
+                            Ok((ModifyResult::Keep(delta), ()))
+                        }
+                        None => {
+                            let deque = std::collections::VecDeque::from(vec![val]);
+                            Ok((ModifyResult::Set(StoreValue::List(deque)), ()))
+                        }
+                        _ => unreachable!(),
+                    }
+                })
+                .unwrap();
+        }
+        // Verify cached_mem_size matches value.mem_size() for list
+        storage.active_db().get_mut(b"list_key").map(|entry| {
+            let actual = entry.value.mem_size() as u64;
+            assert_eq!(
+                entry.cached_mem_size, actual,
+                "List: cached_mem_size {} != actual {}",
+                entry.cached_mem_size, actual
+            );
+        });
+
+        // Test Set: add some members
+        for i in 0..10 {
+            let member = format!("member_{}", i).into_bytes();
+            storage
+                .atomic_modify(b"set_key", RedisDataType::Set, {
+                    let member = member.clone();
+                    move |current| match current {
+                        Some(StoreValue::Set(set)) => {
+                            let delta = if set.insert(member.clone()) {
+                                member.len() as i64 + 32
+                            } else {
+                                0
+                            };
+                            Ok((ModifyResult::Keep(delta), ()))
+                        }
+                        None => {
+                            let mut set = NativeHashSet::default();
+                            set.insert(member);
+                            Ok((ModifyResult::Set(StoreValue::Set(set)), ()))
+                        }
+                        _ => unreachable!(),
+                    }
+                })
+                .unwrap();
+        }
+        // Verify cached_mem_size matches value.mem_size() for set
+        storage.active_db().get_mut(b"set_key").map(|entry| {
+            let actual = entry.value.mem_size() as u64;
+            assert_eq!(
+                entry.cached_mem_size, actual,
+                "Set: cached_mem_size {} != actual {}",
+                entry.cached_mem_size, actual
+            );
+        });
+
+        // Test Hash: set some fields
+        let fields: Vec<(&[u8], &[u8])> = vec![
+            (b"f1", b"val1"),
+            (b"f2", b"val2"),
+            (b"f3", b"val3"),
+        ];
+        storage.hash_set(b"hash_key", &fields).unwrap();
+        storage.active_db().get_mut(b"hash_key").map(|entry| {
+            let actual = entry.value.mem_size() as u64;
+            assert_eq!(
+                entry.cached_mem_size, actual,
+                "Hash: cached_mem_size {} != actual {}",
+                entry.cached_mem_size, actual
+            );
+        });
+
+        // Test String: set via regular path
+        storage
+            .set(b"str_key".to_vec(), b"hello_world".to_vec(), None)
+            .await
+            .unwrap();
+        storage.active_db().get_mut(b"str_key").map(|entry| {
+            let actual = entry.value.mem_size() as u64;
+            assert_eq!(
+                entry.cached_mem_size, actual,
+                "String: cached_mem_size {} != actual {}",
+                entry.cached_mem_size, actual
+            );
+        });
     }
 }

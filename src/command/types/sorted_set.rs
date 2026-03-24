@@ -396,9 +396,12 @@ pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         match existing {
             Some(StoreValue::ZSet(ss)) => {
                 let mut removed = 0i64;
+                let mut delta: i64 = 0;
                 for member in &members {
                     if ss.remove(member) {
                         removed += 1;
+                        // ZSet overhead: member in BTreeSet (len+24) + member in HashMap (len+16)
+                        delta -= member.len() as i64 * 2 + 40;
                     }
                 }
                 if removed == 0 {
@@ -406,7 +409,7 @@ pub async fn zrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 } else if ss.is_empty() {
                     Ok((ModifyResult::Delete, removed))
                 } else {
-                    Ok((ModifyResult::Keep, removed))
+                    Ok((ModifyResult::Keep(delta), removed))
                 }
             }
             None => Ok((ModifyResult::KeepUnchanged, 0i64)),

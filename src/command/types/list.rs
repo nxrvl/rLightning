@@ -30,11 +30,12 @@ fn resolve_index(idx: i64, len: usize) -> Option<usize> {
 }
 
 /// Helper: list result for atomic_modify - delete if empty, keep otherwise.
-fn list_result(deque: &VecDeque<Vec<u8>>) -> ModifyResult {
+/// The delta parameter is the byte size change from the mutation.
+fn list_result(deque: &VecDeque<Vec<u8>>, delta: i64) -> ModifyResult {
     if deque.is_empty() {
         ModifyResult::Delete
     } else {
-        ModifyResult::Keep
+        ModifyResult::Keep(delta)
     }
 }
 
@@ -52,11 +53,13 @@ pub async fn lpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
+            let mut delta: i64 = 0;
             for e in elements {
+                delta += e.len() as i64 + 24;
                 deque.push_front(e);
             }
             let new_len = deque.len() as i64;
-            Ok((ModifyResult::Keep, new_len))
+            Ok((ModifyResult::Keep(delta), new_len))
         }
         None => {
             let mut deque = VecDeque::with_capacity(elements.len());
@@ -84,11 +87,13 @@ pub async fn rpush(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
+            let mut delta: i64 = 0;
             for e in elements {
+                delta += e.len() as i64 + 24;
                 deque.push_back(e);
             }
             let new_len = deque.len() as i64;
-            Ok((ModifyResult::Keep, new_len))
+            Ok((ModifyResult::Keep(delta), new_len))
         }
         None => {
             let mut deque = VecDeque::with_capacity(elements.len());
@@ -131,14 +136,16 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(StoreValue::List(deque)) => {
             if deque.is_empty() {
-                return Ok((ModifyResult::Keep, PopResult::Nil(count.is_some())));
+                return Ok((ModifyResult::Keep(0), PopResult::Nil(count.is_some())));
             }
 
             let pop_count = count.unwrap_or(1);
             let actual = pop_count.min(deque.len());
             let mut elements = Vec::with_capacity(actual);
+            let mut delta: i64 = 0;
             for _ in 0..actual {
                 if let Some(e) = deque.pop_front() {
+                    delta -= e.len() as i64 + 24;
                     elements.push(e);
                 }
             }
@@ -152,9 +159,9 @@ pub async fn lpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
 
-            Ok((list_result(deque), pop_result))
+            Ok((list_result(deque, delta), pop_result))
         }
-        None => Ok((ModifyResult::Keep, PopResult::Nil(count.is_some()))),
+        None => Ok((ModifyResult::Keep(0), PopResult::Nil(count.is_some()))),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -204,14 +211,16 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(StoreValue::List(deque)) => {
             if deque.is_empty() {
-                return Ok((ModifyResult::Keep, PopResult::Nil(count.is_some())));
+                return Ok((ModifyResult::Keep(0), PopResult::Nil(count.is_some())));
             }
 
             let pop_count = count.unwrap_or(1);
             let actual = pop_count.min(deque.len());
             let mut elements = Vec::with_capacity(actual);
+            let mut delta: i64 = 0;
             for _ in 0..actual {
                 if let Some(e) = deque.pop_back() {
+                    delta -= e.len() as i64 + 24;
                     elements.push(e);
                 }
             }
@@ -225,9 +234,9 @@ pub async fn rpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             };
 
-            Ok((list_result(deque), pop_result))
+            Ok((list_result(deque, delta), pop_result))
         }
-        None => Ok((ModifyResult::Keep, PopResult::Nil(count.is_some()))),
+        None => Ok((ModifyResult::Keep(0), PopResult::Nil(count.is_some()))),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -377,12 +386,19 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 // Empty result
                 return Ok((ModifyResult::Delete, ()));
             }
+            // Compute delta: size of elements being removed (before si and after ei)
+            let mut removed_size: i64 = 0;
+            for (i, e) in deque.iter().enumerate() {
+                if i < si || i > ei {
+                    removed_size += e.len() as i64 + 24;
+                }
+            }
             let new_deque: VecDeque<Vec<u8>> =
                 deque.iter().skip(si).take(ei - si + 1).cloned().collect();
             *deque = new_deque;
-            Ok((list_result(deque), ()))
+            Ok((list_result(deque, -removed_size), ()))
         }
-        None => Ok((ModifyResult::Keep, ())),
+        None => Ok((ModifyResult::Keep(0), ())),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -400,13 +416,15 @@ pub async fn lpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
+            let mut delta: i64 = 0;
             for e in elements {
+                delta += e.len() as i64 + 24;
                 deque.push_front(e);
             }
             let new_len = deque.len() as i64;
-            Ok((ModifyResult::Keep, new_len))
+            Ok((ModifyResult::Keep(delta), new_len))
         }
-        None => Ok((ModifyResult::Keep, 0i64)),
+        None => Ok((ModifyResult::Keep(0), 0i64)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -424,13 +442,15 @@ pub async fn rpushx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let length = engine.atomic_modify(key, RedisDataType::List, move |current| match current {
         Some(StoreValue::List(deque)) => {
+            let mut delta: i64 = 0;
             for e in elements {
+                delta += e.len() as i64 + 24;
                 deque.push_back(e);
             }
             let new_len = deque.len() as i64;
-            Ok((ModifyResult::Keep, new_len))
+            Ok((ModifyResult::Keep(delta), new_len))
         }
-        None => Ok((ModifyResult::Keep, 0i64)),
+        None => Ok((ModifyResult::Keep(0), 0i64)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -461,18 +481,19 @@ pub async fn linsert(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
                 Some(pos) => {
                     let insert_pos = if before { pos } else { pos + 1 };
                     // VecDeque doesn't have insert, so we convert to Vec, insert, convert back
+                    let delta = element.len() as i64 + 24;
                     let mut vec: Vec<Vec<u8>> = deque.drain(..).collect();
                     vec.insert(insert_pos, element.clone());
                     *deque = vec.into();
-                    Ok((ModifyResult::Keep, deque.len() as i64))
+                    Ok((ModifyResult::Keep(delta), deque.len() as i64))
                 }
                 None => {
                     // Pivot not found
-                    Ok((ModifyResult::Keep, -1i64))
+                    Ok((ModifyResult::Keep(0), -1i64))
                 }
             }
         }
-        None => Ok((ModifyResult::Keep, 0i64)),
+        None => Ok((ModifyResult::Keep(0), 0i64)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -496,8 +517,9 @@ pub async fn lset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let resolved = resolve_index(index, deque.len()).ok_or_else(|| {
                 crate::storage::error::StorageError::InternalError("index out of range".to_string())
             })?;
+            let delta = element.len() as i64 - deque[resolved].len() as i64;
             deque[resolved] = element.clone();
-            Ok((ModifyResult::Keep, ()))
+            Ok((ModifyResult::Keep(delta), ()))
         }
         None => Err(crate::storage::error::StorageError::InternalError(
             "no such key".to_string(),
@@ -558,9 +580,11 @@ pub async fn lrem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 });
             }
 
-            Ok((list_result(deque), removed_count))
+            // All removed elements have the same content, so delta = count * per-element size
+            let delta = -(removed_count * (element.len() as i64 + 24));
+            Ok((list_result(deque, delta), removed_count))
         }
-        None => Ok((ModifyResult::Keep, 0i64)),
+        None => Ok((ModifyResult::Keep(0), 0i64)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -740,7 +764,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             engine.atomic_modify(source, RedisDataType::List, |current| match current {
                 Some(StoreValue::List(deque)) => {
                     if deque.is_empty() {
-                        return Ok((ModifyResult::Keep, None));
+                        return Ok((ModifyResult::Keep(0), None));
                     }
 
                     let element = if pop_left {
@@ -755,9 +779,9 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         deque.push_back(element.clone());
                     }
 
-                    Ok((ModifyResult::Keep, Some(element)))
+                    Ok((ModifyResult::Keep(0), Some(element)))
                 }
-                None => Ok((ModifyResult::Keep, None)),
+                None => Ok((ModifyResult::Keep(0), None)),
                 _ => Err(crate::storage::error::StorageError::WrongType),
             })?;
 
@@ -776,7 +800,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let element = engine.atomic_modify(source, RedisDataType::List, |current| match current {
         Some(StoreValue::List(deque)) => {
             if deque.is_empty() {
-                return Ok((ModifyResult::Keep, None));
+                return Ok((ModifyResult::Keep(0), None));
             }
 
             let element = if pop_left {
@@ -784,10 +808,11 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             } else {
                 deque.pop_back().unwrap()
             };
+            let delta = -(element.len() as i64 + 24);
 
-            Ok((list_result(deque), Some(element)))
+            Ok((list_result(deque, delta), Some(element)))
         }
-        None => Ok((ModifyResult::Keep, None)),
+        None => Ok((ModifyResult::Keep(0), None)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -806,7 +831,7 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             } else {
                 deque.push_back(elem_for_push.clone());
             }
-            Ok((ModifyResult::Keep, ()))
+            Ok((ModifyResult::Keep(0), ()))
         }
         None => {
             let mut deque = VecDeque::new();
@@ -894,24 +919,27 @@ pub async fn lmpop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
             Some(StoreValue::List(deque)) => {
                 if deque.is_empty() {
-                    return Ok((ModifyResult::Keep, None));
+                    return Ok((ModifyResult::Keep(0), None));
                 }
 
                 let actual = count.min(deque.len());
                 let mut popped = Vec::with_capacity(actual);
+                let mut delta: i64 = 0;
                 for _ in 0..actual {
                     if left {
                         if let Some(e) = deque.pop_front() {
+                            delta -= e.len() as i64 + 24;
                             popped.push(e);
                         }
                     } else if let Some(e) = deque.pop_back() {
+                        delta -= e.len() as i64 + 24;
                         popped.push(e);
                     }
                 }
 
-                Ok((list_result(deque), Some(popped)))
+                Ok((list_result(deque, delta), Some(popped)))
             }
-            None => Ok((ModifyResult::Keep, None)),
+            None => Ok((ModifyResult::Keep(0), None)),
             _ => Err(crate::storage::error::StorageError::WrongType),
         });
 
@@ -944,7 +972,7 @@ async fn try_pop(
     let result = engine.atomic_modify(key, RedisDataType::List, |current| match current {
         Some(StoreValue::List(deque)) => {
             if deque.is_empty() {
-                return Ok((ModifyResult::Keep, None));
+                return Ok((ModifyResult::Keep(0), None));
             }
 
             let element = if left {
@@ -952,10 +980,11 @@ async fn try_pop(
             } else {
                 deque.pop_back().unwrap()
             };
+            let delta = -(element.len() as i64 + 24);
 
-            Ok((list_result(deque), Some(element)))
+            Ok((list_result(deque, delta), Some(element)))
         }
-        None => Ok((ModifyResult::Keep, None)),
+        None => Ok((ModifyResult::Keep(0), None)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 

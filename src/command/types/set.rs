@@ -34,12 +34,14 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         match current {
             Some(StoreValue::Set(set)) => {
                 let mut added = 0i64;
+                let mut delta: i64 = 0;
                 for member in &unique_members {
                     if set.insert(member.clone()) {
                         added += 1;
+                        delta += member.len() as i64 + 32;
                     }
                 }
-                Ok((ModifyResult::Keep, added))
+                Ok((ModifyResult::Keep(delta), added))
             }
             None => {
                 let mut set = NativeHashSet::default();
@@ -72,16 +74,18 @@ pub async fn srem(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let removed = engine.atomic_modify(key, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
             let mut count = 0i64;
+            let mut delta: i64 = 0;
             for member in &members_owned {
                 if set.remove(member) {
                     count += 1;
+                    delta -= member.len() as i64 + 32;
                 }
             }
 
             if set.is_empty() && count > 0 {
                 Ok((ModifyResult::Delete, count))
             } else if count > 0 {
-                Ok((ModifyResult::Keep, count))
+                Ok((ModifyResult::Keep(delta), count))
             } else {
                 Ok((ModifyResult::KeepUnchanged, 0))
             }
@@ -173,7 +177,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         match current {
             Some(StoreValue::Set(set)) => {
                 if set.is_empty() {
-                    return Ok((ModifyResult::Keep, SpopResult::Empty(count.is_some())));
+                    return Ok((ModifyResult::Keep(0), SpopResult::Empty(count.is_some())));
                 }
 
                 if let Some(count) = count {
@@ -185,6 +189,7 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         members.swap(i, j);
                     }
                     let popped: Vec<Vec<u8>> = members[..actual_count].to_vec();
+                    let delta: i64 = -(popped.iter().map(|m| m.len() as i64 + 32).sum::<i64>());
                     // Put remaining back
                     let remaining: NativeHashSet =
                         members[actual_count..].iter().cloned().collect();
@@ -193,24 +198,25 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         Ok((ModifyResult::Delete, SpopResult::Multiple(popped)))
                     } else {
                         *set = remaining;
-                        Ok((ModifyResult::Keep, SpopResult::Multiple(popped)))
+                        Ok((ModifyResult::Keep(delta), SpopResult::Multiple(popped)))
                     }
                 } else {
                     // Return single random element
                     let mut members: Vec<_> = set.drain().collect();
                     let idx = fastrand::usize(0..members.len());
                     let member = members.swap_remove(idx);
+                    let delta = -(member.len() as i64 + 32);
                     let remaining: NativeHashSet = members.into_iter().collect();
 
                     if remaining.is_empty() {
                         Ok((ModifyResult::Delete, SpopResult::Single(member)))
                     } else {
                         *set = remaining;
-                        Ok((ModifyResult::Keep, SpopResult::Single(member)))
+                        Ok((ModifyResult::Keep(delta), SpopResult::Single(member)))
                     }
                 }
             }
-            None => Ok((ModifyResult::Keep, SpopResult::Empty(count.is_some()))),
+            None => Ok((ModifyResult::Keep(0), SpopResult::Empty(count.is_some()))),
             _ => Err(crate::storage::error::StorageError::WrongType),
         }
     })?;
@@ -528,9 +534,9 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let exists = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
             Some(StoreValue::Set(set)) => {
                 let has_member = set.contains(member.as_slice());
-                Ok((ModifyResult::Keep, has_member))
+                Ok((ModifyResult::Keep(0), has_member))
             }
-            None => Ok((ModifyResult::Keep, false)),
+            None => Ok((ModifyResult::Keep(0), false)),
             _ => Err(crate::storage::error::StorageError::WrongType),
         })?;
         return Ok(RespValue::Integer(if exists { 1 } else { 0 }));
@@ -546,16 +552,17 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let removed = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
             if !set.remove(&member_clone) {
-                return Ok((ModifyResult::Keep, false));
+                return Ok((ModifyResult::Keep(0), false));
             }
+            let delta = -(member_clone.len() as i64 + 32);
 
             if set.is_empty() {
                 Ok((ModifyResult::Delete, true))
             } else {
-                Ok((ModifyResult::Keep, true))
+                Ok((ModifyResult::Keep(delta), true))
             }
         }
-        None => Ok((ModifyResult::Keep, false)),
+        None => Ok((ModifyResult::Keep(0), false)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -568,8 +575,9 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let member_clone = member.clone();
     engine.atomic_modify(destination, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
+            let delta = member_clone.len() as i64 + 32;
             set.insert(member_clone.clone());
-            Ok((ModifyResult::Keep, ()))
+            Ok((ModifyResult::Keep(delta), ()))
         }
         None => {
             let mut set = NativeHashSet::default();

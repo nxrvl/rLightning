@@ -313,6 +313,19 @@ impl ShardedStore {
         }
     }
 
+    /// Iterate over all entries mutably.
+    pub fn for_each_mut<F>(&self, mut f: F)
+    where
+        F: FnMut(&Vec<u8>, &mut Entry),
+    {
+        for shard in self.shards.iter() {
+            let mut guard = shard.inner.write();
+            for (key, entry) in guard.map.iter_mut() {
+                f(key, entry);
+            }
+        }
+    }
+
     /// Iterate and collect results. Returns items where f returns Some.
     pub fn filter_map<F, R>(&self, mut f: F) -> Vec<R>
     where

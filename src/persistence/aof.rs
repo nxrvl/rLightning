@@ -444,6 +444,9 @@ impl AofPersistence {
                 });
             }
 
+            // Refresh cached_mem_size for all entries for O(1) memory tracking
+            engine.refresh_all_cached_mem_sizes();
+
             info!(path = ?path, commands = command_count, lines = line_count,
                   "Successfully loaded commands from AOF file");
             Ok(())

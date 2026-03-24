@@ -344,8 +344,10 @@ pub enum StoreValue {
 /// Result of an atomic_modify closure indicating what to do with the entry.
 #[derive(Debug)]
 pub enum ModifyResult {
-    /// Value was modified in-place via the &mut reference, keep it
-    Keep,
+    /// Value was modified in-place via the &mut reference, keep it.
+    /// The i64 is the byte delta: positive = grew, negative = shrank, 0 = no size change.
+    /// Used for O(1) memory tracking without recalculating the full entry size.
+    Keep(i64),
     /// Value was NOT modified — true no-op. Unlike `Keep`, this skips
     /// WATCH version bump and LRU touch. Use for commands like HDEL/SREM/ZREM
     /// that examined an existing key but removed nothing (matching Redis
