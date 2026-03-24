@@ -1188,8 +1188,10 @@ impl Server {
                             "NOPERM this user has no permissions to access the '{}' channel",
                             String::from_utf8_lossy(channel)
                         );
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(error_msg);
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -1210,8 +1212,10 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1227,8 +1231,10 @@ impl Server {
                             "NOPERM this user has no permissions to access the '{}' channel",
                             String::from_utf8_lossy(channel)
                         );
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(error_msg);
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -1249,8 +1255,10 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1264,7 +1272,10 @@ impl Server {
                         "NOPERM this user has no permissions to access the '{}' channel",
                         String::from_utf8_lossy(&cmd.args[0])
                     );
-                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                    let error_resp = RespValue::Error(error_msg);
+                    if let Ok(bytes) = error_resp.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
                     return Ok(DispatchAction::Continue);
                 }
                 let response = pubsub_commands::publish(pubsub, &cmd.args).await;
@@ -1275,8 +1286,10 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1292,8 +1305,10 @@ impl Server {
                             "NOPERM this user has no permissions to access the '{}' channel",
                             String::from_utf8_lossy(channel)
                         );
-                        Self::send_error_to_writer(socket_writer, error_msg, client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(error_msg);
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                         return Ok(DispatchAction::Continue);
                     }
                 }
@@ -1314,8 +1329,10 @@ impl Server {
                         Self::update_sub_counts(pubsub, client_id, connections, conn_id).await;
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1329,7 +1346,10 @@ impl Server {
                         "NOPERM this user has no permissions to access the '{}' channel",
                         String::from_utf8_lossy(&cmd.args[0])
                     );
-                    Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
+                    let error_resp = RespValue::Error(error_msg);
+                    if let Ok(bytes) = error_resp.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
                     return Ok(DispatchAction::Continue);
                 }
                 let response = pubsub_commands::spublish(pubsub, &cmd.args).await;
@@ -1340,8 +1360,10 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1355,8 +1377,10 @@ impl Server {
                         }
                     }
                     Err(e) => {
-                        Self::send_error_to_writer(socket_writer, e.to_string(), client_addr_str)
-                            .await?;
+                        let error_resp = RespValue::Error(e.to_string());
+                        if let Ok(bytes) = error_resp.serialize() {
+                            response_buffer.extend_from_slice(&bytes);
+                        }
                     }
                 }
                 return Ok(DispatchAction::Continue);
@@ -1374,12 +1398,10 @@ impl Server {
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(
-                                socket_writer,
-                                e.to_string(),
-                                client_addr_str,
-                            )
-                            .await?;
+                            let error_resp = RespValue::Error(e.to_string());
+                            if let Ok(bytes) = error_resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
                         }
                     }
                 } else {
@@ -1428,7 +1450,10 @@ impl Server {
                             }
                         }
                         Err(e) => {
-                            Self::send_error_to_writer(socket_writer, e, client_addr_str).await?;
+                            let error_resp = RespValue::Error(e);
+                            if let Ok(bytes) = error_resp.serialize() {
+                                response_buffer.extend_from_slice(&bytes);
+                            }
                         }
                     }
                 } else {
@@ -1487,12 +1512,12 @@ impl Server {
             && repl.is_read_only()
             && ReplicationManager::is_write_command(&cmd_lower)
         {
-            Self::send_error_to_writer(
-                socket_writer,
+            let error_resp = RespValue::Error(
                 "READONLY You can't write against a read only replica.".to_string(),
-                client_addr_str,
-            )
-            .await?;
+            );
+            if let Ok(bytes) = error_resp.serialize() {
+                response_buffer.extend_from_slice(&bytes);
+            }
             return Ok(DispatchAction::Continue);
         }
 
@@ -1625,12 +1650,12 @@ impl Server {
                 _ => vec![],
             };
             if cluster_mgr.check_cross_slot(&key_refs) {
-                Self::send_error_to_writer(
-                    socket_writer,
+                let error_resp = RespValue::Error(
                     "CROSSSLOT Keys in request don't hash to the same slot".to_string(),
-                    client_addr_str,
-                )
-                .await?;
+                );
+                if let Ok(bytes) = error_resp.serialize() {
+                    response_buffer.extend_from_slice(&bytes);
+                }
                 return Ok(DispatchAction::Continue);
             }
 
