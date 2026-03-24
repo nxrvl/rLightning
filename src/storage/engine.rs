@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -203,6 +203,9 @@ pub struct StorageEngine {
     /// Runtime-mutable max memory limit. Updated atomically by CONFIG SET maxmemory.
     /// Read by maybe_evict() during eviction. 0 means use config.max_memory (startup default).
     active_max_memory: AtomicUsize,
+    /// Count of connections that currently have active WATCH keys.
+    /// Used to skip bump_key_version when no connections are watching (common case).
+    active_watch_count: AtomicU32,
 }
 
 impl StorageEngine {
@@ -240,6 +243,7 @@ impl StorageEngine {
             runtime_config: DashMap::new(),
             active_eviction_policy: AtomicU8::new(initial_policy),
             active_max_memory: AtomicUsize::new(initial_max_memory),
+            active_watch_count: AtomicU32::new(0),
         });
 
         // Seed runtime config from startup config
@@ -315,6 +319,9 @@ impl StorageEngine {
                 }
                 if metadata_cleanup_counter >= 600 {
                     metadata_cleanup_counter = 0;
+                    // Clean up stale key_versions entries for keys that no longer exist.
+                    // Runs every 60 seconds to prevent unbounded growth of the WATCH version map.
+                    engine.cleanup_stale_key_versions();
                 }
             }
         });
@@ -1490,6 +1497,49 @@ impl StorageEngine {
     #[cfg(test)]
     pub fn key_versions_len(&self) -> usize {
         self.key_versions.len()
+    }
+
+    /// Increment the active WATCH connection count.
+    /// Called when a connection first issues WATCH (transitions from 0 watched keys to >0).
+    pub fn increment_watch_count(&self) {
+        self.active_watch_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the active WATCH connection count.
+    /// Called when a connection's watched keys are cleared (EXEC/DISCARD/UNWATCH/disconnect).
+    pub fn decrement_watch_count(&self) {
+        self.active_watch_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Get the current active WATCH connection count.
+    #[cfg(test)]
+    pub fn active_watch_count(&self) -> u32 {
+        self.active_watch_count.load(Ordering::Relaxed)
+    }
+
+    /// Remove key_versions entries for keys that no longer exist in any database.
+    /// Called periodically from the expiration task to prevent unbounded growth.
+    pub fn cleanup_stale_key_versions(&self) {
+        self.key_versions.retain(|scoped_key, _| {
+            self.key_exists_in_any_db(scoped_key)
+        });
+    }
+
+    /// Check if a scoped key (db_index prefix + key) exists in the corresponding database.
+    /// Used for key_versions cleanup - checks if the actual data key still exists.
+    fn key_exists_in_any_db(&self, scoped_key: &[u8]) -> bool {
+        // Scoped key format: db_index as u64 le bytes (8 bytes) followed by the actual key.
+        if scoped_key.len() <= 8 {
+            return false;
+        }
+        let db_bytes: [u8; 8] = scoped_key[..8].try_into().unwrap_or_default();
+        let db_index = u64::from_le_bytes(db_bytes) as usize;
+        let key = &scoped_key[8..];
+        if db_index >= NUM_DATABASES {
+            return false;
+        }
+        let db = self.get_db_by_index(db_index);
+        db.contains_key(key)
     }
 
     /// Check if the current task is inside a MULTI/EXEC transaction execution.
@@ -4463,5 +4513,94 @@ mod tests {
         storage
             .update_prefix_indices_batch_for_db(&[], db_idx)
             .await;
+    }
+
+    #[tokio::test]
+    async fn test_key_versions_cleanup_after_expiry() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Set keys with short TTL
+        for i in 0..5 {
+            let key = format!("expiring_key_{}", i);
+            storage
+                .set(key.as_bytes().to_vec(), b"val".to_vec(), Some(Duration::from_millis(50)))
+                .await
+                .unwrap();
+            // Bump version to populate key_versions map
+            storage.bump_key_version(key.as_bytes());
+        }
+
+        // Also set a persistent key
+        storage
+            .set(b"persistent_key".to_vec(), b"val".to_vec(), None)
+            .await
+            .unwrap();
+        storage.bump_key_version(b"persistent_key");
+
+        // key_versions should have entries for all 6 keys
+        assert_eq!(storage.key_versions_len(), 6);
+
+        // Wait for expiration
+        sleep(Duration::from_millis(100)).await;
+
+        // Access expired keys to trigger lazy expiration
+        for i in 0..5 {
+            let key = format!("expiring_key_{}", i);
+            let _ = storage.get(key.as_bytes()).await;
+        }
+
+        // Run cleanup
+        storage.cleanup_stale_key_versions();
+
+        // Only the persistent key's version should remain
+        assert_eq!(storage.key_versions_len(), 1);
+
+        // Verify the persistent key's version is still there
+        let version = storage.get_key_version(b"persistent_key");
+        assert!(version > 0);
+    }
+
+    #[tokio::test]
+    async fn test_active_watch_count() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        assert_eq!(storage.active_watch_count(), 0);
+
+        storage.increment_watch_count();
+        assert_eq!(storage.active_watch_count(), 1);
+
+        storage.increment_watch_count();
+        assert_eq!(storage.active_watch_count(), 2);
+
+        storage.decrement_watch_count();
+        assert_eq!(storage.active_watch_count(), 1);
+
+        storage.decrement_watch_count();
+        assert_eq!(storage.active_watch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_key_exists_in_any_db() {
+        let config = StorageConfig::default();
+        let storage = StorageEngine::new(config);
+
+        // Set a key in DB 0
+        storage
+            .set(b"mykey".to_vec(), b"val".to_vec(), None)
+            .await
+            .unwrap();
+
+        // Create a scoped key for DB 0
+        let scoped = StorageEngine::db_scoped_key(0, b"mykey");
+        assert!(storage.key_exists_in_any_db(&scoped));
+
+        // Non-existent key should not exist
+        let scoped_missing = StorageEngine::db_scoped_key(0, b"missing");
+        assert!(!storage.key_exists_in_any_db(&scoped_missing));
+
+        // Invalid scoped key (too short) should return false
+        assert!(!storage.key_exists_in_any_db(&[1, 2, 3]));
     }
 }

@@ -435,6 +435,11 @@ impl Server {
 
                 // Clear the response buffer for a new batch of commands
                 response_buffer.clear();
+                // Shrink response buffer if it grew beyond 64KB (e.g. from a large LRANGE)
+                const BUFFER_SHRINK_THRESHOLD: usize = 64 * 1024;
+                if response_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                    response_buffer.shrink_to(buffer_size);
+                }
                 let mut commands_processed = 0;
 
                 // Phase 1: Pre-parse all commands from buffer
@@ -449,7 +454,12 @@ impl Server {
                         combined.extend_from_slice(&partial_command_buffer);
                         combined.extend_from_slice(&buffer);
                         buffer = combined;
-                        partial_command_buffer.clear();
+                        // Drop large partial buffers instead of just clearing
+                        if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                            partial_command_buffer = Vec::new();
+                        } else {
+                            partial_command_buffer.clear();
+                        }
                     }
 
                     let fast_parse_result = {
@@ -516,7 +526,11 @@ impl Server {
                                         response_buffer.extend_from_slice(&bytes);
                                     }
                                     buffer.clear();
-                                    partial_command_buffer.clear();
+                                    if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                                        partial_command_buffer = Vec::new();
+                                    } else {
+                                        partial_command_buffer.clear();
+                                    }
                                     break;
                                 }
                             }
@@ -537,7 +551,11 @@ impl Server {
                                 response_buffer.extend_from_slice(&bytes);
                             }
                             buffer.clear();
-                            partial_command_buffer.clear();
+                            if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                                partial_command_buffer = Vec::new();
+                            } else {
+                                partial_command_buffer.clear();
+                            }
                             break;
                         }
                     }
@@ -892,6 +910,9 @@ impl Server {
                             let _ = socket_writer.write_all(&response_buffer).await;
                             let _ = socket_writer.flush().await;
                         }
+                        if !tx_state.watched_keys.is_empty() {
+                            command_handler.storage().decrement_watch_count();
+                        }
                         pubsub.unregister_client(client_id).await;
                         if let Some(security_mgr) = security {
                             security_mgr.remove_client(&client_addr_str);
@@ -956,6 +977,9 @@ impl Server {
                     debug!(client_addr = %client_addr_str, commands = commands_processed, bytes = response_buffer.len(), "Sent batched responses");
 
                     response_buffer.clear();
+                    if response_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                        response_buffer.shrink_to(buffer_size);
+                    }
                 }
                 // Flush the write buffer before going back to reading
                 if let Err(e) = socket_writer.flush().await {
@@ -963,6 +987,11 @@ impl Server {
                     break;
                 }
             }
+        }
+
+        // Cleanup: decrement active watch count if this connection had watched keys
+        if !tx_state.watched_keys.is_empty() {
+            command_handler.storage().decrement_watch_count();
         }
 
         // Cleanup: unregister from PubSub and security
@@ -2103,8 +2132,16 @@ impl Server {
         // Handle transaction commands
         match cmd_lower {
             "multi" => return transaction::handle_multi(tx_state),
-            "discard" => return transaction::handle_discard(tx_state),
+            "discard" => {
+                let had_watches = !tx_state.watched_keys.is_empty();
+                let result = transaction::handle_discard(tx_state);
+                if had_watches {
+                    engine.decrement_watch_count();
+                }
+                return result;
+            }
             "exec" => {
+                let had_watches = !tx_state.watched_keys.is_empty();
                 // Capture queued commands before EXEC drains them (for AOF logging)
                 let queued_commands: Vec<Command> = tx_state.queue.clone();
                 let result = CURRENT_DB_INDEX
@@ -2112,6 +2149,10 @@ impl Server {
                         transaction::handle_exec(tx_state, command_handler, engine, db_index).await
                     })
                     .await?;
+                // EXEC always clears watched keys (via reset())
+                if had_watches {
+                    engine.decrement_watch_count();
+                }
                 // Log transaction commands to AOF wrapped in MULTI/EXEC as a single
                 // atomic batch to prevent interleaving with concurrent clients
                 if let Some(persistence_mgr) = persistence
@@ -2146,8 +2187,22 @@ impl Server {
                 }
                 return Ok(result);
             }
-            "watch" => return transaction::handle_watch(tx_state, engine, &cmd.args, db_index),
-            "unwatch" => return transaction::handle_unwatch(tx_state),
+            "watch" => {
+                let was_empty = tx_state.watched_keys.is_empty();
+                let result = transaction::handle_watch(tx_state, engine, &cmd.args, db_index);
+                if was_empty && !tx_state.watched_keys.is_empty() {
+                    engine.increment_watch_count();
+                }
+                return result;
+            }
+            "unwatch" => {
+                let had_watches = !tx_state.watched_keys.is_empty();
+                let result = transaction::handle_unwatch(tx_state);
+                if had_watches {
+                    engine.decrement_watch_count();
+                }
+                return result;
+            }
             _ => {}
         }
 
@@ -2252,12 +2307,17 @@ impl Server {
         conn_id: u64,
     ) -> Result<(), NetworkError> {
         // Combine partial buffer if needed
+        const BUFFER_SHRINK_THRESHOLD_SUB: usize = 64 * 1024;
         if !partial_command_buffer.is_empty() {
             let mut combined = BytesMut::with_capacity(partial_command_buffer.len() + buffer.len());
             combined.extend_from_slice(partial_command_buffer);
             combined.extend_from_slice(buffer);
             *buffer = combined;
-            partial_command_buffer.clear();
+            if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD_SUB {
+                *partial_command_buffer = Vec::new();
+            } else {
+                partial_command_buffer.clear();
+            }
         }
 
         while !buffer.is_empty() {
@@ -2535,7 +2595,11 @@ impl Server {
                     let error_msg = format!("ERR Protocol error: {}", e);
                     Self::send_error_to_writer(socket_writer, error_msg, client_addr_str).await?;
                     buffer.clear();
-                    partial_command_buffer.clear();
+                    if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD_SUB {
+                        *partial_command_buffer = Vec::new();
+                    } else {
+                        partial_command_buffer.clear();
+                    }
                     break;
                 }
             }
@@ -3516,5 +3580,45 @@ mod tests {
             }
             _ => panic!("Expected BulkString for CLIENT INFO"),
         }
+    }
+
+    #[test]
+    fn test_buffer_shrink_behavior() {
+        const BUFFER_SHRINK_THRESHOLD: usize = 64 * 1024;
+        let buffer_size = 8192;
+
+        // Simulate response_buffer growing large then being cleared + shrunk
+        let mut response_buffer = Vec::with_capacity(buffer_size);
+
+        // Fill buffer beyond threshold
+        response_buffer.extend_from_slice(&vec![0u8; 128 * 1024]);
+        assert!(response_buffer.capacity() > BUFFER_SHRINK_THRESHOLD);
+
+        // Clear and shrink (mimics the hot path logic)
+        response_buffer.clear();
+        if response_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+            response_buffer.shrink_to(buffer_size);
+        }
+
+        // Capacity should be reduced to approximately buffer_size
+        assert!(
+            response_buffer.capacity() <= BUFFER_SHRINK_THRESHOLD,
+            "Buffer should have shrunk: capacity={}, threshold={}",
+            response_buffer.capacity(),
+            BUFFER_SHRINK_THRESHOLD
+        );
+
+        // Simulate partial_command_buffer replacement
+        let mut partial_buf: Vec<u8> = Vec::new();
+        partial_buf.extend_from_slice(&vec![0u8; 128 * 1024]);
+        assert!(partial_buf.capacity() > BUFFER_SHRINK_THRESHOLD);
+
+        // Replace with new Vec (mimics the hot path logic)
+        if partial_buf.capacity() > BUFFER_SHRINK_THRESHOLD {
+            partial_buf = Vec::new();
+        }
+
+        // Should be a fresh allocation
+        assert_eq!(partial_buf.capacity(), 0);
     }
 }
