@@ -517,18 +517,11 @@ impl ShardedStore {
     }
 
     /// Remove a key from the per-shard expiration heap.
-    /// This is an O(n) operation but is only called on TTL removal (PERSIST, DEL),
-    /// which is rare compared to reads/writes.
+    /// O(n) filter + heapify via `retain`, only called on TTL removal (PERSIST, DEL).
     pub fn remove_expiration(&self, key: &[u8]) {
         let shard_idx = self.shard_index(key);
         let mut heap = self.shards[shard_idx].expiration_heap.lock();
-        // Rebuild without the target key
-        let entries: Vec<ShardExpirationEntry> = heap.drain().collect();
-        for entry in entries {
-            if entry.key != key {
-                heap.push(entry);
-            }
-        }
+        heap.retain(|entry| entry.key != key);
     }
 
     /// Process expired keys from a single shard's expiration heap.

@@ -797,13 +797,14 @@ impl Server {
                                                 active_db.remove_expiration(key);
                                             }
 
-                                            if persistence.is_some() {
+                                            if persistence.is_some() && !is_no_op {
                                                 aof_batch.push(RespCommand {
                                                     name: cmd.name.as_bytes().to_vec(),
                                                     args: cmd.args.clone(),
                                                 });
                                             }
                                             if replication.is_some()
+                                                && !is_no_op
                                                 && ReplicationManager::is_write_command(cmd_lower)
                                             {
                                                 // Only emit SELECT once per batch group (db_index
