@@ -575,8 +575,8 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let member_clone = member.clone();
     engine.atomic_modify(destination, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
-            let delta = member_clone.len() as i64 + 32;
-            set.insert(member_clone.clone());
+            let was_new = set.insert(member_clone.clone());
+            let delta = if was_new { member_clone.len() as i64 + 32 } else { 0 };
             Ok((ModifyResult::Keep(delta), ()))
         }
         None => {
