@@ -26,6 +26,13 @@ tokio::task_local! {
 /// Number of databases supported (Redis default is 16)
 pub const NUM_DATABASES: usize = 16;
 
+// db_mapping packs each database index into a 4-bit nibble of an AtomicU64 (16 * 4 = 64 bits).
+// Changing NUM_DATABASES above 16 would cause silent data corruption in SWAPDB.
+const _: () = assert!(
+    NUM_DATABASES <= 16,
+    "db_mapping nibble packing requires NUM_DATABASES <= 16"
+);
+
 /// Result type for storage operations
 pub type StorageResult<T> = Result<T, StorageError>;
 
@@ -1556,8 +1563,14 @@ impl StorageEngine {
 
     /// Decrement the active WATCH connection count.
     /// Called when a connection's watched keys are cleared (EXEC/DISCARD/UNWATCH/disconnect).
+    /// Uses saturating subtraction to prevent underflow wrapping to u32::MAX
+    /// (which would permanently disable the conditional WATCH optimization).
     pub fn decrement_watch_count(&self) {
-        self.active_watch_count.fetch_sub(1, Ordering::Relaxed);
+        let _ = self.active_watch_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(1)),
+        );
     }
 
     /// Get the current active WATCH connection count.

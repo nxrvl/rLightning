@@ -2192,9 +2192,17 @@ impl Server {
             }
             "watch" => {
                 let was_empty = tx_state.watched_keys.is_empty();
-                let result = transaction::handle_watch(tx_state, engine, &cmd.args, db_index);
-                if was_empty && !tx_state.watched_keys.is_empty() {
+                // Increment watch count BEFORE recording key versions to close
+                // the race window where a concurrent writer could check
+                // active_watch_count == 0, skip bump_key_version, and have
+                // the write go undetected by this WATCH session.
+                if was_empty {
                     engine.increment_watch_count();
+                }
+                let result = transaction::handle_watch(tx_state, engine, &cmd.args, db_index);
+                // If handle_watch failed or added no keys, undo the increment
+                if was_empty && tx_state.watched_keys.is_empty() {
+                    engine.decrement_watch_count();
                 }
                 return result;
             }

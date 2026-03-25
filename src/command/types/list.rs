@@ -826,12 +826,13 @@ pub async fn lmove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let elem_for_push = element.clone();
     engine.atomic_modify(destination, RedisDataType::List, |current| match current {
         Some(StoreValue::List(deque)) => {
+            let delta = elem_for_push.len() as i64 + 24;
             if push_left {
                 deque.push_front(elem_for_push.clone());
             } else {
                 deque.push_back(elem_for_push.clone());
             }
-            Ok((ModifyResult::Keep(0), ()))
+            Ok((ModifyResult::Keep(delta), ()))
         }
         None => {
             let mut deque = VecDeque::new();
