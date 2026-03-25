@@ -79,10 +79,10 @@ This is the core performance fix. Changes ModifyResult::Keep to carry a byte del
 
 ### Task 4: Verify Acceptance Criteria
 
-- [ ] Run full test suite: `cargo test`
-- [ ] Run clippy: `cargo clippy -- -D warnings`
-- [ ] Run benchmarks to measure improvement: `cargo bench`
-- [ ] Verify memory behavior: no unbounded growth pattern in key_versions or buffers
+- [x] Run full test suite: `cargo test`
+- [x] Run clippy: `cargo clippy -- -D warnings`
+- [x] Run benchmarks to measure improvement: `cargo bench`
+- [x] Verify memory behavior: no unbounded growth pattern in key_versions or buffers
 
 ### Task 5: Update Documentation
 
