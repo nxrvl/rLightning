@@ -201,17 +201,15 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         Ok((ModifyResult::Keep(delta), SpopResult::Multiple(popped)))
                     }
                 } else {
-                    // Return single random element
-                    let mut members: Vec<_> = set.drain().collect();
-                    let idx = fastrand::usize(0..members.len());
-                    let member = members.swap_remove(idx);
+                    // Return single random element - pick random via iterator, remove in place
+                    let idx = fastrand::usize(0..set.len());
+                    let member = set.iter().nth(idx).cloned().unwrap();
+                    set.remove(&member);
                     let delta = -(member.len() as i64 + 32);
-                    let remaining: NativeHashSet = members.into_iter().collect();
 
-                    if remaining.is_empty() {
+                    if set.is_empty() {
                         Ok((ModifyResult::Delete, SpopResult::Single(member)))
                     } else {
-                        *set = remaining;
                         Ok((ModifyResult::Keep(delta), SpopResult::Single(member)))
                     }
                 }
@@ -530,13 +528,14 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let member = &args[2];
 
     if source == destination {
-        // Same key: just check membership, no-op if present
+        // Same key: just check membership, no-op — use KeepUnchanged to avoid
+        // triggering WATCH invalidation and write counters for a true no-op
         let exists = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
             Some(StoreValue::Set(set)) => {
                 let has_member = set.contains(member.as_slice());
-                Ok((ModifyResult::Keep(0), has_member))
+                Ok((ModifyResult::KeepUnchanged, has_member))
             }
-            None => Ok((ModifyResult::Keep(0), false)),
+            None => Ok((ModifyResult::KeepUnchanged, false)),
             _ => Err(crate::storage::error::StorageError::WrongType),
         })?;
         return Ok(RespValue::Integer(if exists { 1 } else { 0 }));

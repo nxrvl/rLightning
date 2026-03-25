@@ -3117,12 +3117,15 @@ impl StorageEngine {
                             // O(1) memory update using delta instead of recalculating entry size
                             if delta != 0 {
                                 let entry = occ.get_mut();
-                                // Lazy-init cached_mem_size for pre-cache entries (serde default 0)
+                                // Lazy-init cached_mem_size for pre-cache entries (serde default 0).
+                                // Note: closure has already mutated entry.value, so mem_size()
+                                // returns post-mutation size which already includes the delta.
                                 if entry.cached_mem_size == 0 {
                                     entry.cached_mem_size = entry.value.mem_size() as u64;
+                                } else {
+                                    entry.cached_mem_size =
+                                        (entry.cached_mem_size as i64 + delta).max(0) as u64;
                                 }
-                                entry.cached_mem_size =
-                                    (entry.cached_mem_size as i64 + delta).max(0) as u64;
                                 self.adjust_global_memory(delta);
                             }
                             occ.get_mut().touch();

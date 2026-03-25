@@ -691,7 +691,12 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
                     return (Err(CommandError::WrongNumberOfArguments), 0, 0);
                 }
                 match parse_i64(&cmd.args[1]) {
-                    Some(delta) => batch_incr_by(map, &cmd.args, -delta),
+                    Some(delta) => match delta.checked_neg() {
+                        Some(neg) => batch_incr_by(map, &cmd.args, neg),
+                        None => (Err(CommandError::InvalidArgument(
+                            "value is not an integer or out of range".to_string(),
+                        )), 0, 0),
+                    },
                     None => (Err(CommandError::NotANumber), 0, 0),
                 }
             } else {
