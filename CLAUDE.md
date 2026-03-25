@@ -130,6 +130,7 @@ cargo bench --bench storage_bench -- set_get
    - Connection tracking via `Arc<DashMap<u64, ClientInfo>>` for real CLIENT LIST/INFO/ID/SETNAME
    - Async TCP server with Tokio, per-connection state (db_index, protocol_version, client name, subscriptions)
    - Write coalescing: small responses buffered and flushed when read buffer is empty or write buffer is full
+   - Buffer memory management: response and partial command buffers shrink when capacity exceeds 64KB after clearing, preventing unbounded memory growth from large commands
 
 2. **Storage Engine (`src/storage/`)**:
    - Sharded storage (`src/storage/sharded.rs`): cache-line aligned shards (`#[repr(align(128))]`) with `parking_lot::RwLock` per shard, replacing DashMap. Shard count is `(num_cpus * 16).next_power_of_two().clamp(16, 1024)` with FxHash-based shard selection
@@ -144,6 +145,8 @@ cargo bench --bench storage_bench -- set_get
    - Runtime config store: `runtime_config` DashMap for CONFIG SET/GET with glob pattern matching
    - Per-shard expiration heaps with round-robin background expiration and cached clock (`CACHED_NOW: AtomicU64`, updated every 1ms)
    - Probabilistic eviction with per-shard `ArrayVec<EvictionCandidate, 16>` candidate buffer
+   - O(1) memory tracking via `cached_mem_size` field on `Entry` (`src/storage/item.rs`): `ModifyResult::Keep(i64)` carries byte deltas from mutation closures, eliminating O(n) `calculate_entry_size` calls from the write hot path. Recalculated on RDB restore and AOF replay.
+   - Conditional key versioning: `active_watch_count: AtomicU32` tracks active WATCH sessions; `bump_key_version` is skipped entirely when no clients are watching, avoiding DashMap insert on every write. `key_versions` map is periodically cleaned in the expiration task.
    - Transaction key locking with per-shard version tracking for WATCH
    - Per-shard memory tracking (summed for global INFO/CONFIG queries)
    - Blocking command infrastructure (per-key wait queues)
