@@ -1009,8 +1009,10 @@ fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
                 data.append(value);
                 let new_mem = data.mem_size() as i64;
                 let total_len = data.len();
+                let mem_delta = new_mem - old_mem;
+                entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 entry.touch();
-                (Ok(RespValue::Integer(total_len as i64)), new_mem - old_mem, 0)
+                (Ok(RespValue::Integer(total_len as i64)), mem_delta, 0)
             }
             _ => (Err(CommandError::WrongType), 0, 0),
         },
@@ -1057,6 +1059,7 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         mem_delta += pair[1].len() as i64 - old_mem as i64;
                     }
                 }
+                entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 entry.touch();
                 return (Ok(RespValue::Integer(new_fields)), mem_delta, 0);
             }
@@ -1105,6 +1108,9 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                             mem_delta -= (field.len() + old_val.len() + 64) as i64;
                         }
                     }
+                    if mem_delta != 0 {
+                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                    }
                     (removed, mem_delta, hash.is_empty())
                 }
                 _ => return (Err(CommandError::WrongType), 0, 0),
@@ -1149,6 +1155,9 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         added += 1;
                         mem_delta += (member.len() + 32) as i64;
                     }
+                }
+                if mem_delta != 0 {
+                    entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 }
                 entry.touch();
                 return (Ok(RespValue::Integer(added)), mem_delta, 0);
@@ -1200,6 +1209,9 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                             mem_delta -= (member.len() + 32) as i64;
                         }
                     }
+                    if mem_delta != 0 {
+                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                    }
                     (removed, mem_delta, set.is_empty())
                 }
                 _ => return (Err(CommandError::WrongType), 0, 0),
@@ -1245,6 +1257,9 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                             mem_delta -= (member.len() * 2 + 40) as i64;
                         }
                     }
+                    if mem_delta != 0 {
+                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                    }
                     (removed, mem_delta, zset.is_empty())
                 }
                 _ => return (Err(CommandError::WrongType), 0, 0),
@@ -1288,6 +1303,7 @@ fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
                     mem_delta += (value.len() + 24) as i64;
                 }
                 let len = list.len() as i64;
+                entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 entry.touch();
                 return (Ok(RespValue::Integer(len)), mem_delta, 0);
             }
@@ -1334,6 +1350,7 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
                     mem_delta += (value.len() + 24) as i64;
                 }
                 let len = list.len() as i64;
+                entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 entry.touch();
                 return (Ok(RespValue::Integer(len)), mem_delta, 0);
             }

@@ -3109,14 +3109,8 @@ impl StorageEngine {
                                     entry.cached_mem_size = entry.value.mem_size() as u64;
                                 }
                                 entry.cached_mem_size =
-                                    (entry.cached_mem_size as i64 + delta) as u64;
-                                if delta > 0 {
-                                    self.current_memory
-                                        .fetch_add(delta as u64, Ordering::Relaxed);
-                                } else {
-                                    self.current_memory
-                                        .fetch_sub((-delta) as u64, Ordering::Relaxed);
-                                }
+                                    (entry.cached_mem_size as i64 + delta).max(0) as u64;
+                                self.adjust_global_memory(delta);
                             }
                             occ.get_mut().touch();
                         }

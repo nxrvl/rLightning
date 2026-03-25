@@ -687,7 +687,7 @@ impl Server {
                                         // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
                                             let cmd = group.commands[i];
-                                            let cmd_lower = cmd.name.to_lowercase();
+                                            let cmd_lower = &cmd.name;
                                             let cmd_name_bytes = cmd.name.as_bytes();
 
                                             // Only count actual mutations for RDB snapshot
@@ -804,7 +804,7 @@ impl Server {
                                                 });
                                             }
                                             if replication.is_some()
-                                                && ReplicationManager::is_write_command(&cmd_lower)
+                                                && ReplicationManager::is_write_command(cmd_lower)
                                             {
                                                 // Only emit SELECT once per batch group (db_index
                                                 // is constant within a group)
@@ -948,6 +948,9 @@ impl Server {
                         .await?
                         {
                             DispatchAction::CloseConnection => {
+                                if !tx_state.watched_keys.is_empty() {
+                                    command_handler.storage().decrement_watch_count();
+                                }
                                 pubsub.unregister_client(client_id).await;
                                 if let Some(security_mgr) = security {
                                     security_mgr.remove_client(&client_addr_str);
