@@ -1581,10 +1581,25 @@ impl StorageEngine {
 
     /// Remove key_versions entries for keys that no longer exist in any database.
     /// Called periodically from the expiration task to prevent unbounded growth.
+    /// Uses two-phase approach to avoid deadlock: collect stale keys first (no storage locks
+    /// held while DashMap shard lock is active), then remove them in a separate pass.
     pub fn cleanup_stale_key_versions(&self) {
-        self.key_versions.retain(|scoped_key, _| {
-            self.key_exists_in_any_db(scoped_key)
-        });
+        // Phase 1: Collect keys to remove. DashMap::retain holds an internal shard lock
+        // during iteration, and key_exists_in_any_db acquires storage shard read locks.
+        // Meanwhile, write operations hold storage shard write locks and call bump_key_version
+        // which acquires DashMap shard locks. Using retain + contains_key creates an ABBA
+        // deadlock risk. Instead, collect stale keys without holding both locks simultaneously.
+        let stale_keys: Vec<Vec<u8>> = self
+            .key_versions
+            .iter()
+            .filter(|entry| !self.key_exists_in_any_db(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        // Phase 2: Remove stale keys individually (each remove acquires DashMap shard lock briefly).
+        for key in stale_keys {
+            self.key_versions.remove(&key);
+        }
     }
 
     /// Check if a scoped key (db_index prefix + key) exists in the corresponding database.
@@ -2922,10 +2937,12 @@ impl StorageEngine {
                 // Use itoa for direct integer serialization (no String allocation)
                 let new_val_bytes = itoa_buf.format(new_val).as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
-                let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
+                let new_val_mem = new_sv.mem_size() as u64;
+                let new_size = occ.key().len() as u64 + new_val_mem;
                 self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                 occ.get_mut().value = new_sv;
+                occ.get_mut().cached_mem_size = new_val_mem;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_val)
@@ -2984,10 +3001,12 @@ impl StorageEngine {
                 let new_val_str = format_float(new_val);
                 let new_val_bytes = new_val_str.as_bytes().to_vec();
                 let new_sv = StoreValue::Str(new_val_bytes.into());
-                let new_size = Self::calculate_entry_size(occ.key(), &new_sv) as u64;
+                let new_val_mem = new_sv.mem_size() as u64;
+                let new_size = occ.key().len() as u64 + new_val_mem;
                 self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 self.current_memory.fetch_add(new_size, Ordering::Relaxed);
                 occ.get_mut().value = new_sv;
+                occ.get_mut().cached_mem_size = new_val_mem;
                 occ.get_mut().touch();
                 self.bump_key_version(key);
                 Ok(new_val)
