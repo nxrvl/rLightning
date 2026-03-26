@@ -626,16 +626,17 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     // Get the value and determine type
-    if !engine.exists(key).await? {
-        if let Some(store) = store_key {
-            // STORE with empty source creates empty list
-            engine.del(&store).await?;
-            return Ok(RespValue::Integer(0));
+    let item = match engine.get_item(key).await? {
+        Some(item) => item,
+        None => {
+            if let Some(store) = store_key {
+                // STORE with empty source creates empty list
+                engine.del(&store).await?;
+                return Ok(RespValue::Integer(0));
+            }
+            return Ok(RespValue::Array(Some(vec![])));
         }
-        return Ok(RespValue::Array(Some(vec![])));
-    }
-
-    let item = engine.get_item(key).await?.unwrap(); // We checked exists above
+    };
     let mut elements: Vec<Vec<u8>> = match &item.value {
         crate::storage::value::StoreValue::List(deque) => deque.iter().cloned().collect(),
         crate::storage::value::StoreValue::Set(set) => set.iter().cloned().collect(),
