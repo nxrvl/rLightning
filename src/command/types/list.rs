@@ -287,12 +287,16 @@ pub async fn lrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             } else {
                 start.min(len_i64) as usize
             };
-            let ei = if stop < 0 {
-                (len_i64 + stop).max(-1) as usize
+            let ei_raw = if stop < 0 {
+                len_i64 + stop
             } else {
-                stop.min(len_i64 - 1) as usize
+                stop.min(len_i64 - 1)
             };
-            if si > ei || si >= len {
+            if ei_raw < 0 || si >= len {
+                return Ok(vec![]);
+            }
+            let ei = ei_raw as usize;
+            if si > ei {
                 return Ok(vec![]);
             }
             Ok(deque.iter().skip(si).take(ei - si + 1).cloned().collect())
@@ -377,12 +381,17 @@ pub async fn ltrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             } else {
                 start.min(len_i64) as usize
             };
-            let ei = if stop < 0 {
-                (len_i64 + stop).max(-1) as usize
+            let ei_raw = if stop < 0 {
+                len_i64 + stop
             } else {
-                stop.min(len_i64 - 1) as usize
+                stop.min(len_i64 - 1)
             };
-            if si > ei || si >= len {
+            if ei_raw < 0 || si >= len {
+                // Empty result
+                return Ok((ModifyResult::Delete, ()));
+            }
+            let ei = ei_raw as usize;
+            if si > ei {
                 // Empty result
                 return Ok((ModifyResult::Delete, ()));
             }
