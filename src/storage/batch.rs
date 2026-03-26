@@ -322,6 +322,106 @@ pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandR
 
 /// Execute a batch of write commands under a single shard write lock.
 /// Returns one (CommandResult, mem_delta, key_delta) per command in order.
+/// Estimate the additional memory a write batch will require.
+/// Used for pre-batch eviction to proactively free space before acquiring
+/// the shard lock. Only counts non-exempt (allocating) commands.
+///
+/// Commands with insufficient arguments are skipped because they will be
+/// rejected during execution, producing no mutation. This prevents spurious
+/// eviction from pipelines of malformed commands.
+pub fn estimate_write_batch_memory(commands: &[&Command]) -> usize {
+    let mut total: usize = 0;
+    for cmd in commands {
+        let name = cmd.name.as_bytes();
+        if is_memory_exempt_command(name) {
+            continue;
+        }
+        // Skip commands that will fail arg-count validation — they produce
+        // no mutation, so charging memory for them would cause spurious eviction.
+        if !has_valid_write_args(name, cmd.args.len()) {
+            continue;
+        }
+        // INCR/DECR family: in-place numeric updates. Worst case is creating
+        // a new key with a small integer string. Use CompactValue::mem_for_data_len
+        // for the correct inline/heap size (32 bytes on 64-bit), plus per-entry
+        // overhead for potential new key creation.
+        // Also validate that INCRBY/DECRBY have a parseable numeric argument;
+        // non-numeric args will fail at execution without mutating anything.
+        if is_numeric_update(name) {
+            if let Some(key) = cmd.args.first() {
+                // INCRBY/DECRBY: skip if the increment arg is not a valid integer
+                let is_by_variant = cmd.args.len() == 2;
+                if is_by_variant && parse_i64(&cmd.args[1]).is_none() {
+                    continue;
+                }
+                // i64::MIN is at most 20 chars, always fits in CompactValue inline
+                total += key.len() + CompactValue::mem_for_data_len(20) + 64;
+            }
+            continue;
+        }
+        // Default: sum all argument bytes as a conservative estimate
+        // (key + value for SET, key + field + value for HSET, etc.)
+        for arg in &cmd.args {
+            total += arg.len();
+        }
+        // Per-entry overhead (hash slot, Entry struct, expiration metadata)
+        total += 64;
+    }
+    total
+}
+
+/// Check if a command has the correct argument count to execute successfully.
+/// Exact-arity commands use `==`, variable-arity commands use `>=`.
+/// Commands that fail this check will return `WrongNumberOfArguments`.
+#[inline]
+fn has_valid_write_args(name: &[u8], arg_count: usize) -> bool {
+    match name.first().map(|b| b.to_ascii_uppercase()) {
+        Some(b'A') if cmd_eq(name, b"APPEND") => arg_count == 2,
+        Some(b'D') => {
+            if cmd_eq(name, b"DECR") {
+                arg_count == 1
+            } else if cmd_eq(name, b"DECRBY") {
+                arg_count == 2
+            } else {
+                true
+            }
+        }
+        Some(b'H') if cmd_eq(name, b"HSET") => arg_count >= 3,
+        Some(b'I') => {
+            if cmd_eq(name, b"INCR") {
+                arg_count == 1
+            } else if cmd_eq(name, b"INCRBY") {
+                arg_count == 2
+            } else {
+                true
+            }
+        }
+        Some(b'L') if cmd_eq(name, b"LPUSH") => arg_count >= 2,
+        Some(b'R') if cmd_eq(name, b"RPUSH") => arg_count >= 2,
+        Some(b'S') => {
+            if cmd_eq(name, b"SET") {
+                arg_count == 2
+            } else if cmd_eq(name, b"SADD") {
+                arg_count >= 2
+            } else {
+                true
+            }
+        }
+        _ => true,
+    }
+}
+
+/// Returns true for INCR/DECR family commands that perform in-place numeric
+/// updates with minimal memory impact (typically 0 bytes on existing keys).
+#[inline]
+fn is_numeric_update(name: &[u8]) -> bool {
+    match name.first().map(|b| b.to_ascii_uppercase()) {
+        Some(b'D') => cmd_eq(name, b"DECR") || cmd_eq(name, b"DECRBY"),
+        Some(b'I') => cmd_eq(name, b"INCR") || cmd_eq(name, b"INCRBY"),
+        _ => false,
+    }
+}
+
 /// key_delta: +1 = key created, -1 = key deleted, 0 = no change.
 ///
 /// `memory_budget`: optional remaining bytes before maxmemory is hit.
@@ -364,7 +464,7 @@ pub fn execute_write_batch(
             ))), 0, 0));
             continue;
         }
-        // Validate value size for SET (args[1]) and APPEND (args[1])
+        // Validate value size for all data-bearing arguments
         let name = cmd.name.as_bytes();
         if cmd.args.len() >= 2 {
             let is_set = name.len() == 3 && cmd_eq(name, b"SET");
@@ -376,6 +476,36 @@ pub fn execute_write_batch(
                     max_value_size
                 ))), 0, 0));
                 continue;
+            }
+            // HSET: validate field values (args[2], args[4], ...)
+            let is_hset = name.len() == 4 && cmd_eq(name, b"HSET");
+            if is_hset {
+                let mut oversized = false;
+                for pair in cmd.args[1..].chunks(2) {
+                    if pair.iter().any(|v| v.len() > max_value_size) {
+                        oversized = true;
+                        break;
+                    }
+                }
+                if oversized {
+                    results.push((Err(CommandError::InvalidArgument(
+                        "hash field or value exceeds maximum size".to_string(),
+                    )), 0, 0));
+                    continue;
+                }
+            }
+            // SADD: validate members (args[1..])
+            let is_sadd = name.len() == 4 && cmd_eq(name, b"SADD");
+            // LPUSH/RPUSH: validate values (args[1..])
+            let is_lpush = name.len() == 5 && cmd_eq(name, b"LPUSH");
+            let is_rpush = name.len() == 5 && cmd_eq(name, b"RPUSH");
+            if is_sadd || is_lpush || is_rpush {
+                if cmd.args[1..].iter().any(|v| v.len() > max_value_size) {
+                    results.push((Err(CommandError::InvalidArgument(
+                        "value size exceeds maximum".to_string(),
+                    )), 0, 0));
+                    continue;
+                }
             }
         }
         let (result, mem_delta, key_delta) = execute_write_cmd(map, cmd);
@@ -455,7 +585,7 @@ fn get_valid_entry<'a>(
 }
 
 fn batch_get(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -468,7 +598,7 @@ fn batch_get(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_exists(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     let exists = get_valid_entry(map, &args[0], now).is_some();
@@ -476,7 +606,7 @@ fn batch_exists(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult
 }
 
 fn batch_ttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -492,7 +622,7 @@ fn batch_ttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_pttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -508,7 +638,7 @@ fn batch_pttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_type(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -520,7 +650,7 @@ fn batch_type(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_strlen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -533,7 +663,7 @@ fn batch_strlen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult
 }
 
 fn batch_hget(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -549,7 +679,7 @@ fn batch_hget(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_hlen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -562,7 +692,7 @@ fn batch_hlen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_hexists(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -581,7 +711,7 @@ fn batch_hexists(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResul
 }
 
 fn batch_llen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -594,7 +724,7 @@ fn batch_llen(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
 }
 
 fn batch_scard(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -607,7 +737,7 @@ fn batch_scard(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult 
 }
 
 fn batch_sismember(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -624,7 +754,7 @@ fn batch_sismember(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandRes
 }
 
 fn batch_zcard(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -637,7 +767,7 @@ fn batch_zcard(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult 
 }
 
 fn batch_zscore(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CommandError::WrongNumberOfArguments);
     }
     match get_valid_entry(map, &args[0], now) {
@@ -685,9 +815,12 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
             if name.len() == 3 && cmd_eq(name, b"DEL") {
                 batch_del(map, &cmd.args)
             } else if cmd_eq(name, b"DECR") {
+                if cmd.args.len() != 1 {
+                    return (Err(CommandError::WrongNumberOfArguments), 0, 0);
+                }
                 batch_incr_by(map, &cmd.args, -1)
             } else if cmd_eq(name, b"DECRBY") {
-                if cmd.args.len() < 2 {
+                if cmd.args.len() != 2 {
                     return (Err(CommandError::WrongNumberOfArguments), 0, 0);
                 }
                 match parse_i64(&cmd.args[1]) {
@@ -716,9 +849,12 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
         }
         Some(b'I') => {
             if cmd_eq(name, b"INCR") {
+                if cmd.args.len() != 1 {
+                    return (Err(CommandError::WrongNumberOfArguments), 0, 0);
+                }
                 batch_incr_by(map, &cmd.args, 1)
             } else if cmd_eq(name, b"INCRBY") {
-                if cmd.args.len() < 2 {
+                if cmd.args.len() != 2 {
                     return (Err(CommandError::WrongNumberOfArguments), 0, 0);
                 }
                 match parse_i64(&cmd.args[1]) {
@@ -766,7 +902,7 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
 // expiry inline to avoid borrow-checker issues with the two-phase check.
 
 fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
@@ -790,10 +926,22 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
 }
 
 fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.is_empty() {
+    if args.len() != 1 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
+    let now = cached_now();
+    // Check if the key is logically expired before removing.
+    // Treat expired keys the same as non-existent (return 0), matching
+    // the read-path semantics of batch_get/batch_exists.
+    if let Some(entry) = map.get(key) {
+        if entry.expires_at.is_some_and(|t| now > t) {
+            // Physically remove the expired entry but report it as not found
+            let entry = map.remove(key).unwrap();
+            let mem = (key.len() + entry.value.mem_size()) as i64;
+            return (Ok(RespValue::Integer(0)), -mem, -1);
+        }
+    }
     match map.remove(key) {
         Some(entry) => {
             let mem = (key.len() + entry.value.mem_size()) as i64;
@@ -804,7 +952,7 @@ fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
 }
 
 fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.is_empty() {
+    if args.len() != 1 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let now = cached_now();
@@ -897,7 +1045,7 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
 }
 
 fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let seconds = match parse_i64(&args[1]) {
@@ -938,7 +1086,7 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
 }
 
 fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let millis = match parse_i64(&args[1]) {
@@ -979,7 +1127,7 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
 }
 
 fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.is_empty() {
+    if args.len() != 1 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let now = cached_now();
@@ -1003,7 +1151,7 @@ fn batch_persist(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
 }
 
 fn batch_append(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
@@ -1448,6 +1596,8 @@ mod tests {
         assert_eq!(classify_command(b"LPUSH", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
         assert_eq!(classify_command(b"RPUSH", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
         assert_eq!(classify_command(b"APPEND", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
+        assert_eq!(classify_command(b"GETDEL", &[b"k".to_vec()]), CommandKind::Write);
+        assert_eq!(classify_command(b"PERSIST", &[b"k".to_vec()]), CommandKind::Write);
     }
 
     #[test]

@@ -143,7 +143,7 @@ cargo bench --bench storage_bench -- set_get
    - Conditional SET operations: `set_nx()`, `set_xx()`, `set_with_options()` for NX/XX/GET flag combinations
    - Multi-database support (16 databases, SELECT routing via task-local `CURRENT_DB_INDEX`)
    - Runtime config store: `runtime_config` DashMap for CONFIG SET/GET with glob pattern matching
-   - Per-shard expiration heaps with round-robin background expiration and cached clock (`CACHED_NOW: AtomicU64`, updated every 1ms)
+   - Per-shard expiration heaps with round-robin background expiration and cached clock (`CACHED_OFFSET_US: AtomicU64`, updated every 1ms via `src/storage/clock.rs`)
    - Probabilistic eviction with per-shard `ArrayVec<EvictionCandidate, 16>` candidate buffer
    - O(1) memory tracking via `cached_mem_size` field on `Entry` (`src/storage/item.rs`): `ModifyResult::Keep(i64)` carries byte deltas from mutation closures, eliminating O(n) `calculate_entry_size` calls from the write hot path. Recalculated on RDB restore and AOF replay.
    - Conditional key versioning: `active_watch_count: AtomicU32` tracks active WATCH sessions; `bump_key_version` is skipped entirely when no clients are watching, avoiding DashMap insert on every write. `key_versions` map is periodically cleaned in the expiration task.

@@ -480,14 +480,16 @@ mod tests {
         fs::write(&corrupted_path, b"This is not a valid RESP format").unwrap();
 
         let engine = StorageEngine::new(StorageConfig::default());
+        let engine_ref = engine.clone();
         let aof = AofPersistence::new(engine, corrupted_path);
 
-        // Load should fail with corrupted file
-        let _result = aof.load().await;
-
-        // The load should not panic, but might either return an error
-        // or log the error and continue. This depends on the implementation.
-        // For this test, we just ensure it doesn't panic.
+        // Load stops at the first corrupt entry (Redis-compatible behavior).
+        // Verify it doesn't panic and that no commands were loaded.
+        let result = aof.load().await;
+        assert!(result.is_ok(), "AOF load should not panic on corrupted file");
+        // Engine should remain empty since no valid commands could be parsed
+        let val = engine_ref.get(b"any_key").await.unwrap();
+        assert!(val.is_none(), "No keys should be loaded from a corrupted AOF file");
     }
 
     // Testing persistence with large datasets
@@ -609,7 +611,7 @@ mod tests {
 
     // Performance test for AOF rewrite
     #[tokio::test]
-    //#[ignore] // Mark as ignored by default since it's a longer-running test
+    #[ignore] // Mark as ignored by default since it's a longer-running test
     async fn test_aof_rewrite_performance() {
         let temp_dir = tempdir().unwrap();
         let aof_path = temp_dir.path().join("rewrite_perf.aof");
@@ -791,10 +793,13 @@ mod tests {
                 concurrent_found += 1;
             }
         }
-        // At least some concurrent keys should have made it into the snapshot
-        // (the writer starts before snapshot, so some entries should be captured)
-        println!(
-            "COW snapshot captured {}/500 concurrent keys",
+        // Concurrent keys may or may not be present depending on timing.
+        // The important invariant is that all pre-populated keys are present (asserted above)
+        // and any concurrent keys that ARE present have correct values (asserted in the loop).
+        // We log the count for diagnostic purposes but don't assert > 0 since the snapshot
+        // may complete before the writer starts on fast machines.
+        eprintln!(
+            "COW snapshot captured {}/500 concurrent keys (timing-dependent)",
             concurrent_found
         );
     }

@@ -630,11 +630,13 @@ impl Server {
                                         continue;
                                     }
 
-                                    // Pre-batch eviction: try to free memory before the batch
-                                    // (best-effort; per-command budget in execute_write_batch
-                                    // handles individual OOM rejection, allowing freeing commands
-                                    // like DEL/HDEL/SREM/ZREM through even when over maxmemory).
-                                    let _ = command_handler.storage().check_write_memory(0).await;
+                                    // Pre-batch eviction: estimate the batch's memory needs and
+                                    // try to free that much space before acquiring the shard lock.
+                                    // Per-command budget in execute_write_batch handles individual
+                                    // OOM rejection, allowing freeing commands like DEL/HDEL/SREM/ZREM
+                                    // through even when over maxmemory.
+                                    let estimated = batch::estimate_write_batch_memory(&group.commands);
+                                    let _ = command_handler.storage().check_write_memory(estimated).await;
 
                                     // Write batch: single shard write lock
                                     let max_key_size = command_handler.storage().max_key_size();
@@ -845,7 +847,9 @@ impl Server {
                                     if !aof_batch.is_empty()
                                         && let Some(ref pm) = persistence
                                     {
-                                        let _ = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await;
+                                        if let Err(e) = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await {
+                                            eprintln!("WARNING: Failed to log batch AOF for db {}: {}", db_index, e);
+                                        }
                                     }
                                     // Batch replication propagation with a single call
                                     if !repl_batch.is_empty()
