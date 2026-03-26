@@ -878,12 +878,21 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
     let new_mem = (key.len() + CompactValue::mem_for_data_len(new_bytes.len())) as i64;
 
     let key_delta = if physically_exists { 0 } else { 1 };
-    // Remove expired entry if needed, then insert new value
-    if current_val.is_none() && physically_exists {
-        // Key was expired — remove it before inserting (already accounted for in old_mem)
-        map.remove(key.as_slice());
+
+    if current_val.is_some() && physically_exists {
+        // Key exists and is not expired — modify in place to preserve TTL
+        let entry = map.get_mut(key).unwrap();
+        let new_cv: CompactValue = new_bytes.into();
+        entry.cached_mem_size = new_cv.mem_size() as u64;
+        entry.value = StoreValue::Str(new_cv);
+        entry.touch();
+    } else {
+        // Expired or new key — remove stale entry if needed, then insert fresh
+        if current_val.is_none() && physically_exists {
+            map.remove(key.as_slice());
+        }
+        map.insert(key.clone(), Entry::new_string(new_bytes));
     }
-    map.insert(key.clone(), Entry::new_string(new_bytes));
     (Ok(RespValue::Integer(new_val)), new_mem - old_mem, key_delta)
 }
 
