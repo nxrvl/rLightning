@@ -717,6 +717,27 @@ impl StorageEngine {
         }
     }
 
+    /// Lazy-expire a key for a specific database index.
+    /// Used by the batch read path which doesn't set CURRENT_DB_INDEX.
+    pub async fn lazy_expire_for_db(&self, key: &[u8], db_index: usize) {
+        let db = self.get_db_by_index(db_index);
+        let now = cached_now();
+        let mut entry_size = 0u64;
+        let removed = db.remove_if(key, |k, item| {
+            if let Some(exp) = item.expires_at
+                && exp <= now {
+                    entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                    return true;
+                }
+            false
+        });
+        if removed {
+            self.current_memory.fetch_sub(entry_size, Ordering::Relaxed);
+            self.key_count.fetch_sub(1, Ordering::Relaxed);
+            self.bump_key_version_for_db(key, db_index);
+        }
+    }
+
     /// Lazy expiration: if the key exists but is expired, remove it now.
     /// Called by read commands (GET, etc.) after atomic_read returns None to clean up
     /// expired keys eagerly rather than waiting for the periodic expiration task.
@@ -1425,14 +1446,14 @@ impl StorageEngine {
     ///
     /// Uses COW-based per-shard snapshotting: each shard's read lock is held only
     /// long enough to clone its HashMap, then released before moving to the next.
-    /// This eliminates the global cross_db_lock write lock from the snapshot path,
-    /// allowing concurrent reads and writes to proceed on other shards during save.
     ///
-    /// Trade-off: the snapshot is not perfectly atomic across all databases (a MOVE
-    /// or SWAPDB running concurrently could cause minor inconsistency), but this
-    /// matches Redis's fork-based snapshot semantics and vastly reduces lock
-    /// contention during persistence.
+    /// Acquires `cross_db_lock.write()` for the duration of the snapshot loop so
+    /// that cross-DB operations (MOVE holds a read lock, SWAPDB holds a write lock)
+    /// cannot interleave and produce a snapshot where a key appears in both or
+    /// neither database. Regular per-key reads and writes are unaffected because
+    /// they do not touch `cross_db_lock`.
     pub async fn snapshot_all_dbs(&self) -> StorageResult<Vec<HashMap<Vec<u8>, StorageItem>>> {
+        let _guard = self.cross_db_lock.write().await;
         let mut snapshots = Vec::with_capacity(NUM_DATABASES);
         for db_idx in 0..NUM_DATABASES {
             let db = self.get_db_by_index(db_idx);

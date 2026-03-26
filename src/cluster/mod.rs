@@ -1191,13 +1191,28 @@ impl ClusterManager {
         if let Some(migration_state) = state.migration_states.get(&slot) {
             match migration_state {
                 SlotState::Migrating(target_id) => {
-                    // Key is being migrated - redirect with ASK to the target
-                    if let Some(target_node) = state.nodes.get(target_id) {
-                        return Some(RedirectInfo {
-                            redirect_type: RedirectType::Ask,
-                            slot,
-                            addr: target_node.addr,
-                        });
+                    // During migration, keys that still exist locally should be
+                    // served by this node. Only redirect with ASK if the key is
+                    // not present (already migrated or never existed here).
+                    let key_exists_locally = {
+                        let db = self.engine.get_db_by_index(0);
+                        if let Some(entry) = db.get(key) {
+                            !entry.is_expired()
+                        } else {
+                            false
+                        }
+                    };
+                    if !key_exists_locally {
+                        if let Some(target_node) = state.nodes.get(target_id) {
+                            return Some(RedirectInfo {
+                                redirect_type: RedirectType::Ask,
+                                slot,
+                                addr: target_node.addr,
+                            });
+                        }
+                    } else {
+                        // Key exists locally - serve it from this node
+                        return None;
                     }
                 }
                 SlotState::Importing(_) => {

@@ -312,12 +312,22 @@ fn flush_batch<'a>(
 
 /// Execute a batch of read commands under a single shard read lock.
 /// Returns one CommandResult per command in order.
-pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> Vec<CommandResult> {
+pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> (Vec<CommandResult>, Vec<Vec<u8>>) {
     let now = cached_now();
-    commands
-        .iter()
-        .map(|cmd| execute_read_cmd(map, cmd, now))
-        .collect()
+    let mut expired_keys: Vec<Vec<u8>> = Vec::new();
+    let mut results = Vec::with_capacity(commands.len());
+    for cmd in commands {
+        results.push(execute_read_cmd(map, cmd, now));
+        // Track expired keys for deferred lazy-expire cleanup.
+        // The read batch holds a read lock so it can't remove entries;
+        // callers clean up after releasing the lock.
+        if let Some(key) = cmd.args.first()
+            && map.get(key.as_slice()).is_some_and(|e| e.expires_at.is_some_and(|t| now > t))
+        {
+            expired_keys.push(key.clone());
+        }
+    }
+    (results, expired_keys)
 }
 
 /// Execute a batch of write commands under a single shard write lock.
@@ -347,7 +357,7 @@ pub fn estimate_write_batch_memory(commands: &[&Command]) -> usize {
         // overhead for potential new key creation.
         // Also validate that INCRBY/DECRBY have a parseable numeric argument;
         // non-numeric args will fail at execution without mutating anything.
-        if is_numeric_update(name) {
+        if is_incr_decr(name) {
             if let Some(key) = cmd.args.first() {
                 // INCRBY/DECRBY: skip if the increment arg is not a valid integer
                 let is_by_variant = cmd.args.len() == 2;
@@ -370,6 +380,28 @@ pub fn estimate_write_batch_memory(commands: &[&Command]) -> usize {
     total
 }
 
+/// Estimate memory for a single command, used by the per-command budget check
+/// inside execute_write_batch to reject commands that would individually exceed
+/// the remaining memory budget (matching standalone maybe_evict(required_size) semantics).
+#[inline]
+fn estimate_single_cmd_memory(cmd: &Command) -> usize {
+    let name = cmd.name.as_bytes();
+    // Only estimate memory for SET — the only batched write command where the
+    // standalone path passes actual data size to maybe_evict(). All other
+    // commands either call check_write_memory(0) or skip memory checks entirely,
+    // so returning 0 here matches their standalone semantics and prevents
+    // batched commands from being OOM-rejected when standalone would succeed.
+    if !(name.len() == 3 && cmd_eq(name, b"SET")) {
+        return 0;
+    }
+    if cmd.args.len() != 2 {
+        return 0;
+    }
+    // Match the standalone SET path: required_size = key.len() + value.mem_size()
+    // where value.mem_size() accounts for CompactValue inline/heap storage.
+    cmd.args[0].len() + CompactValue::mem_for_data_len(cmd.args[1].len())
+}
+
 /// Check if a command has the correct argument count to execute successfully.
 /// Exact-arity commands use `==`, variable-arity commands use `>=`.
 /// Commands that fail this check will return `WrongNumberOfArguments`.
@@ -386,7 +418,7 @@ fn has_valid_write_args(name: &[u8], arg_count: usize) -> bool {
                 true
             }
         }
-        Some(b'H') if cmd_eq(name, b"HSET") => arg_count >= 3,
+        Some(b'H') if cmd_eq(name, b"HSET") => arg_count >= 3 && (arg_count - 1).is_multiple_of(2),
         Some(b'I') => {
             if cmd_eq(name, b"INCR") {
                 arg_count == 1
@@ -411,12 +443,27 @@ fn has_valid_write_args(name: &[u8], arg_count: usize) -> bool {
     }
 }
 
-/// Returns true for INCR/DECR family commands that perform in-place numeric
-/// updates with minimal memory impact (typically 0 bytes on existing keys).
+/// Returns true for INCR/DECR family commands (used by estimate_write_batch_memory
+/// for numeric-specific worst-case estimation).
 #[inline]
-fn is_numeric_update(name: &[u8]) -> bool {
+fn is_incr_decr(name: &[u8]) -> bool {
     match name.first().map(|b| b.to_ascii_uppercase()) {
         Some(b'D') => cmd_eq(name, b"DECR") || cmd_eq(name, b"DECRBY"),
+        Some(b'I') => cmd_eq(name, b"INCR") || cmd_eq(name, b"INCRBY"),
+        _ => false,
+    }
+}
+
+/// Returns true for commands whose standalone paths do not call
+/// check_write_memory at all: INCR/DECR family (in-place numeric updates),
+/// HSET (hash_set direct), and APPEND (atomic_append direct).
+/// These must bypass the batch memory gate to match standalone behavior.
+#[inline]
+fn skips_standalone_memcheck(name: &[u8]) -> bool {
+    match name.first().map(|b| b.to_ascii_uppercase()) {
+        Some(b'A') => cmd_eq(name, b"APPEND"),
+        Some(b'D') => cmd_eq(name, b"DECR") || cmd_eq(name, b"DECRBY"),
+        Some(b'H') => cmd_eq(name, b"HSET") || cmd_eq(name, b"HSETNX"),
         Some(b'I') => cmd_eq(name, b"INCR") || cmd_eq(name, b"INCRBY"),
         _ => false,
     }
@@ -445,11 +492,24 @@ pub fn execute_write_batch(
         // or metadata-only commands run even when over maxmemory.
         if let Some(budget) = memory_budget {
             let cmd_name = cmd.name.as_bytes();
-            if !is_memory_exempt_command(cmd_name) && accumulated_mem >= budget as i64 {
-                results.push((Err(CommandError::StorageError(
-                    "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
-                )), 0, 0));
-                continue;
+            // Memory-exempt commands (DEL, HDEL, SREM, etc.) always run.
+            // Commands that skip standalone memcheck (INCR, DECR, HSET,
+            // APPEND, etc.) always run — their standalone paths don't call
+            // check_write_memory at all.
+            if !is_memory_exempt_command(cmd_name) && !skips_standalone_memcheck(cmd_name) {
+                // Estimate this command's memory need and check whether
+                // accumulated growth plus the estimate would exceed the
+                // remaining budget, matching the standalone maybe_evict()
+                // which uses strict > (current + size > max_memory).
+                // This means a command that exactly fits the budget is allowed,
+                // consistent with standalone behavior.
+                let cmd_estimate = estimate_single_cmd_memory(cmd) as i64;
+                if accumulated_mem + cmd_estimate > budget as i64 {
+                    results.push((Err(CommandError::StorageError(
+                        "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+                    )), 0, 0));
+                    continue;
+                }
             }
         }
 
@@ -499,13 +559,13 @@ pub fn execute_write_batch(
             // LPUSH/RPUSH: validate values (args[1..])
             let is_lpush = name.len() == 5 && cmd_eq(name, b"LPUSH");
             let is_rpush = name.len() == 5 && cmd_eq(name, b"RPUSH");
-            if is_sadd || is_lpush || is_rpush {
-                if cmd.args[1..].iter().any(|v| v.len() > max_value_size) {
-                    results.push((Err(CommandError::InvalidArgument(
-                        "value size exceeds maximum".to_string(),
-                    )), 0, 0));
-                    continue;
-                }
+            if (is_sadd || is_lpush || is_rpush)
+                && cmd.args[1..].iter().any(|v| v.len() > max_value_size)
+            {
+                results.push((Err(CommandError::InvalidArgument(
+                    "value size exceeds maximum".to_string(),
+                )), 0, 0));
+                continue;
             }
         }
         let (result, mem_delta, key_delta) = execute_write_cmd(map, cmd);
@@ -613,7 +673,10 @@ fn batch_ttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
         Some(entry) => match entry.expires_at {
             Some(expires_at) => {
                 let remaining = expires_at.saturating_duration_since(now);
-                Ok(RespValue::Integer(remaining.as_secs() as i64))
+                let secs = remaining.as_secs() as i64;
+                // Match standalone TTL: clamp to 1 when there's a positive
+                // sub-second remainder (Redis never returns 0 for a live key).
+                Ok(RespValue::Integer(if secs > 0 { secs } else { 1 }))
             }
             None => Ok(RespValue::Integer(-1)),
         },
@@ -629,7 +692,10 @@ fn batch_pttl(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult {
         Some(entry) => match entry.expires_at {
             Some(expires_at) => {
                 let remaining = expires_at.saturating_duration_since(now);
-                Ok(RespValue::Integer(remaining.as_millis() as i64))
+                let millis = remaining.as_millis() as i64;
+                // Match standalone PTTL: clamp to 1 when there's a positive
+                // sub-millisecond remainder (Redis never returns 0 for a live key).
+                Ok(RespValue::Integer(if millis > 0 { millis } else { 1 }))
             }
             None => Ok(RespValue::Integer(-1)),
         },
@@ -930,18 +996,10 @@ fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
     let key = &args[0];
-    let now = cached_now();
-    // Check if the key is logically expired before removing.
-    // Treat expired keys the same as non-existent (return 0), matching
-    // the read-path semantics of batch_get/batch_exists.
-    if let Some(entry) = map.get(key) {
-        if entry.expires_at.is_some_and(|t| now > t) {
-            // Physically remove the expired entry but report it as not found
-            let entry = map.remove(key).unwrap();
-            let mem = (key.len() + entry.value.mem_size()) as i64;
-            return (Ok(RespValue::Integer(0)), -mem, -1);
-        }
-    }
+    // Remove the key regardless of expiry status, matching the non-batch
+    // del() path in engine.rs which does active_db().remove(key) without
+    // checking expiry. This ensures consistent client-facing results
+    // whether a DEL is batched or not.
     match map.remove(key) {
         Some(entry) => {
             let mem = (key.len() + entry.value.mem_size()) as i64;
@@ -1777,7 +1835,7 @@ mod tests {
         let cmd_miss = make_cmd("GET", &[b"nonexistent"]);
         let cmds: Vec<&Command> = vec![&cmd_hit, &cmd_miss];
 
-        let results = store.execute_on_shard_ref(shard_idx, |map| {
+        let (results, _expired) = store.execute_on_shard_ref(shard_idx, |map| {
             execute_read_batch(map, &cmds)
         });
 
@@ -1806,7 +1864,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd];
         let shard_idx = store.shard_index(b"expired");
 
-        let results = store.execute_on_shard_ref(shard_idx, |map| {
+        let (results, expired_keys) = store.execute_on_shard_ref(shard_idx, |map| {
             execute_read_batch(map, &cmds)
         });
         assert_eq!(results.len(), 1);
@@ -1814,6 +1872,8 @@ mod tests {
             Ok(RespValue::BulkString(None)) => {} // Correct: nil for expired
             other => panic!("Expected nil, got {:?}", other),
         }
+        // Verify the expired key was tracked for deferred cleanup
+        assert!(expired_keys.contains(&b"expired".to_vec()));
     }
 
     #[test]
@@ -1826,7 +1886,7 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd];
         let shard_idx = store.shard_index(b"hash_key");
 
-        let results = store.execute_on_shard_ref(shard_idx, |map| {
+        let (results, _expired) = store.execute_on_shard_ref(shard_idx, |map| {
             execute_read_batch(map, &cmds)
         });
         assert!(results[0].is_err()); // WRONGTYPE error
@@ -1991,7 +2051,7 @@ mod tests {
             match entry {
                 PipelineEntry::Batch(group) => {
                     if group.is_read_only {
-                        let batch_results =
+                        let (batch_results, _expired) =
                             store.execute_on_shard_ref(group.shard_idx, |map| {
                                 execute_read_batch(map, &group.commands)
                             });

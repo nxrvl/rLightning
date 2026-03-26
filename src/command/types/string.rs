@@ -649,8 +649,11 @@ pub async fn pexpire(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         }
     }
 
-    // If TTL is None, we need to delete the key
+    // If TTL is None, we need to delete the key.
+    // Lazy-expire first so an already-expired key is treated as non-existent
+    // (returns 0), matching Redis semantics and the batched code path.
     if ttl.is_none() {
+        engine.lazy_expire(&key).await;
         let deleted = engine.del(&key).await?;
         return Ok(RespValue::Integer(if deleted { 1 } else { 0 }));
     }

@@ -400,7 +400,11 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     match engine.get_item(key).await? {
         Some(item) => {
             use crate::storage::value::StoreValue;
-            // Serialize using a simple format: [type_byte][value_bytes]
+            // Serialize using versioned format: [0xFF][version][type_byte][value_bytes]
+            // Version marker 0xFF distinguishes from legacy unversioned payloads
+            // (which start with type_byte 0-5).
+            const DUMP_VERSION_MARKER: u8 = 0xFF;
+            const DUMP_FORMAT_VERSION: u8 = 0x01;
             let type_byte = match item.data_type() {
                 RedisDataType::String => 0u8,
                 RedisDataType::List => 1u8,
@@ -431,7 +435,9 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     bincode::serialize(s).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
                 }
             };
-            let mut serialized = Vec::with_capacity(1 + value_bytes.len());
+            let mut serialized = Vec::with_capacity(3 + value_bytes.len());
+            serialized.push(DUMP_VERSION_MARKER);
+            serialized.push(DUMP_FORMAT_VERSION);
             serialized.push(type_byte);
             serialized.extend_from_slice(&value_bytes);
             Ok(RespValue::BulkString(Some(serialized)))
@@ -478,15 +484,40 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         i += 1;
     }
 
-    // Deserialize: first byte is type, rest is value
+    // Deserialize: detect versioned vs legacy format.
+    // Versioned format: [0xFF][version][type_byte][value_bytes]
+    // Legacy format:    [type_byte][value_bytes]  (type_byte is 0-5)
     use crate::storage::value::StoreValue;
-    let type_byte = serialized[0];
-    let value_bytes = &serialized[1..];
+    const DUMP_VERSION_MARKER: u8 = 0xFF;
+    let (type_byte, value_bytes) = if serialized[0] == DUMP_VERSION_MARKER {
+        // Versioned format
+        if serialized.len() < 3 {
+            return Err(CommandError::InvalidArgument(
+                "DUMP payload version or checksum are wrong".to_string(),
+            ));
+        }
+        let _version = serialized[1]; // Currently only version 0x01
+        (serialized[2], &serialized[3..])
+    } else {
+        // Legacy unversioned format (type_byte 0-5 directly)
+        (serialized[0], &serialized[1..])
+    };
     let store_value = match type_byte {
         0 => StoreValue::Str(value_bytes.to_vec().into()),
         1 => {
-            let vec: Vec<Vec<u8>> = bincode::deserialize(value_bytes)
-                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            // Legacy list payloads may be in list_bytes V0 format (bincode-compatible)
+            // or V1 gap-buffer format (for lists > 128 elements). Try list_bytes
+            // deserialize_all first (handles both V0 and V1), then fall back to
+            // bincode for versioned-format payloads.
+            let vec: Vec<Vec<u8>> = if !value_bytes.is_empty() && value_bytes.len() >= 8 {
+                crate::storage::list_bytes::deserialize_all(value_bytes)
+                    .or_else(|_| bincode::deserialize(value_bytes)
+                        .map_err(|_| crate::storage::error::StorageError::InternalError(
+                            "DUMP payload version or checksum are wrong".to_string())))
+                    .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?
+            } else {
+                return Err(CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()));
+            };
             StoreValue::List(vec.into())
         }
         2 => {

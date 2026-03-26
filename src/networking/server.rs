@@ -410,26 +410,33 @@ impl Server {
                     }
                 }
             } else {
-                // Normal mode: read and process commands
-                let read_result = socket_reader.read_buf(&mut buffer).await;
+                // Normal mode: read and process commands.
+                // Only read from socket when buffer is empty.  If a previous
+                // iteration hit MAX_BATCH_COMMANDS the buffer still holds the
+                // remaining pipeline data — go straight to parsing to avoid a
+                // deadlock where the server waits for new bytes while the client
+                // waits for replies.
+                if buffer.is_empty() {
+                    let read_result = socket_reader.read_buf(&mut buffer).await;
 
-                match read_result {
-                    Ok(0) => {
-                        debug!(client_addr = %client_addr_str, "Connection closed by client");
-                        break;
-                    }
-                    Ok(n) => {
-                        debug!(client_addr = %client_addr_str, bytes_read = n, "Read data from client");
-                        logging::log_protocol_data(
-                            &client_addr_str,
-                            "request",
-                            &buffer[buffer.len() - n..],
-                            true,
-                        );
-                    }
-                    Err(e) => {
-                        error!(client_addr = %client_addr_str, "Error reading from client: {}", e);
-                        break;
+                    match read_result {
+                        Ok(0) => {
+                            debug!(client_addr = %client_addr_str, "Connection closed by client");
+                            break;
+                        }
+                        Ok(n) => {
+                            debug!(client_addr = %client_addr_str, bytes_read = n, "Read data from client");
+                            logging::log_protocol_data(
+                                &client_addr_str,
+                                "request",
+                                &buffer[buffer.len() - n..],
+                                true,
+                            );
+                        }
+                        Err(e) => {
+                            error!(client_addr = %client_addr_str, "Error reading from client: {}", e);
+                            break;
+                        }
                     }
                 }
 
@@ -446,8 +453,14 @@ impl Server {
                 // (separates parsing from execution to enable pipeline batching)
                 const MAX_BATCH_COMMANDS: usize = 100;
                 let mut parsed_commands: Vec<Command> = Vec::new();
+                // Deferred parse errors: (slot_index, serialized_error_bytes).
+                // Errors are collected here instead of written to response_buffer
+                // so that Phase 2 can emit them at the correct position relative
+                // to command results (preserving pipeline response ordering).
+                let mut deferred_parse_errors: Vec<(usize, Vec<u8>)> = Vec::new();
+                let mut total_entry_count: usize = 0;
 
-                while !buffer.is_empty() && parsed_commands.len() < MAX_BATCH_COMMANDS {
+                while !buffer.is_empty() && total_entry_count < MAX_BATCH_COMMANDS {
                     if !partial_command_buffer.is_empty() {
                         let mut combined =
                             BytesMut::with_capacity(partial_command_buffer.len() + buffer.len());
@@ -478,17 +491,22 @@ impl Server {
                         Some(Ok((cmd, consumed))) => {
                             buffer.advance(consumed);
                             parsed_commands.push(cmd);
+                            total_entry_count += 1;
                         }
                         None => {
                             match RespValue::parse(&mut buffer) {
                                 Ok(Some(value)) => {
                                     match parser::parse_command(value) {
-                                        Ok(cmd) => parsed_commands.push(cmd),
+                                        Ok(cmd) => {
+                                            parsed_commands.push(cmd);
+                                            total_entry_count += 1;
+                                        }
                                         Err(e) => {
                                             error!(client_addr = %client_addr_str, error = ?e, "Command parsing error");
                                             let error_resp = RespValue::Error(e.to_string());
                                             if let Ok(bytes) = error_resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
+                                                deferred_parse_errors.push((total_entry_count, bytes));
+                                                total_entry_count += 1;
                                             }
                                         }
                                     }
@@ -523,7 +541,8 @@ impl Server {
                                     };
                                     let error_resp = RespValue::Error(error_msg);
                                     if let Ok(bytes) = error_resp.serialize() {
-                                        response_buffer.extend_from_slice(&bytes);
+                                        deferred_parse_errors.push((total_entry_count, bytes));
+                                        total_entry_count += 1;
                                     }
                                     buffer.clear();
                                     if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
@@ -548,7 +567,8 @@ impl Server {
                             };
                             let error_resp = RespValue::Error(error_msg);
                             if let Ok(bytes) = error_resp.serialize() {
-                                response_buffer.extend_from_slice(&bytes);
+                                deferred_parse_errors.push((total_entry_count, bytes));
+                                total_entry_count += 1;
                             }
                             buffer.clear();
                             if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
@@ -584,7 +604,8 @@ impl Server {
                     && !in_subscription_mode
                     && protocol_version == ProtocolVersion::RESP2
                     && cluster.is_none()
-                    && security.is_none();
+                    && security.is_none()
+                    && deferred_parse_errors.is_empty();
 
                 if batch_eligible {
                     let mut active_db = command_handler.storage().get_db_by_index(db_index);
@@ -599,7 +620,7 @@ impl Server {
                             PipelineEntry::Batch(group) => {
                                 if group.is_read_only {
                                     // Read batch: single shard read lock
-                                    let results = active_db.execute_on_shard_ref(
+                                    let (results, expired_keys) = active_db.execute_on_shard_ref(
                                         group.shard_idx,
                                         |map| batch::execute_read_batch(map, &group.commands),
                                     );
@@ -612,6 +633,11 @@ impl Server {
                                             response_buffer.extend_from_slice(&bytes);
                                         }
                                         commands_processed += 1;
+                                    }
+                                    // Deferred lazy-expire: clean up expired keys found during
+                                    // the read batch (outside the shard lock).
+                                    for key in expired_keys {
+                                        command_handler.storage().lazy_expire_for_db(&key, db_index).await;
                                     }
                                 } else {
                                     // Write batch: check read-only replica first
@@ -717,7 +743,7 @@ impl Server {
                                                     matches!(result, Ok(RespValue::Integer(0))),
                                                 _ => false,
                                             };
-                                            if !is_no_op {
+                                            if !is_no_op || *key_delta < 0 {
                                                 batch_write_count += 1;
                                             }
 
@@ -732,17 +758,17 @@ impl Server {
                                             // also only bump on actual mutation.
                                             let should_bump = match cmd_name_bytes.first().map(|b| b.to_ascii_uppercase()) {
                                                 Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") =>
                                                     *key_delta != 0,
                                                 Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") =>
                                                     matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'P') if cmd_eq(cmd_name_bytes, b"PEXPIRE") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'P') if cmd_eq(cmd_name_bytes, b"PERSIST") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0),
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") =>
                                                     matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
                                                 Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") =>
@@ -805,15 +831,32 @@ impl Server {
                                                 active_db.remove_expiration(key);
                                             }
 
-                                            if persistence.is_some() && !is_no_op {
-                                                aof_batch.push(RespCommand {
-                                                    name: cmd.name.as_bytes().to_vec(),
-                                                    args: cmd.args.clone(),
-                                                });
+                                            // Propagate to AOF/replication.
+                                            // When is_no_op is true the command itself was a
+                                            // no-op (e.g. HDEL on missing key → Integer(0)),
+                                            // so we normally skip it.  However, when key_delta
+                                            // < 0 the batch path lazily removed an expired key;
+                                            // propagate a synthetic DEL so replicas/AOF stay
+                                            // consistent (matching Redis lazy-expiry behaviour).
+                                            let expired_key_removed = is_no_op && *key_delta < 0;
+                                            if persistence.is_some() && (!is_no_op || expired_key_removed) {
+                                                if expired_key_removed {
+                                                    if let Some(key) = cmd.args.first() {
+                                                        aof_batch.push(RespCommand {
+                                                            name: b"DEL".to_vec(),
+                                                            args: vec![key.clone()],
+                                                        });
+                                                    }
+                                                } else {
+                                                    aof_batch.push(RespCommand {
+                                                        name: cmd.name.as_bytes().to_vec(),
+                                                        args: cmd.args.clone(),
+                                                    });
+                                                }
                                             }
                                             if replication.is_some()
-                                                && !is_no_op
-                                                && ReplicationManager::is_write_command(cmd_lower)
+                                                && (!is_no_op || expired_key_removed)
+                                                && (expired_key_removed || ReplicationManager::is_write_command(cmd_lower))
                                             {
                                                 // Only emit SELECT once per batch group (db_index
                                                 // is constant within a group)
@@ -823,10 +866,19 @@ impl Server {
                                                         args: vec![db_index.to_string().into_bytes()],
                                                     });
                                                 }
-                                                repl_batch.push(RespCommand {
-                                                    name: cmd.name.as_bytes().to_vec(),
-                                                    args: cmd.args.clone(),
-                                                });
+                                                if expired_key_removed {
+                                                    if let Some(key) = cmd.args.first() {
+                                                        repl_batch.push(RespCommand {
+                                                            name: b"DEL".to_vec(),
+                                                            args: vec![key.clone()],
+                                                        });
+                                                    }
+                                                } else {
+                                                    repl_batch.push(RespCommand {
+                                                        name: cmd.name.as_bytes().to_vec(),
+                                                        args: cmd.args.clone(),
+                                                    });
+                                                }
                                             }
                                         }
                                         let resp = match result {
@@ -846,10 +898,9 @@ impl Server {
                                     // Batch AOF logging with a single call
                                     if !aof_batch.is_empty()
                                         && let Some(ref pm) = persistence
+                                        && let Err(e) = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await
                                     {
-                                        if let Err(e) = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await {
-                                            eprintln!("WARNING: Failed to log batch AOF for db {}: {}", db_index, e);
-                                        }
+                                        eprintln!("WARNING: Failed to log batch AOF for db {}: {}", db_index, e);
                                     }
                                     // Batch replication propagation with a single call
                                     if !repl_batch.is_empty()
@@ -931,45 +982,64 @@ impl Server {
                         return Ok(());
                     }
                 } else {
-                    // No batching: process each command individually
-                    for cmd in &parsed_commands {
-                        match Self::dispatch_command(
-                            cmd,
-                            &mut socket_writer,
-                            &mut response_buffer,
-                            &mut db_index,
-                            &mut protocol_version,
-                            &mut in_subscription_mode,
-                            &mut tx_state,
-                            &pubsub,
-                            client_id,
-                            &security,
-                            &sentinel,
-                            &cluster,
-                            &replication,
-                            &command_handler,
-                            &persistence,
-                            aof_sync_policy,
-                            &client_addr_str,
-                            &connections,
-                            conn_id,
-                            &mut last_cmd_local,
-                            &mut asking,
-                        )
-                        .await?
+                    // No batching: process each entry (command or deferred error)
+                    // in slot order to preserve pipeline response ordering.
+                    let mut cmd_idx = 0;
+                    let mut err_idx = 0;
+                    for slot in 0..total_entry_count {
+                        if err_idx < deferred_parse_errors.len()
+                            && deferred_parse_errors[err_idx].0 == slot
                         {
-                            DispatchAction::CloseConnection => {
-                                if !tx_state.watched_keys.is_empty() {
-                                    command_handler.storage().decrement_watch_count();
+                            response_buffer
+                                .extend_from_slice(&deferred_parse_errors[err_idx].1);
+                            err_idx += 1;
+                            commands_processed += 1;
+                        } else if cmd_idx < parsed_commands.len() {
+                            let cmd = &parsed_commands[cmd_idx];
+                            cmd_idx += 1;
+                            match Self::dispatch_command(
+                                cmd,
+                                &mut socket_writer,
+                                &mut response_buffer,
+                                &mut db_index,
+                                &mut protocol_version,
+                                &mut in_subscription_mode,
+                                &mut tx_state,
+                                &pubsub,
+                                client_id,
+                                &security,
+                                &sentinel,
+                                &cluster,
+                                &replication,
+                                &command_handler,
+                                &persistence,
+                                aof_sync_policy,
+                                &client_addr_str,
+                                &connections,
+                                conn_id,
+                                &mut last_cmd_local,
+                                &mut asking,
+                            )
+                            .await?
+                            {
+                                DispatchAction::CloseConnection => {
+                                    // Flush buffered responses before closing
+                                    if !response_buffer.is_empty() {
+                                        let _ = socket_writer.write_all(&response_buffer).await;
+                                        let _ = socket_writer.flush().await;
+                                    }
+                                    if !tx_state.watched_keys.is_empty() {
+                                        command_handler.storage().decrement_watch_count();
+                                    }
+                                    pubsub.unregister_client(client_id).await;
+                                    if let Some(security_mgr) = security {
+                                        security_mgr.remove_client(&client_addr_str);
+                                    }
+                                    return Ok(());
                                 }
-                                pubsub.unregister_client(client_id).await;
-                                if let Some(security_mgr) = security {
-                                    security_mgr.remove_client(&client_addr_str);
+                                DispatchAction::Continue => {
+                                    commands_processed += 1;
                                 }
-                                return Ok(());
-                            }
-                            DispatchAction::Continue => {
-                                commands_processed += 1;
                             }
                         }
                     }
@@ -1076,11 +1146,12 @@ impl Server {
         }
 
         // QUIT - close connection
+        // Write to response_buffer (not directly to socket) to maintain
+        // correct response ordering in pipelined commands
         if cmd_lower == "quit" {
             let response = RespValue::SimpleString("OK".to_string());
             if let Ok(bytes) = response.serialize() {
-                let _ = socket_writer.write_all(&bytes).await;
-                let _ = socket_writer.flush().await;
+                response_buffer.extend_from_slice(&bytes);
             }
             return Ok(DispatchAction::CloseConnection);
         }
@@ -1166,6 +1237,24 @@ impl Server {
                 );
                 if let Ok(bytes) = response.serialize() {
                     response_buffer.extend_from_slice(&bytes);
+                }
+            } else if cluster.is_some() {
+                // Cluster mode only supports DB 0
+                let requested_db = std::str::from_utf8(&cmd.args[0])
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok());
+                if requested_db == Some(0) {
+                    let response = RespValue::SimpleString("OK".to_string());
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
+                } else {
+                    let response = RespValue::Error(
+                        "ERR SELECT is not allowed in cluster mode".to_string(),
+                    );
+                    if let Ok(bytes) = response.serialize() {
+                        response_buffer.extend_from_slice(&bytes);
+                    }
                 }
             } else {
                 match std::str::from_utf8(&cmd.args[0])
@@ -1713,7 +1802,6 @@ impl Server {
                     | "multi"
                     | "exec"
                     | "discard"
-                    | "watch"
                     | "unwatch"
                     | "config"
                     | "dbsize"
@@ -2195,9 +2283,12 @@ impl Server {
                         name: b"EXEC".to_vec(),
                         args: vec![],
                     });
-                    let _ = persistence_mgr
+                    if let Err(e) = persistence_mgr
                         .log_commands_batch_for_db(batch, aof_sync_policy, db_index)
-                        .await;
+                        .await
+                    {
+                        eprintln!("WARNING: Failed to log transaction AOF for db {}: {}", db_index, e);
+                    }
                 }
                 return Ok(result);
             }
