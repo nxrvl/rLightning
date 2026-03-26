@@ -658,7 +658,11 @@ impl StorageEngine {
                 let removed = db.remove_if(&key, |k, item| {
                     if let Some(exp) = item.expires_at
                         && exp <= now {
-                            entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                            entry_size = if item.cached_mem_size > 0 {
+                                k.len() as u64 + item.cached_mem_size
+                            } else {
+                                Self::calculate_entry_size(k, &item.value) as u64
+                            };
                             return true;
                         }
                     false
@@ -1031,10 +1035,15 @@ impl StorageEngine {
 
         let is_new_key = match self.active_db().entry(key.clone()) {
             ShardEntry::Occupied(mut entry) => {
-                let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
+                let cached = entry.get().cached_mem_size;
+                let old_size = if cached > 0 {
+                    entry.key().len() as u64 + cached
+                } else {
+                    Self::calculate_entry_size(entry.key(), &entry.get().value) as u64
+                };
                 if old_size > 0 {
                     self.current_memory
-                        .fetch_sub(old_size as u64, Ordering::Relaxed);
+                        .fetch_sub(old_size, Ordering::Relaxed);
                 }
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::Relaxed);
@@ -1093,10 +1102,15 @@ impl StorageEngine {
                 };
                 item.expires_at = existing_expires_at;
 
-                let old_size = Self::calculate_entry_size(entry.key(), &entry.get().value);
+                let cached = entry.get().cached_mem_size;
+                let old_size = if cached > 0 {
+                    entry.key().len() as u64 + cached
+                } else {
+                    Self::calculate_entry_size(entry.key(), &entry.get().value) as u64
+                };
                 if old_size > 0 {
                     self.current_memory
-                        .fetch_sub(old_size as u64, Ordering::Relaxed);
+                        .fetch_sub(old_size, Ordering::Relaxed);
                 }
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::Relaxed);
@@ -1584,21 +1598,24 @@ impl StorageEngine {
     /// Uses two-phase approach to avoid deadlock: collect stale keys first (no storage locks
     /// held while DashMap shard lock is active), then remove them in a separate pass.
     pub fn cleanup_stale_key_versions(&self) {
-        // Phase 1: Collect keys to remove. DashMap::retain holds an internal shard lock
-        // during iteration, and key_exists_in_any_db acquires storage shard read locks.
-        // Meanwhile, write operations hold storage shard write locks and call bump_key_version
-        // which acquires DashMap shard locks. Using retain + contains_key creates an ABBA
-        // deadlock risk. Instead, collect stale keys without holding both locks simultaneously.
-        let stale_keys: Vec<Vec<u8>> = self
+        // Phase 1: Collect ALL versioned keys without calling key_exists_in_any_db.
+        // DashMap::iter() holds internal shard read locks during iteration, and
+        // key_exists_in_any_db acquires storage shard read locks. Meanwhile, write
+        // operations hold storage shard write locks and call bump_key_version which
+        // acquires DashMap shard write locks. Calling key_exists_in_any_db inside
+        // the iterator creates an ABBA deadlock. Collect keys first, then check.
+        let all_keys: Vec<Vec<u8>> = self
             .key_versions
             .iter()
-            .filter(|entry| !self.key_exists_in_any_db(entry.key()))
             .map(|entry| entry.key().clone())
             .collect();
 
-        // Phase 2: Remove stale keys individually (each remove acquires DashMap shard lock briefly).
-        for key in stale_keys {
-            self.key_versions.remove(&key);
+        // Phase 2: Check existence and remove stale keys. No DashMap iterator lock
+        // is held here, so acquiring storage shard read locks is safe.
+        for key in all_keys {
+            if !self.key_exists_in_any_db(&key) {
+                self.key_versions.remove(&key);
+            }
         }
     }
 
