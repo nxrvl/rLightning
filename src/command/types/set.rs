@@ -181,23 +181,34 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
 
                 if let Some(count) = count {
-                    // Return multiple elements using Fisher-Yates partial shuffle
                     let actual_count = std::cmp::min(count, set.len());
-                    let mut members: Vec<_> = set.drain().collect();
-                    for i in 0..actual_count {
-                        let j = fastrand::usize(i..members.len());
-                        members.swap(i, j);
-                    }
-                    let popped: Vec<Vec<u8>> = members[..actual_count].to_vec();
-                    let delta: i64 = -(popped.iter().map(|m| m.len() as i64 + 32).sum::<i64>());
-                    // Put remaining back
-                    let remaining: NativeHashSet =
-                        members[actual_count..].iter().cloned().collect();
 
-                    if remaining.is_empty() {
+                    if actual_count >= set.len() {
+                        // Pop all elements - just drain (Delete handles full entry removal)
+                        let popped: Vec<Vec<u8>> = set.drain().collect();
                         Ok((ModifyResult::Delete, SpopResult::Multiple(popped)))
+                    } else if actual_count == 1 {
+                        // Fast path for SPOP key 1: O(N/2) avg instead of O(N) drain+rebuild
+                        let idx = fastrand::usize(0..set.len());
+                        let member = set.iter().nth(idx).cloned().unwrap();
+                        set.remove(&member);
+                        let delta = -(member.len() as i64 + 32);
+                        if set.is_empty() {
+                            Ok((ModifyResult::Delete, SpopResult::Multiple(vec![member])))
+                        } else {
+                            Ok((ModifyResult::Keep(delta), SpopResult::Multiple(vec![member])))
+                        }
                     } else {
-                        *set = remaining;
+                        // Fisher-Yates partial shuffle with ownership transfer (no clone)
+                        let mut all: Vec<_> = set.drain().collect();
+                        for i in 0..actual_count {
+                            let j = fastrand::usize(i..all.len());
+                            all.swap(i, j);
+                        }
+                        let remaining_vec = all.split_off(actual_count);
+                        let popped = all;
+                        let delta: i64 = -(popped.iter().map(|m| m.len() as i64 + 32).sum::<i64>());
+                        *set = remaining_vec.into_iter().collect();
                         Ok((ModifyResult::Keep(delta), SpopResult::Multiple(popped)))
                     }
                 } else {
@@ -551,7 +562,7 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let removed = engine.atomic_modify(source, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
             if !set.remove(&member_clone) {
-                return Ok((ModifyResult::Keep(0), false));
+                return Ok((ModifyResult::KeepUnchanged, false));
             }
             let delta = -(member_clone.len() as i64 + 32);
 
@@ -561,7 +572,7 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 Ok((ModifyResult::Keep(delta), true))
             }
         }
-        None => Ok((ModifyResult::Keep(0), false)),
+        None => Ok((ModifyResult::KeepUnchanged, false)),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
@@ -575,8 +586,11 @@ pub async fn smove(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.atomic_modify(destination, RedisDataType::Set, |current| match current {
         Some(StoreValue::Set(set)) => {
             let was_new = set.insert(member_clone.clone());
-            let delta = if was_new { member_clone.len() as i64 + 32 } else { 0 };
-            Ok((ModifyResult::Keep(delta), ()))
+            if was_new {
+                Ok((ModifyResult::Keep(member_clone.len() as i64 + 32), ()))
+            } else {
+                Ok((ModifyResult::KeepUnchanged, ()))
+            }
         }
         None => {
             let mut set = NativeHashSet::default();

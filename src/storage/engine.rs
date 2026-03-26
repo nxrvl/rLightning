@@ -3048,16 +3048,18 @@ impl StorageEngine {
                 if occ.get().data_type() != RedisDataType::String {
                     return Err(StorageError::WrongType);
                 }
-                let old_val_size = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
                 let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                 if let Some(bytes) = occ.get_mut().value.as_compact_str_mut() {
                     bytes.append(append_value);
                 }
                 let new_len = occ.get().value.as_str().map(|b| b.len()).unwrap_or(0);
-                let new_size = old_size + (new_len - old_val_size) as u64;
+                let new_val_mem = occ.get().value.mem_size() as u64;
+                let new_size = occ.key().len() as u64 + new_val_mem;
                 self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 self.current_memory.fetch_add(new_size, Ordering::Relaxed);
-                occ.get_mut().touch();
+                let entry = occ.get_mut();
+                entry.cached_mem_size = new_val_mem;
+                entry.touch();
                 self.bump_key_version(key);
                 Ok(new_len)
             }

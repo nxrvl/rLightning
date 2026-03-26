@@ -900,8 +900,10 @@ fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     if seconds <= 0 {
         return match map.get(&args[0]) {
             Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
-                // Already expired — treat as nonexistent
-                (Ok(RespValue::Integer(0)), 0, 0)
+                // Already expired — lazily remove the stale entry
+                let entry = map.remove(&args[0]).unwrap();
+                let mem = (args[0].len() + entry.value.mem_size()) as i64;
+                (Ok(RespValue::Integer(0)), -mem, -1)
             }
             Some(_) => {
                 let entry = map.remove(&args[0]).unwrap();
@@ -939,8 +941,10 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
     if millis <= 0 {
         return match map.get(&args[0]) {
             Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
-                // Already expired — treat as nonexistent
-                (Ok(RespValue::Integer(0)), 0, 0)
+                // Already expired — lazily remove the stale entry
+                let entry = map.remove(&args[0]).unwrap();
+                let mem = (args[0].len() + entry.value.mem_size()) as i64;
+                (Ok(RespValue::Integer(0)), -mem, -1)
             }
             Some(_) => {
                 let entry = map.remove(&args[0]).unwrap();

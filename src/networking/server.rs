@@ -791,7 +791,13 @@ impl Server {
                                             }
 
                                             // Clean up expiration heap for commands that delete keys
+                                            // or overwrite keys that may have had a TTL (SET with key_delta==0)
                                             if *key_delta < 0
+                                                && let Some(key) = cmd.args.first()
+                                            {
+                                                active_db.remove_expiration(key);
+                                            } else if *key_delta == 0
+                                                && cmd_eq(cmd_name_bytes, b"SET")
                                                 && let Some(key) = cmd.args.first()
                                             {
                                                 active_db.remove_expiration(key);
