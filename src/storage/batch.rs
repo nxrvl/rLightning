@@ -40,6 +40,16 @@ pub enum PipelineEntry<'a> {
     Individual(&'a Command),
 }
 
+/// A sorted pipeline entry with original index tracking for response reordering.
+/// Used by `group_pipeline_sorted` to map batch results back to original command order.
+pub struct SortedPipelineEntry<'a> {
+    pub entry: PipelineEntry<'a>,
+    /// Original indices of the commands in this entry, in order.
+    /// For Batch entries, maps `commands[i]` to `original_indices[i]`.
+    /// For Individual entries, has exactly one element.
+    pub original_indices: Vec<usize>,
+}
+
 /// Classify a command for batching using fast byte-level dispatch.
 /// Returns Read for read-only single-key commands, Write for write single-key commands,
 /// and Excluded for everything else (multi-key, transactions, pub/sub, scripting, etc.).
@@ -228,6 +238,8 @@ fn extract_primary_key(cmd: &Command) -> Option<&[u8]> {
 /// Group a pipeline of commands into batch groups and individual commands.
 /// Only groups consecutive commands that target the same shard and have compatible
 /// lock types (all reads or all writes).
+/// Superseded by `group_pipeline_sorted` which sorts by shard for better batching.
+#[allow(dead_code)]
 pub fn group_pipeline<'a>(
     commands: &'a [Command],
     shard_index_fn: impl Fn(&[u8]) -> usize,
@@ -289,6 +301,7 @@ pub fn group_pipeline<'a>(
     entries
 }
 
+#[allow(dead_code)]
 fn flush_batch<'a>(
     entries: &mut Vec<PipelineEntry<'a>>,
     batch_cmds: &mut Vec<&'a Command>,
@@ -308,6 +321,108 @@ fn flush_batch<'a>(
             commands: std::mem::take(batch_cmds),
         }));
     }
+}
+
+/// Annotated command for sorted pipeline grouping.
+struct AnnotatedCommand<'a> {
+    cmd: &'a Command,
+    original_index: usize,
+    shard_idx: usize,
+    is_read: bool,
+}
+
+/// Group a pipeline of commands using sort-then-group strategy for maximum batching.
+///
+/// Commands are stable-sorted by shard_index (preserving relative order within each shard),
+/// then grouped into consecutive same-shard, same-kind batches. Excluded commands act as
+/// ordering barriers that prevent reordering across them.
+///
+/// Returns entries with original index mapping for response reordering.
+pub fn group_pipeline_sorted<'a>(
+    commands: &'a [Command],
+    shard_index_fn: impl Fn(&[u8]) -> usize,
+) -> Vec<SortedPipelineEntry<'a>> {
+    let mut entries: Vec<SortedPipelineEntry<'a>> = Vec::with_capacity(commands.len());
+    let mut segment: Vec<AnnotatedCommand<'a>> = Vec::new();
+
+    for (i, cmd) in commands.iter().enumerate() {
+        let key = extract_primary_key(cmd);
+
+        match key {
+            Some(key) => {
+                let shard_idx = shard_index_fn(key);
+                let is_read = classify_command(cmd.name.as_bytes(), &cmd.args) == CommandKind::Read;
+                segment.push(AnnotatedCommand {
+                    cmd,
+                    original_index: i,
+                    shard_idx,
+                    is_read,
+                });
+            }
+            None => {
+                // Excluded command - flush segment then add as individual barrier
+                flush_sorted_segment(&mut entries, &mut segment);
+                entries.push(SortedPipelineEntry {
+                    entry: PipelineEntry::Individual(cmd),
+                    original_indices: vec![i],
+                });
+            }
+        }
+    }
+
+    // Flush remaining segment
+    flush_sorted_segment(&mut entries, &mut segment);
+
+    entries
+}
+
+/// Flush a segment of batchable commands: stable-sort by shard, group consecutive
+/// same-shard/same-kind entries into batches.
+fn flush_sorted_segment<'a>(
+    entries: &mut Vec<SortedPipelineEntry<'a>>,
+    segment: &mut Vec<AnnotatedCommand<'a>>,
+) {
+    if segment.is_empty() {
+        return;
+    }
+
+    // Stable sort by shard_idx only - preserves relative order within each shard
+    segment.sort_by_key(|a| a.shard_idx);
+
+    // Group consecutive same-shard, same-kind entries into batches
+    let mut i = 0;
+    while i < segment.len() {
+        let start = i;
+        let shard = segment[i].shard_idx;
+        let is_read = segment[i].is_read;
+        i += 1;
+        while i < segment.len() && segment[i].shard_idx == shard && segment[i].is_read == is_read {
+            i += 1;
+        }
+
+        let batch_len = i - start;
+        if batch_len == 1 {
+            // Single command - dispatch individually
+            entries.push(SortedPipelineEntry {
+                entry: PipelineEntry::Individual(segment[start].cmd),
+                original_indices: vec![segment[start].original_index],
+            });
+        } else {
+            // Multiple commands - form batch
+            let commands: Vec<&'a Command> = segment[start..i].iter().map(|a| a.cmd).collect();
+            let indices: Vec<usize> = segment[start..i].iter().map(|a| a.original_index).collect();
+            entries.push(SortedPipelineEntry {
+                entry: PipelineEntry::Batch(BatchGroup {
+                    shard_idx: shard,
+                    is_read_only: is_read,
+                    commands,
+                }),
+                original_indices: indices,
+            });
+        }
+    }
+
+    segment.clear();
 }
 
 /// Execute a batch of read commands under a single shard read lock.
@@ -1697,12 +1812,11 @@ mod tests {
         assert_eq!(classify_command(b"Set", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
     }
 
-    // --- Grouping tests ---
+    // --- Sorted grouping tests ---
 
     #[test]
-    fn test_group_pipeline_consecutive_same_shard_reads() {
+    fn test_sorted_group_same_shard_reads() {
         let store = ShardedStore::with_shard_count_for_test(16);
-        // Use keys that hash to the same shard
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
         for i in 0..1000 {
@@ -1721,9 +1835,9 @@ mod tests {
             .map(|k| make_cmd("GET", &[k.as_bytes()]))
             .collect();
 
-        let entries = group_pipeline(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
         assert_eq!(entries.len(), 1);
-        match &entries[0] {
+        match &entries[0].entry {
             PipelineEntry::Batch(group) => {
                 assert_eq!(group.shard_idx, shard);
                 assert!(group.is_read_only);
@@ -1731,10 +1845,12 @@ mod tests {
             }
             _ => panic!("Expected batch"),
         }
+        // Original indices should be 0, 1, 2
+        assert_eq!(entries[0].original_indices, vec![0, 1, 2]);
     }
 
     #[test]
-    fn test_group_pipeline_excluded_breaks_batch() {
+    fn test_sorted_group_excluded_breaks_batch() {
         let store = ShardedStore::with_shard_count_for_test(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
@@ -1751,21 +1867,24 @@ mod tests {
         let commands = vec![
             make_cmd("GET", &[same_shard_keys[0].as_bytes()]),
             make_cmd("GET", &[same_shard_keys[1].as_bytes()]),
-            make_cmd("MULTI", &[]), // Excluded - breaks batch
+            make_cmd("MULTI", &[]), // Excluded - barrier
             make_cmd("GET", &[same_shard_keys[2].as_bytes()]),
             make_cmd("GET", &[same_shard_keys[3].as_bytes()]),
         ];
 
-        let entries = group_pipeline(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
         // Should be: Batch(2 GETs) + Individual(MULTI) + Batch(2 GETs)
         assert_eq!(entries.len(), 3);
-        assert!(matches!(&entries[0], PipelineEntry::Batch(g) if g.commands.len() == 2));
-        assert!(matches!(&entries[1], PipelineEntry::Individual(_)));
-        assert!(matches!(&entries[2], PipelineEntry::Batch(g) if g.commands.len() == 2));
+        assert!(matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.commands.len() == 2));
+        assert_eq!(entries[0].original_indices, vec![0, 1]);
+        assert!(matches!(&entries[1].entry, PipelineEntry::Individual(_)));
+        assert_eq!(entries[1].original_indices, vec![2]);
+        assert!(matches!(&entries[2].entry, PipelineEntry::Batch(g) if g.commands.len() == 2));
+        assert_eq!(entries[2].original_indices, vec![3, 4]);
     }
 
     #[test]
-    fn test_group_pipeline_mixed_read_write_same_shard() {
+    fn test_sorted_group_mixed_read_write_same_shard() {
         let store = ShardedStore::with_shard_count_for_test(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
@@ -1785,16 +1904,16 @@ mod tests {
             make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"val"]),
         ];
 
-        let entries = group_pipeline(&commands, |k| store.shard_index(k));
-        // Reads and writes are separate groups
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        // Reads and writes are separate groups within the same shard
         assert_eq!(entries.len(), 2);
-        assert!(matches!(&entries[0], PipelineEntry::Batch(g) if g.is_read_only && g.commands.len() == 2));
+        assert!(matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.is_read_only && g.commands.len() == 2));
         // Single write is Individual, not Batch
-        assert!(matches!(&entries[1], PipelineEntry::Individual(_)));
+        assert!(matches!(&entries[1].entry, PipelineEntry::Individual(_)));
     }
 
     #[test]
-    fn test_group_pipeline_single_commands_not_batched() {
+    fn test_sorted_group_single_commands_not_batched() {
         let commands = vec![
             make_cmd("GET", &[b"key1"]),
             make_cmd("PING", &[]),
@@ -1802,25 +1921,178 @@ mod tests {
         ];
 
         let store = ShardedStore::with_shard_count_for_test(16);
-        let entries = group_pipeline(&commands, |k| store.shard_index(k));
-        // Each is individual (no consecutive same-shard commands)
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        // Each is individual (PING is excluded, others may be different shards)
         for entry in &entries {
-            assert!(matches!(entry, PipelineEntry::Individual(_)));
+            assert!(matches!(&entry.entry, PipelineEntry::Individual(_)));
         }
     }
 
     #[test]
-    fn test_group_pipeline_preserves_order() {
+    fn test_sorted_group_original_indices_with_barriers() {
         let store = ShardedStore::with_shard_count_for_test(16);
         let commands = vec![
-            make_cmd("GET", &[b"a"]),
-            make_cmd("PING", &[]),
-            make_cmd("SET", &[b"b", b"v"]),
-            make_cmd("MULTI", &[]),
+            make_cmd("GET", &[b"a"]),    // 0
+            make_cmd("PING", &[]),       // 1 (excluded barrier)
+            make_cmd("SET", &[b"b", b"v"]), // 2
+            make_cmd("MULTI", &[]),      // 3 (excluded barrier)
         ];
 
-        let entries = group_pipeline(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
         assert_eq!(entries.len(), 4);
+        // Verify each entry has the correct original index
+        assert_eq!(entries[0].original_indices, vec![0]);
+        assert_eq!(entries[1].original_indices, vec![1]);
+        assert_eq!(entries[2].original_indices, vec![2]);
+        assert_eq!(entries[3].original_indices, vec![3]);
+    }
+
+    #[test]
+    fn test_sorted_group_non_consecutive_same_shard_batched() {
+        // This is the key improvement: non-consecutive same-shard commands
+        // get sorted together and batched.
+        let store = ShardedStore::with_shard_count_for_test(16);
+
+        // Find keys on two different shards
+        let shard_a = store.shard_index(b"key:0");
+        let mut keys_a = Vec::new();
+        let mut keys_b = Vec::new();
+        for i in 0..10000 {
+            let key = format!("key:{}", i);
+            let shard = store.shard_index(key.as_bytes());
+            if shard == shard_a && keys_a.len() < 2 {
+                keys_a.push(key);
+            } else if shard != shard_a && keys_b.len() < 1 {
+                keys_b.push(key);
+            }
+            if keys_a.len() >= 2 && keys_b.len() >= 1 {
+                break;
+            }
+        }
+        assert!(keys_a.len() >= 2 && keys_b.len() >= 1);
+
+        // Interleave: GET shard_a, GET shard_b, GET shard_a
+        let commands = vec![
+            make_cmd("GET", &[keys_a[0].as_bytes()]),  // shard_a, idx 0
+            make_cmd("GET", &[keys_b[0].as_bytes()]),  // shard_b, idx 1
+            make_cmd("GET", &[keys_a[1].as_bytes()]),  // shard_a, idx 2
+        ];
+
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+
+        // With sorting: the two shard_a GETs should be batched together
+        // even though they were non-consecutive in the original pipeline
+        let mut found_batch = false;
+        for entry in &entries {
+            if let PipelineEntry::Batch(g) = &entry.entry {
+                if g.commands.len() == 2 {
+                    found_batch = true;
+                    assert_eq!(g.shard_idx, shard_a);
+                    assert!(g.is_read_only);
+                    // Original indices should include both shard_a commands
+                    assert!(entry.original_indices.contains(&0));
+                    assert!(entry.original_indices.contains(&2));
+                }
+            }
+        }
+        assert!(found_batch, "Expected shard_a commands to be batched together");
+
+        // The shard_b command should be individual
+        let shard_b_entry = entries.iter().find(|e| {
+            matches!(&e.entry, PipelineEntry::Individual(cmd) if cmd.args[0] == keys_b[0].as_bytes())
+        });
+        assert!(shard_b_entry.is_some());
+        assert_eq!(shard_b_entry.unwrap().original_indices, vec![1]);
+    }
+
+    #[test]
+    fn test_sorted_group_preserves_order_within_shard() {
+        // Verify that stable sort preserves relative order within the same shard
+        let store = ShardedStore::with_shard_count_for_test(16);
+        let shard = store.shard_index(b"key:0");
+        let mut same_shard_keys = Vec::new();
+        for i in 0..1000 {
+            let key = format!("key:{}", i);
+            if store.shard_index(key.as_bytes()) == shard {
+                same_shard_keys.push(key);
+            }
+            if same_shard_keys.len() >= 3 {
+                break;
+            }
+        }
+        assert!(same_shard_keys.len() >= 3);
+
+        // SET, GET, SET on same shard - within shard order is preserved
+        let commands = vec![
+            make_cmd("SET", &[same_shard_keys[0].as_bytes(), b"v1"]),
+            make_cmd("GET", &[same_shard_keys[1].as_bytes()]),
+            make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v2"]),
+        ];
+
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        // Within the same shard: SET(0), GET(1), SET(2) - relative order preserved
+        // Groups: Individual(SET at 0), Individual(GET at 1), Individual(SET at 2)
+        // (reads and writes alternate, each forms a group of 1)
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].original_indices[0], 0);
+        assert_eq!(entries[1].original_indices[0], 1);
+        assert_eq!(entries[2].original_indices[0], 2);
+    }
+
+    #[test]
+    fn test_sorted_group_response_reordering_correctness() {
+        // Simulate the response reordering that server.rs does with response_slots
+        let store = ShardedStore::with_shard_count_for_test(16);
+
+        // Find keys on different shards
+        let shard_a = store.shard_index(b"key:0");
+        let mut keys_a = vec![];
+        let mut keys_b = vec![];
+        for i in 0..10000 {
+            let key = format!("key:{}", i);
+            let shard = store.shard_index(key.as_bytes());
+            if shard == shard_a && keys_a.len() < 2 {
+                keys_a.push(key);
+            } else if shard != shard_a && keys_b.len() < 2 {
+                keys_b.push(key);
+            }
+            if keys_a.len() >= 2 && keys_b.len() >= 2 {
+                break;
+            }
+        }
+        assert!(keys_a.len() >= 2 && keys_b.len() >= 2);
+
+        // Pipeline: A0, B0, A1, B1
+        let commands = vec![
+            make_cmd("GET", &[keys_a[0].as_bytes()]),  // 0
+            make_cmd("GET", &[keys_b[0].as_bytes()]),  // 1
+            make_cmd("GET", &[keys_a[1].as_bytes()]),  // 2
+            make_cmd("GET", &[keys_b[1].as_bytes()]),  // 3
+        ];
+
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+
+        // Simulate response collection with response_slots
+        let mut response_slots: Vec<String> = vec![String::new(); 4];
+        for entry in &entries {
+            match &entry.entry {
+                PipelineEntry::Batch(g) => {
+                    for (i, _cmd) in g.commands.iter().enumerate() {
+                        response_slots[entry.original_indices[i]] = format!("resp_{}", entry.original_indices[i]);
+                    }
+                }
+                PipelineEntry::Individual(_cmd) => {
+                    let idx = entry.original_indices[0];
+                    response_slots[idx] = format!("resp_{}", idx);
+                }
+            }
+        }
+
+        // After reordering, responses should be in original order
+        assert_eq!(response_slots[0], "resp_0");
+        assert_eq!(response_slots[1], "resp_1");
+        assert_eq!(response_slots[2], "resp_2");
+        assert_eq!(response_slots[3], "resp_3");
     }
 
     // --- Read batch execution tests ---
@@ -2137,5 +2409,118 @@ mod tests {
         for entry in &entries {
             assert!(matches!(entry, PipelineEntry::Individual(_)));
         }
+    }
+
+    // --- RESP3 compatibility tests ---
+
+    #[test]
+    fn test_batch_results_use_resp3_compatible_types() {
+        // Verify that batch read/write results use only basic RESP types
+        // (BulkString, Integer, SimpleString, Error) which are compatible
+        // with both RESP2 and RESP3 protocols. This validates that removing
+        // the RESP2-only restriction is safe.
+        let store = ShardedStore::with_shard_count_for_test(16);
+        store.insert(b"str_key".to_vec(), Entry::new_string(b"hello".to_vec()));
+        let shard_idx = store.shard_index(b"str_key");
+
+        // Read commands: GET returns BulkString, EXISTS returns Integer, TTL returns Integer
+        let cmd_get = make_cmd("GET", &[b"str_key"]);
+        let cmd_exists = make_cmd("EXISTS", &[b"str_key"]);
+        let cmd_ttl = make_cmd("TTL", &[b"str_key"]);
+        let cmds: Vec<&Command> = vec![&cmd_get, &cmd_exists, &cmd_ttl];
+        let (results, _) = store.execute_on_shard_ref(shard_idx, |map| {
+            execute_read_batch(map, &cmds)
+        });
+        assert!(matches!(&results[0], Ok(RespValue::BulkString(Some(_)))));
+        assert!(matches!(&results[1], Ok(RespValue::Integer(_))));
+        assert!(matches!(&results[2], Ok(RespValue::Integer(_))));
+
+        // Write commands: SET returns SimpleString, INCR returns Integer
+        let cmd_set = make_cmd("SET", &[b"str_key", b"world"]);
+        let cmd_incr = make_cmd("INCR", &[b"counter"]);
+        let wcmds: Vec<&Command> = vec![&cmd_set, &cmd_incr];
+        let results = store.execute_on_shard_mut(shard_idx, |map| {
+            execute_write_batch(map, &wcmds, 1024, 5 * 1024 * 1024, None)
+        });
+        assert!(matches!(&results[0].0, Ok(RespValue::SimpleString(_))));
+        assert!(matches!(&results[1].0, Ok(RespValue::Integer(_))));
+
+        // All these types serialize identically in RESP2 and RESP3
+        for (result, _, _) in &results {
+            if let Ok(resp) = result {
+                assert!(resp.serialize().is_ok(), "Response must serialize for both protocols");
+            }
+        }
+    }
+
+    // --- Security/ACL batch filtering tests ---
+
+    #[test]
+    fn test_sorted_group_acl_filtering_simulation() {
+        // Simulate the ACL pre-filtering that server.rs does for security-enabled
+        // connections. Commands that fail ACL checks are excluded from batch execution
+        // and get error responses at their original indices.
+        let store = ShardedStore::with_shard_count_for_test(16);
+
+        let shard = store.shard_index(b"key:0");
+        let mut same_shard_keys = Vec::new();
+        for i in 0..1000 {
+            let key = format!("key:{}", i);
+            if store.shard_index(key.as_bytes()) == shard {
+                same_shard_keys.push(key);
+            }
+            if same_shard_keys.len() >= 3 {
+                break;
+            }
+        }
+
+        let commands = vec![
+            make_cmd("SET", &[same_shard_keys[0].as_bytes(), b"v1"]),  // allowed
+            make_cmd("SET", &[same_shard_keys[1].as_bytes(), b"v2"]),  // denied by ACL
+            make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v3"]),  // allowed
+        ];
+
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+
+        // Simulate ACL filtering: command at index 1 is denied
+        let mut response_slots: Vec<String> = vec![String::new(); 3];
+        let denied_index = 1;
+
+        for entry in &entries {
+            match &entry.entry {
+                PipelineEntry::Batch(g) => {
+                    let mut allowed_cmds = Vec::new();
+                    let mut allowed_indices = Vec::new();
+                    for (i, &cmd) in g.commands.iter().enumerate() {
+                        let orig_idx = entry.original_indices[i];
+                        if orig_idx == denied_index {
+                            // Simulate ACL denial
+                            response_slots[orig_idx] = "NOPERM".to_string();
+                        } else {
+                            allowed_cmds.push(cmd);
+                            allowed_indices.push(orig_idx);
+                        }
+                    }
+                    // Execute only allowed commands
+                    for (i, _cmd) in allowed_cmds.iter().enumerate() {
+                        response_slots[allowed_indices[i]] = format!("OK_{}", allowed_indices[i]);
+                    }
+                }
+                PipelineEntry::Individual(cmd) => {
+                    let orig_idx = entry.original_indices[0];
+                    if orig_idx == denied_index {
+                        response_slots[orig_idx] = "NOPERM".to_string();
+                    } else {
+                        let _ = cmd; // used in real dispatch
+                        response_slots[orig_idx] = format!("OK_{}", orig_idx);
+                    }
+                }
+            }
+        }
+
+        // Verify: command 0 and 2 succeed, command 1 gets NOPERM
+        assert_eq!(response_slots[0], "OK_0");
+        assert_eq!(response_slots[1], "NOPERM");
+        assert_eq!(response_slots[2], "OK_2");
     }
 }

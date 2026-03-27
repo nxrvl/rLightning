@@ -582,10 +582,13 @@ impl Server {
                 }
 
                 // Phase 2: Execute commands with optional pipeline batching
-                // Batch when: multiple commands, no MULTI, no subscription, RESP2,
-                // no cluster (avoid slot routing), no security (ACL handled by dispatch),
-                // and no transaction commands in the pipeline (MULTI/EXEC/WATCH/DISCARD
-                // must go through individual dispatch to maintain transaction semantics).
+                // Batch when: multiple commands, no MULTI, no subscription,
+                // no cluster (avoid slot routing), and no transaction commands
+                // in the pipeline (MULTI/EXEC/WATCH/DISCARD must go through
+                // individual dispatch to maintain transaction semantics).
+                // RESP3 and security-enabled connections are now supported:
+                // batched commands produce basic RESP types compatible with both
+                // protocols, and ACL checks run per-command within the batch loop.
                 let has_tx_cmd = parsed_commands.iter().any(|cmd| {
                     let name = cmd.name.as_bytes();
                     matches!(name.len(), 4 | 5 | 7) && matches!(
@@ -598,39 +601,88 @@ impl Server {
                         || cmd_eq(name, b"DISCARD")
                     )
                 });
+                // Security: allow batching if no auth required or user is authenticated.
+                // Unauthenticated users fall through to dispatch_command for NOAUTH errors.
+                let security_allows_batch = security.as_ref().map_or(true, |sec| {
+                    !sec.require_auth() || sec.is_authenticated(&client_addr_str)
+                });
                 let batch_eligible = parsed_commands.len() > 1
                     && !tx_state.in_multi
                     && !has_tx_cmd
                     && !in_subscription_mode
-                    && protocol_version == ProtocolVersion::RESP2
                     && cluster.is_none()
-                    && security.is_none()
+                    && security_allows_batch
                     && deferred_parse_errors.is_empty();
 
                 if batch_eligible {
                     let mut active_db = command_handler.storage().get_db_by_index(db_index);
-                    let groups = batch::group_pipeline(
+                    let sorted_groups = batch::group_pipeline_sorted(
                         &parsed_commands,
                         |k| active_db.shard_index(k),
                     );
+                    let cmd_count = parsed_commands.len();
+                    let mut response_slots: Vec<Vec<u8>> = vec![Vec::new(); cmd_count];
 
                     let mut close_connection = false;
-                    'batch_loop: for entry in &groups {
-                        match entry {
+                    'batch_loop: for sorted_entry in &sorted_groups {
+                        match &sorted_entry.entry {
                             PipelineEntry::Batch(group) => {
+                                // ACL pre-filtering: when security is enabled, check
+                                // permissions before batch execution and produce error
+                                // responses for denied commands.
+                                let (batch_cmds, batch_indices): (Vec<&Command>, Vec<usize>) = if let Some(ref sec_mgr) = security {
+                                    let mut cmds = Vec::with_capacity(group.commands.len());
+                                    let mut idxs = Vec::with_capacity(group.commands.len());
+                                    for (ci, &cmd) in group.commands.iter().enumerate() {
+                                        let orig_idx = sorted_entry.original_indices[ci];
+                                        let cmd_lower = cmd.name.to_lowercase();
+                                        if !sec_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
+                                            let username = sec_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                            sec_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
+                                            let error = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
+                                            if let Ok(bytes) = RespValue::Error(error).serialize() {
+                                                response_slots[orig_idx] = bytes;
+                                            }
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                        if let Some(key) = cmd.args.first()
+                                            && !sec_mgr.check_key_permission(&client_addr_str, key)
+                                        {
+                                            let username = sec_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
+                                            let key_str = String::from_utf8_lossy(key);
+                                            sec_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
+                                            if let Ok(bytes) = RespValue::Error("NOPERM this user has no permissions to access one of the keys used as arguments".to_string()).serialize() {
+                                                response_slots[orig_idx] = bytes;
+                                            }
+                                            commands_processed += 1;
+                                            continue;
+                                        }
+                                        cmds.push(cmd);
+                                        idxs.push(orig_idx);
+                                    }
+                                    (cmds, idxs)
+                                } else {
+                                    (group.commands.clone(), sorted_entry.original_indices.clone())
+                                };
+
+                                if batch_cmds.is_empty() {
+                                    continue;
+                                }
+
                                 if group.is_read_only {
                                     // Read batch: single shard read lock
                                     let (results, expired_keys) = active_db.execute_on_shard_ref(
                                         group.shard_idx,
-                                        |map| batch::execute_read_batch(map, &group.commands),
+                                        |map| batch::execute_read_batch(map, &batch_cmds),
                                     );
-                                    for result in results {
+                                    for (ri, result) in results.into_iter().enumerate() {
                                         let resp = match result {
                                             Ok(r) => r,
                                             Err(e) => RespValue::Error(e.to_string()),
                                         };
                                         if let Ok(bytes) = resp.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
+                                            response_slots[batch_indices[ri]] = bytes;
                                         }
                                         commands_processed += 1;
                                     }
@@ -644,12 +696,12 @@ impl Server {
                                     if let Some(ref repl) = replication
                                         && repl.is_read_only()
                                     {
-                                        for _ in &group.commands {
+                                        for bi in 0..batch_cmds.len() {
                                             let resp = RespValue::Error(
                                                 "READONLY You can't write against a read only replica.".to_string(),
                                             );
                                             if let Ok(bytes) = resp.serialize() {
-                                                response_buffer.extend_from_slice(&bytes);
+                                                response_slots[batch_indices[bi]] = bytes;
                                             }
                                             commands_processed += 1;
                                         }
@@ -661,7 +713,7 @@ impl Server {
                                     // Per-command budget in execute_write_batch handles individual
                                     // OOM rejection, allowing freeing commands like DEL/HDEL/SREM/ZREM
                                     // through even when over maxmemory.
-                                    let estimated = batch::estimate_write_batch_memory(&group.commands);
+                                    let estimated = batch::estimate_write_batch_memory(&batch_cmds);
                                     let _ = command_handler.storage().check_write_memory(estimated).await;
 
                                     // Write batch: single shard write lock
@@ -670,7 +722,7 @@ impl Server {
                                     let memory_budget = command_handler.storage().remaining_memory_budget();
                                     let results = active_db.execute_on_shard_mut(
                                         group.shard_idx,
-                                        |map| batch::execute_write_batch(map, &group.commands, max_key_size, max_value_size, memory_budget),
+                                        |map| batch::execute_write_batch(map, &batch_cmds, max_key_size, max_value_size, memory_budget),
                                     );
                                     let mut batch_write_count: u64 = 0;
                                     let mut batch_key_created: u32 = 0;
@@ -702,19 +754,19 @@ impl Server {
                                         // enter a CURRENT_DB_INDEX scope (unlike handler.rs:84).
                                         if *key_delta > 0 {
                                             batch_key_created += *key_delta as u32;
-                                            if let Some(key) = group.commands[i].args.first() {
+                                            if let Some(key) = batch_cmds[i].args.first() {
                                                 prefix_updates.push((key.to_vec(), true));
                                             }
                                         } else if *key_delta < 0 {
                                             batch_key_deleted += (-*key_delta) as u32;
-                                            if let Some(key) = group.commands[i].args.first() {
+                                            if let Some(key) = batch_cmds[i].args.first() {
                                                 prefix_updates.push((key.to_vec(), false));
                                             }
                                         }
 
                                         // AOF logging, replication, WATCH invalidation, and expiration heap for successful writes
                                         if result.is_ok() {
-                                            let cmd = group.commands[i];
+                                            let cmd = batch_cmds[i];
                                             let cmd_lower = &cmd.name;
                                             let cmd_name_bytes = cmd.name.as_bytes();
 
@@ -886,7 +938,7 @@ impl Server {
                                             Err(e) => RespValue::Error(e.to_string()),
                                         };
                                         if let Ok(bytes) = resp.serialize() {
-                                            response_buffer.extend_from_slice(&bytes);
+                                            response_slots[batch_indices[i]] = bytes;
                                         }
                                         commands_processed += 1;
                                     }
@@ -924,10 +976,12 @@ impl Server {
                                 }
                             }
                             PipelineEntry::Individual(cmd) => {
+                                let orig_idx = sorted_entry.original_indices[0];
+                                let mut temp_buf = Vec::new();
                                 match Self::dispatch_command(
                                     cmd,
                                     &mut socket_writer,
-                                    &mut response_buffer,
+                                    &mut temp_buf,
                                     &mut db_index,
                                     &mut protocol_version,
                                     &mut in_subscription_mode,
@@ -950,10 +1004,12 @@ impl Server {
                                 .await?
                                 {
                                     DispatchAction::CloseConnection => {
+                                        response_slots[orig_idx] = temp_buf;
                                         close_connection = true;
                                         break 'batch_loop;
                                     }
                                     DispatchAction::Continue => {
+                                        response_slots[orig_idx] = temp_buf;
                                         commands_processed += 1;
                                         // If SELECT changed the database, re-capture active_db
                                         // so subsequent batch groups target the correct DB
@@ -963,6 +1019,13 @@ impl Server {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Reorder: flush all response slots to response_buffer in original command order
+                    for slot in &response_slots {
+                        if !slot.is_empty() {
+                            response_buffer.extend_from_slice(slot);
                         }
                     }
 

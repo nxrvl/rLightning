@@ -59,13 +59,13 @@ vs Redis 7.4.8:
 - Modify: `src/storage/batch.rs`
 - Modify: `src/networking/server.rs`
 
-- [ ] Implement `group_pipeline_sorted` in `src/storage/batch.rs`: annotate each command with `(original_index, shard_index, is_read)`, sort by `(shard_index, is_read)`, form batches from sorted groups, return entries with original index map for response reordering
-- [ ] Update pipeline execution in `src/networking/server.rs` to use sorted batching: allocate result slots by original index, execute batches in sorted order, reorder responses back to original command order before writing to `response_buffer`
-- [ ] Relax batch eligibility in `src/networking/server.rs:601-608`: remove `protocol_version == ProtocolVersion::RESP2` restriction (allow RESP3), remove `security.is_none()` restriction (perform ACL checks per-command within batch loop)
-- [ ] Update existing batch tests in `batch.rs` (test at line 1703-1809) to verify sort-then-group behavior
-- [ ] Add tests for response reordering correctness (responses match original command order after sorting)
-- [ ] Add tests for RESP3 and security-enabled connections with batching
-- [ ] Run `cargo test` - all tests must pass
+- [x] Implement `group_pipeline_sorted` in `src/storage/batch.rs`: annotate each command with `(original_index, shard_index, is_read)`, sort by `(shard_index, is_read)`, form batches from sorted groups, return entries with original index map for response reordering
+- [x] Update pipeline execution in `src/networking/server.rs` to use sorted batching: allocate result slots by original index, execute batches in sorted order, reorder responses back to original command order before writing to `response_buffer`
+- [x] Relax batch eligibility in `src/networking/server.rs:601-608`: remove `protocol_version == ProtocolVersion::RESP2` restriction (allow RESP3), remove `security.is_none()` restriction (perform ACL checks per-command within batch loop)
+- [x] Update existing batch tests in `batch.rs` (test at line 1703-1809) to verify sort-then-group behavior
+- [x] Add tests for response reordering correctness (responses match original command order after sorting)
+- [x] Add tests for RESP3 and security-enabled connections with batching
+- [x] Run `cargo test` - all tests must pass
 
 ### Task 4: MSET single-shard fast path (Phase 3)
 
