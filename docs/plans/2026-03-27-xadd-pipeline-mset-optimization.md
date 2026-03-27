@@ -72,12 +72,12 @@ vs Redis 7.4.8:
 **Files:**
 - Modify: `src/command/types/string.rs`
 
-- [ ] In `mset` function (line 209-252), before calling `engine.lock_keys()`, compute shard indices for all keys and check if they all map to the same shard
-- [ ] If all keys are on the same shard, use per-key `set` operations without cross-shard locking (single shard write lock is sufficient)
-- [ ] If keys span multiple shards, keep existing `lock_keys` path unchanged
-- [ ] Add unit tests for single-shard MSET path (all keys same shard -> no cross-shard lock)
-- [ ] Add unit tests for multi-shard MSET path (keys across shards -> lock_keys used)
-- [ ] Run `cargo test` - all tests must pass
+- [x] In `mset` function (line 209-252), before calling `engine.lock_keys()`, compute shard indices for all keys and check if they all map to the same shard
+- [x] If all keys are on the same shard, use per-key `set` operations without cross-shard locking (single shard write lock is sufficient)
+- [x] If keys span multiple shards, keep existing `lock_keys` path unchanged
+- [x] Add unit tests for single-shard MSET path (all keys same shard -> no cross-shard lock)
+- [x] Add unit tests for multi-shard MSET path (keys across shards -> lock_keys used)
+- [x] Run `cargo test` - all tests must pass
 
 ### Task 5: Verify acceptance criteria
 

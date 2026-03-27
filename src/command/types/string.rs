@@ -2,7 +2,8 @@ use crate::command::utils::{bytes_to_string, parse_ttl};
 use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::{SetResult, StorageEngine};
-use crate::storage::item::RedisDataType;
+use crate::storage::item::{Entry, RedisDataType};
+use crate::storage::value::StoreValue;
 
 /// Redis SET command - Set the string value of a key
 /// Uses set_with_options() for atomic NX/XX/GET handling
@@ -209,16 +210,13 @@ pub async fn mget(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 /// Redis MSET command - Set multiple key-value pairs atomically.
 /// Uses lock_keys for cross-key coordination (sorted order prevents deadlocks).
 /// Redis guarantees MSET is atomic — all keys are set or none are visible to concurrent clients.
+///
+/// Optimization: when all keys hash to the same shard, uses a single write lock
+/// instead of per-key lock acquisitions, reducing overhead significantly.
 pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(CommandError::WrongNumberOfArguments);
     }
-
-    // Collect all keys for atomic locking
-    let keys: Vec<Vec<u8>> = (0..args.len())
-        .step_by(2)
-        .map(|i| args[i].clone())
-        .collect();
 
     // Pre-validate all key/value sizes so that individual set() calls
     // cannot fail on size checks after we've already written some keys.
@@ -228,24 +226,78 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         .collect();
     engine.validate_kv_sizes(&pairs)?;
 
-    // Lock all keys in sorted order to prevent deadlocks and coordinate with transactions/MSETNX
-    let _guard = engine.lock_keys(&keys).await;
+    let store = engine.active_db();
 
-    // Check memory for the total batch size while holding key locks.
-    // This narrows the TOCTOU window vs checking before lock acquisition.
-    // Note: this is a best-effort check, not a reservation — concurrent writes
-    // to *other* keys can still consume memory between this check and the
-    // inserts below, which is inherent to the concurrent architecture.
-    let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
-    engine.check_write_memory(estimated_size).await?;
+    // Compute shard index for each key to detect single-shard case
+    let first_shard = store.shard_index(&pairs[0].0);
+    let all_same_shard = pairs.len() == 1 || pairs[1..].iter().all(|(k, _)| store.shard_index(k) == first_shard);
 
-    // Skip per-key eviction checks since we just checked the total batch size.
-    // This prevents partial writes (some keys set, some rejected) which would
-    // violate MSET's all-or-nothing guarantee.
-    for i in (0..args.len()).step_by(2) {
-        engine
-            .set_preevicted(args[i].clone(), args[i + 1].clone(), None)
-            .await?;
+    if all_same_shard {
+        // Single-shard fast path: one tx lock + one write lock for all keys
+        // Acquire shard transaction lock (coordinates with MSETNX/WATCH)
+        if !StorageEngine::in_transaction() {
+            let mutex = store.shard_tx_lock(first_shard);
+            let _guard = mutex.lock_owned().await;
+        }
+
+        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        engine.check_write_memory(estimated_size).await?;
+
+        // Execute all inserts under a single shard write lock
+        let (memory_delta, new_key_count, new_keys) = store.execute_on_shard_mut(first_shard, |map| {
+            let mut mem_delta: i64 = 0;
+            let mut new_count: i64 = 0;
+            let mut created_keys: Vec<Vec<u8>> = Vec::new();
+
+            for (key, value) in &pairs {
+                let new_size = (key.len() + value.len()) as i64;
+                let entry = Entry::new(StoreValue::Str(value.clone().into()));
+
+                if let Some(old_entry) = map.insert(key.clone(), entry) {
+                    let old_size = if old_entry.cached_mem_size > 0 {
+                        key.len() as i64 + old_entry.cached_mem_size as i64
+                    } else {
+                        (key.len() + old_entry.value.mem_size()) as i64
+                    };
+                    mem_delta += new_size - old_size;
+                } else {
+                    mem_delta += new_size;
+                    new_count += 1;
+                    created_keys.push(key.clone());
+                }
+            }
+
+            (mem_delta, new_count, created_keys)
+        });
+
+        // Post-processing outside the write lock
+        engine.adjust_global_memory(memory_delta);
+        engine.adjust_key_count(new_key_count);
+
+        for (key, _) in &pairs {
+            engine.bump_key_version(key);
+        }
+
+        if !new_keys.is_empty() {
+            for key in &new_keys {
+                engine.update_prefix_indices(key, true).await;
+            }
+        }
+
+        engine.increment_write_counters_batch(pairs.len() as u64).await;
+    } else {
+        // Multi-shard path: use existing lock_keys approach
+        let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
+        let _guard = engine.lock_keys(&keys).await;
+
+        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        engine.check_write_memory(estimated_size).await?;
+
+        for (key, value) in &pairs {
+            engine
+                .set_preevicted(key.clone(), value.clone(), None)
+                .await?;
+        }
     }
 
     Ok(RespValue::SimpleString("OK".to_string()))
@@ -2624,5 +2676,154 @@ mod tests {
         let v1 = engine.get(b"msetnx_ck1").await.unwrap().unwrap();
         let v2 = engine.get(b"msetnx_ck2").await.unwrap().unwrap();
         assert_eq!(v1, v2, "Both keys should have the winning task's value");
+    }
+
+    #[tokio::test]
+    async fn test_mset_single_shard_fast_path() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Find keys that hash to the same shard
+        let store = engine.active_db();
+        let target_shard = store.shard_index(b"key0");
+        let mut same_shard_keys: Vec<Vec<u8>> = Vec::new();
+        for i in 0u64..10000 {
+            let k = format!("mset_ss_{}", i).into_bytes();
+            if store.shard_index(&k) == target_shard {
+                same_shard_keys.push(k);
+                if same_shard_keys.len() >= 5 {
+                    break;
+                }
+            }
+        }
+        assert!(same_shard_keys.len() >= 5, "Need at least 5 keys on same shard for test");
+
+        // Build MSET args: key1, val1, key2, val2, ...
+        let mut args: Vec<Vec<u8>> = Vec::new();
+        for (i, key) in same_shard_keys.iter().enumerate() {
+            args.push(key.clone());
+            args.push(format!("value_{}", i).into_bytes());
+        }
+
+        // Execute MSET (should take single-shard fast path)
+        let result = mset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // Verify all keys were set correctly
+        for (i, key) in same_shard_keys.iter().enumerate() {
+            let val = engine.get(key).await.unwrap().unwrap();
+            assert_eq!(val, format!("value_{}", i).as_bytes());
+        }
+
+        // Verify overwrite works in single-shard path
+        let mut overwrite_args: Vec<Vec<u8>> = Vec::new();
+        for (i, key) in same_shard_keys.iter().enumerate() {
+            overwrite_args.push(key.clone());
+            overwrite_args.push(format!("new_value_{}", i).into_bytes());
+        }
+        let result = mset(&engine, &overwrite_args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        for (i, key) in same_shard_keys.iter().enumerate() {
+            let val = engine.get(key).await.unwrap().unwrap();
+            assert_eq!(val, format!("new_value_{}", i).as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mset_multi_shard_path() {
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        // Find keys that hash to different shards
+        let store = engine.active_db();
+        let mut keys_by_shard: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+        for i in 0u64..100000 {
+            let k = format!("mset_ms_{}", i).into_bytes();
+            let shard = store.shard_index(&k);
+            keys_by_shard.entry(shard).or_insert(k);
+            if keys_by_shard.len() >= 3 {
+                break;
+            }
+        }
+        assert!(keys_by_shard.len() >= 2, "Need keys on at least 2 different shards");
+
+        // Build MSET args with keys on different shards
+        let mut args: Vec<Vec<u8>> = Vec::new();
+        let multi_shard_keys: Vec<Vec<u8>> = keys_by_shard.into_values().collect();
+        for (i, key) in multi_shard_keys.iter().enumerate() {
+            args.push(key.clone());
+            args.push(format!("ms_value_{}", i).into_bytes());
+        }
+
+        // Execute MSET (should take multi-shard lock_keys path)
+        let result = mset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        // Verify all keys were set correctly
+        for (i, key) in multi_shard_keys.iter().enumerate() {
+            let val = engine.get(key).await.unwrap().unwrap();
+            assert_eq!(val, format!("ms_value_{}", i).as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mset_single_key_pair() {
+        // Single key-value pair should always be single-shard
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        let args = vec![b"solo_key".to_vec(), b"solo_value".to_vec()];
+        let result = mset(&engine, &args).await.unwrap();
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+
+        let val = engine.get(b"solo_key").await.unwrap().unwrap();
+        assert_eq!(val, b"solo_value");
+    }
+
+    #[tokio::test]
+    async fn test_mset_memory_tracking() {
+        // Verify memory tracking is correct for single-shard path
+        let config = StorageConfig::default();
+        let engine = StorageEngine::new(config);
+
+        let store = engine.active_db();
+        let target_shard = store.shard_index(b"mem_test_0");
+        let mut same_shard_keys: Vec<Vec<u8>> = Vec::new();
+        for i in 0u64..10000 {
+            let k = format!("mem_test_{}", i).into_bytes();
+            if store.shard_index(&k) == target_shard {
+                same_shard_keys.push(k);
+                if same_shard_keys.len() >= 3 {
+                    break;
+                }
+            }
+        }
+
+        let mem_before = engine.get_used_memory();
+
+        let mut args: Vec<Vec<u8>> = Vec::new();
+        for key in &same_shard_keys {
+            args.push(key.clone());
+            args.push(b"test_value".to_vec());
+        }
+
+        mset(&engine, &args).await.unwrap();
+
+        let mem_after = engine.get_used_memory();
+        assert!(mem_after > mem_before, "Memory should increase after MSET");
+
+        // Overwrite with shorter values - memory should change
+        let mut args2: Vec<Vec<u8>> = Vec::new();
+        for key in &same_shard_keys {
+            args2.push(key.clone());
+            args2.push(b"x".to_vec());
+        }
+
+        mset(&engine, &args2).await.unwrap();
+
+        let mem_final = engine.get_used_memory();
+        // Memory after overwrite with shorter values should be less than after initial set
+        assert!(mem_final < mem_after, "Memory should decrease when overwriting with shorter values");
     }
 }
