@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// A stream entry ID in the format "timestamp-sequence"
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StreamEntryId {
     pub ms: u64,
     pub seq: u64,
@@ -240,6 +240,61 @@ impl StreamData {
         }
     }
 
+    /// Generate the next entry ID using the cached wall-clock time.
+    ///
+    /// Same logic as `generate_id` but avoids the `SystemTime::now()` syscall
+    /// on the hot path by reading from the cached clock updated every 1ms.
+    pub fn generate_id_cached(
+        &self,
+        explicit_ms: Option<u64>,
+        explicit_seq: Option<u64>,
+    ) -> Result<StreamEntryId, &'static str> {
+        let now_ms = crate::storage::clock::cached_now_ms();
+
+        match (explicit_ms, explicit_seq) {
+            // Fully auto-generated: "*"
+            (None, None) => {
+                let ms = now_ms.max(self.last_id.ms);
+                let seq = if ms == self.last_id.ms {
+                    self.last_id.seq + 1
+                } else {
+                    0
+                };
+                Ok(StreamEntryId::new(ms, seq))
+            }
+            // Explicit ms, auto seq: "12345-*"
+            (Some(ms), None) => {
+                let seq = if ms == self.last_id.ms {
+                    self.last_id.seq + 1
+                } else if ms > self.last_id.ms {
+                    0
+                } else {
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
+                };
+                Ok(StreamEntryId::new(ms, seq))
+            }
+            // Fully explicit: "12345-67"
+            (Some(ms), Some(seq)) => {
+                let new_id = StreamEntryId::new(ms, seq);
+                if new_id <= self.last_id && !(self.last_id.ms == 0 && self.last_id.seq == 0) {
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
+                }
+                // Special case: 0-0 is not allowed if stream is not empty
+                if ms == 0 && seq == 0 && !self.entries.is_empty() {
+                    return Err(
+                        "The ID specified in XADD is equal or smaller than the target stream top item",
+                    );
+                }
+                Ok(new_id)
+            }
+            (None, Some(_)) => Err("Invalid stream ID format"),
+        }
+    }
+
     /// Add an entry to the stream, returns the entry ID
     pub fn add_entry(
         &mut self,
@@ -247,15 +302,12 @@ impl StreamData {
         fields: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> StreamEntryId {
         if self.first_entry_id.is_none() {
-            self.first_entry_id = Some(id.clone());
+            self.first_entry_id = Some(id);
         }
-        self.last_id = id.clone();
+        self.last_id = id;
         self.entries_added += 1;
-        let entry = StreamEntry {
-            id: id.clone(),
-            fields,
-        };
-        self.entries.insert(id.clone(), entry);
+        let entry = StreamEntry { id, fields };
+        self.entries.insert(id, entry);
         id
     }
 
@@ -267,7 +319,7 @@ impl StreamData {
         count: Option<usize>,
     ) -> Vec<&StreamEntry> {
         let mut result = Vec::new();
-        for (_, entry) in self.entries.range(start.clone()..=end.clone()) {
+        for (_, entry) in self.entries.range(*start..=*end) {
             result.push(entry);
             if let Some(max) = count
                 && result.len() >= max
@@ -286,7 +338,7 @@ impl StreamData {
         count: Option<usize>,
     ) -> Vec<&StreamEntry> {
         let mut result = Vec::new();
-        for (_, entry) in self.entries.range(end.clone()..=start.clone()).rev() {
+        for (_, entry) in self.entries.range(*end..=*start).rev() {
             result.push(entry);
             if let Some(max) = count
                 && result.len() >= max
@@ -315,7 +367,7 @@ impl StreamData {
         };
         let mut removed = 0u64;
         let ids_to_remove: Vec<StreamEntryId> =
-            self.entries.keys().take(actual_remove).cloned().collect();
+            self.entries.keys().take(actual_remove).copied().collect();
         for id in ids_to_remove {
             self.entries.remove(&id);
             if self
@@ -334,8 +386,8 @@ impl StreamData {
     pub fn trim_minid(&mut self, minid: &StreamEntryId, approximate: bool) -> u64 {
         let ids_to_remove: Vec<StreamEntryId> = self
             .entries
-            .range(..minid.clone())
-            .map(|(k, _)| k.clone())
+            .range(..*minid)
+            .map(|(k, _)| *k)
             .collect();
         if ids_to_remove.is_empty() {
             return 0;
@@ -373,7 +425,7 @@ impl StreamData {
                     .as_ref()
                     .is_none_or(|max| id > max)
                 {
-                    self.max_deleted_entry_id = Some(id.clone());
+                    self.max_deleted_entry_id = Some(*id);
                 }
                 deleted += 1;
             }
@@ -455,9 +507,9 @@ mod tests {
         let id2 = StreamEntryId::new(1000, 1);
         let id3 = StreamEntryId::new(2000, 0);
 
-        stream.add_entry(id1.clone(), vec![(b"field1".to_vec(), b"val1".to_vec())]);
-        stream.add_entry(id2.clone(), vec![(b"field2".to_vec(), b"val2".to_vec())]);
-        stream.add_entry(id3.clone(), vec![(b"field3".to_vec(), b"val3".to_vec())]);
+        stream.add_entry(id1, vec![(b"field1".to_vec(), b"val1".to_vec())]);
+        stream.add_entry(id2, vec![(b"field2".to_vec(), b"val2".to_vec())]);
+        stream.add_entry(id3, vec![(b"field3".to_vec(), b"val3".to_vec())]);
 
         assert_eq!(stream.len(), 3);
         assert_eq!(stream.entries_added, 3);
@@ -531,11 +583,11 @@ mod tests {
         let id1 = StreamEntryId::new(1000, 0);
         let id2 = StreamEntryId::new(2000, 0);
         let id3 = StreamEntryId::new(3000, 0);
-        stream.add_entry(id1.clone(), vec![]);
-        stream.add_entry(id2.clone(), vec![]);
-        stream.add_entry(id3.clone(), vec![]);
+        stream.add_entry(id1, vec![]);
+        stream.add_entry(id2, vec![]);
+        stream.add_entry(id3, vec![]);
 
-        let deleted = stream.delete_entries(&[id2.clone()]);
+        let deleted = stream.delete_entries(&[id2]);
         assert_eq!(deleted, 1);
         assert_eq!(stream.len(), 2);
 
@@ -550,9 +602,9 @@ mod tests {
         let id1 = StreamEntryId::new(1000, 0);
         let id2 = StreamEntryId::new(2000, 0);
         let id3 = StreamEntryId::new(3000, 0);
-        stream.add_entry(id1.clone(), vec![(b"a".to_vec(), b"1".to_vec())]);
-        stream.add_entry(id2.clone(), vec![(b"b".to_vec(), b"2".to_vec())]);
-        stream.add_entry(id3.clone(), vec![(b"c".to_vec(), b"3".to_vec())]);
+        stream.add_entry(id1, vec![(b"a".to_vec(), b"1".to_vec())]);
+        stream.add_entry(id2, vec![(b"b".to_vec(), b"2".to_vec())]);
+        stream.add_entry(id3, vec![(b"c".to_vec(), b"3".to_vec())]);
 
         let results = stream.read_after(&id1, None);
         assert_eq!(results.len(), 2);
@@ -578,6 +630,50 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_generate_id_cached_explicit() {
+        // generate_id_cached with explicit IDs should behave identically to generate_id
+        let mut stream = StreamData::new();
+        stream.add_entry(StreamEntryId::new(1000, 0), vec![]);
+
+        // Explicit ms + seq greater than last
+        let id = stream.generate_id_cached(Some(2000), Some(0)).unwrap();
+        assert_eq!(id, StreamEntryId::new(2000, 0));
+
+        // Equal to last should fail
+        let result = stream.generate_id_cached(Some(1000), Some(0));
+        assert!(result.is_err());
+
+        // Explicit ms, auto seq
+        let id = stream.generate_id_cached(Some(1000), None).unwrap();
+        assert_eq!(id, StreamEntryId::new(1000, 1));
+
+        // Invalid format
+        let result = stream.generate_id_cached(None, Some(5));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stream_generate_id_cached_auto() {
+        // Fully auto-generated IDs should produce valid IDs
+        // Note: cached_now_ms() may return 0 without the clock updater running,
+        // but the logic still works — it uses max(now_ms, last_id.ms)
+        let mut stream = StreamData::new();
+
+        // First auto-ID on empty stream
+        let id = stream.generate_id_cached(None, None).unwrap();
+
+        // Add this entry and generate another — should increment seq or advance ms
+        stream.add_entry(id, vec![]);
+        let id2 = stream.generate_id_cached(None, None).unwrap();
+        assert!(id2 > id, "second auto-ID should be greater than first");
+
+        // Third auto-ID should also be strictly greater
+        stream.add_entry(id2, vec![]);
+        let id3 = stream.generate_id_cached(None, None).unwrap();
+        assert!(id3 > id2, "third auto-ID should be greater than second");
+    }
+
+    #[test]
     fn test_consumer_group() {
         let mut group = ConsumerGroup::new("mygroup".to_string(), StreamEntryId::new(0, 0));
         let consumer = group.get_or_create_consumer("consumer1");
@@ -587,5 +683,13 @@ mod tests {
         // Getting again should return the same consumer
         let consumer = group.get_or_create_consumer("consumer1");
         assert_eq!(consumer.name, "consumer1");
+    }
+
+    #[test]
+    fn test_stream_entry_id_is_copy() {
+        // Verify that StreamEntryId implements Copy — this is a compile-time check
+        let id = StreamEntryId::new(42, 7);
+        let id2 = id; // Copy, not move
+        assert_eq!(id, id2); // id is still usable
     }
 }

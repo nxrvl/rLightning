@@ -15,6 +15,10 @@ static CLOCK_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// Updated every 1ms by the background timer task.
 static CACHED_OFFSET_US: AtomicU64 = AtomicU64::new(0);
 
+/// Cached wall-clock time in milliseconds since UNIX epoch.
+/// Updated every 1ms by the background timer task alongside CACHED_OFFSET_US.
+static CACHED_WALL_MS: AtomicU64 = AtomicU64::new(0);
+
 /// Get the current cached `Instant`.
 ///
 /// Returns a value that is at most ~1ms stale compared to `Instant::now()`.
@@ -24,6 +28,16 @@ static CACHED_OFFSET_US: AtomicU64 = AtomicU64::new(0);
 pub fn cached_now() -> Instant {
     let offset_us = CACHED_OFFSET_US.load(Ordering::Relaxed);
     *CLOCK_EPOCH + std::time::Duration::from_micros(offset_us)
+}
+
+/// Get the current cached wall-clock time in milliseconds since UNIX epoch.
+///
+/// Returns a value that is at most ~1ms stale compared to `SystemTime::now()`.
+/// Used by XADD stream ID generation to avoid `SystemTime::now()` syscalls
+/// on the hot path.
+#[inline]
+pub fn cached_now_ms() -> u64 {
+    CACHED_WALL_MS.load(Ordering::Relaxed)
 }
 
 /// Start the background clock updater task.
@@ -36,12 +50,25 @@ pub fn start_clock_updater() {
     // Force CLOCK_EPOCH initialization
     let _ = *CLOCK_EPOCH;
 
+    // Initialize wall-clock time immediately so cached_now_ms() returns
+    // a reasonable value even before the first tick.
+    let wall_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    CACHED_WALL_MS.store(wall_ms, Ordering::Relaxed);
+
     tokio::spawn(async {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
         loop {
             interval.tick().await;
             let elapsed = CLOCK_EPOCH.elapsed();
             CACHED_OFFSET_US.store(elapsed.as_micros() as u64, Ordering::Relaxed);
+            let wall_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            CACHED_WALL_MS.store(wall_ms, Ordering::Relaxed);
         }
     });
 }
@@ -91,5 +118,53 @@ mod tests {
     fn test_cached_now_does_not_panic_without_updater() {
         // Even without the background task, cached_now should return a valid instant
         let _ = cached_now();
+    }
+
+    #[tokio::test]
+    async fn test_cached_now_ms_returns_reasonable_epoch() {
+        start_clock_updater();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let cached = cached_now_ms();
+        let real = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Should be within 100ms of real wall-clock time
+        let diff = if real > cached {
+            real - cached
+        } else {
+            cached - real
+        };
+        assert!(
+            diff < 100,
+            "cached_now_ms drift too large: {}ms",
+            diff
+        );
+
+        // Should be a reasonable epoch time (after 2020-01-01)
+        assert!(
+            cached > 1_577_836_800_000,
+            "cached_now_ms too small: {} (expected > 2020 epoch)",
+            cached
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_now_ms_monotonic() {
+        start_clock_updater();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let t1 = cached_now_ms();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let t2 = cached_now_ms();
+
+        assert!(
+            t2 >= t1,
+            "cached_now_ms should be monotonic: t1={}, t2={}",
+            t1,
+            t2
+        );
     }
 }
