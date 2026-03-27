@@ -587,8 +587,8 @@ impl Server {
                 // in the pipeline (MULTI/EXEC/WATCH/DISCARD must go through
                 // individual dispatch to maintain transaction semantics).
                 // RESP3 and security-enabled connections are now supported:
-                // batched commands produce basic RESP types compatible with both
-                // protocols, and ACL checks run per-command within the batch loop.
+                // batched responses are converted via convert_for_resp3() when needed,
+                // and ACL checks run per-command within the batch loop.
                 let has_tx_cmd = parsed_commands.iter().any(|cmd| {
                     let name = cmd.name.as_bytes();
                     matches!(name.len(), 4 | 5 | 7) && matches!(
@@ -680,6 +680,13 @@ impl Server {
                                         let resp = match result {
                                             Ok(r) => r,
                                             Err(e) => RespValue::Error(e.to_string()),
+                                        };
+                                        let resp = if protocol_version == ProtocolVersion::RESP3 {
+                                            let cmd_lower = batch_cmds[ri].name.to_lowercase();
+                                            let resp3_cmd = Self::build_resp3_command_name(&cmd_lower, &batch_cmds[ri].args);
+                                            resp.convert_for_resp3(&resp3_cmd)
+                                        } else {
+                                            resp
                                         };
                                         if let Ok(bytes) = resp.serialize() {
                                             response_slots[batch_indices[ri]] = bytes;
@@ -936,6 +943,13 @@ impl Server {
                                         let resp = match result {
                                             Ok(r) => r.clone(),
                                             Err(e) => RespValue::Error(e.to_string()),
+                                        };
+                                        let resp = if protocol_version == ProtocolVersion::RESP3 {
+                                            let cmd_lower = batch_cmds[i].name.to_lowercase();
+                                            let resp3_cmd = Self::build_resp3_command_name(&cmd_lower, &batch_cmds[i].args);
+                                            resp.convert_for_resp3(&resp3_cmd)
+                                        } else {
+                                            resp
                                         };
                                         if let Ok(bytes) = resp.serialize() {
                                             response_slots[batch_indices[i]] = bytes;
