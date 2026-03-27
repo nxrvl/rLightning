@@ -1194,7 +1194,7 @@ mod tests {
         // Verify element order: new_head, e0, e1, ..., e127
         let all = deserialize_all(&data).unwrap();
         assert_eq!(all[0], b"new_head");
-        assert_eq!(all[1], format!("e0").into_bytes());
+        assert_eq!(all[1], "e0".to_owned().into_bytes());
         assert_eq!(
             all.last().unwrap(),
             &format!("e{}", GAP_BUFFER_THRESHOLD - 1).into_bytes()
@@ -1308,7 +1308,7 @@ mod tests {
 
         assert_eq!(index(&data, 0).unwrap(), Some(b"head".to_vec()));
         assert_eq!(index(&data, 1).unwrap(), Some(b"e0".to_vec()));
-        assert_eq!(index(&data, -1).unwrap().is_some(), true);
+        assert!(index(&data, -1).unwrap().is_some());
 
         let total = len(&data).unwrap();
         assert_eq!(index(&data, total as i64).unwrap(), None);

@@ -57,8 +57,7 @@ fn bench_replication_command_propagation(c: &mut Criterion) {
                         runtime.block_on(async {
                             let storage_config = StorageConfig::default();
                             let storage = StorageEngine::new(storage_config);
-                            let handler = Arc::new(CommandHandler::new(storage));
-                            handler
+                            Arc::new(CommandHandler::new(storage))
                         })
                     },
                     |handler| {
@@ -111,7 +110,7 @@ fn bench_replication_sync_performance(c: &mut Criterion) {
                 runtime.block_on(async {
                     let storage_config = StorageConfig::default();
                     let storage = StorageEngine::new(storage_config);
-                    let handler = Arc::new(CommandHandler::new(storage.clone()));
+                    let _handler = Arc::new(CommandHandler::new(storage.clone()));
 
                     // Populate master with data
                     for i in 0..1000 {
@@ -156,7 +155,7 @@ fn bench_replication_memory_usage(c: &mut Criterion) {
                             ..Default::default()
                         };
                         let storage = StorageEngine::new(storage_config);
-                        let handler = Arc::new(CommandHandler::new(storage.clone()));
+                        let _handler = Arc::new(CommandHandler::new(storage.clone()));
 
                         // Add data
                         for i in 0..data_size {
@@ -233,8 +232,7 @@ fn bench_replication_lag_simulation(c: &mut Criterion) {
                         runtime.block_on(async {
                             let storage_config = StorageConfig::default();
                             let storage = StorageEngine::new(storage_config);
-                            let handler = Arc::new(CommandHandler::new(storage));
-                            handler
+                            Arc::new(CommandHandler::new(storage))
                         })
                     },
                     |handler| {

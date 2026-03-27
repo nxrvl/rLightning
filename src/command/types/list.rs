@@ -1384,13 +1384,13 @@ mod tests {
         }
 
         // Empty the list
-        lpop(&engine, &[key.clone()]).await.unwrap();
+        lpop(&engine, std::slice::from_ref(&key)).await.unwrap();
 
         // LPOP and RPOP on empty list should return nil
-        let result = lpop(&engine, &[key.clone()]).await.unwrap();
+        let result = lpop(&engine, std::slice::from_ref(&key)).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
 
-        let result = rpop(&engine, &[key.clone()]).await.unwrap();
+        let result = rpop(&engine, std::slice::from_ref(&key)).await.unwrap();
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -1542,8 +1542,8 @@ mod tests {
         assert_eq!(result, RespValue::Integer(5));
 
         // Remove an element and check again
-        lpop(&engine, &[key.clone()]).await.unwrap();
-        let result = llen(&engine, &[key.clone()]).await.unwrap();
+        lpop(&engine, std::slice::from_ref(&key)).await.unwrap();
+        let result = llen(&engine, std::slice::from_ref(&key)).await.unwrap();
         assert_eq!(result, RespValue::Integer(4));
     }
 

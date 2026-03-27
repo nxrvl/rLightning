@@ -1962,14 +1962,14 @@ mod tests {
             let shard = store.shard_index(key.as_bytes());
             if shard == shard_a && keys_a.len() < 2 {
                 keys_a.push(key);
-            } else if shard != shard_a && keys_b.len() < 1 {
+            } else if shard != shard_a && keys_b.is_empty() {
                 keys_b.push(key);
             }
-            if keys_a.len() >= 2 && keys_b.len() >= 1 {
+            if keys_a.len() >= 2 && !keys_b.is_empty() {
                 break;
             }
         }
-        assert!(keys_a.len() >= 2 && keys_b.len() >= 1);
+        assert!(keys_a.len() >= 2 && !keys_b.is_empty());
 
         // Interleave: GET shard_a, GET shard_b, GET shard_a
         let commands = vec![
@@ -1984,15 +1984,15 @@ mod tests {
         // even though they were non-consecutive in the original pipeline
         let mut found_batch = false;
         for entry in &entries {
-            if let PipelineEntry::Batch(g) = &entry.entry {
-                if g.commands.len() == 2 {
-                    found_batch = true;
-                    assert_eq!(g.shard_idx, shard_a);
-                    assert!(g.is_read_only);
-                    // Original indices should include both shard_a commands
-                    assert!(entry.original_indices.contains(&0));
-                    assert!(entry.original_indices.contains(&2));
-                }
+            if let PipelineEntry::Batch(g) = &entry.entry
+                && g.commands.len() == 2
+            {
+                found_batch = true;
+                assert_eq!(g.shard_idx, shard_a);
+                assert!(g.is_read_only);
+                // Original indices should include both shard_a commands
+                assert!(entry.original_indices.contains(&0));
+                assert!(entry.original_indices.contains(&2));
             }
         }
         assert!(found_batch, "Expected shard_a commands to be batched together");

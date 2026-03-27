@@ -7,8 +7,10 @@ use rlightning::storage::engine::{StorageConfig, StorageEngine};
 #[tokio::test]
 async fn test_large_json_through_resp() {
     // Create a configuration with sufficient buffer size for test
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1024 * 1024; // 1MB
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB
+        ..StorageConfig::default()
+    };
 
     // Use a unique port number to avoid conflicts with other tests
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18199));
@@ -94,8 +96,10 @@ async fn test_large_json_through_resp() {
 /// Test setting JSON with control characters that could break the RESP protocol
 #[tokio::test]
 async fn test_json_with_control_chars() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1 * 1024 * 1024; // 1MB
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB
+        ..StorageConfig::default()
+    };
 
     // Use a unique port number
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18200));
@@ -165,8 +169,10 @@ async fn test_json_with_control_chars() {
 async fn test_error_reproduction() {
     // Use a unique port number
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18300));
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1 * 1024 * 1024; // 1MB
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB
+        ..StorageConfig::default()
+    };
     let storage = std::sync::Arc::new(StorageEngine::new(config));
     let server = Server::new(addr, std::sync::Arc::clone(&storage));
 

@@ -992,7 +992,7 @@ async fn acceptance_test_hyperloglog_commands() {
     if let RespValue::Integer(count) = resp {
         // HLL is probabilistic, but for 5 elements it should be close to 5
         assert!(
-            count >= 4 && count <= 6,
+            (4..=6).contains(&count),
             "PFCOUNT should be ~5, got {}",
             count
         );
@@ -1009,7 +1009,7 @@ async fn acceptance_test_hyperloglog_commands() {
         .unwrap();
     if let RespValue::Integer(count) = resp {
         assert!(
-            count >= 4 && count <= 6,
+            (4..=6).contains(&count),
             "PFCOUNT should still be ~5, got {}",
             count
         );
@@ -1033,7 +1033,7 @@ async fn acceptance_test_hyperloglog_commands() {
     if let RespValue::Integer(count) = resp {
         // 5 + 3 = 8 unique elements
         assert!(
-            count >= 6 && count <= 10,
+            (6..=10).contains(&count),
             "PFCOUNT merged should be ~8, got {}",
             count
         );
@@ -1121,7 +1121,7 @@ async fn acceptance_test_geo_commands() {
         .unwrap();
     if let RespValue::Array(Some(arr)) = &resp {
         // Should find SF and LA within 700km radius
-        assert!(arr.len() >= 1);
+        assert!(!arr.is_empty());
     }
 }
 
@@ -1431,7 +1431,7 @@ async fn acceptance_test_scenario_rate_limiter() {
     // Next request should exceed limit
     let resp = client.send_command_str("INCR", &[rate_key]).await.unwrap();
     let count = integer_value(&resp).unwrap();
-    assert!(count > limit as i64, "Should exceed rate limit");
+    assert!(count > limit, "Should exceed rate limit");
 }
 
 #[tokio::test]
@@ -1701,11 +1701,8 @@ async fn acceptance_test_resp3_negotiation() {
 
     // HELLO 2 to switch back to RESP2
     let resp = client.send_command_str("HELLO", &["2"]).await.unwrap();
-    match &resp {
-        RespValue::Array(Some(arr)) => {
-            assert!(!arr.is_empty(), "HELLO 2 should return server info");
-        }
-        _ => {}
+    if let RespValue::Array(Some(arr)) = &resp {
+        assert!(!arr.is_empty(), "HELLO 2 should return server info");
     }
 
     // Verify RESP2 still works

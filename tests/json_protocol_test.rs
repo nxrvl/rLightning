@@ -57,9 +57,9 @@ async fn test_large_json_set_get() {
     json_data.push_str("]\n  },\n");
 
     // Add some text with control characters to test sanitization
-    json_data.push_str(&format!(
+    json_data.push_str(
         "  \"control_chars\": \"Text with control chars: \\u001F separator \\u001E record\",\n"
-    ));
+    );
 
     // Close the JSON object
     json_data.push_str("  \"final_field\": \"value\"\n}");

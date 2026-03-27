@@ -37,7 +37,7 @@ async fn test_redis_datatype_compatibility() -> Result<(), Box<dyn std::error::E
             Err(e) => {
                 eprintln!("Failed to connect to server: {}", e);
                 sleep(Duration::from_millis(500)).await;
-                Client::connect(addr).await.map_err(|e| e.into())
+                Client::connect(addr).await
             }
         }
     }
@@ -61,10 +61,10 @@ async fn test_redis_datatype_compatibility() -> Result<(), Box<dyn std::error::E
                         client = new_client;
                         match client.send_command(cmd).await {
                             Ok(response) => (client, Ok(response)),
-                            Err(e) => (client, Err(e.into())),
+                            Err(e) => (client, Err(e)),
                         }
                     }
-                    Err(e) => (client, Err(e.into())),
+                    Err(e) => (client, Err(e)),
                 }
             }
         }

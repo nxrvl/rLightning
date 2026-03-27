@@ -7,9 +7,10 @@ mod debug_key_tests {
 
     #[tokio::test]
     async fn test_problematic_backend_key() {
-        let mut config = StorageConfig::default();
-        // Increase size limits for this test
-        config.max_value_size = 1024 * 1024 * 10; // 10MB
+        let config = StorageConfig {
+            max_value_size: 1024 * 1024 * 10, // 10MB
+            ..Default::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Test the exact key from the backend logs
@@ -75,8 +76,10 @@ mod debug_key_tests {
 
     #[tokio::test]
     async fn test_very_long_key() {
-        let mut config = StorageConfig::default();
-        config.max_key_size = 2048; // Increase key size limit for this test
+        let config = StorageConfig {
+            max_key_size: 2048, // Increase key size limit for this test
+            ..Default::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create a key that's exactly at the limit

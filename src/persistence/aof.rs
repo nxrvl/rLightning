@@ -1156,7 +1156,7 @@ mod tests {
             id: crate::storage::stream::StreamEntryId::new(1000, 0),
             fields: vec![(b"temp".to_vec(), b"25".to_vec())],
         };
-        stream.entries.insert(entry.id.clone(), entry);
+        stream.entries.insert(entry.id, entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
         let item = make_item(StoreValue::Stream(stream));
         let cmds = aof_rewrite_commands_for_item(&key, &item);
@@ -1290,7 +1290,7 @@ mod tests {
 
         // String
         let str_item = make_item(StoreValue::Str(b"hello".to_vec().into()));
-        for args in aof_rewrite_commands_for_item(&b"str".to_vec(), &str_item) {
+        for args in aof_rewrite_commands_for_item(b"str", &str_item) {
             engine
                 .process_command(&RespCommand {
                     name: args[0].clone(),
@@ -1303,7 +1303,7 @@ mod tests {
         // List
         let list = VecDeque::from(vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
         let list_item = make_item(StoreValue::List(list));
-        for args in aof_rewrite_commands_for_item(&b"lst".to_vec(), &list_item) {
+        for args in aof_rewrite_commands_for_item(b"lst", &list_item) {
             engine
                 .process_command(&RespCommand {
                     name: args[0].clone(),
@@ -1318,7 +1318,7 @@ mod tests {
         set.insert(b"a".to_vec());
         set.insert(b"b".to_vec());
         let set_item = make_item(StoreValue::Set(set));
-        for args in aof_rewrite_commands_for_item(&b"st".to_vec(), &set_item) {
+        for args in aof_rewrite_commands_for_item(b"st", &set_item) {
             engine
                 .process_command(&RespCommand {
                     name: args[0].clone(),
@@ -1332,7 +1332,7 @@ mod tests {
         let mut hash = NativeHashMap::default();
         hash.insert(b"f".to_vec(), b"v".to_vec());
         let hash_item = make_item(StoreValue::Hash(hash));
-        for args in aof_rewrite_commands_for_item(&b"hs".to_vec(), &hash_item) {
+        for args in aof_rewrite_commands_for_item(b"hs", &hash_item) {
             engine
                 .process_command(&RespCommand {
                     name: args[0].clone(),
@@ -1347,7 +1347,7 @@ mod tests {
         zset.insert(1.0, b"m1".to_vec());
         zset.insert(2.0, b"m2".to_vec());
         let zset_item = make_item(StoreValue::ZSet(zset));
-        for args in aof_rewrite_commands_for_item(&b"zs".to_vec(), &zset_item) {
+        for args in aof_rewrite_commands_for_item(b"zs", &zset_item) {
             engine
                 .process_command(&RespCommand {
                     name: args[0].clone(),
@@ -2082,8 +2082,8 @@ mod tests {
             id: StreamEntryId::new(2000, 0),
             fields: vec![(b"field2".to_vec(), b"value2".to_vec())],
         };
-        stream.entries.insert(entry1.id.clone(), entry1);
-        stream.entries.insert(entry2.id.clone(), entry2);
+        stream.entries.insert(entry1.id, entry1);
+        stream.entries.insert(entry2.id, entry2);
         stream.last_id = StreamEntryId::new(2000, 0);
 
         // Create a consumer group with pending entries

@@ -1670,12 +1670,12 @@ mod tests {
 
         // After swap: db0 should have key1, db1 should have key0
         if let Some(db0) = engine.get_db(0) {
-            assert!(db0.contains_key(&b"key1".to_vec()));
-            assert!(!db0.contains_key(&b"key0".to_vec()));
+            assert!(db0.contains_key(b"key1"));
+            assert!(!db0.contains_key(b"key0"));
         }
         if let Some(db1) = engine.get_db(1) {
-            assert!(db1.contains_key(&b"key0".to_vec()));
-            assert!(!db1.contains_key(&b"key1".to_vec()));
+            assert!(db1.contains_key(b"key0"));
+            assert!(!db1.contains_key(b"key1"));
         }
     }
 

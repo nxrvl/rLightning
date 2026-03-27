@@ -1,7 +1,6 @@
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::server::Server;
 use rlightning::storage::engine::StorageEngine;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -102,7 +101,7 @@ async fn test_server_handles_invalid_commands_gracefully() {
     // For unit testing, we'll test the command processing directly
 
     let storage = StorageEngine::new(Default::default());
-    let handler = CommandHandler::new(storage);
+    let _handler = CommandHandler::new(storage);
 
     // With inline protocol support, non-RESP data without \r\n is treated as
     // incomplete (Ok(None)) rather than an error. Data with \r\n would be parsed

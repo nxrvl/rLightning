@@ -350,7 +350,7 @@ mod tests {
         assert!(ttl.is_some(), "Key should have TTL before PERSIST");
 
         // Call PERSIST command
-        let result = persist(&storage, &[key.clone()]).await.unwrap();
+        let result = persist(&storage, std::slice::from_ref(&key)).await.unwrap();
         assert_eq!(
             result,
             RespValue::Integer(1),
@@ -362,7 +362,7 @@ mod tests {
         assert!(ttl_after.is_none(), "Key should not have TTL after PERSIST");
 
         // Test PERSIST on key without TTL
-        let result = persist(&storage, &[key.clone()]).await.unwrap();
+        let result = persist(&storage, std::slice::from_ref(&key)).await.unwrap();
         assert_eq!(
             result,
             RespValue::Integer(0),

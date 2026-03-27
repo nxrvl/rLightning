@@ -1633,7 +1633,7 @@ mod tests {
 
         let result = handler.process(ttl_command, 0).await.unwrap();
         if let RespValue::Integer(ttl) = result {
-            assert!(ttl <= 2 && ttl >= 1);
+            assert!((1..=2).contains(&ttl));
         } else {
             panic!("Expected Integer response from TTL command");
         }
@@ -2304,24 +2304,24 @@ mod tests {
         // Test various case combinations for SET
         for variant in &[&b"set"[..], b"Set", b"sEt", b"SET"] {
             let result = handler
-                .process_bytes(*variant, &[b"k".to_vec(), b"v".to_vec()], 0)
+                .process_bytes(variant, &[b"k".to_vec(), b"v".to_vec()], 0)
                 .await;
             assert!(
                 result.is_ok(),
                 "SET variant {:?} should dispatch correctly",
-                std::str::from_utf8(*variant)
+                std::str::from_utf8(variant)
             );
         }
 
         // Test various case combinations for GET
         for variant in &[&b"get"[..], b"Get", b"gEt", b"GET"] {
             let result = handler
-                .process_bytes(*variant, &[b"k".to_vec()], 0)
+                .process_bytes(variant, &[b"k".to_vec()], 0)
                 .await;
             assert!(
                 result.is_ok(),
                 "GET variant {:?} should dispatch correctly",
-                std::str::from_utf8(*variant)
+                std::str::from_utf8(variant)
             );
         }
 
@@ -2333,24 +2333,24 @@ mod tests {
                 .await
                 .unwrap();
             let result = handler
-                .process_bytes(*variant, &[b"k".to_vec()], 0)
+                .process_bytes(variant, &[b"k".to_vec()], 0)
                 .await;
             assert!(
                 result.is_ok(),
                 "DEL variant {:?} should dispatch correctly",
-                std::str::from_utf8(*variant)
+                std::str::from_utf8(variant)
             );
         }
 
         // Test case insensitivity for slow-path commands too
         for variant in &[&b"append"[..], b"APPEND", b"Append"] {
             let result = handler
-                .process_bytes(*variant, &[b"k2".to_vec(), b"x".to_vec()], 0)
+                .process_bytes(variant, &[b"k2".to_vec(), b"x".to_vec()], 0)
                 .await;
             assert!(
                 result.is_ok(),
                 "APPEND variant {:?} should dispatch correctly",
-                std::str::from_utf8(*variant)
+                std::str::from_utf8(variant)
             );
         }
     }

@@ -726,7 +726,7 @@ async fn test_sentinel_docker_failover() {
         .unwrap();
     let other_sentinels = resp_array(&r);
     assert!(
-        other_sentinels.len() >= 1,
+        !other_sentinels.is_empty(),
         "Should know about other sentinels"
     );
 

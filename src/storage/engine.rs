@@ -1938,12 +1938,12 @@ impl StorageEngine {
                                         }
                                         delta += 32; // per-entry overhead
                                         let entry = crate::storage::stream::StreamEntry {
-                                            id: id.clone(),
+                                            id,
                                             fields,
                                         };
-                                        stream.entries.insert(id.clone(), entry);
+                                        stream.entries.insert(id, entry);
                                         if id > stream.last_id {
-                                            stream.last_id = id.clone();
+                                            stream.last_id = id;
                                         }
                                         stream.entries_added += 1;
                                         if stream.first_entry_id.is_none() {
@@ -1965,12 +1965,12 @@ impl StorageEngine {
                                             j += 2;
                                         }
                                         let entry = crate::storage::stream::StreamEntry {
-                                            id: id.clone(),
+                                            id,
                                             fields,
                                         };
-                                        stream.entries.insert(id.clone(), entry);
+                                        stream.entries.insert(id, entry);
                                         if id > stream.last_id {
-                                            stream.last_id = id.clone();
+                                            stream.last_id = id;
                                         }
                                         stream.entries_added += 1;
                                         if stream.first_entry_id.is_none() {
@@ -4429,7 +4429,7 @@ mod tests {
             .unwrap();
 
         // Acquire shard lock
-        let guard = storage.lock_keys(&[key.clone()]).await;
+        let guard = storage.lock_keys(std::slice::from_ref(&key)).await;
 
         // Can still read/write the key (data operations use separate locks)
         let val = storage.get(&key).await.unwrap();
@@ -4860,14 +4860,14 @@ mod tests {
                 .unwrap();
         }
         // Verify cached_mem_size matches value.mem_size() for list
-        storage.active_db().get_mut(b"list_key").map(|entry| {
+        if let Some(entry) = storage.active_db().get_mut(b"list_key") {
             let actual = entry.value.mem_size() as u64;
             assert_eq!(
                 entry.cached_mem_size, actual,
                 "List: cached_mem_size {} != actual {}",
                 entry.cached_mem_size, actual
             );
-        });
+        }
 
         // Test Set: add some members
         for i in 0..10 {
@@ -4895,14 +4895,14 @@ mod tests {
                 .unwrap();
         }
         // Verify cached_mem_size matches value.mem_size() for set
-        storage.active_db().get_mut(b"set_key").map(|entry| {
+        if let Some(entry) = storage.active_db().get_mut(b"set_key") {
             let actual = entry.value.mem_size() as u64;
             assert_eq!(
                 entry.cached_mem_size, actual,
                 "Set: cached_mem_size {} != actual {}",
                 entry.cached_mem_size, actual
             );
-        });
+        }
 
         // Test Hash: set some fields
         let fields: Vec<(&[u8], &[u8])> = vec![
@@ -4911,28 +4911,28 @@ mod tests {
             (b"f3", b"val3"),
         ];
         storage.hash_set(b"hash_key", &fields).unwrap();
-        storage.active_db().get_mut(b"hash_key").map(|entry| {
+        if let Some(entry) = storage.active_db().get_mut(b"hash_key") {
             let actual = entry.value.mem_size() as u64;
             assert_eq!(
                 entry.cached_mem_size, actual,
                 "Hash: cached_mem_size {} != actual {}",
                 entry.cached_mem_size, actual
             );
-        });
+        }
 
         // Test String: set via regular path
         storage
             .set(b"str_key".to_vec(), b"hello_world".to_vec(), None)
             .await
             .unwrap();
-        storage.active_db().get_mut(b"str_key").map(|entry| {
+        if let Some(entry) = storage.active_db().get_mut(b"str_key") {
             let actual = entry.value.mem_size() as u64;
             assert_eq!(
                 entry.cached_mem_size, actual,
                 "String: cached_mem_size {} != actual {}",
                 entry.cached_mem_size, actual
             );
-        });
+        }
     }
 
     #[tokio::test]

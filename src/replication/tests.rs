@@ -27,9 +27,11 @@ async fn test_replication_manager_creation() {
 async fn test_replication_manager_disconnect_from_master() {
     let storage_config = StorageConfig::default();
     let engine = StorageEngine::new(storage_config);
-    let mut replication_config = ReplicationConfig::default();
-    replication_config.master_host = Some("localhost".to_string());
-    replication_config.master_port = Some(6379);
+    let replication_config = ReplicationConfig {
+        master_host: Some("localhost".to_string()),
+        master_port: Some(6379),
+        ..ReplicationConfig::default()
+    };
 
     let replication_manager = ReplicationManager::new(engine.clone(), replication_config);
 
@@ -225,31 +227,32 @@ async fn test_batched_replication_preserves_command_ordering() {
     // Build a batch of SELECT + write command pairs, simulating
     // what the pipeline batch loop now collects before calling
     // propagate_commands_batch once.
-    let mut batch: Vec<RespCommand> = Vec::new();
-    batch.push(RespCommand {
-        name: b"SELECT".to_vec(),
-        args: vec![b"0".to_vec()],
-    });
-    batch.push(RespCommand {
-        name: b"SET".to_vec(),
-        args: vec![b"key1".to_vec(), b"val1".to_vec()],
-    });
-    batch.push(RespCommand {
-        name: b"SELECT".to_vec(),
-        args: vec![b"0".to_vec()],
-    });
-    batch.push(RespCommand {
-        name: b"SET".to_vec(),
-        args: vec![b"key2".to_vec(), b"val2".to_vec()],
-    });
-    batch.push(RespCommand {
-        name: b"SELECT".to_vec(),
-        args: vec![b"0".to_vec()],
-    });
-    batch.push(RespCommand {
-        name: b"DEL".to_vec(),
-        args: vec![b"key1".to_vec()],
-    });
+    let batch: Vec<RespCommand> = vec![
+        RespCommand {
+            name: b"SELECT".to_vec(),
+            args: vec![b"0".to_vec()],
+        },
+        RespCommand {
+            name: b"SET".to_vec(),
+            args: vec![b"key1".to_vec(), b"val1".to_vec()],
+        },
+        RespCommand {
+            name: b"SELECT".to_vec(),
+            args: vec![b"0".to_vec()],
+        },
+        RespCommand {
+            name: b"SET".to_vec(),
+            args: vec![b"key2".to_vec(), b"val2".to_vec()],
+        },
+        RespCommand {
+            name: b"SELECT".to_vec(),
+            args: vec![b"0".to_vec()],
+        },
+        RespCommand {
+            name: b"DEL".to_vec(),
+            args: vec![b"key1".to_vec()],
+        },
+    ];
 
     // Propagate all pairs in a single batch call
     mgr.propagate_commands_batch(&batch).await;

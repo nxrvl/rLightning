@@ -361,7 +361,7 @@ mod tests {
         let result = pfcount(&engine, &[b"hll".to_vec()]).await.unwrap();
         if let RespValue::Integer(count) = result {
             // HLL is approximate, allow some error margin
-            assert!(count >= 2 && count <= 4, "Expected ~3, got {}", count);
+            assert!((2..=4).contains(&count), "Expected ~3, got {}", count);
         } else {
             panic!("Expected Integer response");
         }
@@ -385,7 +385,7 @@ mod tests {
             .await
             .unwrap();
         if let RespValue::Integer(count) = result {
-            assert!(count >= 2 && count <= 4, "Expected ~3, got {}", count);
+            assert!((2..=4).contains(&count), "Expected ~3, got {}", count);
         } else {
             panic!("Expected Integer response");
         }
@@ -424,7 +424,7 @@ mod tests {
         // Dest should contain union of elements
         let result = pfcount(&engine, &[b"dest".to_vec()]).await.unwrap();
         if let RespValue::Integer(count) = result {
-            assert!(count >= 3 && count <= 5, "Expected ~4, got {}", count);
+            assert!((3..=5).contains(&count), "Expected ~4, got {}", count);
         } else {
             panic!("Expected Integer response");
         }
@@ -451,7 +451,7 @@ mod tests {
 
         let result = pfcount(&engine, &[b"dest".to_vec()]).await.unwrap();
         if let RespValue::Integer(count) = result {
-            assert!(count >= 3 && count <= 5, "Expected ~4, got {}", count);
+            assert!((3..=5).contains(&count), "Expected ~4, got {}", count);
         } else {
             panic!("Expected Integer response");
         }

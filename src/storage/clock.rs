@@ -132,11 +132,7 @@ mod tests {
             .as_millis() as u64;
 
         // Should be within 100ms of real wall-clock time
-        let diff = if real > cached {
-            real - cached
-        } else {
-            cached - real
-        };
+        let diff = real.abs_diff(cached);
         assert!(
             diff < 100,
             "cached_now_ms drift too large: {}ms",

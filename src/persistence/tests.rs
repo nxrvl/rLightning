@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
@@ -202,9 +203,11 @@ mod tests {
         let rdb = RdbPersistence::new(engine.clone(), rdb_path.clone());
 
         // Set up a config for testing write count triggering
-        let mut config = PersistenceConfig::default();
-        config.mode = PersistenceMode::RDB;
-        config.rdb_snapshot_threshold = 3; // Save after 3 writes
+        let config = PersistenceConfig {
+            mode: PersistenceMode::RDB,
+            rdb_snapshot_threshold: 3, // Save after 3 writes
+            ..PersistenceConfig::default()
+        };
 
         // Schedule snapshots
         let schedule_result = rdb.schedule_snapshots(&config).await;

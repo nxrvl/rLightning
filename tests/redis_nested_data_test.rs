@@ -308,12 +308,12 @@ async fn test_redis_nested_data_structures() -> Result<(), Box<dyn std::error::E
                         let data_key = format!("tree:data:{}", child_key);
 
                         let response = client.send_command_str("HGETALL", &[&data_key]).await?;
-                        if let RespValue::Array(Some(data)) = response {
-                            if !data.is_empty() {
-                                println!("Got data for {}: {:?}", child_key, data);
-                                found_data = true;
-                                break;
-                            }
+                        if let RespValue::Array(Some(data)) = response
+                            && !data.is_empty()
+                        {
+                            println!("Got data for {}: {:?}", child_key, data);
+                            found_data = true;
+                            break;
                         }
                     }
                 }

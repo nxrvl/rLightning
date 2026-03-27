@@ -35,7 +35,7 @@ impl DockerManager {
             println!("Build attempt {}/{}", attempt, max_retries);
 
             let output = Command::new("docker")
-                .args(&["build", "-t", &self.image_name, "."])
+                .args(["build", "-t", &self.image_name, "."])
                 .output()?;
 
             if output.status.success() {
@@ -72,7 +72,7 @@ impl DockerManager {
             for attempt in 1..=max_retries {
                 println!("Pull attempt {}/{} for {}", attempt, max_retries, image);
 
-                let output = Command::new("docker").args(&["pull", image]).output()?;
+                let output = Command::new("docker").args(["pull", image]).output()?;
 
                 if output.status.success() {
                     println!("✅ Successfully pulled {}", image);
@@ -103,7 +103,7 @@ impl DockerManager {
     /// Check if Docker is available
     fn check_docker_available(&self) -> bool {
         Command::new("docker")
-            .args(&["--version"])
+            .args(["--version"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -113,12 +113,12 @@ impl DockerManager {
     async fn cleanup_container(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Stop container if running
         let _ = Command::new("docker")
-            .args(&["stop", &self.container_name])
+            .args(["stop", &self.container_name])
             .output();
 
         // Remove container if exists
         let _ = Command::new("docker")
-            .args(&["rm", &self.container_name])
+            .args(["rm", &self.container_name])
             .output();
 
         Ok(())
@@ -129,7 +129,7 @@ impl DockerManager {
         println!("Starting rLightning container on port {}", self.port);
 
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "-d",
                 "--name",
@@ -150,7 +150,7 @@ impl DockerManager {
             sleep(Duration::from_millis(500)).await;
 
             let health_output = Command::new("docker")
-                .args(&[
+                .args([
                     "exec",
                     &self.container_name,
                     "nc",
@@ -176,7 +176,7 @@ impl DockerManager {
     /// Get container logs for debugging
     async fn get_logs(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let output = Command::new("docker")
-            .args(&["logs", &self.container_name])
+            .args(["logs", &self.container_name])
             .output()?;
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -187,10 +187,10 @@ impl Drop for DockerManager {
     fn drop(&mut self) {
         // Best effort cleanup
         let _ = Command::new("docker")
-            .args(&["stop", &self.container_name])
+            .args(["stop", &self.container_name])
             .output();
         let _ = Command::new("docker")
-            .args(&["rm", &self.container_name])
+            .args(["rm", &self.container_name])
             .output();
     }
 }

@@ -566,10 +566,10 @@ async fn test_redis_sharded_pubsub() -> Result<(), Box<dyn std::error::Error + S
 
     // Read the shard message from shard subscriber
     let shard_msg = shard_subscriber.read_response().await?;
-    if let RespValue::Array(Some(msg)) = &shard_msg {
-        if let RespValue::BulkString(Some(msg_type)) = &msg[0] {
-            assert_eq!(std::str::from_utf8(msg_type)?, "smessage");
-        }
+    if let RespValue::Array(Some(msg)) = &shard_msg
+        && let RespValue::BulkString(Some(msg_type)) = &msg[0]
+    {
+        assert_eq!(std::str::from_utf8(msg_type)?, "smessage");
     }
 
     // Regular PUBLISH should NOT reach shard subscriber (only regular subscribers get it)

@@ -222,8 +222,10 @@ mod data_corruption_tests {
 
     #[tokio::test]
     async fn test_large_base64_data_corruption() {
-        let mut config = StorageConfig::default();
-        config.max_value_size = 10 * 1024 * 1024; // 10MB
+        let config = StorageConfig {
+            max_value_size: 10 * 1024 * 1024, // 10MB
+            ..Default::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Test with large base64-encoded data (like 5KB+ JSON from logs)

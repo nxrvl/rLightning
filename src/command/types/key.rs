@@ -1019,7 +1019,7 @@ mod tests {
 
         // Key should exist in db 1
         let db1 = engine.get_db(1).unwrap();
-        assert!(db1.contains_key(&b"moveme".to_vec()));
+        assert!(db1.contains_key(b"moveme"));
 
         // Move non-existent key
         let result = move_cmd(&engine, &[b"nonexistent".to_vec(), b"1".to_vec()])
@@ -1117,7 +1117,7 @@ mod tests {
         let ttl = engine.ttl(b"ea_key").await.unwrap();
         assert!(ttl.is_some());
         let ttl_secs = ttl.unwrap().as_secs();
-        assert!(ttl_secs >= 98 && ttl_secs <= 101);
+        assert!((98..=101).contains(&ttl_secs));
 
         // Set expiration in the past should delete the key
         let past_ts = SystemTime::now()
@@ -1938,14 +1938,14 @@ mod tests {
         )
         .await
         .unwrap();
-        if let RespValue::Array(Some(scan_result)) = result {
-            if let RespValue::Array(Some(keys)) = &scan_result[1] {
-                // Should only contain string keys
-                for key in keys {
-                    if let RespValue::BulkString(Some(k)) = key {
-                        let key_type = engine.get_type(k).await.unwrap();
-                        assert_eq!(key_type, "string");
-                    }
+        if let RespValue::Array(Some(scan_result)) = result
+            && let RespValue::Array(Some(keys)) = &scan_result[1]
+        {
+            // Should only contain string keys
+            for key in keys {
+                if let RespValue::BulkString(Some(k)) = key {
+                    let key_type = engine.get_type(k).await.unwrap();
+                    assert_eq!(key_type, "string");
                 }
             }
         }
@@ -1963,10 +1963,10 @@ mod tests {
         )
         .await
         .unwrap();
-        if let RespValue::Array(Some(scan_result)) = result {
-            if let RespValue::Array(Some(keys)) = &scan_result[1] {
-                assert_eq!(keys.len(), 1);
-            }
+        if let RespValue::Array(Some(scan_result)) = result
+            && let RespValue::Array(Some(keys)) = &scan_result[1]
+        {
+            assert_eq!(keys.len(), 1);
         }
     }
 
@@ -2003,10 +2003,10 @@ mod tests {
         )
         .await
         .unwrap();
-        if let RespValue::Array(Some(scan_result)) = result {
-            if let RespValue::Array(Some(keys)) = &scan_result[1] {
-                assert_eq!(keys.len(), 2);
-            }
+        if let RespValue::Array(Some(scan_result)) = result
+            && let RespValue::Array(Some(keys)) = &scan_result[1]
+        {
+            assert_eq!(keys.len(), 2);
         }
     }
 }

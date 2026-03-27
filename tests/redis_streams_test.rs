@@ -359,11 +359,11 @@ async fn test_redis_streams() -> Result<(), Box<dyn std::error::Error + Send + S
 
                 // Check that the deleted ID is no longer present
                 for entry in entries {
-                    if let RespValue::Array(Some(entry_parts)) = entry {
-                        if let RespValue::BulkString(Some(id_bytes)) = &entry_parts[0] {
-                            let id = String::from_utf8(id_bytes.clone())?;
-                            assert_ne!(id, entry_id, "Deleted entry ID should not be present");
-                        }
+                    if let RespValue::Array(Some(entry_parts)) = entry
+                        && let RespValue::BulkString(Some(id_bytes)) = &entry_parts[0]
+                    {
+                        let id = String::from_utf8(id_bytes.clone())?;
+                        assert_ne!(id, entry_id, "Deleted entry ID should not be present");
                     }
                 }
             }
@@ -476,43 +476,41 @@ async fn test_redis_streams() -> Result<(), Box<dyn std::error::Error + Send + S
                     "XREADGROUP should return results for 1 stream"
                 );
 
-                if let RespValue::Array(Some(stream_data)) = &results[0] {
-                    if let RespValue::Array(Some(entries)) = &stream_data[1] {
-                        assert_eq!(entries.len(), 3, "XREADGROUP should return all 3 entries");
-                    }
+                if let RespValue::Array(Some(stream_data)) = &results[0]
+                    && let RespValue::Array(Some(entries)) = &stream_data[1]
+                {
+                    assert_eq!(entries.len(), 3, "XREADGROUP should return all 3 entries");
                 }
 
                 // Test XACK to acknowledge a message
-                if let RespValue::Array(Some(stream_data)) = &results[0] {
-                    if let RespValue::Array(Some(entries)) = &stream_data[1] {
-                        if let RespValue::Array(Some(entry_parts)) = &entries[0] {
-                            if let RespValue::BulkString(Some(id_bytes)) = &entry_parts[0] {
-                                let id = String::from_utf8(id_bytes.clone())?;
+                if let RespValue::Array(Some(stream_data)) = &results[0]
+                    && let RespValue::Array(Some(entries)) = &stream_data[1]
+                    && let RespValue::Array(Some(entry_parts)) = &entries[0]
+                    && let RespValue::BulkString(Some(id_bytes)) = &entry_parts[0]
+                {
+                    let id = String::from_utf8(id_bytes.clone())?;
 
-                                let xack_result = client
-                                    .send_command_str("XACK", &["groupstream", "mygroup", &id])
-                                    .await?;
-                                if let RespValue::Integer(count) = xack_result {
-                                    assert_eq!(
-                                        count, 1,
-                                        "XACK should return 1 for one acknowledged message"
-                                    );
-                                } else if let RespValue::Error(err) = &xack_result {
-                                    if err.contains("unknown command")
-                                        || err.contains("not implemented")
-                                    {
-                                        println!("XACK command is not implemented, skipping");
-                                    } else {
-                                        panic!(
-                                            "Unexpected error response from XACK: {:?}",
-                                            xack_result
-                                        );
-                                    }
-                                } else {
-                                    panic!("Unexpected response type from XACK: {:?}", xack_result);
-                                }
-                            }
+                    let xack_result = client
+                        .send_command_str("XACK", &["groupstream", "mygroup", &id])
+                        .await?;
+                    if let RespValue::Integer(count) = xack_result {
+                        assert_eq!(
+                            count, 1,
+                            "XACK should return 1 for one acknowledged message"
+                        );
+                    } else if let RespValue::Error(err) = &xack_result {
+                        if err.contains("unknown command")
+                            || err.contains("not implemented")
+                        {
+                            println!("XACK command is not implemented, skipping");
+                        } else {
+                            panic!(
+                                "Unexpected error response from XACK: {:?}",
+                                xack_result
+                            );
                         }
+                    } else {
+                        panic!("Unexpected response type from XACK: {:?}", xack_result);
                     }
                 }
             } else if let RespValue::Error(err) = &xreadgroup_result {

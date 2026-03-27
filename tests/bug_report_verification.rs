@@ -8,9 +8,11 @@ use std::sync::Arc;
 /// Test the exact Python scenario from the bug report
 #[tokio::test]
 async fn test_bug_report_exact_scenario() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024;
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024,
+        max_memory: 100 * 1024 * 1024,
+        ..StorageConfig::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19020));
     let storage = Arc::new(StorageEngine::new(config));
@@ -74,9 +76,11 @@ async fn test_bug_report_exact_scenario() {
 /// Test for Bug #2: Type mismatch after protocol error
 #[tokio::test]
 async fn test_type_mismatch_after_error() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024;
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024,
+        max_memory: 100 * 1024 * 1024,
+        ..StorageConfig::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19021));
     let storage = Arc::new(StorageEngine::new(config));
@@ -135,9 +139,11 @@ async fn test_type_mismatch_after_error() {
 /// Test base64 JSON data (from the bug report error messages)
 #[tokio::test]
 async fn test_base64_json_data() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024;
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024,
+        max_memory: 100 * 1024 * 1024,
+        ..StorageConfig::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19022));
     let storage = Arc::new(StorageEngine::new(config));

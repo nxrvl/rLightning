@@ -12,10 +12,12 @@ use rlightning::storage::engine::{StorageConfig, StorageEngine};
 // Removed unused import: rlightning::persistence::config::AofSyncPolicy
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub const DEFAULT_TEST_PORT: u16 = 17000;
 
 /// Sets up a test server with the specified port offset
 /// Returns the server address
+#[allow(dead_code)]
 pub async fn setup_test_server(
     port_offset: u16,
 ) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
@@ -23,6 +25,7 @@ pub async fn setup_test_server(
 }
 
 /// Creates a test server with custom config
+#[allow(dead_code)]
 pub async fn setup_test_server_with_config(
     port_offset: u16,
     config: StorageConfig,
@@ -32,6 +35,7 @@ pub async fn setup_test_server_with_config(
 
 /// Sets up a test server with specified port offset and security configuration
 /// Returns the server address
+#[allow(dead_code)]
 pub async fn setup_test_server_with_security(
     port_offset: u16,
     storage_config: StorageConfig,
@@ -42,6 +46,7 @@ pub async fn setup_test_server_with_security(
 }
 
 /// Helper to set up a test server with optional security
+#[allow(dead_code)]
 pub async fn setup_test_server_with_optional_security(
     port_offset: u16,
     storage_config: StorageConfig,
@@ -75,6 +80,7 @@ pub async fn setup_test_server_with_optional_security(
 }
 
 /// Creates a new Redis client connected to the specified address
+#[allow(dead_code)]
 pub async fn create_client(
     addr: SocketAddr,
 ) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
@@ -90,6 +96,7 @@ pub async fn create_client(
 }
 
 /// Sets up a test server with replication enabled
+#[allow(dead_code)]
 pub async fn setup_test_server_with_replication(
     port_offset: u16,
     replication_config: ReplicationConfig,
@@ -118,6 +125,7 @@ pub async fn setup_test_server_with_replication(
 }
 
 /// Waits for the specified duration
+#[allow(dead_code)]
 pub async fn wait_ms(ms: u64) {
     sleep(Duration::from_millis(ms)).await;
 }

@@ -574,10 +574,10 @@ mod tests {
         let mut counts: Vec<i64> = responses
             .iter()
             .filter_map(|resp| {
-                if let RespValue::Array(Some(arr)) = resp {
-                    if let RespValue::Integer(n) = arr[2] {
-                        return Some(n);
-                    }
+                if let RespValue::Array(Some(arr)) = resp
+                    && let RespValue::Integer(n) = arr[2]
+                {
+                    return Some(n);
                 }
                 None
             })

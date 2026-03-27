@@ -728,8 +728,8 @@ mod tests {
         assert_eq!(tp, "hash");
         let fields = engine2.hash_getall(b"myhash").unwrap();
         let field_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = fields.into_iter().collect();
-        assert_eq!(field_map.get(&b"field1".to_vec()), Some(&b"val1".to_vec()));
-        assert_eq!(field_map.get(&b"field2".to_vec()), Some(&b"val2".to_vec()));
+        assert_eq!(field_map.get(b"field1".as_slice()), Some(&b"val1".to_vec()));
+        assert_eq!(field_map.get(b"field2".as_slice()), Some(&b"val2".to_vec()));
         assert_eq!(field_map.len(), 2);
     }
 
@@ -748,7 +748,7 @@ mod tests {
                 (b"humidity".to_vec(), b"60".to_vec()),
             ],
         };
-        stream.entries.insert(entry.id.clone(), entry);
+        stream.entries.insert(entry.id, entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
         engine
             .set_with_type(

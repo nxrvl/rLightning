@@ -12,8 +12,10 @@ async fn test_large_json_set_and_get() {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
 
     // Configure storage with sufficient buffer
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1 * 1024 * 1024; // 1MB is enough for our test
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB is enough for our test
+        ..StorageConfig::default()
+    };
 
     // Create storage engine and server
     let storage = Arc::new(StorageEngine::new(config));
@@ -54,10 +56,10 @@ async fn test_large_json_set_and_get() {
 
         test_json.push_str("\"}}");
         if i < 1 {
-            test_json.push_str(",");
+            test_json.push(',');
         }
     }
-    test_json.push_str("]");
+    test_json.push(']');
 
     println!("Test JSON size: {} bytes", test_json.len());
     assert!(

@@ -9,9 +9,11 @@ use std::sync::Arc;
 /// Test the exact 9004 byte boundary reported in the bug
 #[tokio::test]
 async fn test_9004_byte_boundary() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024; // 10MB to allow large values
-    config.max_memory = 100 * 1024 * 1024; // 100MB
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024, // 10MB to allow large values
+        max_memory: 100 * 1024 * 1024, // 100MB
+        ..Default::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19001));
     let storage = Arc::new(StorageEngine::new(config));
@@ -101,9 +103,11 @@ async fn test_9004_byte_boundary() {
 /// Test multiple large value sizes
 #[tokio::test]
 async fn test_large_values_comprehensive() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024; // 10MB
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024, // 10MB
+        max_memory: 100 * 1024 * 1024,
+        ..Default::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19002));
     let storage = Arc::new(StorageEngine::new(config));
@@ -175,9 +179,11 @@ async fn test_large_values_comprehensive() {
 /// Test with base64-encoded data (similar to the bug report)
 #[tokio::test]
 async fn test_base64_encoded_large_values() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024;
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024,
+        max_memory: 100 * 1024 * 1024,
+        ..Default::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19003));
     let storage = Arc::new(StorageEngine::new(config));

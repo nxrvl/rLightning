@@ -309,8 +309,7 @@ async fn test_blpop_wakeup_integration() -> Result<(), Box<dyn std::error::Error
 
     // Spawn BLPOP on client1 in background
     let handle = tokio::spawn(async move {
-        let resp = client1.send_command_str("BLPOP", &["wakekey", "5"]).await;
-        resp
+        client1.send_command_str("BLPOP", &["wakekey", "5"]).await
     });
 
     // Give client1 time to start blocking

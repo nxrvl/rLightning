@@ -108,6 +108,7 @@ impl StatefulRespParser {
 
     /// Set parser state manually (for testing)
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn set_state(&mut self, state: ParserState) {
         self.state = state;
     }

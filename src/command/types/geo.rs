@@ -1680,7 +1680,7 @@ mod tests {
 
         if let RespValue::Array(Some(items)) = result {
             assert!(
-                items.len() >= 1,
+                !items.is_empty(),
                 "Should find at least Palermo or Catania within box"
             );
         } else {

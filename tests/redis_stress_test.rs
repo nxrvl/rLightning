@@ -14,8 +14,10 @@ use rlightning::storage::engine::{StorageConfig, StorageEngine};
 async fn test_concurrent_access() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set up server with more memory for stress test
     let addr: SocketAddr = "127.0.0.1:16384".parse()?;
-    let mut config = StorageConfig::default();
-    config.max_memory = 512; // Increase memory limit for stress test
+    let config = StorageConfig {
+        max_memory: 512, // Increase memory limit for stress test
+        ..StorageConfig::default()
+    };
     let storage = StorageEngine::new(config);
 
     let server = Server::new(addr, storage);
@@ -274,7 +276,7 @@ async fn test_simple_throughput() -> Result<(), Box<dyn std::error::Error + Send
             Err(e) => {
                 eprintln!("Failed to connect to server: {}", e);
                 sleep(Duration::from_millis(500)).await;
-                Client::connect(addr).await.map_err(|e| e.into())
+                Client::connect(addr).await
             }
         }
     }
@@ -307,10 +309,10 @@ async fn test_simple_throughput() -> Result<(), Box<dyn std::error::Error + Send
                         client = new_client;
                         match client.send_command(cmd).await {
                             Ok(response) => (client, Ok(response)),
-                            Err(e) => (client, Err(e.into())),
+                            Err(e) => (client, Err(e)),
                         }
                     }
-                    Err(e) => (client, Err(e.into())),
+                    Err(e) => (client, Err(e)),
                 }
             }
         }

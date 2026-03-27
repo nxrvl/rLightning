@@ -13,8 +13,10 @@ async fn test_redis_advanced_compatibility() -> Result<(), Box<dyn std::error::E
 {
     // Set up server
     let addr: SocketAddr = "127.0.0.1:16385".parse()?;
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1 * 1024 * 1024; // 1MB
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB
+        ..Default::default()
+    };
     let storage = StorageEngine::new(config);
 
     let server = Server::new(addr, storage);

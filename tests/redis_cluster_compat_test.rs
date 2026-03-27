@@ -208,7 +208,7 @@ async fn test_cluster_slots_output_format() {
     mgr.add_slots(&[0, 1, 2, 3, 4, 10, 11, 12]).await.unwrap();
 
     let slots = mgr.get_cluster_slots().await;
-    assert!(slots.len() >= 1, "Should have slot range entries");
+    assert!(!slots.is_empty(), "Should have slot range entries");
 
     // Each entry should have (start, end, nodes)
     for (start, end, nodes) in &slots {

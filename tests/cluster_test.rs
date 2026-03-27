@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rlightning::cluster::gossip::{cluster_cron, start_cluster_bus};
 use rlightning::cluster::slot::{CLUSTER_SLOTS, SlotRange, key_hash_slot};
-use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole, RedirectType};
+use rlightning::cluster::{ClusterConfig, ClusterManager, NodeRole};
 use rlightning::command::Command;
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::resp::RespValue;
@@ -1109,7 +1109,7 @@ async fn test_asking_command_allows_importing_slot() {
     let test_key = test_key.expect("Should find a key mapping to slot 100");
 
     // Without ASKING flag, should redirect (since we don't own the slot normally)
-    let redirect_without_asking = cluster_mgr
+    let _redirect_without_asking = cluster_mgr
         .get_redirect(test_key.as_bytes(), false)
         .await;
     // The importing node doesn't own slot 100 normally, so it would redirect
@@ -1164,9 +1164,8 @@ async fn test_no_redirect_for_slot_exempt_commands() {
 
     // COMMAND should work without redirect
     let result = client.send_command_str("COMMAND", &[]).await.unwrap();
-    match &result {
-        RespValue::Error(_) => panic!("COMMAND should not return error"),
-        _ => {} // Any non-error response is fine
+    if let RespValue::Error(_) = &result {
+        panic!("COMMAND should not return error");
     }
 
     // CLUSTER INFO should work without redirect

@@ -820,11 +820,11 @@ mod tests {
         )
         .await
         .unwrap();
-        if let RespValue::Array(Some(items)) = result {
-            if let RespValue::Array(Some(fv_pairs)) = &items[1] {
-                // Should match "name" and "nickname"
-                assert_eq!(fv_pairs.len(), 4); // 2 matched fields * 2
-            }
+        if let RespValue::Array(Some(items)) = result
+            && let RespValue::Array(Some(fv_pairs)) = &items[1]
+        {
+            // Should match "name" and "nickname"
+            assert_eq!(fv_pairs.len(), 4); // 2 matched fields * 2
         }
     }
 
@@ -963,9 +963,9 @@ mod tests {
                     map.insert(k.clone(), v.clone());
                 }
             }
-            assert_eq!(map.get(&b"a".to_vec()), Some(&b"1".to_vec()));
-            assert_eq!(map.get(&b"b".to_vec()), Some(&b"2".to_vec()));
-            assert_eq!(map.get(&b"c".to_vec()), Some(&b"3".to_vec()));
+            assert_eq!(map.get(b"a".as_slice()), Some(&b"1".to_vec()));
+            assert_eq!(map.get(b"b".as_slice()), Some(&b"2".to_vec()));
+            assert_eq!(map.get(b"c".as_slice()), Some(&b"3".to_vec()));
         } else {
             panic!("Expected array");
         }

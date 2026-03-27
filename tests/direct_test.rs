@@ -2,7 +2,6 @@ use rlightning::networking::client::Client;
 use rlightning::networking::resp::RespValue;
 use rlightning::networking::server::Server;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use std::env;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -12,8 +11,10 @@ async fn test_large_json_set() {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
 
     // Configure storage with sufficient buffer for test
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1 * 1024 * 1024; // 1MB is plenty for our test
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB is plenty for our test
+        ..StorageConfig::default()
+    };
 
     // Create storage engine and server
     let storage = Arc::new(StorageEngine::new(config));
@@ -48,10 +49,10 @@ async fn test_large_json_set() {
 
         test_json.push_str("\"}");
         if i < 1 {
-            test_json.push_str(",");
+            test_json.push(',');
         }
     }
-    test_json.push_str("]");
+    test_json.push(']');
 
     println!("Test JSON size: {} bytes", test_json.len());
     assert!(

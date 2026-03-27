@@ -70,13 +70,12 @@ async fn test_hello_resp2() {
     if let RespValue::Array(Some(items)) = &response {
         // Find proto value
         for i in (0..items.len()).step_by(2) {
-            if let RespValue::BulkString(Some(key)) = &items[i] {
-                if String::from_utf8_lossy(key) == "proto" {
-                    if let RespValue::Integer(val) = &items[i + 1] {
-                        assert_eq!(*val, 2);
-                        return;
-                    }
-                }
+            if let RespValue::BulkString(Some(key)) = &items[i]
+                && String::from_utf8_lossy(key) == "proto"
+                && let RespValue::Integer(val) = &items[i + 1]
+            {
+                assert_eq!(*val, 2);
+                return;
             }
         }
         panic!("Did not find 'proto' key in response");

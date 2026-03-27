@@ -81,7 +81,7 @@ fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(),
 fn build_rlightning_image() -> Result<(), String> {
     eprintln!("Building rLightning Docker image (this will only happen once)...");
     run_command_with_retries(
-        &mut ProcessCommand::new("docker").args([
+        ProcessCommand::new("docker").args([
             "build",
             "--quiet",
             "-t",
@@ -238,8 +238,7 @@ fn connect_to_rlightning() -> Result<Client, redis::RedisError> {
     }
 
     Err(last_error.unwrap_or_else(|| {
-        redis::RedisError::from(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        redis::RedisError::from(std::io::Error::other(
             "Failed to connect to rLightning after multiple attempts",
         ))
     }))
@@ -277,8 +276,7 @@ fn get_connection_with_retry(
     }
 
     Err(last_error.unwrap_or_else(|| {
-        redis::RedisError::from(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        redis::RedisError::from(std::io::Error::other(
             "Failed to get connection after multiple attempts",
         ))
     }))

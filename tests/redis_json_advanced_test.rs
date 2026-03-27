@@ -14,8 +14,10 @@ use rlightning::storage::engine::{StorageConfig, StorageEngine};
 async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set up server with a unique port
     let addr: SocketAddr = "127.0.0.1:16391".parse()?;
-    let mut config = StorageConfig::default();
-    config.max_value_size = 1024 * 1024; // 1MB
+    let config = StorageConfig {
+        max_value_size: 1024 * 1024, // 1MB
+        ..Default::default()
+    };
     let storage = StorageEngine::new(config);
 
     let server = Server::new(addr, storage);
@@ -750,7 +752,7 @@ async fn test_redis_json_advanced() -> Result<(), Box<dyn std::error::Error + Se
     let mut large_nested_json = String::from(r#"{"items":["#);
     for i in 0..100 {
         if i > 0 {
-            large_nested_json.push_str(",");
+            large_nested_json.push(',');
         }
         large_nested_json.push_str(&format!(r#"{{"id":{},"name":"Item {}","attributes":{{"color":"{}","size":{},"tags":["tag1","tag2","tag3"]}},"nested":{{"level1":{{"level2":{{"level3":{{"value":"deep{}"}}}}}}}}}}"#,
             i, i,

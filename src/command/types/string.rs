@@ -1162,10 +1162,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_json_value() {
-        let mut config = StorageConfig::default();
-        // Increase size limits for this test
-        config.max_value_size = 1024 * 1024 * 10; // 10MB
-        config.max_memory = 1024 * 1024 * 100; // 100MB - ensure enough memory for the test
+        let config = StorageConfig {
+            // Increase size limits for this test
+            max_value_size: 1024 * 1024 * 10, // 10MB
+            max_memory: 1024 * 1024 * 100, // 100MB - ensure enough memory for the test
+            ..StorageConfig::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create a large JSON string with various special characters and nested structures
@@ -1198,14 +1200,12 @@ mod tests {
 
         // Try setting the value
         let result = set(&engine, &set_args).await;
-        if result.is_err() {
+        if let Err(CommandError::InvalidArgument(msg)) = &result {
             println!("Set error: {:?}", result);
-            if let Err(CommandError::InvalidArgument(msg)) = &result {
-                if msg.contains("SET operation failed") {
-                    println!(
-                        "Storage error during SET operation. Check memory limits and value size."
-                    );
-                }
+            if msg.contains("SET operation failed") {
+                println!(
+                    "Storage error during SET operation. Check memory limits and value size."
+                );
             }
         }
 
@@ -1305,7 +1305,7 @@ mod tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Test data patterns that previously caused RESP parsing issues
-        let test_patterns = vec![
+        let test_patterns = [
             "B64JSON:W3data",
             "+FAKE_SIMPLE_STRING",
             "-FAKE_ERROR",
@@ -1814,19 +1814,17 @@ mod tests {
         ];
         let result = lcs(&engine, &args).await.unwrap();
 
-        if let RespValue::Array(Some(arr)) = &result {
-            if let RespValue::Array(Some(matches)) = &arr[1] {
-                // All matches should have length >= 4
-                for m in matches {
-                    if let RespValue::Array(Some(entry)) = m {
-                        if let RespValue::Array(Some(a_range)) = &entry[0] {
-                            if let (RespValue::Integer(start), RespValue::Integer(end)) =
-                                (&a_range[0], &a_range[1])
-                            {
-                                assert!((end - start + 1) >= 4);
-                            }
-                        }
-                    }
+        if let RespValue::Array(Some(arr)) = &result
+            && let RespValue::Array(Some(matches)) = &arr[1]
+        {
+            // All matches should have length >= 4
+            for m in matches {
+                if let RespValue::Array(Some(entry)) = m
+                    && let RespValue::Array(Some(a_range)) = &entry[0]
+                    && let (RespValue::Integer(start), RespValue::Integer(end)) =
+                        (&a_range[0], &a_range[1])
+                {
+                    assert!((end - start + 1) >= 4);
                 }
             }
         }
@@ -2664,9 +2662,12 @@ mod tests {
             h.await.unwrap();
         }
 
-        let results = results.lock().unwrap();
-        let successes = results.iter().filter(|&&r| r == 1).count();
-        let failures = results.iter().filter(|&&r| r == 0).count();
+        let (successes, failures) = {
+            let results = results.lock().unwrap();
+            let successes = results.iter().filter(|&&r| r == 1).count();
+            let failures = results.iter().filter(|&&r| r == 0).count();
+            (successes, failures)
+        };
 
         // Exactly one task should have succeeded
         assert_eq!(successes, 1, "Exactly one MSETNX should succeed");

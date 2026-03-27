@@ -112,7 +112,7 @@ mod type_mutation_tests {
             ),
             (
                 "Binary base64",
-                general_purpose::STANDARD.encode(&[0u8, 1u8, 2u8, 255u8]),
+                general_purpose::STANDARD.encode([0u8, 1u8, 2u8, 255u8]),
             ),
         ];
 
@@ -172,7 +172,7 @@ mod type_mutation_tests {
         let engine = Arc::new(StorageEngine::new(config));
 
         // Test binary patterns that might accidentally deserialize as other types
-        let problematic_patterns = vec![
+        let problematic_patterns = [
             // Patterns that might look like bincode-serialized data
             vec![8, 0, 0, 0, 0, 0, 0, 0], // Looks like bincode array length
             vec![1, 0, 0, 0, 0, 0, 0, 0, 5, 104, 101, 108, 108, 111], // Might look like serialized string

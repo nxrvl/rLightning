@@ -79,7 +79,7 @@ async fn test_set_get_problematic_data() {
 #[tokio::test]
 async fn test_multiple_problematic_patterns() {
     // Test data patterns that previously caused issues
-    let test_patterns = vec![
+    let test_patterns = [
         "B64JSON:W3data",
         "+FAKE_SIMPLE_STRING",
         "-FAKE_ERROR",

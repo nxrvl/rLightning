@@ -305,13 +305,10 @@ async fn test_protocol_compliance_summary() {
     for (cmd_name, args) in &string_commands {
         total_commands += 1;
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
-        match client.send_command_str(cmd_name, &args_ref).await {
-            Ok(resp) => {
-                if !matches!(resp, RespValue::Error(_)) {
-                    working_commands += 1;
-                }
-            }
-            Err(_) => {}
+        if let Ok(resp) = client.send_command_str(cmd_name, &args_ref).await
+            && !matches!(resp, RespValue::Error(_))
+        {
+            working_commands += 1;
         }
     }
 
@@ -332,13 +329,10 @@ async fn test_protocol_compliance_summary() {
     for (cmd_name, args) in &hash_commands {
         total_commands += 1;
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
-        match client.send_command_str(cmd_name, &args_ref).await {
-            Ok(resp) => {
-                if !matches!(resp, RespValue::Error(_)) {
-                    working_commands += 1;
-                }
-            }
-            Err(_) => {}
+        if let Ok(resp) = client.send_command_str(cmd_name, &args_ref).await
+            && !matches!(resp, RespValue::Error(_))
+        {
+            working_commands += 1;
         }
     }
 
@@ -355,13 +349,10 @@ async fn test_protocol_compliance_summary() {
     for (cmd_name, args) in &server_commands {
         total_commands += 1;
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
-        match client.send_command_str(cmd_name, &args_ref).await {
-            Ok(resp) => {
-                if !matches!(resp, RespValue::Error(_)) {
-                    working_commands += 1;
-                }
-            }
-            Err(_) => {}
+        if let Ok(resp) = client.send_command_str(cmd_name, &args_ref).await
+            && !matches!(resp, RespValue::Error(_))
+        {
+            working_commands += 1;
         }
     }
 

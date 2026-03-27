@@ -456,7 +456,7 @@ pub async fn xread(
             // $ means "only new entries from now"
             let stream = get_stream_data(engine, &keys[i]).await?;
             let last_id = stream
-                .map(|s| s.last_id.clone())
+                .map(|s| s.last_id)
                 .unwrap_or_else(|| StreamEntryId::new(0, 0));
             parsed_ids.push(last_id);
         } else {
@@ -1012,8 +1012,8 @@ async fn xgroup_create(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
         }
 
         let last_id = match &parsed_id {
-            Some(id) => id.clone(),
-            None => stream.last_id.clone(), // $ resolves to current last_id
+            Some(id) => *id,
+            None => stream.last_id, // $ resolves to current last_id
         };
 
         let mut group = ConsumerGroup::new(group_name.clone(), last_id);
@@ -1091,8 +1091,8 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         })?;
 
         group.last_delivered_id = match &parsed_id {
-            Some(id) => id.clone(),
-            None => stream.last_id.clone(), // $ resolves to current last_id
+            Some(id) => *id,
+            None => stream.last_id, // $ resolves to current last_id
         };
         if let Some(er) = entries_read {
             group.entries_read = Some(er);
@@ -1431,7 +1431,7 @@ async fn do_xreadgroup(
 
                 let entries: Vec<_> = {
                     let iter = stream.entries.range((
-                        std::ops::Bound::Excluded(group.last_delivered_id.clone()),
+                        std::ops::Bound::Excluded(group.last_delivered_id),
                         std::ops::Bound::Unbounded,
                     ));
                     let mut collected = Vec::new();
@@ -1453,11 +1453,11 @@ async fn do_xreadgroup(
                     let mut pending_ids = Vec::new();
                     if !noack {
                         for entry in &entries {
-                            pending_ids.push(entry.id.clone());
+                            pending_ids.push(entry.id);
                             group.pel.insert(
-                                entry.id.clone(),
+                                entry.id,
                                 PendingEntry {
-                                    id: entry.id.clone(),
+                                    id: entry.id,
                                     consumer: consumer_name_owned.clone(),
                                     delivery_time: now,
                                     delivery_count: 1,
@@ -1475,7 +1475,7 @@ async fn do_xreadgroup(
 
                     // Update last delivered ID
                     if let Some(last) = entries.last() {
-                        group.last_delivered_id = last.id.clone();
+                        group.last_delivered_id = last.id;
                     }
                     if let Some(er) = group.entries_read.as_mut() {
                         *er += entries.len() as u64;
@@ -1720,7 +1720,7 @@ pub async fn xpending(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             // Extended form
             let now = now_ms();
             let mut result = Vec::new();
-            for (id, pe) in group.pel.range(start.clone()..=end.clone()) {
+            for (id, pe) in group.pel.range(*start..=*end) {
                 if let Some(cf) = consumer_filter
                     && pe.consumer != *cf
                 {
@@ -1941,9 +1941,9 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
                 // Update or insert PEL entry
                 group.pel.insert(
-                    id.clone(),
+                    *id,
                     PendingEntry {
-                        id: id.clone(),
+                        id: *id,
                         consumer: new_consumer.clone(),
                         delivery_time,
                         delivery_count: new_count,
@@ -1954,7 +1954,7 @@ pub async fn xclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 let consumer = group.get_or_create_consumer(&new_consumer);
                 consumer.seen_time = now;
                 if !consumer.pending.contains(id) {
-                    consumer.pending.push(id.clone());
+                    consumer.pending.push(*id);
                 }
 
                 if let Some(entry) = stream.entries.get(id) {
@@ -2070,12 +2070,12 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
         let pel_entries: Vec<(StreamEntryId, PendingEntry)> = group
             .pel
             .range(start_id..)
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (*k, v.clone()))
             .collect();
 
         for (id, pe) in &pel_entries {
             if found >= count {
-                next_start = id.clone();
+                next_start = *id;
                 break;
             }
 
@@ -2092,9 +2092,9 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
                     // Claim for new consumer
                     group.pel.insert(
-                        id.clone(),
+                        *id,
                         PendingEntry {
-                            id: id.clone(),
+                            id: *id,
                             consumer: new_consumer.clone(),
                             delivery_time: now,
                             delivery_count: pe.delivery_count + 1,
@@ -2104,7 +2104,7 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
                     let consumer = group.get_or_create_consumer(&new_consumer);
                     consumer.seen_time = now;
                     if !consumer.pending.contains(id) {
-                        consumer.pending.push(id.clone());
+                        consumer.pending.push(*id);
                     }
 
                     if let Some(entry) = stream.entries.get(id) {
@@ -2112,7 +2112,7 @@ pub async fn xautoclaim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
                     }
                 } else {
                     // Entry was deleted - remove from PEL
-                    deleted_ids.push(id.clone());
+                    deleted_ids.push(*id);
                 }
             }
         }
@@ -2327,10 +2327,10 @@ mod tests {
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 3);
             // First entry should be 3-0 (reverse order)
-            if let RespValue::Array(Some(ref parts)) = entries[0] {
-                if let RespValue::BulkString(Some(ref id_bytes)) = parts[0] {
-                    assert_eq!(String::from_utf8(id_bytes.clone()).unwrap(), "3-0");
-                }
+            if let RespValue::Array(Some(ref parts)) = entries[0]
+                && let RespValue::BulkString(Some(ref id_bytes)) = parts[0]
+            {
+                assert_eq!(String::from_utf8(id_bytes.clone()).unwrap(), "3-0");
             }
         } else {
             panic!("Expected array");
@@ -2439,10 +2439,10 @@ mod tests {
         .unwrap();
         if let RespValue::Array(Some(streams)) = result {
             assert_eq!(streams.len(), 1);
-            if let RespValue::Array(Some(ref stream_data)) = streams[0] {
-                if let RespValue::Array(Some(ref entries)) = stream_data[1] {
-                    assert_eq!(entries.len(), 1);
-                }
+            if let RespValue::Array(Some(ref stream_data)) = streams[0]
+                && let RespValue::Array(Some(ref entries)) = stream_data[1]
+            {
+                assert_eq!(entries.len(), 1);
             }
         }
     }
@@ -2505,10 +2505,10 @@ mod tests {
 
         if let RespValue::Array(Some(streams)) = &result {
             assert_eq!(streams.len(), 1);
-            if let RespValue::Array(Some(ref stream_data)) = streams[0] {
-                if let RespValue::Array(Some(ref entries)) = stream_data[1] {
-                    assert_eq!(entries.len(), 2);
-                }
+            if let RespValue::Array(Some(ref stream_data)) = streams[0]
+                && let RespValue::Array(Some(ref entries)) = stream_data[1]
+            {
+                assert_eq!(entries.len(), 2);
             }
         } else {
             panic!("Expected array result from XREADGROUP: {:?}", result);
@@ -2842,10 +2842,10 @@ mod tests {
         let result = xrange(&engine, &[b("s"), b("-"), b("+")]).await.unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 1);
-            if let RespValue::Array(Some(ref parts)) = entries[0] {
-                if let RespValue::Array(Some(ref fields)) = parts[1] {
-                    assert_eq!(fields.len(), 6); // 3 field-value pairs
-                }
+            if let RespValue::Array(Some(ref parts)) = entries[0]
+                && let RespValue::Array(Some(ref fields)) = parts[1]
+            {
+                assert_eq!(fields.len(), 6); // 3 field-value pairs
             }
         }
     }
@@ -2944,10 +2944,10 @@ mod tests {
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 10);
             // First remaining entry should be 41-0
-            if let RespValue::Array(Some(ref parts)) = entries[0] {
-                if let RespValue::BulkString(Some(ref id_bytes)) = parts[0] {
-                    assert_eq!(String::from_utf8(id_bytes.clone()).unwrap(), "41-0");
-                }
+            if let RespValue::Array(Some(ref parts)) = entries[0]
+                && let RespValue::BulkString(Some(ref id_bytes)) = parts[0]
+            {
+                assert_eq!(String::from_utf8(id_bytes.clone()).unwrap(), "41-0");
             }
         } else {
             panic!("Expected array");

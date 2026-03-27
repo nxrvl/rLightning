@@ -186,6 +186,7 @@ impl StreamData {
     }
 
     /// Generate the next entry ID based on auto-generation rules
+    #[allow(dead_code)]
     pub fn generate_id(
         &self,
         explicit_ms: Option<u64>,

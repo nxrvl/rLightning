@@ -13,8 +13,10 @@ async fn test_large_json_protocol_handling() -> Result<(), Box<dyn std::error::E
 {
     // Set up server with a unique port
     let addr: SocketAddr = "127.0.0.1:16395".parse()?;
-    let mut config = StorageConfig::default();
-    config.max_value_size = 20 * 1024 * 1024; // 20MB
+    let config = StorageConfig {
+        max_value_size: 20 * 1024 * 1024, // 20MB
+        ..Default::default()
+    };
     let storage = StorageEngine::new(config);
 
     let server = Server::new(addr, storage);

@@ -18,15 +18,15 @@ fn read_resp_array(stream: &mut TcpStream) -> Vec<String> {
     let mut header = String::new();
     reader.read_line(&mut header).unwrap();
 
-    if header.starts_with('*') {
-        let count: usize = header[1..].trim().parse().unwrap_or(0);
+    if let Some(stripped_header) = header.strip_prefix('*') {
+        let count: usize = stripped_header.trim().parse().unwrap_or(0);
 
         for _ in 0..count {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
 
-            if line.starts_with('$') {
-                let len: usize = line[1..].trim().parse().unwrap_or(0);
+            if let Some(stripped_dollar) = line.strip_prefix('$') {
+                let len: usize = stripped_dollar.trim().parse().unwrap_or(0);
                 if len > 0 {
                     let mut value = vec![0u8; len + 2]; // +2 for \r\n
                     reader.read_exact(&mut value).unwrap();
@@ -35,10 +35,10 @@ fn read_resp_array(stream: &mut TcpStream) -> Vec<String> {
                 } else {
                     result.push(String::new());
                 }
-            } else if line.starts_with(':') {
-                result.push(line[1..].trim().to_string());
-            } else if line.starts_with('+') {
-                result.push(line[1..].trim().to_string());
+            } else if let Some(stripped_colon) = line.strip_prefix(':') {
+                result.push(stripped_colon.trim().to_string());
+            } else if let Some(stripped_plus) = line.strip_prefix('+') {
+                result.push(stripped_plus.trim().to_string());
             }
         }
     }

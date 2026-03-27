@@ -144,7 +144,7 @@ fn bench_parse_arrays(c: &mut Criterion) {
     // Large array with many elements
     let mut large_array_data = "*10\r\n".to_string();
     for _i in 0..10 {
-        large_array_data.push_str(&format!("$4\r\nitem\r\n"));
+        large_array_data.push_str("$4\r\nitem\r\n");
     }
     let large_array = BytesMut::from(large_array_data.as_str());
     group.bench_function("LargeArray", |b| {

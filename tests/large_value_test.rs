@@ -34,9 +34,11 @@ async fn test_set_get_large_value(value_size: usize) -> Result<(), Box<dyn std::
     // Start a test server
     use rlightning::storage::engine::StorageConfig;
 
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024; // 10MB max value size
-    config.max_memory = 100 * 1024 * 1024; // 100MB storage
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024, // 10MB max value size
+        max_memory: 100 * 1024 * 1024, // 100MB storage
+        ..StorageConfig::default()
+    };
 
     let storage = StorageEngine::new(config);
     let addr: SocketAddr = "127.0.0.1:0".parse()?;
@@ -46,7 +48,7 @@ async fn test_set_get_large_value(value_size: usize) -> Result<(), Box<dyn std::
     // Spawn server in background
     tokio::spawn(async move {
         if let Ok((socket, _)) = listener.accept().await {
-            let server = Server::new(server_addr, storage);
+            let _server = Server::new(server_addr, storage);
             // Handle single client for this test
             let _ = socket;
         }
@@ -59,7 +61,7 @@ async fn test_set_get_large_value(value_size: usize) -> Result<(), Box<dyn std::
     let mut stream = tokio::net::TcpStream::connect(server_addr).await?;
 
     // Create test data
-    let key = b"test_key";
+    let _key = b"test_key";
     let value = vec![b'x'; value_size];
 
     // Build RESP command: *3\r\n$3\r\nSET\r\n$8\r\ntest_key\r\n$<size>\r\n<value>\r\n

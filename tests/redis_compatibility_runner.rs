@@ -2,7 +2,6 @@
 ///
 /// Validates that all required compatibility test files exist in the test suite.
 /// The actual tests are run directly by cargo test (not via subprocess invocation).
-
 #[cfg(test)]
 mod test_runner {
     use std::path::Path;

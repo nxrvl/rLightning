@@ -7,9 +7,10 @@ mod large_json_tests {
 
     #[tokio::test]
     async fn test_large_json_value() {
-        let mut config = StorageConfig::default();
-        // Increase size limits for this test
-        config.max_value_size = 1024 * 1024 * 10; // 10MB
+        let config = StorageConfig {
+            max_value_size: 1024 * 1024 * 10, // 10MB
+            ..Default::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Create a large JSON string with various special characters and nested structures

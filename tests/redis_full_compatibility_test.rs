@@ -858,7 +858,7 @@ async fn test_compat_set_operations() {
     let r = cmd(&mut c, &["SINTER", "s1", "s2"]).await;
     let arr = get_array(&r);
     assert_eq!(arr.len(), 2);
-    let members: HashSet<String> = arr.iter().map(|v| get_string(v)).collect();
+    let members: HashSet<String> = arr.iter().map(get_string).collect();
     assert!(members.contains("b"));
     assert!(members.contains("c"));
 
@@ -1112,7 +1112,7 @@ async fn test_compat_hyperloglog() {
     // PFCOUNT
     let count = get_int(&cmd(&mut c, &["PFCOUNT", "hll"]).await);
     assert!(
-        count >= 3 && count <= 5,
+        (3..=5).contains(&count),
         "HLL count should be ~4, got {}",
         count
     );
@@ -1122,7 +1122,7 @@ async fn test_compat_hyperloglog() {
     assert_ok(&cmd(&mut c, &["PFMERGE", "merged", "hll", "hll2"]).await);
     let count = get_int(&cmd(&mut c, &["PFCOUNT", "merged"]).await);
     assert!(
-        count >= 5 && count <= 7,
+        (5..=7).contains(&count),
         "Merged HLL count should be ~6, got {}",
         count
     );
@@ -1193,7 +1193,7 @@ async fn test_compat_geo() {
     )
     .await;
     let arr = get_array(&r);
-    assert!(arr.len() >= 1);
+    assert!(!arr.is_empty());
 }
 
 // ---------------------------------------------------------------------------

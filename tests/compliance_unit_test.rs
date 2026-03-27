@@ -4,7 +4,6 @@ use rlightning::command::Command;
 use rlightning::command::handler::CommandHandler;
 use rlightning::networking::resp::RespValue;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
-use std::sync::Arc;
 
 async fn create_test_handler() -> CommandHandler {
     let config = StorageConfig::default();

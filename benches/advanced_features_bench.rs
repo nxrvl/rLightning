@@ -315,7 +315,8 @@ fn bench_persistence(c: &mut Criterion) {
                     |(storage, path, _tmp)| {
                         rt.block_on(async {
                             let rdb = RdbPersistence::new(storage, path);
-                            black_box(rdb.save().await.unwrap());
+                            rdb.save().await.unwrap();
+                            black_box(());
                         })
                     },
                 );
@@ -363,7 +364,8 @@ fn bench_persistence(c: &mut Criterion) {
                 let fresh_storage = StorageEngine::new(fresh_config);
                 rt.block_on(async {
                     let rdb = RdbPersistence::new(fresh_storage, path);
-                    black_box(rdb.load().await.unwrap());
+                    rdb.load().await.unwrap();
+                    black_box(());
                 })
             },
         );
@@ -415,6 +417,7 @@ fn bench_memory_efficiency(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
 
     // Memory usage per data type
+    #[allow(clippy::type_complexity)]
     let data_types: Vec<(&str, Box<dyn Fn(usize) -> Command + Send + Sync>)> = vec![
         (
             "String",

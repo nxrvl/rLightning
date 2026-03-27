@@ -7,10 +7,11 @@ mod resp_limits_tests {
 
     #[tokio::test]
     async fn test_resp_bulk_string_limits() {
-        let mut config = StorageConfig::default();
-        // Test with very large limits
-        config.max_value_size = 50 * 1024 * 1024; // 50MB
-        config.max_key_size = 100 * 1024; // 100KB
+        let config = StorageConfig {
+            max_value_size: 50 * 1024 * 1024, // 50MB
+            max_key_size: 100 * 1024, // 100KB
+            ..Default::default()
+        };
         let engine = Arc::new(StorageEngine::new(config));
 
         // Test edge case: RESP bulk string length representation

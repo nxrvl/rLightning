@@ -1190,15 +1190,15 @@ mod tests {
         .await
         .unwrap();
 
-        if let RespValue::Array(Some(items)) = result {
-            if let RespValue::Array(Some(members)) = &items[1] {
-                // Should match: alpha, beta, gamma, delta (all contain 'a')
-                assert!(members.len() >= 3); // alpha, gamma, delta at minimum
-                for m in members {
-                    if let RespValue::BulkString(Some(data)) = m {
-                        let s = String::from_utf8_lossy(data);
-                        assert!(s.contains('a'), "Member '{}' should match pattern *a*", s);
-                    }
+        if let RespValue::Array(Some(items)) = result
+            && let RespValue::Array(Some(members)) = &items[1]
+        {
+            // Should match: alpha, beta, gamma, delta (all contain 'a')
+            assert!(members.len() >= 3); // alpha, gamma, delta at minimum
+            for m in members {
+                if let RespValue::BulkString(Some(data)) = m {
+                    let s = String::from_utf8_lossy(data);
+                    assert!(s.contains('a'), "Member '{}' should match pattern *a*", s);
                 }
             }
         }

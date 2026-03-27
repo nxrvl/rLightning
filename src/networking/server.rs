@@ -603,7 +603,7 @@ impl Server {
                 });
                 // Security: allow batching if no auth required or user is authenticated.
                 // Unauthenticated users fall through to dispatch_command for NOAUTH errors.
-                let security_allows_batch = security.as_ref().map_or(true, |sec| {
+                let security_allows_batch = security.as_ref().is_none_or(|sec| {
                     !sec.require_auth() || sec.is_authenticated(&client_addr_str)
                 });
                 let batch_eligible = parsed_commands.len() > 1
@@ -3607,9 +3607,8 @@ mod tests {
         assert_eq!(version, ProtocolVersion::RESP3);
 
         // Response should not be an error
-        match &response {
-            RespValue::Error(e) => panic!("Expected success, got error: {}", e),
-            _ => {}
+        if let RespValue::Error(e) = &response {
+            panic!("Expected success, got error: {}", e);
         }
 
         // CLIENT GETNAME should now return "myconn"
@@ -3666,9 +3665,8 @@ mod tests {
         );
 
         assert_eq!(version, ProtocolVersion::RESP2);
-        match &response {
-            RespValue::Error(e) => panic!("Expected success, got error: {}", e),
-            _ => {}
+        if let RespValue::Error(e) = &response {
+            panic!("Expected success, got error: {}", e);
         }
     }
 

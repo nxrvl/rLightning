@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_50kb_value_simple() {
-    let mut config = StorageConfig::default();
-    config.max_value_size = 10 * 1024 * 1024; // 10MB
-    config.max_memory = 100 * 1024 * 1024;
+    let config = StorageConfig {
+        max_value_size: 10 * 1024 * 1024, // 10MB
+        max_memory: 100 * 1024 * 1024,
+        ..StorageConfig::default()
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 19010));
     let storage = Arc::new(StorageEngine::new(config));
