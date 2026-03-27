@@ -90,5 +90,5 @@ vs Redis 7.4.8:
 
 ### Task 6: Update documentation
 
-- [ ] Update CLAUDE.md if any internal architecture patterns changed (e.g., new clock API, new batch strategy)
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md if any internal architecture patterns changed (e.g., new clock API, new batch strategy)
+- [x] Move this plan to `docs/plans/completed/`

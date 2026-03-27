@@ -123,7 +123,7 @@ cargo bench --bench storage_bench -- set_get
    - Zero-copy RESP parser (`src/networking/raw_command.rs`): `RawCommand<'buf>` parses commands as byte slices directly from the read buffer, avoiding heap allocations on the hot path. Falls back to owned `RespValue` for MULTI queue, AOF logging, and RESP3 features
    - RESP3 response conversion: Map type for HGETALL/CONFIG/XINFO/HSCAN/ZSCAN/SSCAN/XRANGE/XREAD/COMMAND DOCS, Set type for SMEMBERS, Double for float commands, native Null/Boolean/Push types
    - Pipeline error isolation: per-command errors in a pipeline are captured as RespValue::Error instead of killing the entire pipeline
-   - Pipeline batching (`src/storage/batch.rs`): consecutive same-shard commands are grouped and executed under a single lock acquisition, with read/write classification for optimal lock selection
+   - Pipeline batching (`src/storage/batch.rs`): sort-then-group strategy annotates each command with `(original_index, shard_index, is_read)`, sorts by shard, forms batches under a single lock acquisition per shard, then reorders responses back to original command order. Works with RESP2/RESP3 and security-enabled connections (ACL checks per-command within batch loop)
    - Batched pipeline post-processing: prefix index updates, AOF logging, and replication propagation are collected during the batch loop and flushed in single bulk calls after completion, avoiding per-command overhead
    - Static response interning: OK, PONG, NIL, 0, 1, and empty array responses use `Bytes::from_static` to avoid allocation
    - TCP_NODELAY enabled on all client connections immediately after accept
@@ -139,13 +139,13 @@ cargo bench --bench storage_bench -- set_get
    - Read-optimized locking: GET, EXISTS, TTL, TYPE use `RwLock::read()` for maximum concurrent reader throughput
    - Atomic operations for all mutable data types: strings, lists, sets, sorted sets, geo (via `atomic_modify`)
    - Inline atomic operations: INCR, DECR, APPEND, SETNX operate directly within shard write guard
-   - Cross-key atomicity via `lock_keys()` with sorted shard-level locking for deadlock prevention (MSET, SMOVE, GEOSEARCHSTORE)
+   - Cross-key atomicity via `lock_keys()` with sorted shard-level locking for deadlock prevention (SMOVE, GEOSEARCHSTORE, multi-shard MSET); MSET uses a single-shard fast path when all keys hash to the same shard, avoiding cross-shard lock overhead
    - Conditional SET operations: `set_nx()`, `set_xx()`, `set_with_options()` for NX/XX/GET flag combinations
    - Multi-database support (16 databases, SELECT routing via task-local `CURRENT_DB_INDEX`)
    - Runtime config store: `runtime_config` DashMap for CONFIG SET/GET with glob pattern matching
-   - Per-shard expiration heaps with round-robin background expiration and cached clock (`CACHED_OFFSET_US: AtomicU64`, updated every 1ms via `src/storage/clock.rs`)
+   - Per-shard expiration heaps with round-robin background expiration and cached clock (`CACHED_OFFSET_US: AtomicU64` for monotonic microseconds, `CACHED_WALL_MS: AtomicU64` for wall-clock milliseconds, both updated every 1ms via `src/storage/clock.rs`; `cached_now_ms()` provides fast epoch-millis for XADD auto-ID generation)
    - Probabilistic eviction with per-shard `ArrayVec<EvictionCandidate, 16>` candidate buffer
-   - O(1) memory tracking via `cached_mem_size` field on `Entry` (`src/storage/item.rs`): `ModifyResult::Keep(i64)` carries byte deltas from mutation closures, eliminating O(n) `calculate_entry_size` calls from the write hot path. Recalculated on RDB restore and AOF replay.
+   - O(1) memory tracking via `cached_mem_size` field on `Entry` (`src/storage/item.rs`): `ModifyResult::Keep(i64)` carries byte deltas from mutation closures, eliminating O(n) `calculate_entry_size` calls from the write hot path. Used by XADD/XDEL/XTRIM for in-place stream mutation without deep-clone. Recalculated on RDB restore and AOF replay.
    - Conditional key versioning: `active_watch_count: AtomicU32` tracks active WATCH sessions; `bump_key_version` is skipped entirely when no clients are watching, avoiding DashMap insert on every write. `key_versions` map is periodically cleaned in the expiration task.
    - Transaction key locking with per-shard version tracking for WATCH
    - Per-shard memory tracking (summed for global INFO/CONFIG queries)
@@ -211,7 +211,7 @@ cargo bench --bench storage_bench -- set_get
 1. Clients connect via TCP (TCP_NODELAY enabled) using the Redis protocol
 2. The zero-copy RESP parser extracts commands as byte slices from the read buffer (`RawCommand`)
 3. Two-level byte dispatch routes commands to handlers without string allocation
-4. For pipelines, consecutive same-shard commands are batched under a single lock acquisition; post-batch processing (prefix index updates, AOF logging, replication propagation) is done in bulk
+4. For pipelines, commands are sorted by shard index then grouped into batches under a single lock acquisition per shard; responses are reordered back to original command order; post-batch processing (prefix index updates, AOF logging, replication propagation) is done in bulk
 5. Command handlers interact with the sharded storage engine using native data types (no serialization)
 6. Results are serialized back as RESP responses (with static interning for common responses)
 7. If replication is enabled, commands are propagated to replicas
