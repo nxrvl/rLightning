@@ -46,12 +46,12 @@ vs Redis 7.4.8:
 **Files:**
 - Modify: `src/command/types/stream.rs`
 
-- [ ] Add `estimate_entry_size` helper function that computes byte delta for a stream entry from its field pairs
-- [ ] Refactor XADD handler (lines 177-212) to mutate stream in-place via `&mut StoreValue` reference instead of cloning: borrow existing `StoreValue::Stream(s)` directly, call `generate_id_cached`, `add_entry`, apply trimming, return `ModifyResult::Keep(delta)` with computed byte delta. Only use `ModifyResult::Set` for the new-stream (None) case.
-- [ ] Apply the same in-place pattern to XDEL, XTRIM, and any other stream commands that currently clone (check lines 620-633 for XDEL)
-- [ ] Update existing stream integration tests to verify XADD still works correctly (functional correctness, not just compilation)
-- [ ] Add benchmark or test that exercises XADD throughput to validate improvement
-- [ ] Run `cargo test` - all tests must pass
+- [x] Add `estimate_entry_size` helper function that computes byte delta for a stream entry from its field pairs
+- [x] Refactor XADD handler (lines 177-212) to mutate stream in-place via `&mut StoreValue` reference instead of cloning: borrow existing `StoreValue::Stream(s)` directly, call `generate_id_cached`, `add_entry`, apply trimming, return `ModifyResult::Keep(delta)` with computed byte delta. Only use `ModifyResult::Set` for the new-stream (None) case.
+- [x] Apply the same in-place pattern to XDEL, XTRIM, and any other stream commands that currently clone (check lines 620-633 for XDEL)
+- [x] Update existing stream integration tests to verify XADD still works correctly (functional correctness, not just compilation)
+- [x] Add benchmark or test that exercises XADD throughput to validate improvement
+- [x] Run `cargo test` - all tests must pass
 
 ### Task 3: Pipeline sort-then-group batching (Phase 2)
 

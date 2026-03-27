@@ -53,6 +53,22 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Estimate the byte delta for adding a stream entry with the given field-value pairs.
+///
+/// Accounts for: StreamEntryId (16 bytes), Vec overhead (24 bytes for the fields vec),
+/// plus each field-value pair (Vec overhead 24 bytes each for key and value, plus data).
+/// Also includes BTreeMap node overhead (~64 bytes).
+fn estimate_entry_size(fields: &[(Vec<u8>, Vec<u8>)]) -> i64 {
+    // StreamEntryId: 16 bytes, StreamEntry struct overhead: ~24 bytes (Vec ptr+len+cap for fields)
+    // BTreeMap node overhead: ~64 bytes
+    let mut size: i64 = 16 + 24 + 64;
+    for (k, v) in fields {
+        // Each field pair: 2x Vec overhead (24 bytes each) + actual data
+        size += 24 + k.len() as i64 + 24 + v.len() as i64;
+    }
+    size
+}
+
 // ============================================================
 // XADD
 // ============================================================
@@ -174,38 +190,65 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     };
 
+    let entry_delta = estimate_entry_size(&fields);
+
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
-        let mut stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
-            Some(_) => return Err(StorageError::WrongType),
+        match existing {
+            Some(StoreValue::Stream(s)) => {
+                // In-place mutation: no clone needed
+                let entry_id = s
+                    .generate_id_cached(parsed_id.0, parsed_id.1)
+                    .map_err(|e| StorageError::InternalError(e.to_string()))?;
+
+                let added_id = s.add_entry(entry_id, fields.clone());
+
+                // Apply trimming (entries removed reduce delta)
+                let mut trim_delta: i64 = 0;
+                if let Some((threshold, approximate)) = maxlen {
+                    let before = s.len();
+                    s.trim_maxlen(threshold, approximate);
+                    let removed = before - s.len();
+                    // Rough estimate: each removed entry ~same size as average
+                    trim_delta -= removed as i64 * 128;
+                }
+                if let Some((ref min_entry_id, approximate)) = minid {
+                    let before = s.len();
+                    s.trim_minid(min_entry_id, approximate);
+                    let removed = before - s.len();
+                    trim_delta -= removed as i64 * 128;
+                }
+
+                Ok((
+                    ModifyResult::Keep(entry_delta + trim_delta),
+                    RespValue::BulkString(Some(added_id.to_string().into_bytes())),
+                ))
+            }
+            Some(_) => Err(StorageError::WrongType),
             None => {
                 if nomkstream {
                     return Ok((ModifyResult::Keep(0), RespValue::BulkString(None)));
                 }
-                StreamData::new()
+                // New stream: must use Set since there's no existing value to mutate
+                let mut stream = StreamData::new();
+                let entry_id = stream
+                    .generate_id_cached(parsed_id.0, parsed_id.1)
+                    .map_err(|e| StorageError::InternalError(e.to_string()))?;
+
+                let added_id = stream.add_entry(entry_id, fields.clone());
+
+                if let Some((threshold, approximate)) = maxlen {
+                    stream.trim_maxlen(threshold, approximate);
+                }
+                if let Some((ref min_entry_id, approximate)) = minid {
+                    stream.trim_minid(min_entry_id, approximate);
+                }
+
+                Ok((
+                    ModifyResult::Set(StoreValue::Stream(stream)),
+                    RespValue::BulkString(Some(added_id.to_string().into_bytes())),
+                ))
             }
-        };
-
-        // Generate/resolve the entry ID using stream state
-        let entry_id = stream
-            .generate_id(parsed_id.0, parsed_id.1)
-            .map_err(|e| StorageError::InternalError(e.to_string()))?;
-
-        // Add the entry
-        let added_id = stream.add_entry(entry_id, fields.clone());
-
-        // Apply trimming
-        if let Some((threshold, approximate)) = maxlen {
-            stream.trim_maxlen(threshold, approximate);
         }
-        if let Some((ref min_entry_id, approximate)) = minid {
-            stream.trim_minid(min_entry_id, approximate);
-        }
-
-        Ok((
-            ModifyResult::Set(StoreValue::Stream(stream)),
-            RespValue::BulkString(Some(added_id.to_string().into_bytes())),
-        ))
     })?;
 
     Ok(result)
@@ -571,21 +614,23 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     };
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
-        let mut stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
-            Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
-        };
+        match existing {
+            Some(StoreValue::Stream(s)) => {
+                let removed = match &trim_strategy {
+                    TrimStrategy::MaxLen(maxlen, approx) => s.trim_maxlen(*maxlen, *approx),
+                    TrimStrategy::MinId(min_id, approx) => s.trim_minid(min_id, *approx),
+                };
 
-        let removed = match &trim_strategy {
-            TrimStrategy::MaxLen(maxlen, approx) => stream.trim_maxlen(*maxlen, *approx),
-            TrimStrategy::MinId(min_id, approx) => stream.trim_minid(min_id, *approx),
-        };
-
-        if removed > 0 {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(removed as i64)))
-        } else {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
+                if removed > 0 {
+                    // Rough estimate: ~128 bytes per trimmed entry
+                    let delta = -(removed as i64 * 128);
+                    Ok((ModifyResult::Keep(delta), RespValue::Integer(removed as i64)))
+                } else {
+                    Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
+                }
+            }
+            Some(_) => Err(StorageError::WrongType),
+            None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
         }
     })?;
 
@@ -618,17 +663,19 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
-        let mut stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
-            Some(_) => return Err(StorageError::WrongType),
-            None => return Ok((ModifyResult::Keep(0), RespValue::Integer(0))),
-        };
-
-        let deleted = stream.delete_entries(&ids);
-        if deleted > 0 {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(deleted as i64)))
-        } else {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
+        match existing {
+            Some(StoreValue::Stream(s)) => {
+                let deleted = s.delete_entries(&ids);
+                if deleted > 0 {
+                    // Rough estimate: ~128 bytes per deleted entry
+                    let delta = -(deleted as i64 * 128);
+                    Ok((ModifyResult::Keep(delta), RespValue::Integer(deleted as i64)))
+                } else {
+                    Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
+                }
+            }
+            Some(_) => Err(StorageError::WrongType),
+            None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
         }
     })?;
 
@@ -2833,5 +2880,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, RespValue::Array(Some(vec![])));
+    }
+
+    #[tokio::test]
+    async fn test_xadd_inplace_mutation_correctness() {
+        // Verify XADD in-place mutation preserves stream state across many appends
+        let engine = make_engine();
+        for i in 1..=100 {
+            let result = xadd(
+                &engine,
+                &[b("stream"), b(&format!("{}-0", i)), b("k"), b(&format!("v{}", i))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                RespValue::BulkString(Some(format!("{}-0", i).into_bytes()))
+            );
+        }
+
+        // Verify length
+        let result = xlen(&engine, &[b("stream")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(100));
+
+        // Verify range returns all entries in order
+        let result = xrange(&engine, &[b("stream"), b("-"), b("+")])
+            .await
+            .unwrap();
+        if let RespValue::Array(Some(entries)) = result {
+            assert_eq!(entries.len(), 100);
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_xadd_inplace_with_trimming() {
+        // Verify XADD with MAXLEN trimming works correctly with in-place mutation
+        let engine = make_engine();
+        for i in 1..=50 {
+            xadd(
+                &engine,
+                &[
+                    b("s"),
+                    b("MAXLEN"),
+                    b("10"),
+                    b(&format!("{}-0", i)),
+                    b("k"),
+                    b("v"),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = xlen(&engine, &[b("s")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(10));
+
+        // Verify the remaining entries are the last 10
+        let result = xrange(&engine, &[b("s"), b("-"), b("+")])
+            .await
+            .unwrap();
+        if let RespValue::Array(Some(entries)) = result {
+            assert_eq!(entries.len(), 10);
+            // First remaining entry should be 41-0
+            if let RespValue::Array(Some(ref parts)) = entries[0] {
+                if let RespValue::BulkString(Some(ref id_bytes)) = parts[0] {
+                    assert_eq!(String::from_utf8(id_bytes.clone()).unwrap(), "41-0");
+                }
+            }
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_xdel_inplace_mutation() {
+        // Verify XDEL in-place mutation works correctly
+        let engine = make_engine();
+        for i in 1..=5 {
+            xadd(&engine, &[b("s"), b(&format!("{}-0", i)), b("k"), b("v")])
+                .await
+                .unwrap();
+        }
+
+        // Delete entries 2 and 4
+        let result = xdel(&engine, &[b("s"), b("2-0"), b("4-0")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(2));
+
+        let result = xlen(&engine, &[b("s")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(3));
+
+        // Verify remaining entries are 1, 3, 5
+        let result = xrange(&engine, &[b("s"), b("-"), b("+")])
+            .await
+            .unwrap();
+        if let RespValue::Array(Some(entries)) = result {
+            assert_eq!(entries.len(), 3);
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_xtrim_inplace_mutation() {
+        // Verify XTRIM in-place mutation works correctly
+        let engine = make_engine();
+        for i in 1..=20 {
+            xadd(&engine, &[b("s"), b(&format!("{}-0", i)), b("k"), b("v")])
+                .await
+                .unwrap();
+        }
+
+        let result = xtrim(&engine, &[b("s"), b("MAXLEN"), b("5")])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(15));
+
+        let result = xlen(&engine, &[b("s")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(5));
+    }
+
+    #[tokio::test]
+    async fn test_xdel_nonexistent_stream() {
+        // XDEL on nonexistent stream should return 0
+        let engine = make_engine();
+        let result = xdel(&engine, &[b("nosuchkey"), b("1-0")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_xtrim_nonexistent_stream() {
+        // XTRIM on nonexistent stream should return 0
+        let engine = make_engine();
+        let result = xtrim(&engine, &[b("nosuchkey"), b("MAXLEN"), b("5")])
+            .await
+            .unwrap();
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[tokio::test]
+    async fn test_xadd_throughput() {
+        // Exercise XADD throughput with many entries to validate the in-place mutation optimization
+        let engine = make_engine();
+        let start = std::time::Instant::now();
+        let count = 10_000;
+
+        for i in 0..count {
+            xadd(
+                &engine,
+                &[
+                    b("bench"),
+                    b("*"),
+                    b("field"),
+                    b(&format!("value{}", i)),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        let elapsed = start.elapsed();
+        let rps = count as f64 / elapsed.as_secs_f64();
+
+        // Verify correctness
+        let result = xlen(&engine, &[b("bench")]).await.unwrap();
+        assert_eq!(result, RespValue::Integer(count));
+
+        // Log throughput (not a hard assertion - CI environments vary)
+        eprintln!(
+            "XADD throughput: {:.0} ops/sec ({} entries in {:.2?})",
+            rps, count, elapsed
+        );
+
+        // Sanity check: should be able to do at least 50k ops/sec on any reasonable machine
+        assert!(
+            rps > 50_000.0,
+            "XADD throughput too low: {:.0} ops/sec (expected >50,000)",
+            rps
+        );
+    }
+
+    #[test]
+    fn test_estimate_entry_size() {
+        // Single small field pair
+        let fields = vec![(b"key".to_vec(), b"val".to_vec())];
+        let size = estimate_entry_size(&fields);
+        // 16 (id) + 24 (vec overhead) + 64 (btree node) + 24 + 3 + 24 + 3 = 158
+        assert_eq!(size, 158);
+
+        // Multiple fields
+        let fields = vec![
+            (b"name".to_vec(), b"John".to_vec()),
+            (b"age".to_vec(), b"30".to_vec()),
+        ];
+        let size = estimate_entry_size(&fields);
+        // 16 + 24 + 64 + (24 + 4 + 24 + 4) + (24 + 3 + 24 + 2) = 213
+        assert_eq!(size, 213);
+
+        // Empty fields
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = vec![];
+        let size = estimate_entry_size(&fields);
+        // Just base overhead: 16 + 24 + 64 = 104
+        assert_eq!(size, 104);
     }
 }
