@@ -1026,6 +1026,10 @@ impl Server {
                     for slot in &response_slots {
                         if !slot.is_empty() {
                             response_buffer.extend_from_slice(slot);
+                        } else {
+                            // Serialization failed or slot was never populated;
+                            // emit an error to preserve 1:1 command-response alignment
+                            response_buffer.extend_from_slice(b"-ERR internal serialization error\r\n");
                         }
                     }
 

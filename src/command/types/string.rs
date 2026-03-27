@@ -235,10 +235,13 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     if all_same_shard {
         // Single-shard fast path: one tx lock + one write lock for all keys
         // Acquire shard transaction lock (coordinates with MSETNX/WATCH)
-        if !StorageEngine::in_transaction() {
+        // Guard must live until end of block to hold the lock across all writes
+        let _tx_guard = if !StorageEngine::in_transaction() {
             let mutex = store.shard_tx_lock(first_shard);
-            let _guard = mutex.lock_owned().await;
-        }
+            Some(mutex.lock_owned().await)
+        } else {
+            None
+        };
 
         let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
         engine.check_write_memory(estimated_size).await?;
@@ -250,8 +253,8 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let mut created_keys: Vec<Vec<u8>> = Vec::new();
 
             for (key, value) in &pairs {
-                let new_size = (key.len() + value.len()) as i64;
                 let entry = Entry::new(StoreValue::Str(value.clone().into()));
+                let new_size = key.len() as i64 + entry.cached_mem_size as i64;
 
                 if let Some(old_entry) = map.insert(key.clone(), entry) {
                     let old_size = if old_entry.cached_mem_size > 0 {
@@ -261,7 +264,7 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     };
                     mem_delta += new_size - old_size;
                 } else {
-                    mem_delta += new_size;
+                    mem_delta += new_size + 64; // +64 for HashMap entry overhead
                     new_count += 1;
                     created_keys.push(key.clone());
                 }
@@ -2803,10 +2806,13 @@ mod tests {
 
         let mem_before = engine.get_used_memory();
 
+        // Use values larger than COMPACT_INLINE_MAX (23 bytes) so they go to heap,
+        // making memory deltas visible when overwriting with shorter values.
+        let long_value = vec![b'A'; 100];
         let mut args: Vec<Vec<u8>> = Vec::new();
         for key in &same_shard_keys {
             args.push(key.clone());
-            args.push(b"test_value".to_vec());
+            args.push(long_value.clone());
         }
 
         mset(&engine, &args).await.unwrap();
@@ -2814,7 +2820,7 @@ mod tests {
         let mem_after = engine.get_used_memory();
         assert!(mem_after > mem_before, "Memory should increase after MSET");
 
-        // Overwrite with shorter values - memory should change
+        // Overwrite with shorter values (inline-sized) - memory should decrease
         let mut args2: Vec<Vec<u8>> = Vec::new();
         for key in &same_shard_keys {
             args2.push(key.clone());
@@ -2824,7 +2830,7 @@ mod tests {
         mset(&engine, &args2).await.unwrap();
 
         let mem_final = engine.get_used_memory();
-        // Memory after overwrite with shorter values should be less than after initial set
+        // Memory after overwrite with shorter (inline) values should be less than after 100-byte values
         assert!(mem_final < mem_after, "Memory should decrease when overwriting with shorter values");
     }
 }

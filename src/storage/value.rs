@@ -105,16 +105,12 @@ impl CompactValue {
     pub fn append(&mut self, extra: &[u8]) {
         let new_len = self.len() + extra.len();
         if new_len <= COMPACT_INLINE_MAX {
-            // Result still fits inline
-            match self {
-                CompactValue::Inline { len, data } => {
-                    let start = *len as usize;
-                    data[start..start + extra.len()].copy_from_slice(extra);
-                    *len = new_len as u8;
-                }
-                CompactValue::Heap(v) => {
-                    v.extend_from_slice(extra);
-                }
+            // Result still fits inline (only reachable for Inline variant,
+            // since Heap values always have len > COMPACT_INLINE_MAX)
+            if let CompactValue::Inline { len, data } = self {
+                let start = *len as usize;
+                data[start..start + extra.len()].copy_from_slice(extra);
+                *len = new_len as u8;
             }
         } else {
             // Must go to heap

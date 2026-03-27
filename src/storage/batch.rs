@@ -239,7 +239,8 @@ fn extract_primary_key(cmd: &Command) -> Option<&[u8]> {
 /// Only groups consecutive commands that target the same shard and have compatible
 /// lock types (all reads or all writes).
 /// Superseded by `group_pipeline_sorted` which sorts by shard for better batching.
-#[allow(dead_code)]
+/// Retained for test coverage of basic grouping logic.
+#[cfg(test)]
 pub fn group_pipeline<'a>(
     commands: &'a [Command],
     shard_index_fn: impl Fn(&[u8]) -> usize,
@@ -301,7 +302,7 @@ pub fn group_pipeline<'a>(
     entries
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn flush_batch<'a>(
     entries: &mut Vec<PipelineEntry<'a>>,
     batch_cmds: &mut Vec<&'a Command>,

@@ -438,11 +438,13 @@ impl StreamData {
     pub fn read_after(&self, after: &StreamEntryId, count: Option<usize>) -> Vec<&StreamEntry> {
         let mut result = Vec::new();
         // Use a range that starts just after `after`
-        let start = StreamEntryId::new(after.ms, after.seq.wrapping_add(1));
         let start = if after.seq == u64::MAX {
+            if after.ms == u64::MAX {
+                return result; // No entries can exist after the maximum possible ID
+            }
             StreamEntryId::new(after.ms + 1, 0)
         } else {
-            start
+            StreamEntryId::new(after.ms, after.seq + 1)
         };
 
         for (_, entry) in self.entries.range(start..) {
