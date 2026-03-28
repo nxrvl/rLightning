@@ -74,9 +74,11 @@ async fn test_replication_manager_creation() {
 async fn test_replication_manager_disconnect_from_master() {
     let storage_config = StorageConfig::default();
     let engine = StorageEngine::new(storage_config);
-    let mut replication_config = ReplicationConfig::default();
-    replication_config.master_host = Some("localhost".to_string());
-    replication_config.master_port = Some(6379);
+    let replication_config = ReplicationConfig {
+        master_host: Some("localhost".to_string()),
+        master_port: Some(6379),
+        ..Default::default()
+    };
 
     let replication_manager = ReplicationManager::new(engine.clone(), replication_config);
 
@@ -392,10 +394,9 @@ async fn test_read_only_mode_on_replica() {
     // Reads should still work
     let response = send_command(&mut stream, "GET", &["key1"]).await.unwrap();
     // key1 was set before becoming replica, should still be readable
-    match response {
-        RespValue::BulkString(Some(data)) => assert_eq!(data, b"value1"),
-        _ => {} // may be nil if key didn't persist, that's fine
-    }
+    if let RespValue::BulkString(Some(data)) = response {
+        assert_eq!(data, b"value1");
+    } // may be nil if key didn't persist, that's fine
 
     // REPLICAOF NO ONE to go back to master
     let response = send_command(&mut stream, "REPLICAOF", &["NO", "ONE"])
@@ -637,19 +638,16 @@ async fn test_psync_without_replication() {
     let response = send_command(&mut stream, "PSYNC", &["?", "-1"]).await;
     // The connection may close after PSYNC (it enters replication mode)
     // Either a valid response or a connection close is acceptable
-    match response {
-        Ok(resp) => {
-            let resp_str = format!("{:?}", resp);
-            assert!(
-                resp_str.contains("FULLRESYNC")
-                    || resp_str.contains("ERR")
-                    || resp_str.contains("CONTINUE"),
-                "PSYNC should return FULLRESYNC, CONTINUE, or ERR, got: {}",
-                resp_str
-            );
-        }
-        Err(_) => {} // Connection closed (expected for PSYNC entering replication stream)
-    }
+    if let Ok(resp) = response {
+        let resp_str = format!("{:?}", resp);
+        assert!(
+            resp_str.contains("FULLRESYNC")
+                || resp_str.contains("ERR")
+                || resp_str.contains("CONTINUE"),
+            "PSYNC should return FULLRESYNC, CONTINUE, or ERR, got: {}",
+            resp_str
+        );
+    } // Connection closed (expected for PSYNC entering replication stream)
 
     // Verify the server is still alive after PSYNC
     let mut verify_stream = TcpStream::connect(addr).await.unwrap();
@@ -867,14 +865,12 @@ async fn test_replication_select_db_tracking() {
     // Simulate the fixed replication client logic: track current_db from SELECT commands
     let mut current_db: usize = 0;
     for cmd in commands {
-        if cmd.name.eq_ignore_ascii_case("SELECT") {
-            if let Some(db_arg) = cmd.args.first() {
-                if let Ok(db_str) = std::str::from_utf8(db_arg) {
-                    if let Ok(db_idx) = db_str.parse::<usize>() {
-                        current_db = db_idx;
-                    }
-                }
-            }
+        if cmd.name.eq_ignore_ascii_case("SELECT")
+            && let Some(db_arg) = cmd.args.first()
+            && let Ok(db_str) = std::str::from_utf8(db_arg)
+            && let Ok(db_idx) = db_str.parse::<usize>()
+        {
+            current_db = db_idx;
         }
         let _ = cmd_handler.process(cmd, current_db).await;
     }
@@ -1049,14 +1045,12 @@ async fn test_replication_multi_exec_transaction() {
         let cmd_name_lower = cmd.name.to_lowercase();
 
         // Track SELECT
-        if cmd_name_lower == "select" {
-            if let Some(db_arg) = cmd.args.first() {
-                if let Ok(db_str) = std::str::from_utf8(db_arg) {
-                    if let Ok(db_idx) = db_str.parse::<usize>() {
-                        current_db = db_idx;
-                    }
-                }
-            }
+        if cmd_name_lower == "select"
+            && let Some(db_arg) = cmd.args.first()
+            && let Ok(db_str) = std::str::from_utf8(db_arg)
+            && let Ok(db_idx) = db_str.parse::<usize>()
+        {
+            current_db = db_idx;
         }
 
         match cmd_name_lower.as_str() {

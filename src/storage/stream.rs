@@ -101,6 +101,19 @@ pub struct StreamEntry {
     pub fields: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Compute the in-memory byte size of a stream entry for accurate memory accounting.
+/// Uses the same formula as `estimate_entry_size` in command/types/stream.rs.
+fn entry_mem_size(entry: &StreamEntry) -> usize {
+    // StreamEntryId: 16 bytes, StreamEntry struct overhead: ~24 bytes (Vec ptr+len+cap)
+    // BTreeMap node overhead: ~64 bytes
+    let mut size: usize = 16 + 24 + 64;
+    for (k, v) in &entry.fields {
+        // Each field pair: 2x Vec overhead (24 bytes each) + actual data
+        size += 24 + k.len() + 24 + v.len();
+    }
+    size
+}
+
 /// A pending entry in a consumer group's PEL (Pending Entries List)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEntry {
@@ -174,6 +187,16 @@ pub struct StreamData {
 }
 
 impl StreamData {
+    /// Compute the total in-memory byte size of this stream.
+    /// Uses `entry_mem_size()` per entry so that the baseline matches
+    /// the deltas applied by `estimate_entry_size` / `entry_mem_size` on
+    /// XADD/XDEL/XTRIM, preventing `cached_mem_size` drift.
+    pub fn mem_size(&self) -> usize {
+        let entries_size: usize = self.entries.values().map(entry_mem_size).sum();
+        // Base overhead: StreamData struct fields (BTreeMap, HashMap, metadata)
+        entries_size + 256
+    }
+
     pub fn new() -> Self {
         StreamData {
             entries: BTreeMap::new(),
@@ -350,10 +373,11 @@ impl StreamData {
         result
     }
 
-    /// Trim the stream to a maximum length, removing oldest entries
-    pub fn trim_maxlen(&mut self, maxlen: usize, approximate: bool) -> u64 {
+    /// Trim the stream to a maximum length, removing oldest entries.
+    /// Returns (count_removed, bytes_freed) for accurate memory accounting.
+    pub fn trim_maxlen(&mut self, maxlen: usize, approximate: bool) -> (u64, i64) {
         if self.entries.len() <= maxlen {
-            return 0;
+            return (0, 0);
         }
         let to_remove = self.entries.len() - maxlen;
         // For approximate trimming, we trim at least ~10% less aggressively
@@ -367,31 +391,35 @@ impl StreamData {
             to_remove
         };
         let mut removed = 0u64;
+        let mut bytes_freed: i64 = 0;
         let ids_to_remove: Vec<StreamEntryId> =
             self.entries.keys().take(actual_remove).copied().collect();
         for id in ids_to_remove {
-            self.entries.remove(&id);
-            if self
-                .max_deleted_entry_id
-                .as_ref()
-                .is_none_or(|max| id > *max)
-            {
-                self.max_deleted_entry_id = Some(id);
+            if let Some(entry) = self.entries.remove(&id) {
+                bytes_freed += entry_mem_size(&entry) as i64;
+                if self
+                    .max_deleted_entry_id
+                    .as_ref()
+                    .is_none_or(|max| id > *max)
+                {
+                    self.max_deleted_entry_id = Some(id);
+                }
+                removed += 1;
             }
-            removed += 1;
         }
-        removed
+        (removed, -bytes_freed)
     }
 
-    /// Trim entries with IDs less than the given minid
-    pub fn trim_minid(&mut self, minid: &StreamEntryId, approximate: bool) -> u64 {
+    /// Trim entries with IDs less than the given minid.
+    /// Returns (count_removed, bytes_freed) for accurate memory accounting.
+    pub fn trim_minid(&mut self, minid: &StreamEntryId, approximate: bool) -> (u64, i64) {
         let ids_to_remove: Vec<StreamEntryId> = self
             .entries
             .range(..*minid)
             .map(|(k, _)| *k)
             .collect();
         if ids_to_remove.is_empty() {
-            return 0;
+            return (0, 0);
         }
         let to_remove = if approximate {
             ids_to_remove
@@ -402,25 +430,31 @@ impl StreamData {
             ids_to_remove.len()
         };
         let mut removed = 0u64;
+        let mut bytes_freed: i64 = 0;
         for id in ids_to_remove.into_iter().take(to_remove) {
-            self.entries.remove(&id);
-            if self
-                .max_deleted_entry_id
-                .as_ref()
-                .is_none_or(|max| id > *max)
-            {
-                self.max_deleted_entry_id = Some(id);
+            if let Some(entry) = self.entries.remove(&id) {
+                bytes_freed += entry_mem_size(&entry) as i64;
+                if self
+                    .max_deleted_entry_id
+                    .as_ref()
+                    .is_none_or(|max| id > *max)
+                {
+                    self.max_deleted_entry_id = Some(id);
+                }
+                removed += 1;
             }
-            removed += 1;
         }
-        removed
+        (removed, -bytes_freed)
     }
 
-    /// Delete specific entries by ID
-    pub fn delete_entries(&mut self, ids: &[StreamEntryId]) -> u64 {
+    /// Delete specific entries by ID.
+    /// Returns (count_deleted, bytes_freed) for accurate memory accounting.
+    pub fn delete_entries(&mut self, ids: &[StreamEntryId]) -> (u64, i64) {
         let mut deleted = 0u64;
+        let mut bytes_freed: i64 = 0;
         for id in ids {
-            if self.entries.remove(id).is_some() {
+            if let Some(entry) = self.entries.remove(id) {
+                bytes_freed += entry_mem_size(&entry) as i64;
                 if self
                     .max_deleted_entry_id
                     .as_ref()
@@ -431,7 +465,7 @@ impl StreamData {
                 deleted += 1;
             }
         }
-        deleted
+        (deleted, -bytes_freed)
     }
 
     /// Get entries after a given ID (exclusive)
@@ -560,8 +594,9 @@ mod tests {
         }
         assert_eq!(stream.len(), 10);
 
-        let removed = stream.trim_maxlen(5, false);
+        let (removed, bytes_delta) = stream.trim_maxlen(5, false);
         assert_eq!(removed, 5);
+        assert!(bytes_delta < 0, "trim should report negative byte delta");
         assert_eq!(stream.len(), 5);
     }
 
@@ -575,8 +610,9 @@ mod tests {
             );
         }
 
-        let removed = stream.trim_minid(&StreamEntryId::new(5000, 0), false);
+        let (removed, bytes_delta) = stream.trim_minid(&StreamEntryId::new(5000, 0), false);
         assert_eq!(removed, 4); // IDs 1000-4000 removed
+        assert!(bytes_delta < 0, "trim should report negative byte delta");
         assert_eq!(stream.len(), 6);
     }
 
@@ -590,13 +626,15 @@ mod tests {
         stream.add_entry(id2, vec![]);
         stream.add_entry(id3, vec![]);
 
-        let deleted = stream.delete_entries(&[id2]);
+        let (deleted, bytes_delta) = stream.delete_entries(&[id2]);
         assert_eq!(deleted, 1);
+        assert!(bytes_delta < 0 || deleted == 0, "delete should report non-positive byte delta");
         assert_eq!(stream.len(), 2);
 
         // Deleting non-existent ID
-        let deleted = stream.delete_entries(&[StreamEntryId::new(9999, 0)]);
+        let (deleted, bytes_delta) = stream.delete_entries(&[StreamEntryId::new(9999, 0)]);
         assert_eq!(deleted, 0);
+        assert_eq!(bytes_delta, 0);
     }
 
     #[test]

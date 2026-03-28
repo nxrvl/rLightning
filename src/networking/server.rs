@@ -616,9 +616,25 @@ impl Server {
 
                 if batch_eligible {
                     let mut active_db = command_handler.storage().get_db_by_index(db_index);
+                    // Only reorder across shards when maxmemory is unlimited.
+                    // When maxmemory is configured, preserve client send order so
+                    // freeing commands (DEL) execute before allocating commands (SET).
+                    // Also disable reordering if any command in the pipeline could
+                    // mutate maxmemory (e.g. CONFIG SET maxmemory), since the flag
+                    // is computed once before execution and would be stale after such
+                    // a barrier command changes the memory limit.
+                    let has_config_set_maxmemory = parsed_commands.iter().any(|cmd| {
+                        cmd.name.eq_ignore_ascii_case("CONFIG")
+                            && cmd.args.len() >= 2
+                            && cmd.args[0].eq_ignore_ascii_case(b"SET")
+                            && cmd.args[1].eq_ignore_ascii_case(b"MAXMEMORY")
+                    });
+                    let can_reorder = !has_config_set_maxmemory
+                        && command_handler.storage().remaining_memory_budget().is_none();
                     let sorted_groups = batch::group_pipeline_sorted(
                         &parsed_commands,
                         |k| active_db.shard_index(k),
+                        can_reorder,
                     );
                     let cmd_count = parsed_commands.len();
                     let mut response_slots: Vec<Vec<u8>> = vec![Vec::new(); cmd_count];
@@ -1040,9 +1056,12 @@ impl Server {
                     for slot in &response_slots {
                         if !slot.is_empty() {
                             response_buffer.extend_from_slice(slot);
-                        } else {
+                        } else if !close_connection {
                             // Serialization failed or slot was never populated;
-                            // emit an error to preserve 1:1 command-response alignment
+                            // emit an error to preserve 1:1 command-response alignment.
+                            // When close_connection is set (e.g. QUIT in pipeline),
+                            // skip unpopulated trailing slots — those commands should
+                            // produce no response since the connection is closing.
                             response_buffer.extend_from_slice(b"-ERR internal serialization error\r\n");
                         }
                     }

@@ -202,17 +202,12 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 // Apply trimming (entries removed reduce delta)
                 let mut trim_delta: i64 = 0;
                 if let Some((threshold, approximate)) = maxlen {
-                    let before = s.len();
-                    s.trim_maxlen(threshold, approximate);
-                    let removed = before - s.len();
-                    // Rough estimate: each removed entry ~same size as average
-                    trim_delta -= removed as i64 * 128;
+                    let (_removed, bytes_delta) = s.trim_maxlen(threshold, approximate);
+                    trim_delta += bytes_delta;
                 }
                 if let Some((ref min_entry_id, approximate)) = minid {
-                    let before = s.len();
-                    s.trim_minid(min_entry_id, approximate);
-                    let removed = before - s.len();
-                    trim_delta -= removed as i64 * 128;
+                    let (_removed, bytes_delta) = s.trim_minid(min_entry_id, approximate);
+                    trim_delta += bytes_delta;
                 }
 
                 Ok((
@@ -234,10 +229,10 @@ pub async fn xadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 let added_id = stream.add_entry(entry_id, fields.clone());
 
                 if let Some((threshold, approximate)) = maxlen {
-                    stream.trim_maxlen(threshold, approximate);
+                    let _ = stream.trim_maxlen(threshold, approximate);
                 }
                 if let Some((ref min_entry_id, approximate)) = minid {
-                    stream.trim_minid(min_entry_id, approximate);
+                    let _ = stream.trim_minid(min_entry_id, approximate);
                 }
 
                 Ok((
@@ -263,12 +258,11 @@ pub async fn xlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let key = &args[0];
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
-        let stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
-            Some(_) => return Err(StorageError::WrongType),
-            None => return Ok(RespValue::Integer(0)),
-        };
-        Ok(RespValue::Integer(stream.len() as i64))
+        match existing {
+            Some(StoreValue::Stream(s)) => Ok(RespValue::Integer(s.len() as i64)),
+            Some(_) => Err(StorageError::WrongType),
+            None => Ok(RespValue::Integer(0)),
+        }
     })?;
 
     Ok(result)
@@ -312,7 +306,7 @@ pub async fn xrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(StoreValue::Stream(s)) => s,
             Some(_) => return Err(StorageError::WrongType),
             None => return Ok(RespValue::Array(Some(vec![]))),
         };
@@ -359,7 +353,7 @@ pub async fn xrevrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResul
 
     let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
         let stream = match existing {
-            Some(StoreValue::Stream(s)) => s.clone(),
+            Some(StoreValue::Stream(s)) => s,
             Some(_) => return Err(StorageError::WrongType),
             None => return Ok(RespValue::Array(Some(vec![]))),
         };
@@ -613,15 +607,13 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         match existing {
             Some(StoreValue::Stream(s)) => {
-                let removed = match &trim_strategy {
+                let (removed, bytes_delta) = match &trim_strategy {
                     TrimStrategy::MaxLen(maxlen, approx) => s.trim_maxlen(*maxlen, *approx),
                     TrimStrategy::MinId(min_id, approx) => s.trim_minid(min_id, *approx),
                 };
 
                 if removed > 0 {
-                    // Rough estimate: ~128 bytes per trimmed entry
-                    let delta = -(removed as i64 * 128);
-                    Ok((ModifyResult::Keep(delta), RespValue::Integer(removed as i64)))
+                    Ok((ModifyResult::Keep(bytes_delta), RespValue::Integer(removed as i64)))
                 } else {
                     Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
                 }
@@ -662,11 +654,9 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
         match existing {
             Some(StoreValue::Stream(s)) => {
-                let deleted = s.delete_entries(&ids);
+                let (deleted, bytes_delta) = s.delete_entries(&ids);
                 if deleted > 0 {
-                    // Rough estimate: ~128 bytes per deleted entry
-                    let delta = -(deleted as i64 * 128);
-                    Ok((ModifyResult::Keep(delta), RespValue::Integer(deleted as i64)))
+                    Ok((ModifyResult::Keep(bytes_delta), RespValue::Integer(deleted as i64)))
                 } else {
                     Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
                 }

@@ -338,10 +338,17 @@ struct AnnotatedCommand<'a> {
 /// then grouped into consecutive same-shard, same-kind batches. Excluded commands act as
 /// ordering barriers that prevent reordering across them.
 ///
+/// When `reorder` is false, commands are NOT sorted across shards — only consecutive
+/// same-shard commands are grouped. This preserves the client's send order, which is
+/// required when `maxmemory` is configured: a pipeline like `DEL key_b; SET key_a val`
+/// must execute DEL first to free memory before SET allocates. Cross-shard sorting
+/// would reorder execution by shard index, potentially causing spurious OOM errors.
+///
 /// Returns entries with original index mapping for response reordering.
 pub fn group_pipeline_sorted<'a>(
     commands: &'a [Command],
     shard_index_fn: impl Fn(&[u8]) -> usize,
+    reorder: bool,
 ) -> Vec<SortedPipelineEntry<'a>> {
     let mut entries: Vec<SortedPipelineEntry<'a>> = Vec::with_capacity(commands.len());
     let mut segment: Vec<AnnotatedCommand<'a>> = Vec::new();
@@ -362,7 +369,7 @@ pub fn group_pipeline_sorted<'a>(
             }
             None => {
                 // Excluded command - flush segment then add as individual barrier
-                flush_sorted_segment(&mut entries, &mut segment);
+                flush_sorted_segment(&mut entries, &mut segment, reorder);
                 entries.push(SortedPipelineEntry {
                     entry: PipelineEntry::Individual(cmd),
                     original_indices: vec![i],
@@ -372,23 +379,28 @@ pub fn group_pipeline_sorted<'a>(
     }
 
     // Flush remaining segment
-    flush_sorted_segment(&mut entries, &mut segment);
+    flush_sorted_segment(&mut entries, &mut segment, reorder);
 
     entries
 }
 
-/// Flush a segment of batchable commands: stable-sort by shard, group consecutive
-/// same-shard/same-kind entries into batches.
+/// Flush a segment of batchable commands: optionally stable-sort by shard, then
+/// group consecutive same-shard/same-kind entries into batches.
 fn flush_sorted_segment<'a>(
     entries: &mut Vec<SortedPipelineEntry<'a>>,
     segment: &mut Vec<AnnotatedCommand<'a>>,
+    reorder: bool,
 ) {
     if segment.is_empty() {
         return;
     }
 
-    // Stable sort by shard_idx only - preserves relative order within each shard
-    segment.sort_by_key(|a| a.shard_idx);
+    // Only sort by shard when reorder is enabled (no maxmemory configured).
+    // When maxmemory is active, preserving client send order is required so
+    // that freeing commands (DEL) execute before allocating commands (SET).
+    if reorder {
+        segment.sort_by_key(|a| a.shard_idx);
+    }
 
     // Group consecutive same-shard, same-kind entries into batches
     let mut i = 0;
@@ -1219,57 +1231,26 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
 }
 
 fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() != 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
-    }
-    let seconds = match parse_i64(&args[1]) {
-        Some(s) => s,
-        None => return (Err(CommandError::NotANumber), 0, 0),
-    };
-    let now = cached_now();
-    // Redis: TTL <= 0 means delete the key immediately
-    if seconds <= 0 {
-        return match map.get(&args[0]) {
-            Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
-                // Already expired — lazily remove the stale entry
-                let entry = map.remove(&args[0]).unwrap();
-                let mem = (args[0].len() + entry.value.mem_size()) as i64;
-                (Ok(RespValue::Integer(0)), -mem, -1)
-            }
-            Some(_) => {
-                let entry = map.remove(&args[0]).unwrap();
-                let mem = (args[0].len() + entry.value.mem_size()) as i64;
-                (Ok(RespValue::Integer(1)), -mem, -1)
-            }
-            None => (Ok(RespValue::Integer(0)), 0, 0),
-        };
-    }
-    match map.get_mut(&args[0]) {
-        Some(entry) => {
-            if entry.expires_at.is_some_and(|t| now > t) {
-                // Expired — lazily remove the entry
-                let entry = map.remove(&args[0]).unwrap();
-                let mem = (args[0].len() + entry.value.mem_size()) as i64;
-                return (Ok(RespValue::Integer(0)), -mem, -1);
-            }
-            entry.expires_at = Some(now + Duration::from_secs(seconds as u64));
-            (Ok(RespValue::Integer(1)), 0, 0)
-        }
-        None => (Ok(RespValue::Integer(0)), 0, 0),
-    }
+    batch_expire_impl(map, args, false)
 }
 
 fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
+    batch_expire_impl(map, args, true)
+}
+
+/// Shared implementation for EXPIRE/PEXPIRE batch commands.
+/// `is_millis`: false for EXPIRE (seconds), true for PEXPIRE (milliseconds).
+fn batch_expire_impl(map: &mut ShardMap, args: &[Vec<u8>], is_millis: bool) -> (CommandResult, i64, i32) {
     if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
-    let millis = match parse_i64(&args[1]) {
-        Some(m) => m,
+    let ttl_val = match parse_i64(&args[1]) {
+        Some(v) => v,
         None => return (Err(CommandError::NotANumber), 0, 0),
     };
     let now = cached_now();
     // Redis: TTL <= 0 means delete the key immediately
-    if millis <= 0 {
+    if ttl_val <= 0 {
         return match map.get(&args[0]) {
             Some(entry) if entry.expires_at.is_some_and(|t| now > t) => {
                 // Already expired — lazily remove the stale entry
@@ -1293,7 +1274,12 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
                 let mem = (args[0].len() + entry.value.mem_size()) as i64;
                 return (Ok(RespValue::Integer(0)), -mem, -1);
             }
-            entry.expires_at = Some(now + Duration::from_millis(millis as u64));
+            let duration = if is_millis {
+                Duration::from_millis(ttl_val as u64)
+            } else {
+                Duration::from_secs(ttl_val as u64)
+            };
+            entry.expires_at = Some(now + duration);
             (Ok(RespValue::Integer(1)), 0, 0)
         }
         None => (Ok(RespValue::Integer(0)), 0, 0),
@@ -1627,53 +1613,16 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
 }
 
 fn batch_lpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
-    if args.len() < 2 {
-        return (Err(CommandError::WrongNumberOfArguments), 0, 0);
-    }
-    let key = &args[0];
-    let now = cached_now();
-    let mut mem_delta: i64 = 0;
-    let mut replaced_expired = false;
-
-    // Remove expired entry
-    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
-        && let Some(v) = map.remove(key.as_slice())
-    {
-        mem_delta -= (key.len() + v.value.mem_size()) as i64;
-        replaced_expired = true;
-    }
-
-    if let Some(entry) = map.get_mut(key) {
-        match &mut entry.value {
-            StoreValue::List(list) => {
-                for value in &args[1..] {
-                    list.push_front(value.clone());
-                    mem_delta += (value.len() + 24) as i64;
-                }
-                let len = list.len() as i64;
-                entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
-                entry.touch();
-                return (Ok(RespValue::Integer(len)), mem_delta, 0);
-            }
-            _ => return (Err(CommandError::WrongType), 0, 0),
-        }
-    }
-
-    // Key doesn't exist - create new list
-    let mut list = std::collections::VecDeque::new();
-    mem_delta += key.len() as i64;
-    for value in &args[1..] {
-        list.push_front(value.clone());
-        mem_delta += (value.len() + 24) as i64;
-    }
-    let len = list.len() as i64;
-    map.insert(key.clone(), Entry::new(StoreValue::List(list)));
-    // Net key_delta is 0 when replacing an expired entry (remove + create cancel out)
-    let key_delta = if replaced_expired { 0 } else { 1 };
-    (Ok(RespValue::Integer(len)), mem_delta, key_delta)
+    batch_list_push(map, args, true)
 }
 
 fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
+    batch_list_push(map, args, false)
+}
+
+/// Shared implementation for LPUSH/RPUSH batch commands.
+/// `push_front`: true for LPUSH, false for RPUSH.
+fn batch_list_push(map: &mut ShardMap, args: &[Vec<u8>], push_front: bool) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
@@ -1694,7 +1643,11 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
         match &mut entry.value {
             StoreValue::List(list) => {
                 for value in &args[1..] {
-                    list.push_back(value.clone());
+                    if push_front {
+                        list.push_front(value.clone());
+                    } else {
+                        list.push_back(value.clone());
+                    }
                     mem_delta += (value.len() + 24) as i64;
                 }
                 let len = list.len() as i64;
@@ -1710,7 +1663,11 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
     let mut list = std::collections::VecDeque::new();
     mem_delta += key.len() as i64;
     for value in &args[1..] {
-        list.push_back(value.clone());
+        if push_front {
+            list.push_front(value.clone());
+        } else {
+            list.push_back(value.clone());
+        }
         mem_delta += (value.len() + 24) as i64;
     }
     let len = list.len() as i64;
@@ -1836,7 +1793,7 @@ mod tests {
             .map(|k| make_cmd("GET", &[k.as_bytes()]))
             .collect();
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         assert_eq!(entries.len(), 1);
         match &entries[0].entry {
             PipelineEntry::Batch(group) => {
@@ -1873,7 +1830,7 @@ mod tests {
             make_cmd("GET", &[same_shard_keys[3].as_bytes()]),
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         // Should be: Batch(2 GETs) + Individual(MULTI) + Batch(2 GETs)
         assert_eq!(entries.len(), 3);
         assert!(matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.commands.len() == 2));
@@ -1905,7 +1862,7 @@ mod tests {
             make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"val"]),
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         // Reads and writes are separate groups within the same shard
         assert_eq!(entries.len(), 2);
         assert!(matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.is_read_only && g.commands.len() == 2));
@@ -1922,7 +1879,7 @@ mod tests {
         ];
 
         let store = ShardedStore::with_shard_count_for_test(16);
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         // Each is individual (PING is excluded, others may be different shards)
         for entry in &entries {
             assert!(matches!(&entry.entry, PipelineEntry::Individual(_)));
@@ -1939,7 +1896,7 @@ mod tests {
             make_cmd("MULTI", &[]),      // 3 (excluded barrier)
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         assert_eq!(entries.len(), 4);
         // Verify each entry has the correct original index
         assert_eq!(entries[0].original_indices, vec![0]);
@@ -1979,7 +1936,7 @@ mod tests {
             make_cmd("GET", &[keys_a[1].as_bytes()]),  // shard_a, idx 2
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
 
         // With sorting: the two shard_a GETs should be batched together
         // even though they were non-consecutive in the original pipeline
@@ -2030,7 +1987,7 @@ mod tests {
             make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v2"]),
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         // Within the same shard: SET(0), GET(1), SET(2) - relative order preserved
         // Groups: Individual(SET at 0), Individual(GET at 1), Individual(SET at 2)
         // (reads and writes alternate, each forms a group of 1)
@@ -2071,7 +2028,7 @@ mod tests {
             make_cmd("GET", &[keys_b[1].as_bytes()]),  // 3
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
 
         // Simulate response collection with response_slots
         let mut response_slots: Vec<String> = vec![String::new(); 4];
@@ -2094,6 +2051,66 @@ mod tests {
         assert_eq!(response_slots[1], "resp_1");
         assert_eq!(response_slots[2], "resp_2");
         assert_eq!(response_slots[3], "resp_3");
+    }
+
+    #[test]
+    fn test_no_reorder_preserves_cross_shard_order() {
+        // When reorder=false (maxmemory configured), cross-shard command order
+        // must be preserved. A pipeline of DEL(shard_b), SET(shard_a) must NOT
+        // reorder SET before DEL, as the DEL may need to free memory first.
+        let store = ShardedStore::with_shard_count_for_test(16);
+
+        // Find keys on two different shards where shard_a < shard_b
+        let mut shard_lo_key = None;
+        let mut shard_hi_key = None;
+        for i in 0..10000 {
+            let key = format!("key:{}", i);
+            let shard = store.shard_index(key.as_bytes());
+            if shard_lo_key.is_none() {
+                shard_lo_key = Some((key, shard));
+            } else if let Some((_, lo_shard)) = &shard_lo_key
+                && shard != *lo_shard
+                && shard_hi_key.is_none()
+            {
+                // Ensure lo < hi for the test scenario
+                if shard > *lo_shard {
+                    shard_hi_key = Some((key, shard));
+                } else {
+                    shard_hi_key = shard_lo_key.take();
+                    shard_lo_key = Some((key, shard));
+                }
+            }
+            if shard_lo_key.is_some() && shard_hi_key.is_some() {
+                break;
+            }
+        }
+        let (lo_key, lo_shard) = shard_lo_key.unwrap();
+        let (hi_key, hi_shard) = shard_hi_key.unwrap();
+        assert!(lo_shard < hi_shard);
+
+        // Pipeline: DEL on high shard, then SET on low shard
+        // With reorder=true, SET(lo) would execute before DEL(hi) — wrong for memory
+        // With reorder=false, DEL(hi) stays first — correct
+        let commands = vec![
+            make_cmd("DEL", &[hi_key.as_bytes()]),        // idx 0, shard_hi
+            make_cmd("SET", &[lo_key.as_bytes(), b"val"]), // idx 1, shard_lo
+        ];
+
+        // reorder=false: should preserve original order
+        let entries_no_reorder = group_pipeline_sorted(&commands, |k| store.shard_index(k), false);
+        // Both are individual (different shards, non-consecutive same-shard)
+        assert_eq!(entries_no_reorder.len(), 2);
+        // First entry should be DEL (original index 0)
+        assert_eq!(entries_no_reorder[0].original_indices, vec![0]);
+        // Second entry should be SET (original index 1)
+        assert_eq!(entries_no_reorder[1].original_indices, vec![1]);
+
+        // reorder=true: may reorder SET before DEL (shard_lo < shard_hi)
+        let entries_reorder = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
+        assert_eq!(entries_reorder.len(), 2);
+        // With reorder, SET(shard_lo) should come first
+        assert_eq!(entries_reorder[0].original_indices, vec![1]); // SET
+        assert_eq!(entries_reorder[1].original_indices, vec![0]); // DEL
     }
 
     // --- Read batch execution tests ---
@@ -2162,7 +2179,11 @@ mod tests {
         let (results, _expired) = store.execute_on_shard_ref(shard_idx, |map| {
             execute_read_batch(map, &cmds)
         });
-        assert!(results[0].is_err()); // WRONGTYPE error
+        assert!(
+            matches!(results[0], Err(CommandError::WrongType)),
+            "Expected WrongType error, got: {:?}",
+            results[0]
+        );
     }
 
     // --- Write batch execution tests ---
@@ -2481,7 +2502,7 @@ mod tests {
             make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v3"]),  // allowed
         ];
 
-        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
+        let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
 
         // Simulate ACL filtering: command at index 1 is denied
         let mut response_slots: Vec<String> = vec![String::new(); 3];

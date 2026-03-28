@@ -3,7 +3,7 @@ use crate::command::{CommandError, CommandResult};
 use crate::networking::resp::RespValue;
 use crate::storage::engine::{SetResult, StorageEngine};
 use crate::storage::item::{Entry, RedisDataType};
-use crate::storage::value::StoreValue;
+use crate::storage::value::{CompactValue, StoreValue};
 
 /// Redis SET command - Set the string value of a key
 /// Uses set_with_options() for atomic NX/XX/GET handling
@@ -243,7 +243,7 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             None
         };
 
-        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len())).sum();
         engine.check_write_memory(estimated_size).await?;
 
         // Execute all inserts under a single shard write lock
@@ -264,7 +264,7 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     };
                     mem_delta += new_size - old_size;
                 } else {
-                    mem_delta += new_size + 64; // +64 for HashMap entry overhead
+                    mem_delta += new_size;
                     new_count += 1;
                     created_keys.push(key.clone());
                 }
@@ -293,7 +293,7 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
         let _guard = engine.lock_keys(&keys).await;
 
-        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len())).sum();
         engine.check_write_memory(estimated_size).await?;
 
         for (key, value) in &pairs {
