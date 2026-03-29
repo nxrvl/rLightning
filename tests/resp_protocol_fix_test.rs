@@ -1,6 +1,5 @@
 use bytes::BytesMut;
 use rlightning::networking::resp::RespValue;
-use rlightning::networking::resp_parser_state::StatefulRespParser;
 use rlightning::storage::engine::{StorageConfig, StorageEngine};
 use std::sync::Arc;
 
@@ -16,27 +15,6 @@ async fn test_resp_protocol_data_command_separation() {
         matches!(result, Ok(None)),
         "Data without newline should be incomplete (Ok(None)), got: {:?}",
         result
-    );
-}
-
-#[tokio::test]
-async fn test_stateful_parser_prevents_confusion() {
-    let mut parser = StatefulRespParser::new();
-
-    // Test valid RESP command
-    let mut buffer = BytesMut::from("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
-    let result = parser.parse_with_state(&mut buffer);
-    assert!(result.is_ok(), "Valid RESP command should parse correctly");
-
-    // Reset parser
-    parser.reset();
-
-    // Test rejection of data in command mode
-    let mut buffer = BytesMut::from("B64JSON:W3randomdata...");
-    let result = parser.parse_with_state(&mut buffer);
-    assert!(
-        result.is_err(),
-        "Stateful parser should reject data in command mode"
     );
 }
 

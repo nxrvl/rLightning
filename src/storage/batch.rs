@@ -1774,7 +1774,7 @@ mod tests {
 
     #[test]
     fn test_sorted_group_same_shard_reads() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
         for i in 0..1000 {
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[test]
     fn test_sorted_group_excluded_breaks_batch() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
         for i in 0..1000 {
@@ -1843,7 +1843,7 @@ mod tests {
 
     #[test]
     fn test_sorted_group_mixed_read_write_same_shard() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
         for i in 0..1000 {
@@ -1878,7 +1878,7 @@ mod tests {
             make_cmd("SET", &[b"key2", b"val"]),
         ];
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k), true);
         // Each is individual (PING is excluded, others may be different shards)
         for entry in &entries {
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[test]
     fn test_sorted_group_original_indices_with_barriers() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let commands = vec![
             make_cmd("GET", &[b"a"]),    // 0
             make_cmd("PING", &[]),       // 1 (excluded barrier)
@@ -1909,7 +1909,7 @@ mod tests {
     fn test_sorted_group_non_consecutive_same_shard_batched() {
         // This is the key improvement: non-consecutive same-shard commands
         // get sorted together and batched.
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         // Find keys on two different shards
         let shard_a = store.shard_index(b"key:0");
@@ -1966,7 +1966,7 @@ mod tests {
     #[test]
     fn test_sorted_group_preserves_order_within_shard() {
         // Verify that stable sort preserves relative order within the same shard
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();
         for i in 0..1000 {
@@ -2000,7 +2000,7 @@ mod tests {
     #[test]
     fn test_sorted_group_response_reordering_correctness() {
         // Simulate the response reordering that server.rs does with response_slots
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         // Find keys on different shards
         let shard_a = store.shard_index(b"key:0");
@@ -2058,7 +2058,7 @@ mod tests {
         // When reorder=false (maxmemory configured), cross-shard command order
         // must be preserved. A pipeline of DEL(shard_b), SET(shard_a) must NOT
         // reorder SET before DEL, as the DEL may need to free memory first.
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         // Find keys on two different shards where shard_a < shard_b
         let mut shard_lo_key = None;
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[test]
     fn test_batch_read_get() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         store.insert(b"key1".to_vec(), Entry::new_string(b"val1".to_vec()));
 
         let shard_idx = store.shard_index(b"key1");
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn test_batch_read_expired_key() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let mut entry = Entry::new_string(b"val".to_vec());
         entry.expires_at = Some(cached_now() - Duration::from_secs(1)); // Already expired
         store.insert(b"expired".to_vec(), entry);
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn test_batch_read_wrong_type() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let hash = hashbrown::HashMap::with_hasher(rustc_hash::FxBuildHasher);
         store.insert(b"hash_key".to_vec(), Entry::new(StoreValue::Hash(hash)));
 
@@ -2190,7 +2190,7 @@ mod tests {
 
     #[test]
     fn test_batch_write_set_del() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard_idx = store.shard_index(b"key1");
 
         let cmd1 = make_cmd("SET", &[b"key1", b"val1"]);
@@ -2211,7 +2211,7 @@ mod tests {
 
     #[test]
     fn test_batch_write_incr() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard_idx = store.shard_index(b"counter");
         store.insert(b"counter".to_vec(), Entry::new_string(b"10".to_vec()));
 
@@ -2235,7 +2235,7 @@ mod tests {
 
     #[test]
     fn test_batch_write_error_isolation() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard_idx = store.shard_index(b"key1");
         let hash = hashbrown::HashMap::with_hasher(rustc_hash::FxBuildHasher);
         store.insert(b"key1".to_vec(), Entry::new(StoreValue::Hash(hash)));
@@ -2255,7 +2255,7 @@ mod tests {
 
     #[test]
     fn test_batch_write_ordering_preserved() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let shard_idx = store.shard_index(b"key");
 
         let cmd1 = make_cmd("SET", &[b"key", b"first"]);
@@ -2274,7 +2274,7 @@ mod tests {
 
     #[test]
     fn test_batch_read_multiple_types() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         store.insert(b"str".to_vec(), Entry::new_string(b"hello".to_vec()));
 
         let mut hash = hashbrown::HashMap::with_hasher(rustc_hash::FxBuildHasher);
@@ -2323,7 +2323,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_batching_correctness() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         // Insert test data
         store.insert(b"k1".to_vec(), Entry::new_string(b"v1".to_vec()));
@@ -2423,7 +2423,7 @@ mod tests {
             make_cmd("EXEC", &[]),
         ];
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let entries = group_pipeline(&commands, |k| store.shard_index(k));
 
         // MULTI and EXEC are excluded, SET in between is individual
@@ -2441,7 +2441,7 @@ mod tests {
         // (BulkString, Integer, SimpleString, Error) which are compatible
         // with both RESP2 and RESP3 protocols. This validates that removing
         // the RESP2-only restriction is safe.
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         store.insert(b"str_key".to_vec(), Entry::new_string(b"hello".to_vec()));
         let shard_idx = store.shard_index(b"str_key");
 
@@ -2482,7 +2482,7 @@ mod tests {
         // Simulate the ACL pre-filtering that server.rs does for security-enabled
         // connections. Commands that fail ACL checks are excluded from batch execution
         // and get error responses at their original indices.
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         let shard = store.shard_index(b"key:0");
         let mut same_shard_keys = Vec::new();

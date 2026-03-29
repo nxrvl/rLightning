@@ -57,16 +57,11 @@ pub struct EvictionCandidate {
     pub mem_size: usize,
 }
 
-/// Internal data for a single shard.
-struct ShardInner {
-    map: ShardMap,
-}
-
 /// A single shard with cache-line alignment to prevent false sharing.
 #[repr(align(128))]
 struct Shard {
     /// Data storage with parking_lot RwLock for fast synchronous locking.
-    inner: RwLock<ShardInner>,
+    inner: RwLock<ShardMap>,
     /// Per-shard expiration min-heap. Uses a separate parking_lot Mutex
     /// so expiration processing doesn't hold the data RwLock.
     expiration_heap: Mutex<BinaryHeap<ShardExpirationEntry>>,
@@ -89,13 +84,13 @@ pub struct ShardedStore {
 
 /// Occupied entry in a shard (key exists). Holds the shard write lock.
 pub struct OccupiedShardEntry<'a> {
-    guard: RwLockWriteGuard<'a, ShardInner>,
+    guard: RwLockWriteGuard<'a, ShardMap>,
     key: Vec<u8>,
 }
 
 /// Vacant entry in a shard (key does not exist). Holds the shard write lock.
 pub struct VacantShardEntry<'a> {
-    guard: RwLockWriteGuard<'a, ShardInner>,
+    guard: RwLockWriteGuard<'a, ShardMap>,
     key: Vec<u8>,
 }
 
@@ -113,27 +108,27 @@ impl<'a> OccupiedShardEntry<'a> {
 
     /// Get a reference to the value.
     pub fn get(&self) -> &Entry {
-        self.guard.map.get(&self.key).unwrap()
+        self.guard.get(&self.key).unwrap()
     }
 
     /// Get a mutable reference to the value.
     pub fn get_mut(&mut self) -> &mut Entry {
-        self.guard.map.get_mut(&self.key).unwrap()
+        self.guard.get_mut(&self.key).unwrap()
     }
 
     /// Replace the value, returning the old value.
     pub fn insert(&mut self, value: Entry) -> Entry {
-        self.guard.map.insert(self.key.clone(), value).unwrap()
+        self.guard.insert(self.key.clone(), value).unwrap()
     }
 
     /// Remove the entry and return the value.
     pub fn remove(mut self) -> Entry {
-        self.guard.map.remove(&self.key).unwrap()
+        self.guard.remove(&self.key).unwrap()
     }
 
     /// Remove the entry and return both key and value.
     pub fn remove_entry(mut self) -> (Vec<u8>, Entry) {
-        let value = self.guard.map.remove(&self.key).unwrap();
+        let value = self.guard.remove(&self.key).unwrap();
         (self.key, value)
     }
 }
@@ -147,7 +142,7 @@ impl<'a> VacantShardEntry<'a> {
 
     /// Insert a value, consuming the vacant entry.
     pub fn insert(mut self, value: Entry) {
-        self.guard.map.insert(self.key, value);
+        self.guard.insert(self.key, value);
     }
 }
 
@@ -176,8 +171,7 @@ impl ShardedStore {
         Self::with_shard_count_and_capacity(shard_count, capacity)
     }
 
-    #[allow(dead_code)]
-    fn with_shard_count(shard_count: usize) -> Self {
+    pub(crate) fn with_shard_count(shard_count: usize) -> Self {
         Self::with_shard_count_and_capacity(shard_count, 0)
     }
 
@@ -191,12 +185,10 @@ impl ShardedStore {
 
         let shards: Vec<Shard> = (0..shard_count)
             .map(|_| Shard {
-                inner: RwLock::new(ShardInner {
-                    map: if per_shard_capacity > 0 {
-                        ShardMap::with_capacity_and_hasher(per_shard_capacity, FxBuildHasher)
-                    } else {
-                        ShardMap::with_hasher(FxBuildHasher)
-                    },
+                inner: RwLock::new(if per_shard_capacity > 0 {
+                    ShardMap::with_capacity_and_hasher(per_shard_capacity, FxBuildHasher)
+                } else {
+                    ShardMap::with_hasher(FxBuildHasher)
                 }),
                 expiration_heap: Mutex::new(BinaryHeap::new()),
                 tx_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -229,7 +221,7 @@ impl ShardedStore {
     pub fn get(&self, key: &[u8]) -> Option<MappedRwLockReadGuard<'_, Entry>> {
         let shard_idx = self.shard_index(key);
         let guard = self.shards[shard_idx].inner.read();
-        RwLockReadGuard::try_map(guard, |shard| shard.map.get(key)).ok()
+        RwLockReadGuard::try_map(guard, |shard| shard.get(key)).ok()
     }
 
     /// Get a write reference to an entry by key.
@@ -237,14 +229,14 @@ impl ShardedStore {
     pub fn get_mut(&self, key: &[u8]) -> Option<MappedRwLockWriteGuard<'_, Entry>> {
         let shard_idx = self.shard_index(key);
         let guard = self.shards[shard_idx].inner.write();
-        RwLockWriteGuard::try_map(guard, |shard| shard.map.get_mut(key)).ok()
+        RwLockWriteGuard::try_map(guard, |shard| shard.get_mut(key)).ok()
     }
 
     /// Get an entry for a key (occupied or vacant), holding the shard write lock.
     pub fn entry(&self, key: Vec<u8>) -> ShardEntry<'_> {
         let shard_idx = self.shard_index(&key);
         let guard = self.shards[shard_idx].inner.write();
-        let exists = guard.map.contains_key(&*key);
+        let exists = guard.contains_key(&*key);
         if exists {
             ShardEntry::Occupied(OccupiedShardEntry { guard, key })
         } else {
@@ -256,43 +248,41 @@ impl ShardedStore {
     pub fn insert(&self, key: Vec<u8>, value: Entry) -> Option<Entry> {
         let shard_idx = self.shard_index(&key);
         let mut guard = self.shards[shard_idx].inner.write();
-        guard.map.insert(key, value)
+        guard.insert(key, value)
     }
 
     /// Remove a key. Returns (key, value) if the key existed.
     pub fn remove(&self, key: &[u8]) -> Option<(Vec<u8>, Entry)> {
         let shard_idx = self.shard_index(key);
         let mut guard = self.shards[shard_idx].inner.write();
-        guard
-            .map
-            .remove_entry(key)
+        guard.remove_entry(key)
     }
 
     /// Check if a key exists.
     pub fn contains_key(&self, key: &[u8]) -> bool {
         let shard_idx = self.shard_index(key);
         let guard = self.shards[shard_idx].inner.read();
-        guard.map.contains_key(key)
+        guard.contains_key(key)
     }
 
     /// Get the total number of entries across all shards.
     pub fn len(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.inner.read().map.len())
+            .map(|s| s.inner.read().len())
             .sum()
     }
 
     /// Check if the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(|s| s.inner.read().map.is_empty())
+        self.shards.iter().all(|s| s.inner.read().is_empty())
     }
 
     /// Remove all entries from all shards.
     pub fn clear(&self) {
         for shard in self.shards.iter() {
             let mut guard = shard.inner.write();
-            guard.map.clear();
+            guard.clear();
             shard.expiration_heap.lock().clear();
             shard.used_memory.store(0, Ordering::Relaxed);
             shard.key_count.store(0, Ordering::Relaxed);
@@ -307,7 +297,7 @@ impl ShardedStore {
     {
         for shard in self.shards.iter() {
             let guard = shard.inner.read();
-            for (key, entry) in guard.map.iter() {
+            for (key, entry) in guard.iter() {
                 f(key, entry);
             }
         }
@@ -320,7 +310,7 @@ impl ShardedStore {
     {
         for shard in self.shards.iter() {
             let mut guard = shard.inner.write();
-            for (key, entry) in guard.map.iter_mut() {
+            for (key, entry) in guard.iter_mut() {
                 f(key, entry);
             }
         }
@@ -334,7 +324,7 @@ impl ShardedStore {
         let mut results = Vec::new();
         for shard in self.shards.iter() {
             let guard = shard.inner.read();
-            for (key, entry) in guard.map.iter() {
+            for (key, entry) in guard.iter() {
                 if let Some(r) = f(key, entry) {
                     results.push(r);
                 }
@@ -359,7 +349,7 @@ impl ShardedStore {
         for i in 0..num_shards {
             let shard_idx = (start_shard + i) % num_shards;
             let guard = self.shards[shard_idx].inner.read();
-            for (key, entry) in guard.map.iter() {
+            for (key, entry) in guard.iter() {
                 if results.len() >= count {
                     return results;
                 }
@@ -381,9 +371,9 @@ impl ShardedStore {
     {
         let shard_idx = self.shard_index(key);
         let mut guard = self.shards[shard_idx].inner.write();
-        if let Some((k, v)) = guard.map.get_key_value(key)
+        if let Some((k, v)) = guard.get_key_value(key)
             && f(k, v) {
-                guard.map.remove(key);
+                guard.remove(key);
                 return true;
             }
         false
@@ -453,7 +443,7 @@ impl ShardedStore {
         F: FnOnce(&ShardMap) -> R,
     {
         let guard = self.shards[shard_idx].inner.read();
-        f(&guard.map)
+        f(&guard)
     }
 
     /// Execute a mutating function with direct access to a shard's HashMap.
@@ -465,7 +455,7 @@ impl ShardedStore {
         F: FnOnce(&mut ShardMap) -> R,
     {
         let mut guard = self.shards[shard_idx].inner.write();
-        f(&mut guard.map)
+        f(&mut guard)
     }
 
     // --- Shard-indexed counter methods (for batch processing) ---
@@ -558,11 +548,11 @@ impl ShardedStore {
         // Phase 2: Remove expired keys from data map (lock data)
         let mut guard = self.shards[shard_idx].inner.write();
         for key in expired_keys {
-            if let Some(entry) = guard.map.get(&key) {
+            if let Some(entry) = guard.get(&key) {
                 // Verify the key is actually expired (may have been refreshed)
                 if let Some(exp) = entry.expires_at
                     && exp <= now
-                    && let Some(entry) = guard.map.remove(&key) {
+                    && let Some(entry) = guard.remove(&key) {
                         removed.push((key, entry));
                     }
                 // else: key has no expiry anymore (PERSIST was called), skip
@@ -583,7 +573,7 @@ impl ShardedStore {
         let mut candidates = ArrayVec::new();
         let guard = self.shards[shard_idx].inner.read();
 
-        for (key, entry) in guard.map.iter() {
+        for (key, entry) in guard.iter() {
             if candidates.is_full() {
                 break;
             }
@@ -611,7 +601,7 @@ impl ShardedStore {
         let mut result = Vec::new();
         for shard in self.shards.iter() {
             let guard = shard.inner.read();
-            for (key, entry) in guard.map.iter() {
+            for (key, entry) in guard.iter() {
                 if !entry.is_expired() {
                     result.push((key.clone(), entry.clone()));
                 }
@@ -621,11 +611,6 @@ impl ShardedStore {
         result
     }
 
-    /// Create a ShardedStore with a specific shard count for testing.
-    #[cfg(test)]
-    pub fn with_shard_count_for_test(shard_count: usize) -> Self {
-        Self::with_shard_count(shard_count)
-    }
 }
 
 #[cfg(test)]
@@ -997,7 +982,7 @@ mod tests {
     fn test_per_shard_expiration_basic() {
         use std::time::Duration;
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let key = b"expkey".to_vec();
         let now = Instant::now();
         let expires_at = now + Duration::from_millis(50);
@@ -1027,7 +1012,7 @@ mod tests {
     fn test_per_shard_expiration_refreshed_key() {
         use std::time::Duration;
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let key = b"refreshed".to_vec();
         let now = Instant::now();
         let old_expires = now + Duration::from_millis(50);
@@ -1059,7 +1044,7 @@ mod tests {
     fn test_per_shard_expiration_max_removals() {
         use std::time::Duration;
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let now = Instant::now();
         let expires = now + Duration::from_millis(10);
 
@@ -1091,7 +1076,7 @@ mod tests {
     fn test_remove_expiration() {
         use std::time::Duration;
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let key = b"persist_me".to_vec();
         let now = Instant::now();
         let expires = now + Duration::from_millis(50);
@@ -1113,7 +1098,7 @@ mod tests {
 
     #[test]
     fn test_eviction_candidate_sampling() {
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
 
         // Insert keys with varying LRU clocks
         for i in 0..100 {
@@ -1156,7 +1141,7 @@ mod tests {
     fn test_clear_also_clears_expiration_heaps() {
         use std::time::Duration;
 
-        let store = ShardedStore::with_shard_count_for_test(16);
+        let store = ShardedStore::with_shard_count(16);
         let now = Instant::now();
 
         // Add keys with expirations

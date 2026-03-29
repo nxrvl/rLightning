@@ -225,7 +225,9 @@ impl StreamData {
             (None, None) => {
                 let ms = now_ms.max(self.last_id.ms);
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq + 1
+                    self.last_id.seq.checked_add(1).ok_or(
+                        "ERR The stream sequence number overflowed"
+                    )?
                 } else {
                     0
                 };
@@ -234,7 +236,9 @@ impl StreamData {
             // Explicit ms, auto seq: "12345-*"
             (Some(ms), None) => {
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq + 1
+                    self.last_id.seq.checked_add(1).ok_or(
+                        "ERR The stream sequence number overflowed"
+                    )?
                 } else if ms > self.last_id.ms {
                     0
                 } else {
@@ -280,7 +284,9 @@ impl StreamData {
             (None, None) => {
                 let ms = now_ms.max(self.last_id.ms);
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq + 1
+                    self.last_id.seq.checked_add(1).ok_or(
+                        "ERR The stream sequence number overflowed"
+                    )?
                 } else {
                     0
                 };
@@ -289,7 +295,9 @@ impl StreamData {
             // Explicit ms, auto seq: "12345-*"
             (Some(ms), None) => {
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq + 1
+                    self.last_id.seq.checked_add(1).ok_or(
+                        "ERR The stream sequence number overflowed"
+                    )?
                 } else if ms > self.last_id.ms {
                     0
                 } else {
