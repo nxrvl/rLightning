@@ -157,7 +157,7 @@ impl RespValue {
                 if items.len() < SMALL_ARRAY_THRESHOLD {
                     header_size + items.len() * AVG_SMALL_ITEM_SIZE
                 } else {
-                    header_size + SMALL_ARRAY_THRESHOLD * AVG_LARGE_ITEM_SIZE
+                    header_size + items.len() * AVG_LARGE_ITEM_SIZE
                 }
             }
             // RESP3 types

@@ -1405,9 +1405,10 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let mut hash = hashbrown::HashMap::with_hasher(rustc_hash::FxBuildHasher);
     mem_delta += key.len() as i64;
     for pair in args[1..].chunks(2) {
-        hash.insert(pair[0].clone(), pair[1].clone());
-        new_fields += 1;
-        mem_delta += (pair[0].len() + pair[1].len() + 64) as i64;
+        if hash.insert(pair[0].clone(), pair[1].clone()).is_none() {
+            new_fields += 1;
+            mem_delta += (pair[0].len() + pair[1].len() + 64) as i64;
+        }
     }
     map.insert(key.clone(), Entry::new(StoreValue::Hash(hash)));
     // Net key_delta is 0 when replacing an expired entry (remove + create cancel out)
