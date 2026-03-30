@@ -238,18 +238,18 @@ impl RdbPersistence {
                 hasher.update(&[has_expiry]);
 
                 let expiry = if has_expiry == 1 {
-                    let secs = reader
+                    let ms = reader
                         .read_u64::<BigEndian>()
                         .map_err(PersistenceError::Io)?;
-                    hasher.update(&secs.to_be_bytes());
+                    hasher.update(&ms.to_be_bytes());
 
-                    let now = std::time::SystemTime::now()
+                    let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
-                        .as_secs();
+                        .as_millis() as u64;
 
-                    if secs > now {
-                        Some(Duration::from_secs(secs - now))
+                    if ms > now_ms {
+                        Some(Duration::from_millis(ms - now_ms))
                     } else {
                         None
                     }
@@ -406,12 +406,12 @@ impl RdbPersistence {
                             .map_err(PersistenceError::Io)?;
                         hasher.update(&[1]);
 
-                        let now = std::time::SystemTime::now()
+                        let now_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
-                            .as_secs();
+                            .as_millis() as u64;
 
-                        let expiry_time = now + ttl.as_secs();
+                        let expiry_time = now_ms + ttl.as_millis() as u64;
 
                         writer
                             .write_u64::<BigEndian>(expiry_time)
