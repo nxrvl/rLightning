@@ -44,7 +44,8 @@ fn serialize_store_value(value: &StoreValue) -> Result<Vec<u8>, String> {
 }
 
 /// Deserialize bytes to a StoreValue for RDB loading.
-fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8]) -> Result<StoreValue, String> {
+/// `rdb_version` is used to handle backward-compatible deserialization (v1 lists use list_bytes format).
+fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8], rdb_version: u8) -> Result<StoreValue, String> {
     match data_type {
         RedisDataType::String => Ok(StoreValue::Str(bytes.to_vec().into())),
         RedisDataType::Hash => {
@@ -65,9 +66,22 @@ fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8]) -> Result<St
             Ok(StoreValue::ZSet(ss))
         }
         RedisDataType::List => {
-            let vec: Vec<Vec<u8>> =
-                bincode::deserialize(bytes).map_err(|e| format!("List deserialization: {}", e))?;
-            Ok(StoreValue::List(vec.into()))
+            if rdb_version == 1 {
+                // V1 stored lists in list_bytes format (gap-buffer); try that first,
+                // then fall back to bincode for compatibility.
+                let vec: Vec<Vec<u8>> = crate::storage::list_bytes::deserialize_all(bytes)
+                    .map_err(|e| format!("List deserialization: {}", e))
+                    .or_else(|_| {
+                        bincode::deserialize::<Vec<Vec<u8>>>(bytes)
+                            .map_err(|e| format!("List deserialization: {}", e))
+                    })?;
+                Ok(StoreValue::List(vec.into()))
+            } else {
+                // V2 stores lists as bincode Vec<Vec<u8>>
+                let vec: Vec<Vec<u8>> =
+                    bincode::deserialize(bytes).map_err(|e| format!("List deserialization: {}", e))?;
+                Ok(StoreValue::List(vec.into()))
+            }
         }
         RedisDataType::Stream => {
             let s: crate::storage::stream::StreamData =
@@ -78,7 +92,9 @@ fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8]) -> Result<St
 }
 
 // Constants for RDB file format
-const RDB_VERSION: u8 = 1;
+// Version 1: expiry stored as epoch seconds, lists stored as list_bytes format
+// Version 2: expiry stored as epoch milliseconds, lists stored as bincode Vec<Vec<u8>>
+const RDB_VERSION: u8 = 2;
 const RDB_MAGIC_STRING: &[u8] = b"RLDB";
 
 // Type markers for data structures
@@ -165,10 +181,10 @@ impl RdbPersistence {
                 ));
             }
 
-            // Read version
+            // Read version (accept v1 for backward compatibility and v2 for current)
             let version = reader.read_u8().map_err(PersistenceError::Io)?;
 
-            if version != RDB_VERSION {
+            if version != 1 && version != 2 {
                 return Err(PersistenceError::CorruptedFile(format!(
                     "Unsupported RDB version: {}",
                     version
@@ -238,20 +254,35 @@ impl RdbPersistence {
                 hasher.update(&[has_expiry]);
 
                 let expiry = if has_expiry == 1 {
-                    let ms = reader
+                    let raw_ts = reader
                         .read_u64::<BigEndian>()
                         .map_err(PersistenceError::Io)?;
-                    hasher.update(&ms.to_be_bytes());
+                    hasher.update(&raw_ts.to_be_bytes());
 
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
+                    if version == 1 {
+                        // V1: expiry stored as epoch seconds
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
 
-                    if ms > now_ms {
-                        Some(Duration::from_millis(ms - now_ms))
+                        if raw_ts > now_secs {
+                            Some(Duration::from_secs(raw_ts - now_secs))
+                        } else {
+                            None
+                        }
                     } else {
-                        None
+                        // V2: expiry stored as epoch milliseconds
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+
+                        if raw_ts > now_ms {
+                            Some(Duration::from_millis(raw_ts - now_ms))
+                        } else {
+                            None
+                        }
                     }
                 } else {
                     None
@@ -292,7 +323,7 @@ impl RdbPersistence {
                 use crate::storage::engine::CURRENT_DB_INDEX;
                 for (db_idx, key, value, data_type, ttl) in data {
                     let engine_ref = &engine;
-                    let store_value = match deserialize_store_value(&data_type, &value) {
+                    let store_value = match deserialize_store_value(&data_type, &value, version) {
                         Ok(sv) => sv,
                         Err(e) => {
                             warn!(db = db_idx, "Error deserializing RDB value: {}", e);
