@@ -616,25 +616,15 @@ impl Server {
 
                 if batch_eligible {
                     let mut active_db = command_handler.storage().get_db_by_index(db_index);
-                    // Only reorder across shards when maxmemory is unlimited.
-                    // When maxmemory is configured, preserve client send order so
-                    // freeing commands (DEL) execute before allocating commands (SET).
-                    // Also disable reordering if any command in the pipeline could
-                    // mutate maxmemory (e.g. CONFIG SET maxmemory), since the flag
-                    // is computed once before execution and would be stale after such
-                    // a barrier command changes the memory limit.
-                    let has_config_set_maxmemory = parsed_commands.iter().any(|cmd| {
-                        cmd.name.eq_ignore_ascii_case("CONFIG")
-                            && cmd.args.len() >= 2
-                            && cmd.args[0].eq_ignore_ascii_case(b"SET")
-                            && cmd.args[1].eq_ignore_ascii_case(b"MAXMEMORY")
-                    });
-                    let can_reorder = !has_config_set_maxmemory
-                        && command_handler.storage().remaining_memory_budget().is_none();
+                    // Never reorder commands across shards. Redis guarantees that
+                    // commands from a single client execute in send order; cross-shard
+                    // sorting would permute that order, making intermediate state
+                    // visible to other clients in a different sequence than the client
+                    // sent. Consecutive same-shard commands are still batched under a
+                    // single lock acquisition for performance.
                     let sorted_groups = batch::group_pipeline_sorted(
                         &parsed_commands,
                         |k| active_db.shard_index(k),
-                        can_reorder,
                     );
                     let cmd_count = parsed_commands.len();
                     let mut response_slots: Vec<Vec<u8>> = vec![Vec::new(); cmd_count];
@@ -643,6 +633,16 @@ impl Server {
                     'batch_loop: for sorted_entry in &sorted_groups {
                         match &sorted_entry.entry {
                             PipelineEntry::Batch(group) => {
+                                // Update last command tracking for CLIENT LIST/INFO.
+                                // Use the original group commands (before ACL filtering)
+                                // so that denied commands also update cmd= in CLIENT LIST,
+                                // matching Redis behavior where cmd= reflects the last
+                                // command received, not the last one allowed.
+                                if let Some(last) = group.commands.last() {
+                                    let cmd_lower = last.name.to_lowercase();
+                                    last_cmd_local.clone_from(&cmd_lower);
+                                }
+
                                 // ACL pre-filtering: when security is enabled, check
                                 // permissions before batch execution and produce error
                                 // responses for denied commands.
@@ -743,7 +743,7 @@ impl Server {
                                     let max_key_size = command_handler.storage().max_key_size();
                                     let max_value_size = command_handler.storage().max_value_size();
                                     let memory_budget = command_handler.storage().remaining_memory_budget();
-                                    let results = active_db.execute_on_shard_mut(
+                                    let (results, expired_replaced_keys) = active_db.execute_on_shard_mut(
                                         group.shard_idx,
                                         |map| batch::execute_write_batch(map, &batch_cmds, max_key_size, max_value_size, memory_budget),
                                     );
@@ -756,6 +756,14 @@ impl Server {
                                     let mut aof_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
                                     // Collect replication commands to batch into a single propagation call
                                     let mut repl_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
+                                    // Clean up stale expiration-heap entries for keys
+                                    // that were lazily replaced by HSET/SADD/LPUSH/RPUSH
+                                    // BEFORE the per-command loop so that a subsequent
+                                    // EXPIRE/PEXPIRE in the same batch can safely add a
+                                    // new heap entry without it being removed.
+                                    for key in &expired_replaced_keys {
+                                        active_db.remove_expiration(key);
+                                    }
                                     for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
@@ -1004,6 +1012,7 @@ impl Server {
                                         command_handler.storage().increment_write_counters_batch(batch_write_count).await;
                                     }
                                 }
+                                // (last_cmd_local already updated from group.commands above)
                             }
                             PipelineEntry::Individual(cmd) => {
                                 let orig_idx = sorted_entry.original_indices[0];
@@ -1145,6 +1154,19 @@ impl Server {
                     }
                 }
 
+                // Sync local connection state to shared tracker so CLIENT LIST/INFO
+                // from other connections reflects up-to-date cmd/db/multi values.
+                // Done once per read-loop iteration (not per-command) for minimal overhead.
+                if let Some(mut info) = connections.get_mut(&conn_id) {
+                    info.last_cmd.clone_from(&last_cmd_local);
+                    info.db = db_index;
+                    info.multi = if tx_state.in_multi {
+                        tx_state.queue.len() as i64
+                    } else {
+                        -1
+                    };
+                }
+
                 // Send the batched responses if we have any
                 if !response_buffer.is_empty() {
                     logging::log_protocol_data(
@@ -1214,6 +1236,11 @@ impl Server {
         asking: &mut bool,
     ) -> Result<DispatchAction, NetworkError> {
         let cmd_lower = cmd.name.to_lowercase();
+
+        // Track last command locally before any early returns, so the
+        // per-iteration sync at the end of the read loop always reflects
+        // the most recent command (ASKING, HELLO, QUIT, SELECT, etc.).
+        last_cmd_local.clone_from(&cmd_lower);
 
         // ASKING command: set the per-connection flag and return +OK
         if cmd_lower == "asking" {
@@ -1382,12 +1409,10 @@ impl Server {
             return Ok(DispatchAction::Continue);
         }
 
-        // Track last command locally (avoids DashMap write lock on every command)
-        last_cmd_local.clone_from(&cmd_lower);
-
         // CLIENT - connection management commands handled here with access to per-connection state
         if cmd_lower == "client" {
-            // Sync local state to connection tracker for CLIENT LIST/INFO queries
+            // Sync local state to shared map before CLIENT LIST/INFO reads it,
+            // so the issuing connection sees up-to-date cmd/db/multi values.
             if let Some(mut info) = connections.get_mut(&conn_id) {
                 info.last_cmd.clone_from(last_cmd_local);
                 info.db = *db_index;

@@ -238,28 +238,23 @@ Key configuration areas:
 
 ### Building Documentation
 
-The project includes a comprehensive documentation site built with MkDocs Material.
-
-**Prerequisites:**
-```bash
-pip install mkdocs-material mkdocs-minify-plugin
-```
+The project includes a comprehensive documentation site built with Astro.
 
 **Local Development:**
 ```bash
-# Serve documentation with live reload
 cd site
-mkdocs serve
+npm install
+npm run dev
 
-# Access at http://localhost:8000
+# Access at http://localhost:4321
 ```
 
 **Building Static Site:**
 ```bash
 cd site
-mkdocs build
+npm run build
 
-# Output in site/site/ directory
+# Output in site/dist/ directory
 ```
 
 **Docker Build:**
@@ -277,39 +272,34 @@ docker run -d -p 8080:8080 rlightning-docs
 
 ```
 site/
-├── mkdocs.yml           # MkDocs configuration
-├── docs/                # Documentation source
-│   ├── index.md         # Homepage (modern landing page)
-│   ├── getting-started.md
-│   ├── quick-start.md
-│   ├── configuration.md
-│   ├── architecture.md  # Includes cluster/sentinel diagrams
-│   ├── benchmarks.md    # Performance comparison vs Redis
-│   ├── use-cases.md
-│   ├── commands/        # Command reference
-│   │   ├── index.md     # Overview with all categories
-│   │   ├── strings.md, hashes.md, lists.md, sets.md, sorted-sets.md
-│   │   ├── bitmap.md, hyperloglog.md, geo.md, streams.md
-│   │   ├── transactions.md, scripting.md, pubsub.md
-│   │   ├── acl.md, cluster.md, sentinel.md, server.md
-│   ├── stylesheets/
-│   │   └── extra.css    # Dark navy/coral theme
-│   └── javascripts/
-│       └── extra.js     # Scroll animations
-└── overrides/           # Theme overrides
+├── package.json              # Astro project configuration
+├── astro.config.mjs          # Astro build config
+├── src/
+│   ├── content/
+│   │   └── docs/             # Documentation markdown files
+│   │       ├── architecture.md
+│   │       ├── benchmarks.md
+│   │       ├── configuration.md
+│   │       ├── getting-started.md
+│   │       ├── quick-start.md
+│   │       ├── commands/     # Command reference pages
+│   │       └── ...
+│   ├── pages/                # Astro page templates
+│   ├── layouts/              # Layout components
+│   └── components/           # UI components
+└── public/                   # Static assets
 ```
 
 ### Updating Documentation
 
-1. Edit markdown files in `site/docs/`
-2. Update `site/mkdocs.yml` if adding new pages
-3. Test locally with `mkdocs serve`
-4. Commit changes - GitHub Actions will auto-deploy
+1. Edit markdown files in `site/src/content/docs/`
+2. Test locally with `npm run dev` from the `site/` directory
+3. Commit changes
 
 ## Claude instructions
 - Use Redis commands to interact with the server
 - Use Redis commands to manage data
 - Use Redis commands to manage security
 - Track progress in different files
-- When updating documentation, follow the MkDocs structure in site/docs/
+- When updating documentation, follow the Astro structure in site/src/content/docs/
 - **CRITICAL**: NEVER add Claude Code attribution footers to commit messages (no "🤖 Generated with Claude Code" or "Co-Authored-By: Claude" lines). Keep commit messages clean and professional.

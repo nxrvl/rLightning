@@ -247,10 +247,11 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         engine.check_write_memory(estimated_size).await?;
 
         // Execute all inserts under a single shard write lock
-        let (memory_delta, new_key_count, new_keys) = store.execute_on_shard_mut(first_shard, |map| {
+        let (memory_delta, new_key_count, new_keys, expired_keys) = store.execute_on_shard_mut(first_shard, |map| {
             let mut mem_delta: i64 = 0;
             let mut new_count: i64 = 0;
             let mut created_keys: Vec<Vec<u8>> = Vec::new();
+            let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
 
             for (key, value) in &pairs {
                 let entry = Entry::new(StoreValue::Str(value.clone().into()));
@@ -263,6 +264,10 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         (key.len() + old_entry.value.mem_size()) as i64
                     };
                     mem_delta += new_size - old_size;
+                    // Track keys that had a TTL so we can clean up stale heap entries
+                    if old_entry.expires_at.is_some() {
+                        stale_expiry_keys.push(key.clone());
+                    }
                 } else {
                     mem_delta += new_size;
                     new_count += 1;
@@ -270,12 +275,17 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                 }
             }
 
-            (mem_delta, new_count, created_keys)
+            (mem_delta, new_count, created_keys, stale_expiry_keys)
         });
 
         // Post-processing outside the write lock
         engine.adjust_global_memory(memory_delta);
         engine.adjust_key_count(new_key_count);
+
+        // Clean up stale expiration-heap entries for replaced keys that had TTLs
+        for key in &expired_keys {
+            store.remove_expiration(key);
+        }
 
         for (key, _) in &pairs {
             engine.bump_key_version(key);
@@ -296,10 +306,20 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len())).sum();
         engine.check_write_memory(estimated_size).await?;
 
+        // Track keys that had a TTL so we can clean up stale expiration-heap entries
+        let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
         for (key, value) in &pairs {
+            if let Some(entry) = store.get(key) {
+                if entry.expires_at.is_some() {
+                    stale_expiry_keys.push(key.clone());
+                }
+            }
             engine
                 .set_preevicted(key.clone(), value.clone(), None)
                 .await?;
+        }
+        for key in &stale_expiry_keys {
+            store.remove_expiration(key);
         }
     }
 

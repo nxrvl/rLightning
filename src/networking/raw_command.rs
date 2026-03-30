@@ -1,12 +1,12 @@
 use smallvec::SmallVec;
 
 use crate::command::Command;
-use crate::networking::resp::{RespError, RespValue};
+use crate::networking::resp::RespError;
 
 /// A zero-copy parsed RESP command that borrows directly from the read buffer.
 ///
 /// This avoids all heap allocations during parsing. The caller must convert to
-/// owned types (via `to_command()` or `to_resp_value()`) before advancing the buffer.
+/// owned types (via `to_command()`) before advancing the buffer.
 #[derive(Debug)]
 pub struct RawCommand<'buf> {
     /// Command name as a borrowed byte slice (e.g., b"SET", b"get")
@@ -179,17 +179,6 @@ impl<'buf> RawCommand<'buf> {
         }
     }
 
-    /// Convert to an owned `RespValue` for paths that need ownership:
-    /// MULTI command queuing, AOF logging, RESP3 protocol features.
-    #[allow(dead_code)]
-    pub fn to_resp_value(&self) -> RespValue {
-        let mut parts = Vec::with_capacity(1 + self.args.len());
-        parts.push(RespValue::BulkString(Some(self.name.to_vec())));
-        for arg in &self.args {
-            parts.push(RespValue::BulkString(Some(arg.to_vec())));
-        }
-        RespValue::Array(Some(parts))
-    }
 }
 
 /// Find the next CRLF (\r\n) in the buffer starting at `from`.
@@ -365,31 +354,6 @@ mod tests {
         let raw = RawCommand::try_parse(buf).unwrap().unwrap();
         let cmd = raw.to_command();
         assert_eq!(cmd.name, "get");
-    }
-
-    #[test]
-    fn test_to_resp_value() {
-        let buf = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
-        let raw = RawCommand::try_parse(buf).unwrap().unwrap();
-        let resp = raw.to_resp_value();
-        match resp {
-            RespValue::Array(Some(parts)) => {
-                assert_eq!(parts.len(), 3);
-                assert_eq!(
-                    parts[0],
-                    RespValue::BulkString(Some(b"SET".to_vec()))
-                );
-                assert_eq!(
-                    parts[1],
-                    RespValue::BulkString(Some(b"foo".to_vec()))
-                );
-                assert_eq!(
-                    parts[2],
-                    RespValue::BulkString(Some(b"bar".to_vec()))
-                );
-            }
-            other => panic!("Expected Array, got {:?}", other),
-        }
     }
 
     #[test]
