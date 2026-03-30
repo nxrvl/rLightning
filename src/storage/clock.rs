@@ -68,7 +68,7 @@ pub fn start_clock_updater() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            CACHED_WALL_MS.store(wall_ms, Ordering::Relaxed);
+            CACHED_WALL_MS.fetch_max(wall_ms, Ordering::Relaxed);
         }
     });
 }

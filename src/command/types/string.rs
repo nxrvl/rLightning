@@ -309,10 +309,8 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         // Track keys that had a TTL so we can clean up stale expiration-heap entries
         let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
         for (key, value) in &pairs {
-            if let Some(entry) = store.get(key) {
-                if entry.expires_at.is_some() {
-                    stale_expiry_keys.push(key.clone());
-                }
+            if let Some(entry) = store.get(key) && entry.expires_at.is_some() {
+                stale_expiry_keys.push(key.clone());
             }
             engine
                 .set_preevicted(key.clone(), value.clone(), None)

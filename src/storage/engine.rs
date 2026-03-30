@@ -1540,7 +1540,7 @@ impl StorageEngine {
     /// Bump the version counter for a specific key (DB-scoped for WATCH isolation).
     /// Skipped when no connections have active WATCH keys (common case).
     pub fn bump_key_version(&self, key: &[u8]) {
-        if self.active_watch_count.load(Ordering::Relaxed) == 0 {
+        if self.active_watch_count.load(Ordering::Acquire) == 0 {
             return;
         }
         let db_idx = Self::current_db_idx();
@@ -1563,7 +1563,7 @@ impl StorageEngine {
     /// in the destination database.
     /// Skipped when no connections have active WATCH keys.
     pub fn bump_key_version_for_db(&self, key: &[u8], db_index: usize) {
-        if self.active_watch_count.load(Ordering::Relaxed) == 0 {
+        if self.active_watch_count.load(Ordering::Acquire) == 0 {
             return;
         }
         let scoped = Self::db_scoped_key(db_index, key);
@@ -1593,7 +1593,7 @@ impl StorageEngine {
     /// Increment the active WATCH connection count.
     /// Called when a connection first issues WATCH (transitions from 0 watched keys to >0).
     pub fn increment_watch_count(&self) {
-        self.active_watch_count.fetch_add(1, Ordering::Relaxed);
+        self.active_watch_count.fetch_add(1, Ordering::Release);
     }
 
     /// Decrement the active WATCH connection count.
@@ -1602,7 +1602,7 @@ impl StorageEngine {
     /// (which would permanently disable the conditional WATCH optimization).
     pub fn decrement_watch_count(&self) {
         let _ = self.active_watch_count.fetch_update(
-            Ordering::Relaxed,
+            Ordering::Release,
             Ordering::Relaxed,
             |current| Some(current.saturating_sub(1)),
         );
