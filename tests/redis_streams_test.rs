@@ -499,15 +499,10 @@ async fn test_redis_streams() -> Result<(), Box<dyn std::error::Error + Send + S
                             "XACK should return 1 for one acknowledged message"
                         );
                     } else if let RespValue::Error(err) = &xack_result {
-                        if err.contains("unknown command")
-                            || err.contains("not implemented")
-                        {
+                        if err.contains("unknown command") || err.contains("not implemented") {
                             println!("XACK command is not implemented, skipping");
                         } else {
-                            panic!(
-                                "Unexpected error response from XACK: {:?}",
-                                xack_result
-                            );
+                            panic!("Unexpected error response from XACK: {:?}", xack_result);
                         }
                     } else {
                         panic!("Unexpected response type from XACK: {:?}", xack_result);

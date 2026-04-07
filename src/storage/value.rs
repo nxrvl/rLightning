@@ -122,7 +122,6 @@ impl CompactValue {
             *self = CompactValue::Heap(v);
         }
     }
-
 }
 
 impl Default for CompactValue {
@@ -236,7 +235,10 @@ impl<'de> Deserialize<'de> for CompactValue {
                 Ok(CompactValue::from(v))
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<CompactValue, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<CompactValue, A::Error> {
                 let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
                 while let Some(b) = seq.next_element()? {
                     bytes.push(b);
@@ -296,8 +298,7 @@ impl SortedSetData {
 
     pub fn remove(&mut self, member: &[u8]) -> bool {
         if let Some(score) = self.scores.remove(member) {
-            self.entries
-                .remove(&(OrderedFloat(score), member.to_vec()));
+            self.entries.remove(&(OrderedFloat(score), member.to_vec()));
             true
         } else {
             false
@@ -387,9 +388,7 @@ impl StoreValue {
                     ss.scores.iter().map(|(member, _)| member.len() + 16).sum();
                 entries_size + scores_size
             }
-            StoreValue::List(deque) => {
-                deque.iter().map(|elem| elem.len() + 24).sum::<usize>()
-            }
+            StoreValue::List(deque) => deque.iter().map(|elem| elem.len() + 24).sum::<usize>(),
             StoreValue::Stream(s) => s.mem_size(),
         }
     }
@@ -410,7 +409,6 @@ impl StoreValue {
             _ => None,
         }
     }
-
 }
 
 #[cfg(test)]

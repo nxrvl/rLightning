@@ -225,9 +225,10 @@ impl StreamData {
             (None, None) => {
                 let ms = now_ms.max(self.last_id.ms);
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq.checked_add(1).ok_or(
-                        "ERR The stream sequence number overflowed"
-                    )?
+                    self.last_id
+                        .seq
+                        .checked_add(1)
+                        .ok_or("ERR The stream sequence number overflowed")?
                 } else {
                     0
                 };
@@ -236,9 +237,10 @@ impl StreamData {
             // Explicit ms, auto seq: "12345-*"
             (Some(ms), None) => {
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq.checked_add(1).ok_or(
-                        "ERR The stream sequence number overflowed"
-                    )?
+                    self.last_id
+                        .seq
+                        .checked_add(1)
+                        .ok_or("ERR The stream sequence number overflowed")?
                 } else if ms > self.last_id.ms {
                     0
                 } else {
@@ -284,9 +286,10 @@ impl StreamData {
             (None, None) => {
                 let ms = now_ms.max(self.last_id.ms);
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq.checked_add(1).ok_or(
-                        "ERR The stream sequence number overflowed"
-                    )?
+                    self.last_id
+                        .seq
+                        .checked_add(1)
+                        .ok_or("ERR The stream sequence number overflowed")?
                 } else {
                     0
                 };
@@ -295,9 +298,10 @@ impl StreamData {
             // Explicit ms, auto seq: "12345-*"
             (Some(ms), None) => {
                 let seq = if ms == self.last_id.ms {
-                    self.last_id.seq.checked_add(1).ok_or(
-                        "ERR The stream sequence number overflowed"
-                    )?
+                    self.last_id
+                        .seq
+                        .checked_add(1)
+                        .ok_or("ERR The stream sequence number overflowed")?
                 } else if ms > self.last_id.ms {
                     0
                 } else {
@@ -421,11 +425,8 @@ impl StreamData {
     /// Trim entries with IDs less than the given minid.
     /// Returns (count_removed, bytes_freed) for accurate memory accounting.
     pub fn trim_minid(&mut self, minid: &StreamEntryId, approximate: bool) -> (u64, i64) {
-        let ids_to_remove: Vec<StreamEntryId> = self
-            .entries
-            .range(..*minid)
-            .map(|(k, _)| *k)
-            .collect();
+        let ids_to_remove: Vec<StreamEntryId> =
+            self.entries.range(..*minid).map(|(k, _)| *k).collect();
         if ids_to_remove.is_empty() {
             return (0, 0);
         }
@@ -636,7 +637,10 @@ mod tests {
 
         let (deleted, bytes_delta) = stream.delete_entries(&[id2]);
         assert_eq!(deleted, 1);
-        assert!(bytes_delta < 0 || deleted == 0, "delete should report non-positive byte delta");
+        assert!(
+            bytes_delta < 0 || deleted == 0,
+            "delete should report non-positive byte delta"
+        );
         assert_eq!(stream.len(), 2);
 
         // Deleting non-existent ID

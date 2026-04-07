@@ -489,10 +489,16 @@ mod tests {
         // Load stops at the first corrupt entry (Redis-compatible behavior).
         // Verify it doesn't panic and that no commands were loaded.
         let result = aof.load().await;
-        assert!(result.is_ok(), "AOF load should not panic on corrupted file");
+        assert!(
+            result.is_ok(),
+            "AOF load should not panic on corrupted file"
+        );
         // Engine should remain empty since no valid commands could be parsed
         let val = engine_ref.get(b"any_key").await.unwrap();
-        assert!(val.is_none(), "No keys should be loaded from a corrupted AOF file");
+        assert!(
+            val.is_none(),
+            "No keys should be loaded from a corrupted AOF file"
+        );
     }
 
     // Testing persistence with large datasets
@@ -757,7 +763,10 @@ mod tests {
         // Perform the RDB snapshot concurrently with writes
         let rdb = RdbPersistence::new(engine.clone(), rdb_path.clone());
         let save_result = rdb.save().await;
-        assert!(save_result.is_ok(), "RDB save should succeed during concurrent writes");
+        assert!(
+            save_result.is_ok(),
+            "RDB save should succeed during concurrent writes"
+        );
 
         // Wait for writer to finish
         writer_handle.await.unwrap();

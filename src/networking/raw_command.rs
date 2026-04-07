@@ -66,11 +66,9 @@ impl<'buf> RawCommand<'buf> {
         let crlf_pos = crlf_pos.unwrap();
 
         // Parse element count
-        let count_str = std::str::from_utf8(&buffer[count_start..crlf_pos])
-            .map_err(RespError::Utf8Error)?;
-        let count: i64 = count_str
-            .parse()
-            .map_err(RespError::IntegerParseError)?;
+        let count_str =
+            std::str::from_utf8(&buffer[count_start..crlf_pos]).map_err(RespError::Utf8Error)?;
+        let count: i64 = count_str.parse().map_err(RespError::IntegerParseError)?;
 
         if count <= 0 {
             return Ok(None); // Null array or empty - let standard parser handle
@@ -110,11 +108,9 @@ impl<'buf> RawCommand<'buf> {
             let len_crlf = len_crlf.unwrap();
 
             // Parse bulk string length
-            let len_str = std::str::from_utf8(&buffer[pos..len_crlf])
-                .map_err(RespError::Utf8Error)?;
-            let element_len: i64 = len_str
-                .parse()
-                .map_err(RespError::IntegerParseError)?;
+            let len_str =
+                std::str::from_utf8(&buffer[pos..len_crlf]).map_err(RespError::Utf8Error)?;
+            let element_len: i64 = len_str.parse().map_err(RespError::IntegerParseError)?;
 
             if element_len < 0 {
                 // Null bulk string in command - unusual but let standard parser handle
@@ -178,7 +174,6 @@ impl<'buf> RawCommand<'buf> {
             args: self.args.iter().map(|a| a.to_vec()).collect(),
         }
     }
-
 }
 
 /// Find the next CRLF (\r\n) in the buffer starting at `from`.

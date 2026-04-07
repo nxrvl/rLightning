@@ -240,7 +240,10 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
 
     // Compute shard index for each key to detect single-shard case
     let first_shard = store.shard_index(&pairs[0].0);
-    let all_same_shard = pairs.len() == 1 || pairs[1..].iter().all(|(k, _)| store.shard_index(k) == first_shard);
+    let all_same_shard = pairs.len() == 1
+        || pairs[1..]
+            .iter()
+            .all(|(k, _)| store.shard_index(k) == first_shard);
 
     if all_same_shard {
         // Single-shard fast path: one tx lock + one write lock for all keys
@@ -253,40 +256,44 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             None
         };
 
-        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len())).sum();
+        let estimated_size: usize = pairs
+            .iter()
+            .map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len()))
+            .sum();
         engine.check_write_memory(estimated_size).await?;
 
         // Execute all inserts under a single shard write lock
-        let (memory_delta, new_key_count, new_keys, expired_keys) = store.execute_on_shard_mut(first_shard, |map| {
-            let mut mem_delta: i64 = 0;
-            let mut new_count: i64 = 0;
-            let mut created_keys: Vec<Vec<u8>> = Vec::new();
-            let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
+        let (memory_delta, new_key_count, new_keys, expired_keys) =
+            store.execute_on_shard_mut(first_shard, |map| {
+                let mut mem_delta: i64 = 0;
+                let mut new_count: i64 = 0;
+                let mut created_keys: Vec<Vec<u8>> = Vec::new();
+                let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
 
-            for (key, value) in &pairs {
-                let entry = Entry::new(StoreValue::Str(value.clone().into()));
-                let new_size = key.len() as i64 + entry.cached_mem_size as i64;
+                for (key, value) in &pairs {
+                    let entry = Entry::new(StoreValue::Str(value.clone().into()));
+                    let new_size = key.len() as i64 + entry.cached_mem_size as i64;
 
-                if let Some(old_entry) = map.insert(key.clone(), entry) {
-                    let old_size = if old_entry.cached_mem_size > 0 {
-                        key.len() as i64 + old_entry.cached_mem_size as i64
+                    if let Some(old_entry) = map.insert(key.clone(), entry) {
+                        let old_size = if old_entry.cached_mem_size > 0 {
+                            key.len() as i64 + old_entry.cached_mem_size as i64
+                        } else {
+                            (key.len() + old_entry.value.mem_size()) as i64
+                        };
+                        mem_delta += new_size - old_size;
+                        // Track keys that had a TTL so we can clean up stale heap entries
+                        if old_entry.expires_at.is_some() {
+                            stale_expiry_keys.push(key.clone());
+                        }
                     } else {
-                        (key.len() + old_entry.value.mem_size()) as i64
-                    };
-                    mem_delta += new_size - old_size;
-                    // Track keys that had a TTL so we can clean up stale heap entries
-                    if old_entry.expires_at.is_some() {
-                        stale_expiry_keys.push(key.clone());
+                        mem_delta += new_size;
+                        new_count += 1;
+                        created_keys.push(key.clone());
                     }
-                } else {
-                    mem_delta += new_size;
-                    new_count += 1;
-                    created_keys.push(key.clone());
                 }
-            }
 
-            (mem_delta, new_count, created_keys, stale_expiry_keys)
-        });
+                (mem_delta, new_count, created_keys, stale_expiry_keys)
+            });
 
         // Post-processing outside the write lock
         engine.adjust_global_memory(memory_delta);
@@ -307,19 +314,26 @@ pub async fn mset(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
 
-        engine.increment_write_counters_batch(pairs.len() as u64).await;
+        engine
+            .increment_write_counters_batch(pairs.len() as u64)
+            .await;
     } else {
         // Multi-shard path: use existing lock_keys approach
         let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
         let _guard = engine.lock_keys(&keys).await;
 
-        let estimated_size: usize = pairs.iter().map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len())).sum();
+        let estimated_size: usize = pairs
+            .iter()
+            .map(|(k, v)| k.len() + CompactValue::mem_for_data_len(v.len()))
+            .sum();
         engine.check_write_memory(estimated_size).await?;
 
         // Track keys that had a TTL so we can clean up stale expiration-heap entries
         let mut stale_expiry_keys: Vec<Vec<u8>> = Vec::new();
         for (key, value) in &pairs {
-            if let Some(entry) = store.get(key) && entry.expires_at.is_some() {
+            if let Some(entry) = store.get(key)
+                && entry.expires_at.is_some()
+            {
                 stale_expiry_keys.push(key.clone());
             }
             engine
@@ -511,7 +525,12 @@ pub async fn setrange(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
         }
 
         let new_len = val.len() as i64;
-        Ok((crate::storage::value::ModifyResult::Set(crate::storage::value::StoreValue::Str(val.into())), new_len))
+        Ok((
+            crate::storage::value::ModifyResult::Set(crate::storage::value::StoreValue::Str(
+                val.into(),
+            )),
+            new_len,
+        ))
     })?;
 
     Ok(RespValue::Integer(new_len))
@@ -1196,7 +1215,7 @@ mod tests {
         let config = StorageConfig {
             // Increase size limits for this test
             max_value_size: 1024 * 1024 * 10, // 10MB
-            max_memory: 1024 * 1024 * 100, // 100MB - ensure enough memory for the test
+            max_memory: 1024 * 1024 * 100,    // 100MB - ensure enough memory for the test
             ..StorageConfig::default()
         };
         let engine = Arc::new(StorageEngine::new(config));
@@ -1234,9 +1253,7 @@ mod tests {
         if let Err(CommandError::InvalidArgument(msg)) = &result {
             println!("Set error: {:?}", result);
             if msg.contains("SET operation failed") {
-                println!(
-                    "Storage error during SET operation. Check memory limits and value size."
-                );
+                println!("Storage error during SET operation. Check memory limits and value size.");
             }
         }
 
@@ -2728,7 +2745,10 @@ mod tests {
                 }
             }
         }
-        assert!(same_shard_keys.len() >= 5, "Need at least 5 keys on same shard for test");
+        assert!(
+            same_shard_keys.len() >= 5,
+            "Need at least 5 keys on same shard for test"
+        );
 
         // Build MSET args: key1, val1, key2, val2, ...
         let mut args: Vec<Vec<u8>> = Vec::new();
@@ -2769,7 +2789,8 @@ mod tests {
 
         // Find keys that hash to different shards
         let store = engine.active_db();
-        let mut keys_by_shard: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+        let mut keys_by_shard: std::collections::HashMap<usize, Vec<u8>> =
+            std::collections::HashMap::new();
         for i in 0u64..100000 {
             let k = format!("mset_ms_{}", i).into_bytes();
             let shard = store.shard_index(&k);
@@ -2778,7 +2799,10 @@ mod tests {
                 break;
             }
         }
-        assert!(keys_by_shard.len() >= 2, "Need keys on at least 2 different shards");
+        assert!(
+            keys_by_shard.len() >= 2,
+            "Need keys on at least 2 different shards"
+        );
 
         // Build MSET args with keys on different shards
         let mut args: Vec<Vec<u8>> = Vec::new();
@@ -2859,6 +2883,9 @@ mod tests {
 
         let mem_final = engine.get_used_memory();
         // Memory after overwrite with shorter (inline) values should be less than after 100-byte values
-        assert!(mem_final < mem_after, "Memory should decrease when overwriting with shorter values");
+        assert!(
+            mem_final < mem_after,
+            "Memory should decrease when overwriting with shorter values"
+        );
     }
 }

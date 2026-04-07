@@ -4,8 +4,8 @@
 //! every 1ms by a background Tokio timer. On hot paths (GET, EXISTS, TTL),
 //! this avoids the ~25ns syscall overhead per operation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// The epoch instant from which all cached timestamps are measured.
@@ -133,11 +133,7 @@ mod tests {
 
         // Should be within 100ms of real wall-clock time
         let diff = real.abs_diff(cached);
-        assert!(
-            diff < 100,
-            "cached_now_ms drift too large: {}ms",
-            diff
-        );
+        assert!(diff < 100, "cached_now_ms drift too large: {}ms", diff);
 
         // Should be a reasonable epoch time (after 2020-01-01)
         assert!(

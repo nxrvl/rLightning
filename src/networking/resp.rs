@@ -588,7 +588,6 @@ impl RespValue {
             other => other,
         }
     }
-
 }
 
 /// Optimized read_line using memchr for efficient CRLF scanning
@@ -2732,9 +2731,6 @@ mod tests {
             RespValue::Integer(i64::MIN).serialize().unwrap(),
             format!(":{}\r\n", i64::MIN).into_bytes()
         );
-        assert_eq!(
-            RespValue::Integer(0).serialize().unwrap(),
-            b":0\r\n"
-        );
+        assert_eq!(RespValue::Integer(0).serialize().unwrap(), b":0\r\n");
     }
 }

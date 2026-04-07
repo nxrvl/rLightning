@@ -3,16 +3,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
 use crate::storage::clock::{cached_now, start_clock_updater};
-use crate::storage::sharded::{ShardedStore, ShardEntry};
+use crate::storage::sharded::{ShardEntry, ShardedStore};
+use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tokio::time;
 
 use crate::networking::resp::RespCommand;
 use crate::storage::error::StorageError;
 use crate::storage::item::{Entry, RedisDataType, StorageItem};
-use crate::storage::value::{ModifyResult, NativeHashMap, NativeHashSet, SortedSetData, StoreValue};
+use crate::storage::value::{
+    ModifyResult, NativeHashMap, NativeHashSet, SortedSetData, StoreValue,
+};
 
 tokio::task_local! {
     /// The currently active database index for this task/connection.
@@ -648,9 +650,10 @@ impl StorageEngine {
             }
             let keys_to_remove: Vec<Vec<u8>> = db.sample(SAMPLE_SIZE, |key, entry| {
                 if let Some(exp) = entry.expires_at
-                    && exp <= now {
-                        return Some(key.clone());
-                    }
+                    && exp <= now
+                {
+                    return Some(key.clone());
+                }
                 None
             });
 
@@ -658,14 +661,15 @@ impl StorageEngine {
                 let mut entry_size = 0u64;
                 let removed = db.remove_if(&key, |k, item| {
                     if let Some(exp) = item.expires_at
-                        && exp <= now {
-                            entry_size = if item.cached_mem_size > 0 {
-                                k.len() as u64 + item.cached_mem_size
-                            } else {
-                                Self::calculate_entry_size(k, &item.value) as u64
-                            };
-                            return true;
-                        }
+                        && exp <= now
+                    {
+                        entry_size = if item.cached_mem_size > 0 {
+                            k.len() as u64 + item.cached_mem_size
+                        } else {
+                            Self::calculate_entry_size(k, &item.value) as u64
+                        };
+                        return true;
+                    }
                     false
                 });
                 if removed {
@@ -704,10 +708,11 @@ impl StorageEngine {
         let mut entry_size = 0u64;
         let removed = db.remove_if(key, |k, item| {
             if let Some(exp) = item.expires_at
-                && exp <= now {
-                    entry_size = Self::calculate_entry_size(k, &item.value) as u64;
-                    return true;
-                }
+                && exp <= now
+            {
+                entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                return true;
+            }
             false
         });
         if removed {
@@ -726,10 +731,11 @@ impl StorageEngine {
         let mut entry_size = 0u64;
         let removed = db.remove_if(key, |k, item| {
             if let Some(exp) = item.expires_at
-                && exp <= now {
-                    entry_size = Self::calculate_entry_size(k, &item.value) as u64;
-                    return true;
-                }
+                && exp <= now
+            {
+                entry_size = Self::calculate_entry_size(k, &item.value) as u64;
+                return true;
+            }
             false
         });
         if removed {
@@ -991,7 +997,8 @@ impl StorageEngine {
         value: Vec<u8>,
         ttl: Option<Duration>,
     ) -> StorageResult<()> {
-        self.set_value(key, StoreValue::Str(value.into()), ttl, true).await
+        self.set_value(key, StoreValue::Str(value.into()), ttl, true)
+            .await
     }
 
     /// Set a key-value pair with native StoreValue type
@@ -1063,8 +1070,7 @@ impl StorageEngine {
                     Self::calculate_entry_size(entry.key(), &entry.get().value) as u64
                 };
                 if old_size > 0 {
-                    self.current_memory
-                        .fetch_sub(old_size, Ordering::Relaxed);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 }
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::Relaxed);
@@ -1130,8 +1136,7 @@ impl StorageEngine {
                     Self::calculate_entry_size(entry.key(), &entry.get().value) as u64
                 };
                 if old_size > 0 {
-                    self.current_memory
-                        .fetch_sub(old_size, Ordering::Relaxed);
+                    self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                 }
                 self.current_memory
                     .fetch_add(required_size as u64, Ordering::Relaxed);
@@ -1350,9 +1355,10 @@ impl StorageEngine {
                 return None;
             }
             if let Ok(key_str) = std::str::from_utf8(key)
-                && crate::utils::glob::glob_match(pattern, key_str) {
-                    return Some(key.clone());
-                }
+                && crate::utils::glob::glob_match(pattern, key_str)
+            {
+                return Some(key.clone());
+            }
             None
         });
 
@@ -1505,13 +1511,16 @@ impl StorageEngine {
     /// Adjust the global memory counter by a signed delta (for batch path synchronization).
     pub fn adjust_global_memory(&self, delta: i64) {
         if delta > 0 {
-            self.current_memory.fetch_add(delta as u64, Ordering::Relaxed);
+            self.current_memory
+                .fetch_add(delta as u64, Ordering::Relaxed);
         } else if delta < 0 {
             // Use saturating subtraction to avoid wrapping
             let sub = (-delta) as u64;
-            self.current_memory.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(sub))
-            }).ok();
+            self.current_memory
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(sub))
+                })
+                .ok();
         }
     }
 
@@ -1522,9 +1531,11 @@ impl StorageEngine {
             self.key_count.fetch_add(delta as u64, Ordering::Relaxed);
         } else if delta < 0 {
             let sub = (-delta) as u64;
-            self.key_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(sub))
-            }).ok();
+            self.key_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(sub))
+                })
+                .ok();
         }
     }
 
@@ -1600,11 +1611,11 @@ impl StorageEngine {
     /// Uses saturating subtraction to prevent underflow wrapping to u32::MAX
     /// (which would permanently disable the conditional WATCH optimization).
     pub fn decrement_watch_count(&self) {
-        let _ = self.active_watch_count.fetch_update(
-            Ordering::Release,
-            Ordering::Relaxed,
-            |current| Some(current.saturating_sub(1)),
-        );
+        let _ =
+            self.active_watch_count
+                .fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(1))
+                });
     }
 
     /// Get the current active WATCH connection count.
@@ -1817,7 +1828,8 @@ impl StorageEngine {
                                     Ok((ModifyResult::Keep(delta), ()))
                                 }
                                 None => {
-                                    let deque: std::collections::VecDeque<Vec<u8>> = elems.into_iter().collect();
+                                    let deque: std::collections::VecDeque<Vec<u8>> =
+                                        elems.into_iter().collect();
                                     Ok((ModifyResult::Set(StoreValue::List(deque)), ()))
                                 }
                                 _ => unreachable!(),
@@ -1833,26 +1845,24 @@ impl StorageEngine {
                     let _: () = self.atomic_modify(
                         key,
                         crate::storage::item::RedisDataType::Set,
-                        |existing| {
-                            match existing {
-                                Some(StoreValue::Set(set)) => {
-                                    let mut delta: i64 = 0;
-                                    for m in members {
-                                        if set.insert(m.clone()) {
-                                            delta += m.len() as i64 + 32;
-                                        }
+                        |existing| match existing {
+                            Some(StoreValue::Set(set)) => {
+                                let mut delta: i64 = 0;
+                                for m in members {
+                                    if set.insert(m.clone()) {
+                                        delta += m.len() as i64 + 32;
                                     }
-                                    Ok((ModifyResult::Keep(delta), ()))
                                 }
-                                None => {
-                                    let mut set = NativeHashSet::default();
-                                    for m in members {
-                                        set.insert(m.clone());
-                                    }
-                                    Ok((ModifyResult::Set(StoreValue::Set(set)), ()))
-                                }
-                                _ => unreachable!(),
+                                Ok((ModifyResult::Keep(delta), ()))
                             }
+                            None => {
+                                let mut set = NativeHashSet::default();
+                                for m in members {
+                                    set.insert(m.clone());
+                                }
+                                Ok((ModifyResult::Set(StoreValue::Set(set)), ()))
+                            }
+                            _ => unreachable!(),
                         },
                     )?;
                 }
@@ -1864,37 +1874,35 @@ impl StorageEngine {
                     let _: () = self.atomic_modify(
                         key,
                         crate::storage::item::RedisDataType::ZSet,
-                        |existing| {
-                            match existing {
-                                Some(StoreValue::ZSet(zset)) => {
-                                    let mut delta: i64 = 0;
-                                    let mut i = 0;
-                                    while i + 1 < pairs.len() {
-                                        if let Ok(score_str) = std::str::from_utf8(&pairs[i])
-                                            && let Ok(score) = score_str.parse::<f64>()
-                                            && zset.insert(score, pairs[i + 1].clone())
-                                        {
-                                            delta += pairs[i + 1].len() as i64 * 2 + 40;
-                                        }
-                                        i += 2;
+                        |existing| match existing {
+                            Some(StoreValue::ZSet(zset)) => {
+                                let mut delta: i64 = 0;
+                                let mut i = 0;
+                                while i + 1 < pairs.len() {
+                                    if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                        && let Ok(score) = score_str.parse::<f64>()
+                                        && zset.insert(score, pairs[i + 1].clone())
+                                    {
+                                        delta += pairs[i + 1].len() as i64 * 2 + 40;
                                     }
-                                    Ok((ModifyResult::Keep(delta), ()))
+                                    i += 2;
                                 }
-                                None => {
-                                    let mut zset = SortedSetData::new();
-                                    let mut i = 0;
-                                    while i + 1 < pairs.len() {
-                                        if let Ok(score_str) = std::str::from_utf8(&pairs[i])
-                                            && let Ok(score) = score_str.parse::<f64>()
-                                        {
-                                            zset.insert(score, pairs[i + 1].clone());
-                                        }
-                                        i += 2;
-                                    }
-                                    Ok((ModifyResult::Set(StoreValue::ZSet(zset)), ()))
-                                }
-                                _ => unreachable!(),
+                                Ok((ModifyResult::Keep(delta), ()))
                             }
+                            None => {
+                                let mut zset = SortedSetData::new();
+                                let mut i = 0;
+                                while i + 1 < pairs.len() {
+                                    if let Ok(score_str) = std::str::from_utf8(&pairs[i])
+                                        && let Ok(score) = score_str.parse::<f64>()
+                                    {
+                                        zset.insert(score, pairs[i + 1].clone());
+                                    }
+                                    i += 2;
+                                }
+                                Ok((ModifyResult::Set(StoreValue::ZSet(zset)), ()))
+                            }
+                            _ => unreachable!(),
                         },
                     )?;
                 }
@@ -1931,15 +1939,18 @@ impl StorageEngine {
                                         let mut fields = Vec::new();
                                         let mut j = 0;
                                         while j + 1 < field_args.len() {
-                                            delta += field_args[j].len() as i64 + field_args[j + 1].len() as i64 + 16;
-                                            fields.push((field_args[j].clone(), field_args[j + 1].clone()));
+                                            delta += field_args[j].len() as i64
+                                                + field_args[j + 1].len() as i64
+                                                + 16;
+                                            fields.push((
+                                                field_args[j].clone(),
+                                                field_args[j + 1].clone(),
+                                            ));
                                             j += 2;
                                         }
                                         delta += 32; // per-entry overhead
-                                        let entry = crate::storage::stream::StreamEntry {
-                                            id,
-                                            fields,
-                                        };
+                                        let entry =
+                                            crate::storage::stream::StreamEntry { id, fields };
                                         stream.entries.insert(id, entry);
                                         if id > stream.last_id {
                                             stream.last_id = id;
@@ -1960,13 +1971,14 @@ impl StorageEngine {
                                         let mut fields = Vec::new();
                                         let mut j = 0;
                                         while j + 1 < field_args.len() {
-                                            fields.push((field_args[j].clone(), field_args[j + 1].clone()));
+                                            fields.push((
+                                                field_args[j].clone(),
+                                                field_args[j + 1].clone(),
+                                            ));
                                             j += 2;
                                         }
-                                        let entry = crate::storage::stream::StreamEntry {
-                                            id,
-                                            fields,
-                                        };
+                                        let entry =
+                                            crate::storage::stream::StreamEntry { id, fields };
                                         stream.entries.insert(id, entry);
                                         if id > stream.last_id {
                                             stream.last_id = id;
@@ -2079,7 +2091,11 @@ impl StorageEngine {
 
         // Sample random non-expired keys
         let sampled = db.sample(100, |key, entry| {
-            if entry.is_expired() { None } else { Some(key.clone()) }
+            if entry.is_expired() {
+                None
+            } else {
+                Some(key.clone())
+            }
         });
 
         if sampled.is_empty() {
@@ -2163,7 +2179,12 @@ impl StorageEngine {
     /// Get the absolute Unix timestamp (seconds) when a key will expire
     pub async fn expiretime(&self, key: &[u8]) -> StorageResult<Option<i64>> {
         // Extract result in sync block to avoid holding !Send guard across await.
-        enum ExpiretimeResult { Expired, HasExpiry(i64), NoExpiry, NotFound }
+        enum ExpiretimeResult {
+            Expired,
+            HasExpiry(i64),
+            NoExpiry,
+            NotFound,
+        }
         let result = {
             if let Some(entry) = self.active_db().get(key) {
                 if entry.is_expired() {
@@ -2266,8 +2287,7 @@ impl StorageEngine {
             if expires_at > now {
                 let remaining = expires_at - now;
                 let exp = new_item.expire(remaining);
-                self.add_to_expiration_queue(dst.clone(), exp)
-                    .await;
+                self.add_to_expiration_queue(dst.clone(), exp).await;
             }
         }
 
@@ -2537,58 +2557,58 @@ impl StorageEngine {
                     None // need cleanup
                 } else {
                     let encoding = match &entry.value {
-                StoreValue::Str(bytes) => {
-                    if let Ok(s) = std::str::from_utf8(bytes) {
-                        if s.parse::<i64>().is_ok() {
-                            "int"
-                        } else if bytes.len() <= 44 {
-                            "embstr"
-                        } else {
-                            "raw"
+                        StoreValue::Str(bytes) => {
+                            if let Ok(s) = std::str::from_utf8(bytes) {
+                                if s.parse::<i64>().is_ok() {
+                                    "int"
+                                } else if bytes.len() <= 44 {
+                                    "embstr"
+                                } else {
+                                    "raw"
+                                }
+                            } else {
+                                "raw"
+                            }
                         }
-                    } else {
-                        "raw"
-                    }
-                }
-                StoreValue::List(list) => {
-                    if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
-                        "listpack"
-                    } else {
-                        "quicklist"
-                    }
-                }
-                StoreValue::Set(set) => {
-                    // Redis 7 default: set-max-intset-entries = 512
-                    if set.len() <= 512
-                        && set.iter().all(|el| {
-                            std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok())
-                        })
-                    {
-                        "intset"
-                    } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
-                        "listpack"
-                    } else {
-                        "hashtable"
-                    }
-                }
-                StoreValue::Hash(map) => {
-                    if map.len() <= 128
-                        && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
-                    {
-                        "listpack"
-                    } else {
-                        "hashtable"
-                    }
-                }
-                StoreValue::ZSet(ss) => {
-                    if ss.scores.len() <= 128 && ss.scores.keys().all(|k| k.len() <= 64) {
-                        "listpack"
-                    } else {
-                        "skiplist"
-                    }
-                }
-                StoreValue::Stream(_) => "stream",
-            };
+                        StoreValue::List(list) => {
+                            if list.len() <= 128 && list.iter().all(|el| el.len() <= 64) {
+                                "listpack"
+                            } else {
+                                "quicklist"
+                            }
+                        }
+                        StoreValue::Set(set) => {
+                            // Redis 7 default: set-max-intset-entries = 512
+                            if set.len() <= 512
+                                && set.iter().all(|el| {
+                                    std::str::from_utf8(el).is_ok_and(|s| s.parse::<i64>().is_ok())
+                                })
+                            {
+                                "intset"
+                            } else if set.len() <= 128 && set.iter().all(|el| el.len() <= 64) {
+                                "listpack"
+                            } else {
+                                "hashtable"
+                            }
+                        }
+                        StoreValue::Hash(map) => {
+                            if map.len() <= 128
+                                && map.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
+                            {
+                                "listpack"
+                            } else {
+                                "hashtable"
+                            }
+                        }
+                        StoreValue::ZSet(ss) => {
+                            if ss.scores.len() <= 128 && ss.scores.keys().all(|k| k.len() <= 64) {
+                                "listpack"
+                            } else {
+                                "skiplist"
+                            }
+                        }
+                        StoreValue::Stream(_) => "stream",
+                    };
                     Some(Some(encoding.to_string()))
                 }
             } else {
@@ -2858,7 +2878,8 @@ impl StorageEngine {
                     } else if xx && !effectively_exists {
                         // XX: don't set if key doesn't exist
                         if expired {
-                            let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
+                            let old_size =
+                                Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                             self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                             occ.remove();
                             self.key_count.fetch_sub(1, Ordering::Relaxed);
@@ -2877,7 +2898,8 @@ impl StorageEngine {
                         } else {
                             None
                         };
-                        let old_size = Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
+                        let old_size =
+                            Self::calculate_entry_size(occ.key(), &occ.get().value) as u64;
                         self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
                         self.current_memory
                             .fetch_add(required_size as u64, Ordering::Relaxed);
@@ -3437,13 +3459,12 @@ impl StorageEngine {
 
     /// Set a field only if it does NOT exist. Returns true if the field was set.
     pub fn hash_set_nx(&self, key: &[u8], field: &[u8], value: &[u8]) -> StorageResult<bool> {
-        let field_exists = self.atomic_read(key, RedisDataType::Hash, |existing| {
-            match existing {
+        let field_exists =
+            self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
                 Some(StoreValue::Hash(map)) => Ok(map.contains_key(field)),
                 None => Ok(false),
                 _ => unreachable!(),
-            }
-        })?;
+            })?;
         if field_exists {
             return Ok(false);
         }
@@ -3576,7 +3597,10 @@ impl StorageEngine {
                 Some(v) => {
                     let old_len = v.len();
                     let s = std::str::from_utf8(v).map_err(|_| StorageError::NotANumber)?;
-                    (s.parse::<i64>().map_err(|_| StorageError::NotANumber)?, old_len as i64)
+                    (
+                        s.parse::<i64>().map_err(|_| StorageError::NotANumber)?,
+                        old_len as i64,
+                    )
                 }
                 None => (0, -(field.len() as i64 + 64)), // new field: account for key+overhead
             };
@@ -3637,9 +3661,7 @@ impl StorageEngine {
     /// Get the string length of a hash field's value.
     pub fn hash_strlen(&self, key: &[u8], field: &[u8]) -> StorageResult<i64> {
         self.atomic_read(key, RedisDataType::Hash, |existing| match existing {
-            Some(StoreValue::Hash(map)) => {
-                Ok(map.get(field).map(|v| v.len() as i64).unwrap_or(0))
-            }
+            Some(StoreValue::Hash(map)) => Ok(map.get(field).map(|v| v.len() as i64).unwrap_or(0)),
             None => Ok(0),
             _ => unreachable!(),
         })
@@ -4092,14 +4114,12 @@ mod tests {
 
         // Use atomic_modify to create a list-like structure
         let result: usize = storage
-            .atomic_modify(b"my_list", RedisDataType::List, |existing| {
-                match existing {
-                    None => {
-                        let deque = std::collections::VecDeque::from(vec![b"item1".to_vec()]);
-                        Ok((ModifyResult::Set(StoreValue::List(deque)), 1))
-                    }
-                    Some(_) => unreachable!(),
+            .atomic_modify(b"my_list", RedisDataType::List, |existing| match existing {
+                None => {
+                    let deque = std::collections::VecDeque::from(vec![b"item1".to_vec()]);
+                    Ok((ModifyResult::Set(StoreValue::List(deque)), 1))
                 }
+                Some(_) => unreachable!(),
             })
             .unwrap();
         assert_eq!(result, 1);
@@ -4449,7 +4469,10 @@ mod tests {
         for i in 0..100 {
             let key = format!("read_key:{}", i);
             let val = format!("val:{}", i);
-            storage.set(key.into_bytes(), val.into_bytes(), None).await.unwrap();
+            storage
+                .set(key.into_bytes(), val.into_bytes(), None)
+                .await
+                .unwrap();
         }
 
         // Spawn many concurrent read tasks
@@ -4480,7 +4503,10 @@ mod tests {
 
         for i in 0..50 {
             let key = format!("rlock_key:{}", i);
-            storage.set(key.into_bytes(), b"value".to_vec(), None).await.unwrap();
+            storage
+                .set(key.into_bytes(), b"value".to_vec(), None)
+                .await
+                .unwrap();
         }
 
         let mut handles = Vec::new();
@@ -4511,7 +4537,10 @@ mod tests {
         let storage = StorageEngine::new(config);
 
         // Initialize key to 0
-        storage.set(b"counter".to_vec(), b"0".to_vec(), None).await.unwrap();
+        storage
+            .set(b"counter".to_vec(), b"0".to_vec(), None)
+            .await
+            .unwrap();
 
         let num_tasks = 16;
         let increments_per_task = 1000;
@@ -4545,11 +4574,14 @@ mod tests {
         let decrements: i64 = 500;
         let start_value = num_tasks * decrements;
 
-        storage.set(
-            b"dcounter".to_vec(),
-            start_value.to_string().into_bytes(),
-            None,
-        ).await.unwrap();
+        storage
+            .set(
+                b"dcounter".to_vec(),
+                start_value.to_string().into_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
 
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
@@ -4586,7 +4618,10 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 for i in 0..ops_per_task {
                     let key = format!("relax_key:{}:{}", t, i);
-                    storage.set(key.into_bytes(), b"v".to_vec(), None).await.unwrap();
+                    storage
+                        .set(key.into_bytes(), b"v".to_vec(), None)
+                        .await
+                        .unwrap();
                 }
             }));
         }
@@ -4640,7 +4675,7 @@ mod tests {
 
         // Batch delete one key and insert another
         let updates2: Vec<(&[u8], bool)> = vec![
-            (b"user:alice", false), // delete
+            (b"user:alice", false),  // delete
             (b"user:charlie", true), // insert
         ];
         storage
@@ -4656,9 +4691,7 @@ mod tests {
         drop(index);
 
         // Delete all keys from a prefix -- entry should be cleaned up
-        let updates3: Vec<(&[u8], bool)> = vec![
-            (b"cache:page1", false),
-        ];
+        let updates3: Vec<(&[u8], bool)> = vec![(b"cache:page1", false)];
         storage
             .update_prefix_indices_batch_for_db(&updates3, db_idx)
             .await;
@@ -4685,7 +4718,11 @@ mod tests {
         for i in 0..5 {
             let key = format!("expiring_key_{}", i);
             storage
-                .set(key.as_bytes().to_vec(), b"val".to_vec(), Some(Duration::from_millis(50)))
+                .set(
+                    key.as_bytes().to_vec(),
+                    b"val".to_vec(),
+                    Some(Duration::from_millis(50)),
+                )
                 .await
                 .unwrap();
             // Bump version to populate key_versions map
@@ -4900,11 +4937,8 @@ mod tests {
         }
 
         // Test Hash: set some fields
-        let fields: Vec<(&[u8], &[u8])> = vec![
-            (b"f1", b"val1"),
-            (b"f2", b"val2"),
-            (b"f3", b"val3"),
-        ];
+        let fields: Vec<(&[u8], &[u8])> =
+            vec![(b"f1", b"val1"), (b"f2", b"val2"), (b"f3", b"val3")];
         storage.hash_set(b"hash_key", &fields).unwrap();
         if let Some(entry) = storage.active_db().get_mut(b"hash_key") {
             let actual = entry.value.mem_size() as u64;
@@ -4937,7 +4971,10 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
 
-        storage.set(b"watched_key".to_vec(), b"v1".to_vec(), None).await.unwrap();
+        storage
+            .set(b"watched_key".to_vec(), b"v1".to_vec(), None)
+            .await
+            .unwrap();
 
         // Simulate a connection starting WATCH
         storage.increment_watch_count();
@@ -4967,7 +5004,10 @@ mod tests {
         let config = StorageConfig::default();
         let storage = StorageEngine::new(config);
 
-        storage.set(b"mykey".to_vec(), b"v1".to_vec(), None).await.unwrap();
+        storage
+            .set(b"mykey".to_vec(), b"v1".to_vec(), None)
+            .await
+            .unwrap();
 
         // No WATCH active - bump_key_version should be a no-op
         assert_eq!(storage.active_watch_count(), 0);

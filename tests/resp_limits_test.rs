@@ -9,7 +9,7 @@ mod resp_limits_tests {
     async fn test_resp_bulk_string_limits() {
         let config = StorageConfig {
             max_value_size: 50 * 1024 * 1024, // 50MB
-            max_key_size: 100 * 1024, // 100KB
+            max_key_size: 100 * 1024,         // 100KB
             ..Default::default()
         };
         let engine = Arc::new(StorageEngine::new(config));

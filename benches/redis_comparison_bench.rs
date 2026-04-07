@@ -81,13 +81,7 @@ fn run_command_with_retries(cmd: &mut ProcessCommand, retries: u8) -> Result<(),
 fn build_rlightning_image() -> Result<(), String> {
     eprintln!("Building rLightning Docker image (this will only happen once)...");
     run_command_with_retries(
-        ProcessCommand::new("docker").args([
-            "build",
-            "--quiet",
-            "-t",
-            "rlightning:latest",
-            ".",
-        ]),
+        ProcessCommand::new("docker").args(["build", "--quiet", "-t", "rlightning:latest", "."]),
         DOCKER_BUILD_RETRIES,
     )
 }

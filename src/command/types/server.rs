@@ -142,9 +142,7 @@ pub async fn rename(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     });
 
     // Set the new key preserving data type and TTL
-    engine
-        .set_with_type(new_key, item.value, ttl)
-        .await?;
+    engine.set_with_type(new_key, item.value, ttl).await?;
 
     // Delete the old key
     engine.del(&key).await?;
@@ -196,9 +194,7 @@ pub async fn renamenx(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     });
 
     // Set the new key preserving data type and TTL
-    engine
-        .set_with_type(new_key, item.value, ttl)
-        .await?;
+    engine.set_with_type(new_key, item.value, ttl).await?;
 
     // Delete the old key
     engine.del(&key).await?;

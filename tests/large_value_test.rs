@@ -36,7 +36,7 @@ async fn test_set_get_large_value(value_size: usize) -> Result<(), Box<dyn std::
 
     let config = StorageConfig {
         max_value_size: 10 * 1024 * 1024, // 10MB max value size
-        max_memory: 100 * 1024 * 1024, // 100MB storage
+        max_memory: 100 * 1024 * 1024,    // 100MB storage
         ..StorageConfig::default()
     };
 

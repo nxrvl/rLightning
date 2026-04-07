@@ -11,7 +11,7 @@ use std::sync::Arc;
 async fn test_9004_byte_boundary() {
     let config = StorageConfig {
         max_value_size: 10 * 1024 * 1024, // 10MB to allow large values
-        max_memory: 100 * 1024 * 1024, // 100MB
+        max_memory: 100 * 1024 * 1024,    // 100MB
         ..Default::default()
     };
 

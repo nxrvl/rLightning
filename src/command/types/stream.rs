@@ -257,12 +257,10 @@ pub async fn xlen(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     let key = &args[0];
-    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| {
-        match existing {
-            Some(StoreValue::Stream(s)) => Ok(RespValue::Integer(s.len() as i64)),
-            Some(_) => Err(StorageError::WrongType),
-            None => Ok(RespValue::Integer(0)),
-        }
+    let result = engine.atomic_read(key, RedisDataType::Stream, |existing| match existing {
+        Some(StoreValue::Stream(s)) => Ok(RespValue::Integer(s.len() as i64)),
+        Some(_) => Err(StorageError::WrongType),
+        None => Ok(RespValue::Integer(0)),
     })?;
 
     Ok(result)
@@ -604,23 +602,24 @@ pub async fn xtrim(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
     };
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
-        match existing {
-            Some(StoreValue::Stream(s)) => {
-                let (removed, bytes_delta) = match &trim_strategy {
-                    TrimStrategy::MaxLen(maxlen, approx) => s.trim_maxlen(*maxlen, *approx),
-                    TrimStrategy::MinId(min_id, approx) => s.trim_minid(min_id, *approx),
-                };
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| match existing {
+        Some(StoreValue::Stream(s)) => {
+            let (removed, bytes_delta) = match &trim_strategy {
+                TrimStrategy::MaxLen(maxlen, approx) => s.trim_maxlen(*maxlen, *approx),
+                TrimStrategy::MinId(min_id, approx) => s.trim_minid(min_id, *approx),
+            };
 
-                if removed > 0 {
-                    Ok((ModifyResult::Keep(bytes_delta), RespValue::Integer(removed as i64)))
-                } else {
-                    Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
-                }
+            if removed > 0 {
+                Ok((
+                    ModifyResult::Keep(bytes_delta),
+                    RespValue::Integer(removed as i64),
+                ))
+            } else {
+                Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
             }
-            Some(_) => Err(StorageError::WrongType),
-            None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
         }
+        Some(_) => Err(StorageError::WrongType),
+        None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
     })?;
 
     Ok(result)
@@ -651,19 +650,20 @@ pub async fn xdel(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         ids.push(id);
     }
 
-    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| {
-        match existing {
-            Some(StoreValue::Stream(s)) => {
-                let (deleted, bytes_delta) = s.delete_entries(&ids);
-                if deleted > 0 {
-                    Ok((ModifyResult::Keep(bytes_delta), RespValue::Integer(deleted as i64)))
-                } else {
-                    Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
-                }
+    let result = engine.atomic_modify(key, RedisDataType::Stream, |existing| match existing {
+        Some(StoreValue::Stream(s)) => {
+            let (deleted, bytes_delta) = s.delete_entries(&ids);
+            if deleted > 0 {
+                Ok((
+                    ModifyResult::Keep(bytes_delta),
+                    RespValue::Integer(deleted as i64),
+                ))
+            } else {
+                Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0)))
             }
-            Some(_) => Err(StorageError::WrongType),
-            None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
         }
+        Some(_) => Err(StorageError::WrongType),
+        None => Ok((ModifyResult::KeepUnchanged, RespValue::Integer(0))),
     })?;
 
     Ok(result)
@@ -1085,7 +1085,10 @@ async fn xgroup_setid(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
             group.entries_read = Some(er);
         }
 
-        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::SimpleString("OK".to_string())))
+        Ok((
+            ModifyResult::Set(StoreValue::Stream(stream)),
+            RespValue::SimpleString("OK".to_string()),
+        ))
     });
 
     match result {
@@ -1119,9 +1122,15 @@ async fn xgroup_destroy(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
         let removed = stream.groups.remove(&group_name).is_some();
         if removed {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(1)))
+            Ok((
+                ModifyResult::Set(StoreValue::Stream(stream)),
+                RespValue::Integer(1),
+            ))
         } else {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
+            Ok((
+                ModifyResult::Set(StoreValue::Stream(stream)),
+                RespValue::Integer(0),
+            ))
         }
     })?;
 
@@ -1163,7 +1172,10 @@ async fn xgroup_delconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Command
             None => 0,
         };
 
-        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(pending_count)))
+        Ok((
+            ModifyResult::Set(StoreValue::Stream(stream)),
+            RespValue::Integer(pending_count),
+        ))
     });
 
     match result {
@@ -1211,7 +1223,10 @@ async fn xgroup_createconsumer(engine: &StorageEngine, args: &[Vec<u8>]) -> Comm
             1
         };
 
-        Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(created)))
+        Ok((
+            ModifyResult::Set(StoreValue::Stream(stream)),
+            RespValue::Integer(created),
+        ))
     });
 
     match result {
@@ -1532,7 +1547,10 @@ async fn do_xreadgroup(
                 )
             };
 
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), (stream_has_data, entry_resp)))
+            Ok((
+                ModifyResult::Set(StoreValue::Stream(stream)),
+                (stream_has_data, entry_resp),
+            ))
         });
 
         match result {
@@ -1599,7 +1617,10 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         let group = match stream.groups.get_mut(&group_name) {
             Some(g) => g,
             None => {
-                return Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)));
+                return Ok((
+                    ModifyResult::Set(StoreValue::Stream(stream)),
+                    RespValue::Integer(0),
+                ));
             }
         };
 
@@ -1614,9 +1635,15 @@ pub async fn xack(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
         }
 
         if acked > 0 {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(acked)))
+            Ok((
+                ModifyResult::Set(StoreValue::Stream(stream)),
+                RespValue::Integer(acked),
+            ))
         } else {
-            Ok((ModifyResult::Set(StoreValue::Stream(stream)), RespValue::Integer(0)))
+            Ok((
+                ModifyResult::Set(StoreValue::Stream(stream)),
+                RespValue::Integer(0),
+            ))
         }
     })?;
 
@@ -2876,7 +2903,12 @@ mod tests {
         for i in 1..=100 {
             let result = xadd(
                 &engine,
-                &[b("stream"), b(&format!("{}-0", i)), b("k"), b(&format!("v{}", i))],
+                &[
+                    b("stream"),
+                    b(&format!("{}-0", i)),
+                    b("k"),
+                    b(&format!("v{}", i)),
+                ],
             )
             .await
             .unwrap();
@@ -2925,9 +2957,7 @@ mod tests {
         assert_eq!(result, RespValue::Integer(10));
 
         // Verify the remaining entries are the last 10
-        let result = xrange(&engine, &[b("s"), b("-"), b("+")])
-            .await
-            .unwrap();
+        let result = xrange(&engine, &[b("s"), b("-"), b("+")]).await.unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 10);
             // First remaining entry should be 41-0
@@ -2959,9 +2989,7 @@ mod tests {
         assert_eq!(result, RespValue::Integer(3));
 
         // Verify remaining entries are 1, 3, 5
-        let result = xrange(&engine, &[b("s"), b("-"), b("+")])
-            .await
-            .unwrap();
+        let result = xrange(&engine, &[b("s"), b("-"), b("+")]).await.unwrap();
         if let RespValue::Array(Some(entries)) = result {
             assert_eq!(entries.len(), 3);
         } else {
@@ -3016,12 +3044,7 @@ mod tests {
         for i in 0..count {
             xadd(
                 &engine,
-                &[
-                    b("bench"),
-                    b("*"),
-                    b("field"),
-                    b(&format!("value{}", i)),
-                ],
+                &[b("bench"), b("*"), b("field"), b(&format!("value{}", i))],
             )
             .await
             .unwrap();

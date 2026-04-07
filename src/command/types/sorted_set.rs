@@ -853,9 +853,7 @@ pub async fn zremrangebyrank(engine: &StorageEngine, args: &[Vec<u8>]) -> Comman
             return Ok((ModifyResult::Delete, 0i64));
         }
         match normalize_indices(start, stop, ss.len()) {
-            None => {
-                Ok((zset_result(ss), 0i64))
-            }
+            None => Ok((zset_result(ss), 0i64)),
             Some((si, ei)) => {
                 let to_remove: Vec<_> = ss
                     .entries
@@ -985,7 +983,9 @@ pub async fn zinterstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandRes
         }
     }
     if sets.is_empty() || sets.iter().any(|s| s.is_empty()) {
-        engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((ModifyResult::Delete, ())))?;
+        engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
+            Ok((ModifyResult::Delete, ()))
+        })?;
         return Ok(RespValue::Integer(0));
     }
     let mut result_ss = SortedSetData::new();
@@ -1214,7 +1214,9 @@ pub async fn zdiffstore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
     let first_set = match load_sorted_set_readonly(engine, &keys[0])? {
         Some(ss) => ss,
         None => {
-            engine.atomic_modify(dest, RedisDataType::ZSet, |_| Ok((ModifyResult::Delete, ())))?;
+            engine.atomic_modify(dest, RedisDataType::ZSet, |_| {
+                Ok((ModifyResult::Delete, ()))
+            })?;
             return Ok(RespValue::Integer(0));
         }
     };

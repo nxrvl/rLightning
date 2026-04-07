@@ -58,7 +58,7 @@ async fn test_large_json_set_get() {
 
     // Add some text with control characters to test sanitization
     json_data.push_str(
-        "  \"control_chars\": \"Text with control chars: \\u001F separator \\u001E record\",\n"
+        "  \"control_chars\": \"Text with control chars: \\u001F separator \\u001E record\",\n",
     );
 
     // Close the JSON object

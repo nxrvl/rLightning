@@ -187,7 +187,10 @@ pub async fn pfadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             }
         }
 
-        Ok((ModifyResult::Set(StoreValue::Str(hll_data.into())), if changed { 1 } else { 0 }))
+        Ok((
+            ModifyResult::Set(StoreValue::Str(hll_data.into())),
+            if changed { 1 } else { 0 },
+        ))
     })?;
 
     Ok(RespValue::Integer(changed))
@@ -568,7 +571,9 @@ mod tests {
         engine
             .set_with_type(
                 b"mylist".to_vec(),
-                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(vec![b"item".to_vec()])),
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(vec![
+                    b"item".to_vec(),
+                ])),
                 None,
             )
             .await

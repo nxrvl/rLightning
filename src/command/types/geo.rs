@@ -406,13 +406,11 @@ pub async fn geoadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     engine.check_write_memory(0).await?;
     let result = engine.atomic_modify(key, RedisDataType::ZSet, |current| {
         let mut ss: SortedSet = match current {
-            Some(StoreValue::ZSet(ss_data)) => {
-                ss_data
-                    .entries
-                    .iter()
-                    .map(|(score, member)| (score.into_inner(), member.clone()))
-                    .collect()
-            }
+            Some(StoreValue::ZSet(ss_data)) => ss_data
+                .entries
+                .iter()
+                .map(|(score, member)| (score.into_inner(), member.clone()))
+                .collect(),
             Some(_) => return Err(crate::storage::error::StorageError::WrongType),
             None => Vec::new(),
         };

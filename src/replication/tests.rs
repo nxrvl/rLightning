@@ -266,13 +266,15 @@ async fn test_batched_replication_preserves_command_ordering() {
     // Parse the RESP-serialized commands and verify ordering.
     // Each command is: *N\r\n $len\r\n name\r\n $len\r\n arg1\r\n ...
     let text = String::from_utf8_lossy(&data);
-    let commands: Vec<&str> = text
-        .split('*')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let commands: Vec<&str> = text.split('*').filter(|s| !s.is_empty()).collect();
 
     // We should have 6 commands: SELECT, SET, SELECT, SET, SELECT, DEL
-    assert_eq!(commands.len(), 6, "expected 6 commands in batch, got {}", commands.len());
+    assert_eq!(
+        commands.len(),
+        6,
+        "expected 6 commands in batch, got {}",
+        commands.len()
+    );
 
     // Verify order: extract command names from each RESP array
     let extract_name = |resp: &str| -> String {
@@ -290,5 +292,9 @@ async fn test_batched_replication_preserves_command_ordering() {
 
     // Verify the master offset advanced by the total serialized length
     let offset = mgr.get_master_repl_offset();
-    assert_eq!(offset as usize, data.len(), "master offset should match serialized batch size");
+    assert_eq!(
+        offset as usize,
+        data.len(),
+        "master offset should match serialized batch size"
+    );
 }

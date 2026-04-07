@@ -30,31 +30,29 @@ pub async fn sadd(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     }
 
     engine.check_write_memory(0).await?;
-    let new_count = engine.atomic_modify(key, RedisDataType::Set, |current| {
-        match current {
-            Some(StoreValue::Set(set)) => {
-                let mut added = 0i64;
-                let mut delta: i64 = 0;
-                for member in &unique_members {
-                    if set.insert(member.clone()) {
-                        added += 1;
-                        delta += member.len() as i64 + 32;
-                    }
+    let new_count = engine.atomic_modify(key, RedisDataType::Set, |current| match current {
+        Some(StoreValue::Set(set)) => {
+            let mut added = 0i64;
+            let mut delta: i64 = 0;
+            for member in &unique_members {
+                if set.insert(member.clone()) {
+                    added += 1;
+                    delta += member.len() as i64 + 32;
                 }
-                Ok((ModifyResult::Keep(delta), added))
             }
-            None => {
-                let mut set = NativeHashSet::default();
-                let mut added = 0i64;
-                for member in &unique_members {
-                    if set.insert(member.clone()) {
-                        added += 1;
-                    }
-                }
-                Ok((ModifyResult::Set(StoreValue::Set(set)), added))
-            }
-            _ => Err(crate::storage::error::StorageError::WrongType),
+            Ok((ModifyResult::Keep(delta), added))
         }
+        None => {
+            let mut set = NativeHashSet::default();
+            let mut added = 0i64;
+            for member in &unique_members {
+                if set.insert(member.clone()) {
+                    added += 1;
+                }
+            }
+            Ok((ModifyResult::Set(StoreValue::Set(set)), added))
+        }
+        _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
     Ok(RespValue::Integer(new_count))
@@ -106,9 +104,7 @@ pub async fn smembers(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult
     let key = &args[0];
 
     let members = engine.atomic_read(key, RedisDataType::Set, |current| match current {
-        Some(StoreValue::Set(set)) => {
-            Ok(set.iter().cloned().collect::<Vec<_>>())
-        }
+        Some(StoreValue::Set(set)) => Ok(set.iter().cloned().collect::<Vec<_>>()),
         None => Ok(vec![]),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
@@ -196,7 +192,10 @@ pub async fn spop(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                         if set.is_empty() {
                             Ok((ModifyResult::Delete, SpopResult::Multiple(vec![member])))
                         } else {
-                            Ok((ModifyResult::Keep(delta), SpopResult::Multiple(vec![member])))
+                            Ok((
+                                ModifyResult::Keep(delta),
+                                SpopResult::Multiple(vec![member]),
+                            ))
                         }
                     } else {
                         // Fisher-Yates partial shuffle with ownership transfer (no clone)
@@ -685,20 +684,15 @@ pub async fn smismember(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResu
 
     let members_owned: Vec<Vec<u8>> = members.to_vec();
     let results = engine.atomic_read(key, RedisDataType::Set, |current| match current {
-        Some(StoreValue::Set(set)) => {
-            Ok(members_owned
-                .iter()
-                .map(|m| if set.contains(m.as_slice()) { 1i64 } else { 0 })
-                .collect::<Vec<_>>())
-        }
+        Some(StoreValue::Set(set)) => Ok(members_owned
+            .iter()
+            .map(|m| if set.contains(m.as_slice()) { 1i64 } else { 0 })
+            .collect::<Vec<_>>()),
         None => Ok(vec![0i64; members_owned.len()]),
         _ => Err(crate::storage::error::StorageError::WrongType),
     })?;
 
-    let resp_results: Vec<RespValue> = results
-        .into_iter()
-        .map(RespValue::Integer)
-        .collect();
+    let resp_results: Vec<RespValue> = results.into_iter().map(RespValue::Integer).collect();
 
     Ok(RespValue::Array(Some(resp_results)))
 }

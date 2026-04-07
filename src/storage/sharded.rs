@@ -7,14 +7,13 @@
 use arrayvec::ArrayVec;
 use hashbrown::HashMap as HBHashMap;
 use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard,
-    RwLockWriteGuard,
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use rustc_hash::FxBuildHasher;
 use std::collections::BinaryHeap;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::storage::item::Entry;
@@ -157,17 +156,13 @@ impl ShardedStore {
     /// Shard count = (num_cpus * 16).next_power_of_two().clamp(16, 1024)
     #[allow(dead_code)]
     pub fn new() -> Self {
-        let shard_count = (num_cpus::get() * 16)
-            .next_power_of_two()
-            .clamp(16, 1024);
+        let shard_count = (num_cpus::get() * 16).next_power_of_two().clamp(16, 1024);
         Self::with_shard_count(shard_count)
     }
 
     /// Create a new ShardedStore with a specific initial capacity per shard.
     pub fn with_capacity(capacity: usize) -> Self {
-        let shard_count = (num_cpus::get() * 16)
-            .next_power_of_two()
-            .clamp(16, 1024);
+        let shard_count = (num_cpus::get() * 16).next_power_of_two().clamp(16, 1024);
         Self::with_shard_count_and_capacity(shard_count, capacity)
     }
 
@@ -267,10 +262,7 @@ impl ShardedStore {
 
     /// Get the total number of entries across all shards.
     pub fn len(&self) -> usize {
-        self.shards
-            .iter()
-            .map(|s| s.inner.read().len())
-            .sum()
+        self.shards.iter().map(|s| s.inner.read().len()).sum()
     }
 
     /// Check if the store is empty.
@@ -372,10 +364,11 @@ impl ShardedStore {
         let shard_idx = self.shard_index(key);
         let mut guard = self.shards[shard_idx].inner.write();
         if let Some((k, v)) = guard.get_key_value(key)
-            && f(k, v) {
-                guard.remove(key);
-                return true;
-            }
+            && f(k, v)
+        {
+            guard.remove(key);
+            return true;
+        }
         false
     }
 
@@ -552,9 +545,10 @@ impl ShardedStore {
                 // Verify the key is actually expired (may have been refreshed)
                 if let Some(exp) = entry.expires_at
                     && exp <= now
-                    && let Some(entry) = guard.remove(&key) {
-                        removed.push((key, entry));
-                    }
+                    && let Some(entry) = guard.remove(&key)
+                {
+                    removed.push((key, entry));
+                }
                 // else: key has no expiry anymore (PERSIST was called), skip
             }
             // else: key was already deleted, skip
@@ -610,7 +604,6 @@ impl ShardedStore {
         }
         result
     }
-
 }
 
 #[cfg(test)]
@@ -659,7 +652,11 @@ mod tests {
         let store = ShardedStore::new();
 
         // Insert
-        assert!(store.insert(b"key1".to_vec(), make_entry(b"val1")).is_none());
+        assert!(
+            store
+                .insert(b"key1".to_vec(), make_entry(b"val1"))
+                .is_none()
+        );
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
 
@@ -965,9 +962,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut found = 0;
                 for shard_idx in 0..num_shards {
-                    found += store.execute_on_shard_ref(shard_idx, |map| {
-                        map.len()
-                    });
+                    found += store.execute_on_shard_ref(shard_idx, |map| map.len());
                 }
                 assert_eq!(found, 100);
             }));
@@ -1130,7 +1125,10 @@ mod tests {
         for shard_idx in 0..store.num_shards() {
             let candidates = store.sample_eviction_candidates(shard_idx, true);
             for c in &candidates {
-                assert!(c.has_expiry, "Volatile-only should only return keys with expiry");
+                assert!(
+                    c.has_expiry,
+                    "Volatile-only should only return keys with expiry"
+                );
             }
             volatile_candidates += candidates.len();
         }

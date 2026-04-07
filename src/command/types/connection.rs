@@ -1661,7 +1661,12 @@ mod tests {
         // Put data in db1 directly
         if let Some(db1) = engine.get_db(1) {
             use crate::storage::item::StorageItem;
-            db1.insert(b"key1".to_vec(), StorageItem::new(crate::storage::value::StoreValue::Str(b"val1".to_vec().into())));
+            db1.insert(
+                b"key1".to_vec(),
+                StorageItem::new(crate::storage::value::StoreValue::Str(
+                    b"val1".to_vec().into(),
+                )),
+            );
         }
 
         // Swap db0 and db1

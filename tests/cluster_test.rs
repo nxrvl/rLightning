@@ -1000,7 +1000,10 @@ async fn test_moved_response_for_wrong_slot_key() {
 
     // Connect and try to SET a key that doesn't belong to us
     let mut client = create_client(addr).await.unwrap();
-    let result = client.send_command_str("SET", &["foo", "bar"]).await.unwrap();
+    let result = client
+        .send_command_str("SET", &["foo", "bar"])
+        .await
+        .unwrap();
 
     // Should get a MOVED error
     match result {
@@ -1109,16 +1112,12 @@ async fn test_asking_command_allows_importing_slot() {
     let test_key = test_key.expect("Should find a key mapping to slot 100");
 
     // Without ASKING flag, should redirect (since we don't own the slot normally)
-    let _redirect_without_asking = cluster_mgr
-        .get_redirect(test_key.as_bytes(), false)
-        .await;
+    let _redirect_without_asking = cluster_mgr.get_redirect(test_key.as_bytes(), false).await;
     // The importing node doesn't own slot 100 normally, so it would redirect
     // (unless it's also in slot_owners, which it won't be)
 
     // With ASKING flag, importing slot should be handled locally
-    let redirect_with_asking = cluster_mgr
-        .get_redirect(test_key.as_bytes(), true)
-        .await;
+    let redirect_with_asking = cluster_mgr.get_redirect(test_key.as_bytes(), true).await;
     assert!(
         redirect_with_asking.is_none(),
         "With ASKING flag, importing slot should be handled locally"
@@ -1153,10 +1152,7 @@ async fn test_no_redirect_for_slot_exempt_commands() {
     }
 
     // INFO should work without redirect
-    let result = client
-        .send_command_str("INFO", &["server"])
-        .await
-        .unwrap();
+    let result = client.send_command_str("INFO", &["server"]).await.unwrap();
     match &result {
         RespValue::BulkString(Some(_)) => {} // INFO returns bulk string
         other => panic!("INFO should return bulk string, got: {:?}", other),
@@ -1169,10 +1165,7 @@ async fn test_no_redirect_for_slot_exempt_commands() {
     }
 
     // CLUSTER INFO should work without redirect
-    let result = client
-        .send_command_str("CLUSTER", &["INFO"])
-        .await
-        .unwrap();
+    let result = client.send_command_str("CLUSTER", &["INFO"]).await.unwrap();
     match &result {
         RespValue::Error(e) if e.starts_with("MOVED") || e.starts_with("ASK") => {
             panic!("CLUSTER INFO should not redirect, got: {}", e)
@@ -1272,7 +1265,9 @@ async fn test_cluster_nodes_format_redis7_compatible() {
     mgr.init(addr).await;
 
     // Assign some slots so the output includes slot ranges
-    mgr.add_slots(&(0..100).collect::<Vec<u16>>()).await.unwrap();
+    mgr.add_slots(&(0..100).collect::<Vec<u16>>())
+        .await
+        .unwrap();
 
     let nodes_output = mgr.get_cluster_nodes().await;
     let lines: Vec<&str> = nodes_output.trim().lines().collect();
@@ -1341,7 +1336,8 @@ async fn test_cluster_nodes_format_redis7_compatible() {
         // Field 3: master-id (40 hex chars or "-")
         let master_id = parts[3];
         assert!(
-            master_id == "-" || (master_id.len() == 40 && master_id.chars().all(|c| c.is_ascii_hexdigit())),
+            master_id == "-"
+                || (master_id.len() == 40 && master_id.chars().all(|c| c.is_ascii_hexdigit())),
             "Master ID must be '-' or 40 hex chars: {}",
             master_id
         );
@@ -1416,10 +1412,7 @@ async fn test_info_reports_cluster_enabled_1_when_cluster_on() {
     let (addr, _cluster) = setup_cluster_server(965).await.unwrap();
     let mut client = create_client(addr).await.unwrap();
 
-    let response = client
-        .send_command_str("INFO", &["cluster"])
-        .await
-        .unwrap();
+    let response = client.send_command_str("INFO", &["cluster"]).await.unwrap();
     let info = resp_string(&response);
     assert!(
         info.contains("cluster_enabled:1"),
@@ -1447,10 +1440,7 @@ async fn test_info_reports_cluster_enabled_0_when_cluster_off() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut client = create_client(addr).await.unwrap();
-    let response = client
-        .send_command_str("INFO", &["cluster"])
-        .await
-        .unwrap();
+    let response = client.send_command_str("INFO", &["cluster"]).await.unwrap();
     let info = resp_string(&response);
     assert!(
         info.contains("cluster_enabled:0"),

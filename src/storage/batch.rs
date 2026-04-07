@@ -8,11 +8,11 @@
 use crate::command::{Command, CommandError, CommandResult};
 use crate::networking::raw_command::cmd_eq;
 use crate::networking::resp::RespValue;
+use crate::storage::clock::cached_now;
 use crate::storage::item::Entry;
 use crate::storage::sharded::ShardMap;
 use crate::storage::value::{CompactValue, StoreValue};
 use std::time::{Duration, Instant};
-use crate::storage::clock::cached_now;
 
 /// Classification of a command for pipeline batching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +235,6 @@ fn extract_primary_key(cmd: &Command) -> Option<&[u8]> {
     }
 }
 
-
 /// Annotated command for sorted pipeline grouping.
 struct AnnotatedCommand<'a> {
     cmd: &'a Command,
@@ -343,7 +342,10 @@ fn flush_sorted_segment<'a>(
 
 /// Execute a batch of read commands under a single shard read lock.
 /// Returns one CommandResult per command in order.
-pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> (Vec<CommandResult>, Vec<Vec<u8>>) {
+pub fn execute_read_batch(
+    map: &ShardMap,
+    commands: &[&Command],
+) -> (Vec<CommandResult>, Vec<Vec<u8>>) {
     let now = cached_now();
     let mut expired_keys: Vec<Vec<u8>> = Vec::new();
     let mut results = Vec::with_capacity(commands.len());
@@ -353,7 +355,9 @@ pub fn execute_read_batch(map: &ShardMap, commands: &[&Command]) -> (Vec<Command
         // The read batch holds a read lock so it can't remove entries;
         // callers clean up after releasing the lock.
         if let Some(key) = cmd.args.first()
-            && map.get(key.as_slice()).is_some_and(|e| e.expires_at.is_some_and(|t| now > t))
+            && map
+                .get(key.as_slice())
+                .is_some_and(|e| e.expires_at.is_some_and(|t| now > t))
         {
             expired_keys.push(key.clone());
         }
@@ -539,9 +543,13 @@ pub fn execute_write_batch(
                 // consistent with standalone behavior.
                 let cmd_estimate = estimate_single_cmd_memory(cmd) as i64;
                 if accumulated_mem + cmd_estimate > budget as i64 {
-                    results.push((Err(CommandError::StorageError(
-                        "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
-                    )), 0, 0));
+                    results.push((
+                        Err(CommandError::StorageError(
+                            "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+                        )),
+                        0,
+                        0,
+                    ));
                     continue;
                 }
             }
@@ -551,11 +559,15 @@ pub fn execute_write_batch(
         if let Some(key) = cmd.args.first()
             && key.len() > max_key_size
         {
-            results.push((Err(CommandError::InvalidArgument(format!(
-                "key size {} exceeds maximum {}",
-                key.len(),
-                max_key_size
-            ))), 0, 0));
+            results.push((
+                Err(CommandError::InvalidArgument(format!(
+                    "key size {} exceeds maximum {}",
+                    key.len(),
+                    max_key_size
+                ))),
+                0,
+                0,
+            ));
             continue;
         }
         // Validate value size for all data-bearing arguments
@@ -564,11 +576,15 @@ pub fn execute_write_batch(
             let is_set = name.len() == 3 && cmd_eq(name, b"SET");
             let is_append = name.len() == 6 && cmd_eq(name, b"APPEND");
             if (is_set || is_append) && cmd.args[1].len() > max_value_size {
-                results.push((Err(CommandError::InvalidArgument(format!(
-                    "value size {} exceeds maximum {}",
-                    cmd.args[1].len(),
-                    max_value_size
-                ))), 0, 0));
+                results.push((
+                    Err(CommandError::InvalidArgument(format!(
+                        "value size {} exceeds maximum {}",
+                        cmd.args[1].len(),
+                        max_value_size
+                    ))),
+                    0,
+                    0,
+                ));
                 continue;
             }
             // HSET: validate field values (args[2], args[4], ...)
@@ -582,9 +598,13 @@ pub fn execute_write_batch(
                     }
                 }
                 if oversized {
-                    results.push((Err(CommandError::InvalidArgument(
-                        "hash field or value exceeds maximum size".to_string(),
-                    )), 0, 0));
+                    results.push((
+                        Err(CommandError::InvalidArgument(
+                            "hash field or value exceeds maximum size".to_string(),
+                        )),
+                        0,
+                        0,
+                    ));
                     continue;
                 }
             }
@@ -596,9 +616,13 @@ pub fn execute_write_batch(
             if (is_sadd || is_lpush || is_rpush)
                 && cmd.args[1..].iter().any(|v| v.len() > max_value_size)
             {
-                results.push((Err(CommandError::InvalidArgument(
-                    "value size exceeds maximum".to_string(),
-                )), 0, 0));
+                results.push((
+                    Err(CommandError::InvalidArgument(
+                        "value size exceeds maximum".to_string(),
+                    )),
+                    0,
+                    0,
+                ));
                 continue;
             }
         }
@@ -630,7 +654,8 @@ pub fn execute_write_batch(
         // can remove the stale expiration-heap entry.  Only do this when the
         // command succeeded — arity errors return before removing the expired
         // entry, so removing the heap entry would orphan the key.
-        if key_was_expired && key_delta == 0
+        if key_was_expired
+            && key_delta == 0
             && result.is_ok()
             && let Some(key) = cmd.args.first()
         {
@@ -697,11 +722,7 @@ fn execute_read_cmd(map: &ShardMap, cmd: &Command, now: Instant) -> CommandResul
 
 /// Look up entry, returning None if expired or missing.
 #[inline]
-fn get_valid_entry<'a>(
-    map: &'a ShardMap,
-    key: &[u8],
-    now: Instant,
-) -> Option<&'a Entry> {
+fn get_valid_entry<'a>(map: &'a ShardMap, key: &[u8], now: Instant) -> Option<&'a Entry> {
     map.get(key).and_then(|entry| {
         if entry.expires_at.is_some_and(|t| now > t) {
             None // expired
@@ -830,13 +851,11 @@ fn batch_hexists(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResul
     }
     match get_valid_entry(map, &args[0], now) {
         Some(entry) => match &entry.value {
-            StoreValue::Hash(hash) => {
-                Ok(RespValue::Integer(if hash.contains_key(&args[1]) {
-                    1
-                } else {
-                    0
-                }))
-            }
+            StoreValue::Hash(hash) => Ok(RespValue::Integer(if hash.contains_key(&args[1]) {
+                1
+            } else {
+                0
+            })),
             _ => Err(CommandError::WrongType),
         },
         None => Ok(RespValue::Integer(0)),
@@ -906,9 +925,7 @@ fn batch_zscore(map: &ShardMap, args: &[Vec<u8>], now: Instant) -> CommandResult
     match get_valid_entry(map, &args[0], now) {
         Some(entry) => match &entry.value {
             StoreValue::ZSet(zset) => match zset.get_score(&args[1]) {
-                Some(score) => Ok(RespValue::BulkString(Some(
-                    score.to_string().into_bytes(),
-                ))),
+                Some(score) => Ok(RespValue::BulkString(Some(score.to_string().into_bytes()))),
                 None => Ok(RespValue::BulkString(None)),
             },
             _ => Err(CommandError::WrongType),
@@ -959,9 +976,13 @@ fn execute_write_cmd(map: &mut ShardMap, cmd: &Command) -> (CommandResult, i64, 
                 match parse_i64(&cmd.args[1]) {
                     Some(delta) => match delta.checked_neg() {
                         Some(neg) => batch_incr_by(map, &cmd.args, neg),
-                        None => (Err(CommandError::InvalidArgument(
-                            "value is not an integer or out of range".to_string(),
-                        )), 0, 0),
+                        None => (
+                            Err(CommandError::InvalidArgument(
+                                "value is not an integer or out of range".to_string(),
+                            )),
+                            0,
+                            0,
+                        ),
                     },
                     None => (Err(CommandError::NotANumber), 0, 0),
                 }
@@ -1055,7 +1076,11 @@ fn batch_set(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) 
     let key_delta = if physically_exists { 0 } else { 1 };
     map.insert(key.clone(), Entry::new_string(value.clone()));
     let delta = new_mem - old_mem;
-    (Ok(RespValue::SimpleString("OK".to_string())), delta, key_delta)
+    (
+        Ok(RespValue::SimpleString("OK".to_string())),
+        delta,
+        key_delta,
+    )
 }
 
 fn batch_del(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
@@ -1101,9 +1126,7 @@ fn batch_getdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i3
     let entry = map.remove(key).unwrap();
     let mem = (key.len() + entry.value.mem_size()) as i64;
     match entry.value {
-        StoreValue::Str(data) => {
-            (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem, -1)
-        }
+        StoreValue::Str(data) => (Ok(RespValue::BulkString(Some(data.into_vec()))), -mem, -1),
         _ => unreachable!(), // Type already checked above
     }
 }
@@ -1129,7 +1152,10 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
             } else {
                 match &entry.value {
                     StoreValue::Str(data) => {
-                        match std::str::from_utf8(data).ok().and_then(|s| s.parse::<i64>().ok()) {
+                        match std::str::from_utf8(data)
+                            .ok()
+                            .and_then(|s| s.parse::<i64>().ok())
+                        {
                             Some(v) => (Some(v), mem, true),
                             None => return (Err(CommandError::NotANumber), 0, 0),
                         }
@@ -1166,7 +1192,11 @@ fn batch_incr_by(map: &mut ShardMap, args: &[Vec<u8>], delta: i64) -> (CommandRe
         }
         map.insert(key.clone(), Entry::new_string(new_bytes));
     }
-    (Ok(RespValue::Integer(new_val)), new_mem - old_mem, key_delta)
+    (
+        Ok(RespValue::Integer(new_val)),
+        new_mem - old_mem,
+        key_delta,
+    )
 }
 
 fn batch_expire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32) {
@@ -1179,7 +1209,11 @@ fn batch_pexpire(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i
 
 /// Shared implementation for EXPIRE/PEXPIRE batch commands.
 /// `is_millis`: false for EXPIRE (seconds), true for PEXPIRE (milliseconds).
-fn batch_expire_impl(map: &mut ShardMap, args: &[Vec<u8>], is_millis: bool) -> (CommandResult, i64, i32) {
+fn batch_expire_impl(
+    map: &mut ShardMap,
+    args: &[Vec<u8>],
+    is_millis: bool,
+) -> (CommandResult, i64, i32) {
     if args.len() != 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
@@ -1309,7 +1343,9 @@ fn batch_hset(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+    if map
+        .get(key)
+        .is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
         && let Some(v) = map.remove(key.as_slice())
     {
         mem_delta -= (key.len() + v.value.mem_size()) as i64;
@@ -1388,7 +1424,8 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         }
                     }
                     if mem_delta != 0 {
-                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                        entry.cached_mem_size =
+                            (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                     }
                     (removed, mem_delta, hash.is_empty())
                 }
@@ -1399,7 +1436,8 @@ fn batch_hdel(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0
+    if is_empty
+        && removed > 0
         && let Some(entry) = map.remove(key)
     {
         let key_mem = (key.len() + entry.value.mem_size()) as i64;
@@ -1418,7 +1456,9 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+    if map
+        .get(key)
+        .is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
         && let Some(v) = map.remove(key.as_slice())
     {
         mem_delta -= (key.len() + v.value.mem_size()) as i64;
@@ -1436,7 +1476,8 @@ fn batch_sadd(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                     }
                 }
                 if mem_delta != 0 {
-                    entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                    entry.cached_mem_size =
+                        (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                 }
                 entry.touch();
                 return (Ok(RespValue::Integer(added)), mem_delta, 0);
@@ -1489,7 +1530,8 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         }
                     }
                     if mem_delta != 0 {
-                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                        entry.cached_mem_size =
+                            (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                     }
                     (removed, mem_delta, set.is_empty())
                 }
@@ -1500,7 +1542,8 @@ fn batch_srem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0
+    if is_empty
+        && removed > 0
         && let Some(entry) = map.remove(key)
     {
         let key_mem = (key.len() + entry.value.mem_size()) as i64;
@@ -1537,7 +1580,8 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
                         }
                     }
                     if mem_delta != 0 {
-                        entry.cached_mem_size = (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
+                        entry.cached_mem_size =
+                            (entry.cached_mem_size as i64 + mem_delta).max(0) as u64;
                     }
                     (removed, mem_delta, zset.is_empty())
                 }
@@ -1548,7 +1592,8 @@ fn batch_zrem(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32)
     };
 
     // Auto-delete empty container (Redis compatibility)
-    if is_empty && removed > 0
+    if is_empty
+        && removed > 0
         && let Some(entry) = map.remove(key)
     {
         let key_mem = (key.len() + entry.value.mem_size()) as i64;
@@ -1567,7 +1612,11 @@ fn batch_rpush(map: &mut ShardMap, args: &[Vec<u8>]) -> (CommandResult, i64, i32
 
 /// Shared implementation for LPUSH/RPUSH batch commands.
 /// `push_front`: true for LPUSH, false for RPUSH.
-fn batch_list_push(map: &mut ShardMap, args: &[Vec<u8>], push_front: bool) -> (CommandResult, i64, i32) {
+fn batch_list_push(
+    map: &mut ShardMap,
+    args: &[Vec<u8>],
+    push_front: bool,
+) -> (CommandResult, i64, i32) {
     if args.len() < 2 {
         return (Err(CommandError::WrongNumberOfArguments), 0, 0);
     }
@@ -1577,7 +1626,9 @@ fn batch_list_push(map: &mut ShardMap, args: &[Vec<u8>], push_front: bool) -> (C
     let mut replaced_expired = false;
 
     // Remove expired entry
-    if map.get(key).is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
+    if map
+        .get(key)
+        .is_some_and(|entry| entry.expires_at.is_some_and(|t| now > t))
         && let Some(v) = map.remove(key.as_slice())
     {
         mem_delta -= (key.len() + v.value.mem_size()) as i64;
@@ -1638,42 +1689,138 @@ mod tests {
 
     #[test]
     fn test_classify_read_commands() {
-        assert_eq!(classify_command(b"GET", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"get", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"EXISTS", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"TTL", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"PTTL", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"TYPE", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"STRLEN", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"HGET", &[b"k".to_vec(), b"f".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"HLEN", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"HEXISTS", &[b"k".to_vec(), b"f".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"LLEN", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"SCARD", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"SISMEMBER", &[b"k".to_vec(), b"m".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"ZCARD", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"ZSCORE", &[b"k".to_vec(), b"m".to_vec()]), CommandKind::Read);
+        assert_eq!(
+            classify_command(b"GET", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"get", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"EXISTS", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"TTL", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"PTTL", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"TYPE", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"STRLEN", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"HGET", &[b"k".to_vec(), b"f".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"HLEN", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"HEXISTS", &[b"k".to_vec(), b"f".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"LLEN", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"SCARD", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"SISMEMBER", &[b"k".to_vec(), b"m".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"ZCARD", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"ZSCORE", &[b"k".to_vec(), b"m".to_vec()]),
+            CommandKind::Read
+        );
     }
 
     #[test]
     fn test_classify_write_commands() {
-        assert_eq!(classify_command(b"SET", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"DEL", &[b"k".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"INCR", &[b"k".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"DECR", &[b"k".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"INCRBY", &[b"k".to_vec(), b"1".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"DECRBY", &[b"k".to_vec(), b"1".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"EXPIRE", &[b"k".to_vec(), b"60".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"PEXPIRE", &[b"k".to_vec(), b"1000".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"HSET", &[b"k".to_vec(), b"f".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"HDEL", &[b"k".to_vec(), b"f".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"SADD", &[b"k".to_vec(), b"m".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"SREM", &[b"k".to_vec(), b"m".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"LPUSH", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"RPUSH", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"APPEND", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"GETDEL", &[b"k".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"PERSIST", &[b"k".to_vec()]), CommandKind::Write);
+        assert_eq!(
+            classify_command(b"SET", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"DEL", &[b"k".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"INCR", &[b"k".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"DECR", &[b"k".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"INCRBY", &[b"k".to_vec(), b"1".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"DECRBY", &[b"k".to_vec(), b"1".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"EXPIRE", &[b"k".to_vec(), b"60".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"PEXPIRE", &[b"k".to_vec(), b"1000".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"HSET", &[b"k".to_vec(), b"f".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"HDEL", &[b"k".to_vec(), b"f".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"SADD", &[b"k".to_vec(), b"m".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"SREM", &[b"k".to_vec(), b"m".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"LPUSH", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"RPUSH", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"APPEND", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"GETDEL", &[b"k".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"PERSIST", &[b"k".to_vec()]),
+            CommandKind::Write
+        );
     }
 
     #[test]
@@ -1682,37 +1829,88 @@ mod tests {
         assert_eq!(classify_command(b"MULTI", &[]), CommandKind::Excluded);
         assert_eq!(classify_command(b"EXEC", &[]), CommandKind::Excluded);
         // Pub/Sub
-        assert_eq!(classify_command(b"SUBSCRIBE", &[b"ch".to_vec()]), CommandKind::Excluded);
-        assert_eq!(classify_command(b"PUBLISH", &[b"ch".to_vec(), b"msg".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"SUBSCRIBE", &[b"ch".to_vec()]),
+            CommandKind::Excluded
+        );
+        assert_eq!(
+            classify_command(b"PUBLISH", &[b"ch".to_vec(), b"msg".to_vec()]),
+            CommandKind::Excluded
+        );
         // Scripting
-        assert_eq!(classify_command(b"EVAL", &[b"script".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"EVAL", &[b"script".to_vec()]),
+            CommandKind::Excluded
+        );
         // Multi-key DEL
-        assert_eq!(classify_command(b"DEL", &[b"k1".to_vec(), b"k2".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"DEL", &[b"k1".to_vec(), b"k2".to_vec()]),
+            CommandKind::Excluded
+        );
         // Multi-key EXISTS
-        assert_eq!(classify_command(b"EXISTS", &[b"k1".to_vec(), b"k2".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"EXISTS", &[b"k1".to_vec(), b"k2".to_vec()]),
+            CommandKind::Excluded
+        );
         // SET with options
-        assert_eq!(classify_command(b"SET", &[b"k".to_vec(), b"v".to_vec(), b"EX".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"SET", &[b"k".to_vec(), b"v".to_vec(), b"EX".to_vec()]),
+            CommandKind::Excluded
+        );
         // Unknown
         assert_eq!(classify_command(b"RANDOMCMD", &[]), CommandKind::Excluded);
         // MGET/MSET
-        assert_eq!(classify_command(b"MGET", &[b"k1".to_vec(), b"k2".to_vec()]), CommandKind::Excluded);
-        assert_eq!(classify_command(b"MSET", &[b"k1".to_vec(), b"v1".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"MGET", &[b"k1".to_vec(), b"k2".to_vec()]),
+            CommandKind::Excluded
+        );
+        assert_eq!(
+            classify_command(b"MSET", &[b"k1".to_vec(), b"v1".to_vec()]),
+            CommandKind::Excluded
+        );
         // Blocking
-        assert_eq!(classify_command(b"BLPOP", &[b"k".to_vec(), b"0".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"BLPOP", &[b"k".to_vec(), b"0".to_vec()]),
+            CommandKind::Excluded
+        );
         // PING (no key)
         assert_eq!(classify_command(b"PING", &[]), CommandKind::Excluded);
         // EXPIRE/PEXPIRE with condition flags
-        assert_eq!(classify_command(b"EXPIRE", &[b"k".to_vec(), b"60".to_vec(), b"NX".to_vec()]), CommandKind::Excluded);
-        assert_eq!(classify_command(b"PEXPIRE", &[b"k".to_vec(), b"1000".to_vec(), b"GT".to_vec()]), CommandKind::Excluded);
+        assert_eq!(
+            classify_command(b"EXPIRE", &[b"k".to_vec(), b"60".to_vec(), b"NX".to_vec()]),
+            CommandKind::Excluded
+        );
+        assert_eq!(
+            classify_command(
+                b"PEXPIRE",
+                &[b"k".to_vec(), b"1000".to_vec(), b"GT".to_vec()]
+            ),
+            CommandKind::Excluded
+        );
     }
 
     #[test]
     fn test_classify_case_insensitive() {
-        assert_eq!(classify_command(b"get", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"Get", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"GET", &[b"k".to_vec()]), CommandKind::Read);
-        assert_eq!(classify_command(b"set", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
-        assert_eq!(classify_command(b"Set", &[b"k".to_vec(), b"v".to_vec()]), CommandKind::Write);
+        assert_eq!(
+            classify_command(b"get", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"Get", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"GET", &[b"k".to_vec()]),
+            CommandKind::Read
+        );
+        assert_eq!(
+            classify_command(b"set", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
+        assert_eq!(
+            classify_command(b"Set", &[b"k".to_vec(), b"v".to_vec()]),
+            CommandKind::Write
+        );
     }
 
     // --- Sorted grouping tests ---
@@ -1731,7 +1929,10 @@ mod tests {
                 break;
             }
         }
-        assert!(same_shard_keys.len() >= 3, "Need at least 3 same-shard keys");
+        assert!(
+            same_shard_keys.len() >= 3,
+            "Need at least 3 same-shard keys"
+        );
 
         let commands: Vec<Command> = same_shard_keys
             .iter()
@@ -1810,7 +2011,9 @@ mod tests {
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
         // Reads and writes are separate groups within the same shard
         assert_eq!(entries.len(), 2);
-        assert!(matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.is_read_only && g.commands.len() == 2));
+        assert!(
+            matches!(&entries[0].entry, PipelineEntry::Batch(g) if g.is_read_only && g.commands.len() == 2)
+        );
         // Single write is Individual, not Batch
         assert!(matches!(&entries[1].entry, PipelineEntry::Individual(_)));
     }
@@ -1835,10 +2038,10 @@ mod tests {
     fn test_sorted_group_original_indices_with_barriers() {
         let store = ShardedStore::with_shard_count(16);
         let commands = vec![
-            make_cmd("GET", &[b"a"]),    // 0
-            make_cmd("PING", &[]),       // 1 (excluded barrier)
+            make_cmd("GET", &[b"a"]),       // 0
+            make_cmd("PING", &[]),          // 1 (excluded barrier)
             make_cmd("SET", &[b"b", b"v"]), // 2
-            make_cmd("MULTI", &[]),      // 3 (excluded barrier)
+            make_cmd("MULTI", &[]),         // 3 (excluded barrier)
         ];
 
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
@@ -1876,9 +2079,9 @@ mod tests {
 
         // Interleave: GET shard_a, GET shard_b, GET shard_a
         let commands = vec![
-            make_cmd("GET", &[keys_a[0].as_bytes()]),  // shard_a, idx 0
-            make_cmd("GET", &[keys_b[0].as_bytes()]),  // shard_b, idx 1
-            make_cmd("GET", &[keys_a[1].as_bytes()]),  // shard_a, idx 2
+            make_cmd("GET", &[keys_a[0].as_bytes()]), // shard_a, idx 0
+            make_cmd("GET", &[keys_b[0].as_bytes()]), // shard_b, idx 1
+            make_cmd("GET", &[keys_a[1].as_bytes()]), // shard_a, idx 2
         ];
 
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
@@ -1954,10 +2157,10 @@ mod tests {
 
         // Pipeline: A0, B0, A1, B1
         let commands = vec![
-            make_cmd("GET", &[keys_a[0].as_bytes()]),  // 0
-            make_cmd("GET", &[keys_b[0].as_bytes()]),  // 1
-            make_cmd("GET", &[keys_a[1].as_bytes()]),  // 2
-            make_cmd("GET", &[keys_b[1].as_bytes()]),  // 3
+            make_cmd("GET", &[keys_a[0].as_bytes()]), // 0
+            make_cmd("GET", &[keys_b[0].as_bytes()]), // 1
+            make_cmd("GET", &[keys_a[1].as_bytes()]), // 2
+            make_cmd("GET", &[keys_b[1].as_bytes()]), // 3
         ];
 
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
@@ -1968,7 +2171,8 @@ mod tests {
             match &entry.entry {
                 PipelineEntry::Batch(g) => {
                     for (i, _cmd) in g.commands.iter().enumerate() {
-                        response_slots[entry.original_indices[i]] = format!("resp_{}", entry.original_indices[i]);
+                        response_slots[entry.original_indices[i]] =
+                            format!("resp_{}", entry.original_indices[i]);
                     }
                 }
                 PipelineEntry::Individual(_cmd) => {
@@ -2023,7 +2227,7 @@ mod tests {
         // Pipeline: DEL on high shard, then SET on low shard
         // Commands preserve client send order — DEL(hi) stays first
         let commands = vec![
-            make_cmd("DEL", &[hi_key.as_bytes()]),        // idx 0, shard_hi
+            make_cmd("DEL", &[hi_key.as_bytes()]), // idx 0, shard_hi
             make_cmd("SET", &[lo_key.as_bytes(), b"val"]), // idx 1, shard_lo
         ];
 
@@ -2048,9 +2252,8 @@ mod tests {
         let cmd_miss = make_cmd("GET", &[b"nonexistent"]);
         let cmds: Vec<&Command> = vec![&cmd_hit, &cmd_miss];
 
-        let (results, _expired) = store.execute_on_shard_ref(shard_idx, |map| {
-            execute_read_batch(map, &cmds)
-        });
+        let (results, _expired) =
+            store.execute_on_shard_ref(shard_idx, |map| execute_read_batch(map, &cmds));
 
         assert_eq!(results.len(), 2);
         // key1 is in this shard — verify correct value returned
@@ -2077,9 +2280,8 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd];
         let shard_idx = store.shard_index(b"expired");
 
-        let (results, expired_keys) = store.execute_on_shard_ref(shard_idx, |map| {
-            execute_read_batch(map, &cmds)
-        });
+        let (results, expired_keys) =
+            store.execute_on_shard_ref(shard_idx, |map| execute_read_batch(map, &cmds));
         assert_eq!(results.len(), 1);
         match &results[0] {
             Ok(RespValue::BulkString(None)) => {} // Correct: nil for expired
@@ -2099,9 +2301,8 @@ mod tests {
         let cmds: Vec<&Command> = vec![&cmd];
         let shard_idx = store.shard_index(b"hash_key");
 
-        let (results, _expired) = store.execute_on_shard_ref(shard_idx, |map| {
-            execute_read_batch(map, &cmds)
-        });
+        let (results, _expired) =
+            store.execute_on_shard_ref(shard_idx, |map| execute_read_batch(map, &cmds));
         assert!(
             matches!(results[0], Err(CommandError::WrongType)),
             "Expected WrongType error, got: {:?}",
@@ -2262,14 +2463,15 @@ mod tests {
         ];
 
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));
-        let mut response_slots: Vec<Option<CommandResult>> = (0..commands.len()).map(|_| None).collect();
+        let mut response_slots: Vec<Option<CommandResult>> =
+            (0..commands.len()).map(|_| None).collect();
 
         for sorted_entry in &entries {
             match &sorted_entry.entry {
                 PipelineEntry::Batch(group) => {
                     if group.is_read_only {
-                        let (batch_results, _expired) =
-                            store.execute_on_shard_ref(group.shard_idx, |map| {
+                        let (batch_results, _expired) = store
+                            .execute_on_shard_ref(group.shard_idx, |map| {
                                 execute_read_batch(map, &group.commands)
                             });
                         for (i, r) in batch_results.into_iter().enumerate() {
@@ -2278,7 +2480,13 @@ mod tests {
                     } else {
                         let (batch_results, _) =
                             store.execute_on_shard_mut(group.shard_idx, |map| {
-                                execute_write_batch(map, &group.commands, 1024, 5 * 1024 * 1024, None)
+                                execute_write_batch(
+                                    map,
+                                    &group.commands,
+                                    1024,
+                                    5 * 1024 * 1024,
+                                    None,
+                                )
                             });
                         for (i, (r, _, _)) in batch_results.into_iter().enumerate() {
                             response_slots[sorted_entry.original_indices[i]] = Some(r);
@@ -2305,7 +2513,8 @@ mod tests {
                                 response_slots[idx] = Some(r);
                             }
                             CommandKind::Excluded => {
-                                response_slots[idx] = Some(Ok(RespValue::SimpleString("OK".to_string())));
+                                response_slots[idx] =
+                                    Some(Ok(RespValue::SimpleString("OK".to_string())));
                             }
                         }
                     }
@@ -2378,9 +2587,8 @@ mod tests {
         let cmd_exists = make_cmd("EXISTS", &[b"str_key"]);
         let cmd_ttl = make_cmd("TTL", &[b"str_key"]);
         let cmds: Vec<&Command> = vec![&cmd_get, &cmd_exists, &cmd_ttl];
-        let (results, _) = store.execute_on_shard_ref(shard_idx, |map| {
-            execute_read_batch(map, &cmds)
-        });
+        let (results, _) =
+            store.execute_on_shard_ref(shard_idx, |map| execute_read_batch(map, &cmds));
         assert!(matches!(&results[0], Ok(RespValue::BulkString(Some(_)))));
         assert!(matches!(&results[1], Ok(RespValue::Integer(_))));
         assert!(matches!(&results[2], Ok(RespValue::Integer(_))));
@@ -2398,7 +2606,10 @@ mod tests {
         // All these types serialize identically in RESP2 and RESP3
         for (result, _, _) in &results {
             if let Ok(resp) = result {
-                assert!(resp.serialize().is_ok(), "Response must serialize for both protocols");
+                assert!(
+                    resp.serialize().is_ok(),
+                    "Response must serialize for both protocols"
+                );
             }
         }
     }
@@ -2425,9 +2636,9 @@ mod tests {
         }
 
         let commands = vec![
-            make_cmd("SET", &[same_shard_keys[0].as_bytes(), b"v1"]),  // allowed
-            make_cmd("SET", &[same_shard_keys[1].as_bytes(), b"v2"]),  // denied by ACL
-            make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v3"]),  // allowed
+            make_cmd("SET", &[same_shard_keys[0].as_bytes(), b"v1"]), // allowed
+            make_cmd("SET", &[same_shard_keys[1].as_bytes(), b"v2"]), // denied by ACL
+            make_cmd("SET", &[same_shard_keys[2].as_bytes(), b"v3"]), // allowed
         ];
 
         let entries = group_pipeline_sorted(&commands, |k| store.shard_index(k));

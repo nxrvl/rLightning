@@ -474,23 +474,17 @@ impl CommandHandler {
             "json.arrappend" | "jsonarrappend" => {
                 commands::json_arrappend(&self.storage, args).await
             }
-            "json.arrtrim" | "jsonarrtrim" => {
-                commands::json_arrtrim(&self.storage, args).await
-            }
+            "json.arrtrim" | "jsonarrtrim" => commands::json_arrtrim(&self.storage, args).await,
             "json.resp" | "jsonresp" => commands::json_resp(&self.storage, args).await,
             "json.del" | "jsondel" => commands::json_del(&self.storage, args).await,
-            "json.objkeys" | "jsonobjkeys" => {
-                commands::json_objkeys(&self.storage, args).await
-            }
+            "json.objkeys" | "jsonobjkeys" => commands::json_objkeys(&self.storage, args).await,
             "json.objlen" | "jsonobjlen" => commands::json_objlen(&self.storage, args).await,
             "json.arrlen" | "jsonarrlen" => commands::json_arrlen(&self.storage, args).await,
             "json.numincrby" | "jsonnumincrby" => {
                 commands::json_numincrby(&self.storage, args).await
             }
             "json.mget" | "jsonmget" => commands::json_mget(&self.storage, args).await,
-            "json.arrindex" | "jsonarrindex" => {
-                commands::json_arrindex(&self.storage, args).await
-            }
+            "json.arrindex" | "jsonarrindex" => commands::json_arrindex(&self.storage, args).await,
 
             // Server commands
             "info" => commands::info_expanded(&self.storage, args).await,
@@ -534,9 +528,7 @@ impl CommandHandler {
             "xdel" => commands::xdel(&self.storage, args).await,
             "xinfo" => commands::xinfo(&self.storage, args).await,
             "xgroup" => commands::xgroup(&self.storage, args).await,
-            "xreadgroup" => {
-                commands::xreadgroup(&self.storage, args, &self.blocking_mgr).await
-            }
+            "xreadgroup" => commands::xreadgroup(&self.storage, args, &self.blocking_mgr).await,
             "xack" => commands::xack(&self.storage, args).await,
             "xpending" => commands::xpending(&self.storage, args).await,
             "xclaim" => commands::xclaim(&self.storage, args).await,
@@ -2188,12 +2180,7 @@ mod tests {
         let result = handler
             .process_bytes(
                 b"MSET",
-                &[
-                    b"a".to_vec(),
-                    b"1".to_vec(),
-                    b"b".to_vec(),
-                    b"2".to_vec(),
-                ],
+                &[b"a".to_vec(), b"1".to_vec(), b"b".to_vec(), b"2".to_vec()],
                 0,
             )
             .await
@@ -2278,11 +2265,7 @@ mod tests {
 
         // HGETALL goes through slow path
         handler
-            .process_bytes(
-                b"HSET",
-                &[b"h".to_vec(), b"f".to_vec(), b"v".to_vec()],
-                0,
-            )
+            .process_bytes(b"HSET", &[b"h".to_vec(), b"f".to_vec(), b"v".to_vec()], 0)
             .await
             .unwrap();
         let result = handler
@@ -2315,9 +2298,7 @@ mod tests {
 
         // Test various case combinations for GET
         for variant in &[&b"get"[..], b"Get", b"gEt", b"GET"] {
-            let result = handler
-                .process_bytes(variant, &[b"k".to_vec()], 0)
-                .await;
+            let result = handler.process_bytes(variant, &[b"k".to_vec()], 0).await;
             assert!(
                 result.is_ok(),
                 "GET variant {:?} should dispatch correctly",
@@ -2332,9 +2313,7 @@ mod tests {
                 .process_bytes(b"SET", &[b"k".to_vec(), b"v".to_vec()], 0)
                 .await
                 .unwrap();
-            let result = handler
-                .process_bytes(variant, &[b"k".to_vec()], 0)
-                .await;
+            let result = handler.process_bytes(variant, &[b"k".to_vec()], 0).await;
             assert!(
                 result.is_ok(),
                 "DEL variant {:?} should dispatch correctly",
@@ -2361,9 +2340,7 @@ mod tests {
         let storage = StorageEngine::new(config);
         let handler = CommandHandler::new(Arc::clone(&storage));
 
-        let result = handler
-            .process_bytes(b"NOTACOMMAND", &[], 0)
-            .await;
+        let result = handler.process_bytes(b"NOTACOMMAND", &[], 0).await;
         assert!(result.is_err());
     }
 }

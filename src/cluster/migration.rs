@@ -46,7 +46,8 @@ pub async fn migrate_key(
     let value_bytes: Vec<u8> = match &item.value {
         crate::storage::value::StoreValue::Str(v) => v.to_vec(),
         crate::storage::value::StoreValue::Hash(m) => {
-            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             bincode::serialize(&std_map).map_err(|e| format!("ERR serialization: {}", e))?
         }
         crate::storage::value::StoreValue::Set(s) => {

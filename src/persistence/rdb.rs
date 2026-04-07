@@ -45,7 +45,11 @@ fn serialize_store_value(value: &StoreValue) -> Result<Vec<u8>, String> {
 
 /// Deserialize bytes to a StoreValue for RDB loading.
 /// `rdb_version` is used to handle backward-compatible deserialization (v1 lists use list_bytes format).
-fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8], rdb_version: u8) -> Result<StoreValue, String> {
+fn deserialize_store_value(
+    data_type: &RedisDataType,
+    bytes: &[u8],
+    rdb_version: u8,
+) -> Result<StoreValue, String> {
     match data_type {
         RedisDataType::String => Ok(StoreValue::Str(bytes.to_vec().into())),
         RedisDataType::Hash => {
@@ -78,14 +82,14 @@ fn deserialize_store_value(data_type: &RedisDataType, bytes: &[u8], rdb_version:
                 Ok(StoreValue::List(vec.into()))
             } else {
                 // V2 stores lists as bincode Vec<Vec<u8>>
-                let vec: Vec<Vec<u8>> =
-                    bincode::deserialize(bytes).map_err(|e| format!("List deserialization: {}", e))?;
+                let vec: Vec<Vec<u8>> = bincode::deserialize(bytes)
+                    .map_err(|e| format!("List deserialization: {}", e))?;
                 Ok(StoreValue::List(vec.into()))
             }
         }
         RedisDataType::Stream => {
-            let s: crate::storage::stream::StreamData =
-                bincode::deserialize(bytes).map_err(|e| format!("Stream deserialization: {}", e))?;
+            let s: crate::storage::stream::StreamData = bincode::deserialize(bytes)
+                .map_err(|e| format!("Stream deserialization: {}", e))?;
             Ok(StoreValue::Stream(s))
         }
     }
@@ -595,7 +599,7 @@ mod tests {
     use super::*;
     use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
-    use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+    use crate::storage::value::{NativeHashMap, NativeHashSet, StoreValue};
     use std::collections::VecDeque;
     use tempfile::NamedTempFile;
 
@@ -782,11 +786,7 @@ mod tests {
         stream.entries.insert(entry.id, entry);
         stream.last_id = crate::storage::stream::StreamEntryId::new(1000, 0);
         engine
-            .set_with_type(
-                b"mystream".to_vec(),
-                StoreValue::Stream(stream),
-                None,
-            )
+            .set_with_type(b"mystream".to_vec(), StoreValue::Stream(stream), None)
             .await
             .unwrap();
 
@@ -817,11 +817,7 @@ mod tests {
         // List
         let list = VecDeque::from(vec![b"1".to_vec(), b"2".to_vec()]);
         engine
-            .set_with_type(
-                b"lst".to_vec(),
-                StoreValue::List(list),
-                None,
-            )
+            .set_with_type(b"lst".to_vec(), StoreValue::List(list), None)
             .await
             .unwrap();
 
@@ -829,11 +825,7 @@ mod tests {
         let mut set = NativeHashSet::default();
         set.insert(b"a".to_vec());
         engine
-            .set_with_type(
-                b"st".to_vec(),
-                StoreValue::Set(set),
-                None,
-            )
+            .set_with_type(b"st".to_vec(), StoreValue::Set(set), None)
             .await
             .unwrap();
 
@@ -841,11 +833,7 @@ mod tests {
         let mut hash = NativeHashMap::default();
         hash.insert(b"f".to_vec(), b"v".to_vec());
         engine
-            .set_with_type(
-                b"hs".to_vec(),
-                StoreValue::Hash(hash),
-                None,
-            )
+            .set_with_type(b"hs".to_vec(), StoreValue::Hash(hash), None)
             .await
             .unwrap();
 
@@ -853,11 +841,7 @@ mod tests {
         let mut zset = SortedSetData::new();
         zset.insert(3.0, b"m".to_vec());
         engine
-            .set_with_type(
-                b"zs".to_vec(),
-                StoreValue::ZSet(zset),
-                None,
-            )
+            .set_with_type(b"zs".to_vec(), StoreValue::ZSet(zset), None)
             .await
             .unwrap();
 

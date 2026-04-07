@@ -73,7 +73,10 @@ pub async fn setbit(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             bitmap[byte_offset] &= !(1 << bit_offset);
         }
 
-        Ok((ModifyResult::Set(StoreValue::Str(bitmap.into())), old as i64))
+        Ok((
+            ModifyResult::Set(StoreValue::Str(bitmap.into())),
+            old as i64,
+        ))
     })?;
 
     Ok(RespValue::Integer(old_bit))

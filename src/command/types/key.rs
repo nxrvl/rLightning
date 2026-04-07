@@ -417,23 +417,30 @@ pub async fn dump(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
             let value_bytes: Vec<u8> = match &item.value {
                 StoreValue::Str(v) => v.to_vec(),
                 StoreValue::Hash(m) => {
-                    let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    bincode::serialize(&std_map).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                    let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                        m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    bincode::serialize(&std_map).map_err(|e| {
+                        CommandError::InternalError(format!("Serialization error: {}", e))
+                    })?
                 }
                 StoreValue::Set(s) => {
                     let std_set: std::collections::HashSet<Vec<u8>> = s.iter().cloned().collect();
-                    bincode::serialize(&std_set).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                    bincode::serialize(&std_set).map_err(|e| {
+                        CommandError::InternalError(format!("Serialization error: {}", e))
+                    })?
                 }
-                StoreValue::ZSet(ss) => {
-                    bincode::serialize(ss).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
-                }
+                StoreValue::ZSet(ss) => bincode::serialize(ss).map_err(|e| {
+                    CommandError::InternalError(format!("Serialization error: {}", e))
+                })?,
                 StoreValue::List(deque) => {
                     let vec: Vec<Vec<u8>> = deque.iter().cloned().collect();
-                    bincode::serialize(&vec).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
+                    bincode::serialize(&vec).map_err(|e| {
+                        CommandError::InternalError(format!("Serialization error: {}", e))
+                    })?
                 }
-                StoreValue::Stream(s) => {
-                    bincode::serialize(s).map_err(|e| CommandError::InternalError(format!("Serialization error: {}", e)))?
-                }
+                StoreValue::Stream(s) => bincode::serialize(s).map_err(|e| {
+                    CommandError::InternalError(format!("Serialization error: {}", e))
+                })?,
             };
             let mut serialized = Vec::with_capacity(3 + value_bytes.len());
             serialized.push(DUMP_VERSION_MARKER);
@@ -511,35 +518,61 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
             // bincode for versioned-format payloads.
             let vec: Vec<Vec<u8>> = if !value_bytes.is_empty() && value_bytes.len() >= 8 {
                 crate::storage::list_bytes::deserialize_all(value_bytes)
-                    .or_else(|_| bincode::deserialize(value_bytes)
-                        .map_err(|_| crate::storage::error::StorageError::InternalError(
-                            "DUMP payload version or checksum are wrong".to_string())))
-                    .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?
+                    .or_else(|_| {
+                        bincode::deserialize(value_bytes).map_err(|_| {
+                            crate::storage::error::StorageError::InternalError(
+                                "DUMP payload version or checksum are wrong".to_string(),
+                            )
+                        })
+                    })
+                    .map_err(|_| {
+                        CommandError::InvalidArgument(
+                            "DUMP payload version or checksum are wrong".to_string(),
+                        )
+                    })?
             } else {
-                return Err(CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "DUMP payload version or checksum are wrong".to_string(),
+                ));
             };
             StoreValue::List(vec.into())
         }
         2 => {
             let std_set: std::collections::HashSet<Vec<u8>> = bincode::deserialize(value_bytes)
-                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+                .map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "DUMP payload version or checksum are wrong".to_string(),
+                    )
+                })?;
             let native: crate::storage::value::NativeHashSet = std_set.into_iter().collect();
             StoreValue::Set(native)
         }
         3 => {
-            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = bincode::deserialize(value_bytes)
-                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+            let std_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                bincode::deserialize(value_bytes).map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "DUMP payload version or checksum are wrong".to_string(),
+                    )
+                })?;
             let native: crate::storage::value::NativeHashMap = std_map.into_iter().collect();
             StoreValue::Hash(native)
         }
         4 => {
             let ss: crate::storage::value::SortedSetData = bincode::deserialize(value_bytes)
-                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+                .map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "DUMP payload version or checksum are wrong".to_string(),
+                    )
+                })?;
             StoreValue::ZSet(ss)
         }
         5 => {
             let stream: crate::storage::stream::StreamData = bincode::deserialize(value_bytes)
-                .map_err(|_| CommandError::InvalidArgument("DUMP payload version or checksum are wrong".to_string()))?;
+                .map_err(|_| {
+                    CommandError::InvalidArgument(
+                        "DUMP payload version or checksum are wrong".to_string(),
+                    )
+                })?;
             StoreValue::Stream(stream)
         }
         _ => {
@@ -555,10 +588,7 @@ pub async fn restore(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult 
         None
     };
 
-    match engine
-        .restore_key(key, store_value, ttl, replace)
-        .await
-    {
+    match engine.restore_key(key, store_value, ttl, replace).await {
         Ok(true) => Ok(RespValue::SimpleString("OK".to_string())),
         Ok(false) => Err(CommandError::InvalidArgument(
             "Target key name already exists".to_string(),
@@ -671,9 +701,11 @@ pub async fn sort(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
     let mut elements: Vec<Vec<u8>> = match &item.value {
         crate::storage::value::StoreValue::List(deque) => deque.iter().cloned().collect(),
         crate::storage::value::StoreValue::Set(set) => set.iter().cloned().collect(),
-        crate::storage::value::StoreValue::ZSet(ss) => {
-            ss.entries.iter().map(|(_, member)| member.clone()).collect()
-        }
+        crate::storage::value::StoreValue::ZSet(ss) => ss
+            .entries
+            .iter()
+            .map(|(_, member)| member.clone())
+            .collect(),
         _ => {
             return Err(CommandError::WrongType);
         }
@@ -1293,7 +1325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_object_encoding_collections_small() {
-        use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+        use crate::storage::value::{NativeHashMap, NativeHashSet, StoreValue};
         use std::collections::VecDeque;
 
         let config = StorageConfig::default();
@@ -1302,11 +1334,7 @@ mod tests {
         // Small list (<=128 elements, all <=64 bytes) -> "listpack"
         let small_list = VecDeque::from(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         engine
-            .set_with_type(
-                b"small_list".to_vec(),
-                StoreValue::List(small_list),
-                None,
-            )
+            .set_with_type(b"small_list".to_vec(), StoreValue::List(small_list), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_list".to_vec()])
@@ -1319,11 +1347,7 @@ mod tests {
         small_set.insert(b"x".to_vec());
         small_set.insert(b"y".to_vec());
         engine
-            .set_with_type(
-                b"small_set".to_vec(),
-                StoreValue::Set(small_set),
-                None,
-            )
+            .set_with_type(b"small_set".to_vec(), StoreValue::Set(small_set), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_set".to_vec()])
@@ -1336,11 +1360,7 @@ mod tests {
         small_hash.insert(b"field1".to_vec(), b"val1".to_vec());
         small_hash.insert(b"field2".to_vec(), b"val2".to_vec());
         engine
-            .set_with_type(
-                b"small_hash".to_vec(),
-                StoreValue::Hash(small_hash),
-                None,
-            )
+            .set_with_type(b"small_hash".to_vec(), StoreValue::Hash(small_hash), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_hash".to_vec()])
@@ -1354,11 +1374,7 @@ mod tests {
         small_zset.insert(1.0, b"mem1".to_vec());
         small_zset.insert(2.0, b"mem2".to_vec());
         engine
-            .set_with_type(
-                b"small_zset".to_vec(),
-                StoreValue::ZSet(small_zset),
-                None,
-            )
+            .set_with_type(b"small_zset".to_vec(), StoreValue::ZSet(small_zset), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"small_zset".to_vec()])
@@ -1369,7 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_object_encoding_collections_large() {
-        use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+        use crate::storage::value::{NativeHashMap, NativeHashSet, StoreValue};
         use std::collections::VecDeque;
 
         let config = StorageConfig::default();
@@ -1380,11 +1396,7 @@ mod tests {
             .map(|i| format!("item{}", i).into_bytes())
             .collect();
         engine
-            .set_with_type(
-                b"large_list".to_vec(),
-                StoreValue::List(large_list),
-                None,
-            )
+            .set_with_type(b"large_list".to_vec(), StoreValue::List(large_list), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_list".to_vec()])
@@ -1397,11 +1409,7 @@ mod tests {
             .map(|i| format!("item{}", i).into_bytes())
             .collect();
         engine
-            .set_with_type(
-                b"large_set".to_vec(),
-                StoreValue::Set(large_set),
-                None,
-            )
+            .set_with_type(b"large_set".to_vec(), StoreValue::Set(large_set), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_set".to_vec()])
@@ -1418,11 +1426,7 @@ mod tests {
             );
         }
         engine
-            .set_with_type(
-                b"large_hash".to_vec(),
-                StoreValue::Hash(large_hash),
-                None,
-            )
+            .set_with_type(b"large_hash".to_vec(), StoreValue::Hash(large_hash), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_hash".to_vec()])
@@ -1437,11 +1441,7 @@ mod tests {
             large_zset.insert(i as f64, format!("m{}", i).into_bytes());
         }
         engine
-            .set_with_type(
-                b"large_zset".to_vec(),
-                StoreValue::ZSet(large_zset),
-                None,
-            )
+            .set_with_type(b"large_zset".to_vec(), StoreValue::ZSet(large_zset), None)
             .await
             .unwrap();
         let result = object(&engine, &[b"ENCODING".to_vec(), b"large_zset".to_vec()])
@@ -1670,7 +1670,11 @@ mod tests {
             b"4".to_vec(),
         ];
         engine
-            .set_with_type(b"mylist".to_vec(), StoreValue::List(VecDeque::from(list)), None)
+            .set_with_type(
+                b"mylist".to_vec(),
+                StoreValue::List(VecDeque::from(list)),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1718,7 +1722,11 @@ mod tests {
 
         let list = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
         engine
-            .set_with_type(b"fruits".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
+            .set_with_type(
+                b"fruits".to_vec(),
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1748,9 +1756,14 @@ mod tests {
         let config = StorageConfig::default();
         let engine = StorageEngine::new(config);
 
-        let list: std::collections::VecDeque<Vec<u8>> = (1..=10).map(|i: i32| i.to_string().into_bytes()).collect();
+        let list: std::collections::VecDeque<Vec<u8>> =
+            (1..=10).map(|i: i32| i.to_string().into_bytes()).collect();
         engine
-            .set_with_type(b"numbers".to_vec(), crate::storage::value::StoreValue::List(list), None)
+            .set_with_type(
+                b"numbers".to_vec(),
+                crate::storage::value::StoreValue::List(list),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1788,7 +1801,11 @@ mod tests {
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
         engine
-            .set_with_type(b"src_list".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
+            .set_with_type(
+                b"src_list".to_vec(),
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1808,7 +1825,10 @@ mod tests {
         let stored_item = engine.get_item(b"dst_list").await.unwrap().unwrap();
         if let crate::storage::value::StoreValue::List(deque) = &stored_item.value {
             let stored_list: Vec<Vec<u8>> = deque.iter().cloned().collect();
-            assert_eq!(stored_list, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+            assert_eq!(
+                stored_list,
+                vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
+            );
         } else {
             panic!("Expected List StoreValue");
         }
@@ -1821,7 +1841,11 @@ mod tests {
 
         let list = vec![b"3".to_vec(), b"1".to_vec(), b"2".to_vec()];
         engine
-            .set_with_type(b"ro_list".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
+            .set_with_type(
+                b"ro_list".to_vec(),
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1921,7 +1945,11 @@ mod tests {
         // Set a list key
         let list = vec![b"item1".to_vec()];
         engine
-            .set_with_type(b"mylist".to_vec(), crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)), None)
+            .set_with_type(
+                b"mylist".to_vec(),
+                crate::storage::value::StoreValue::List(std::collections::VecDeque::from(list)),
+                None,
+            )
             .await
             .unwrap();
 

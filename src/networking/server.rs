@@ -20,6 +20,7 @@ use crate::command::types::pubsub::{
 };
 use crate::networking::error::NetworkError;
 use crate::networking::raw_command::RawCommand;
+use crate::networking::raw_command::cmd_eq;
 use crate::networking::resp::{ProtocolVersion, RespCommand, RespValue};
 use crate::persistence::PersistenceManager;
 use crate::persistence::config::AofSyncPolicy;
@@ -27,7 +28,6 @@ use crate::pubsub::PubSubManager;
 use crate::replication::ReplicationManager;
 use crate::security::SecurityManager;
 use crate::sentinel::SentinelManager;
-use crate::networking::raw_command::cmd_eq;
 use crate::storage::batch::{self, PipelineEntry};
 use crate::storage::clock::cached_now;
 use crate::storage::engine::{CURRENT_DB_INDEX, StorageEngine};
@@ -493,72 +493,74 @@ impl Server {
                             parsed_commands.push(cmd);
                             total_entry_count += 1;
                         }
-                        None => {
-                            match RespValue::parse(&mut buffer) {
-                                Ok(Some(value)) => {
-                                    match parser::parse_command(value) {
-                                        Ok(cmd) => {
-                                            parsed_commands.push(cmd);
-                                            total_entry_count += 1;
-                                        }
-                                        Err(e) => {
-                                            error!(client_addr = %client_addr_str, error = ?e, "Command parsing error");
-                                            let error_resp = RespValue::Error(e.to_string());
-                                            if let Ok(bytes) = error_resp.serialize() {
-                                                deferred_parse_errors.push((total_entry_count, bytes));
-                                                total_entry_count += 1;
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    if partial_command_buffer.len() + buffer.len()
-                                        > MAX_PARTIAL_BUFFER_SIZE
-                                    {
-                                        error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit");
-                                        Self::send_error_to_writer(
-                                            &mut socket_writer,
-                                            "ERR Protocol error: command too large".to_string(),
-                                            &client_addr_str,
-                                        )
-                                        .await?;
-                                        return Ok(());
-                                    }
-                                    partial_command_buffer.extend_from_slice(&buffer);
-                                    buffer.clear();
-                                    break;
+                        None => match RespValue::parse(&mut buffer) {
+                            Ok(Some(value)) => match parser::parse_command(value) {
+                                Ok(cmd) => {
+                                    parsed_commands.push(cmd);
+                                    total_entry_count += 1;
                                 }
                                 Err(e) => {
-                                    error!(client_addr = %client_addr_str, error = ?e, "RESP protocol error");
-                                    let error_msg = match &e {
-                                        RespError::InvalidFormatDetails(details) => {
-                                            format!("ERR Protocol error: Invalid RESP data format - {}", details)
-                                        }
-                                        RespError::ValueTooLarge(details) => {
-                                            format!("ERR Protocol error: {}", details)
-                                        }
-                                        _ => format!("ERR Protocol error: {}", e),
-                                    };
-                                    let error_resp = RespValue::Error(error_msg);
+                                    error!(client_addr = %client_addr_str, error = ?e, "Command parsing error");
+                                    let error_resp = RespValue::Error(e.to_string());
                                     if let Ok(bytes) = error_resp.serialize() {
                                         deferred_parse_errors.push((total_entry_count, bytes));
                                         total_entry_count += 1;
                                     }
-                                    buffer.clear();
-                                    if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
-                                        partial_command_buffer = Vec::new();
-                                    } else {
-                                        partial_command_buffer.clear();
-                                    }
-                                    break;
                                 }
+                            },
+                            Ok(None) => {
+                                if partial_command_buffer.len() + buffer.len()
+                                    > MAX_PARTIAL_BUFFER_SIZE
+                                {
+                                    error!(client_addr = %client_addr_str, "Partial command buffer exceeded size limit");
+                                    Self::send_error_to_writer(
+                                        &mut socket_writer,
+                                        "ERR Protocol error: command too large".to_string(),
+                                        &client_addr_str,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                                partial_command_buffer.extend_from_slice(&buffer);
+                                buffer.clear();
+                                break;
                             }
-                        }
+                            Err(e) => {
+                                error!(client_addr = %client_addr_str, error = ?e, "RESP protocol error");
+                                let error_msg = match &e {
+                                    RespError::InvalidFormatDetails(details) => {
+                                        format!(
+                                            "ERR Protocol error: Invalid RESP data format - {}",
+                                            details
+                                        )
+                                    }
+                                    RespError::ValueTooLarge(details) => {
+                                        format!("ERR Protocol error: {}", details)
+                                    }
+                                    _ => format!("ERR Protocol error: {}", e),
+                                };
+                                let error_resp = RespValue::Error(error_msg);
+                                if let Ok(bytes) = error_resp.serialize() {
+                                    deferred_parse_errors.push((total_entry_count, bytes));
+                                    total_entry_count += 1;
+                                }
+                                buffer.clear();
+                                if partial_command_buffer.capacity() > BUFFER_SHRINK_THRESHOLD {
+                                    partial_command_buffer = Vec::new();
+                                } else {
+                                    partial_command_buffer.clear();
+                                }
+                                break;
+                            }
+                        },
                         Some(Err(e)) => {
                             error!(client_addr = %client_addr_str, error = ?e, "Zero-copy parser error");
                             let error_msg = match &e {
                                 RespError::InvalidFormatDetails(details) => {
-                                    format!("ERR Protocol error: Invalid RESP data format - {}", details)
+                                    format!(
+                                        "ERR Protocol error: Invalid RESP data format - {}",
+                                        details
+                                    )
                                 }
                                 RespError::ValueTooLarge(details) => {
                                     format!("ERR Protocol error: {}", details)
@@ -591,15 +593,15 @@ impl Server {
                 // and ACL checks run per-command within the batch loop.
                 let has_tx_cmd = parsed_commands.iter().any(|cmd| {
                     let name = cmd.name.as_bytes();
-                    matches!(name.len(), 4 | 5 | 7) && matches!(
-                        name.first().map(|b| b.to_ascii_uppercase()),
-                        Some(b'M') | Some(b'E') | Some(b'W') | Some(b'D')
-                    ) && (
-                        cmd_eq(name, b"MULTI")
-                        || cmd_eq(name, b"EXEC")
-                        || cmd_eq(name, b"WATCH")
-                        || cmd_eq(name, b"DISCARD")
-                    )
+                    matches!(name.len(), 4 | 5 | 7)
+                        && matches!(
+                            name.first().map(|b| b.to_ascii_uppercase()),
+                            Some(b'M') | Some(b'E') | Some(b'W') | Some(b'D')
+                        )
+                        && (cmd_eq(name, b"MULTI")
+                            || cmd_eq(name, b"EXEC")
+                            || cmd_eq(name, b"WATCH")
+                            || cmd_eq(name, b"DISCARD"))
                 });
                 // Security: allow batching if no auth required or user is authenticated.
                 // Unauthenticated users fall through to dispatch_command for NOAUTH errors.
@@ -622,10 +624,9 @@ impl Server {
                     // visible to other clients in a different sequence than the client
                     // sent. Consecutive same-shard commands are still batched under a
                     // single lock acquisition for performance.
-                    let sorted_groups = batch::group_pipeline_sorted(
-                        &parsed_commands,
-                        |k| active_db.shard_index(k),
-                    );
+                    let sorted_groups = batch::group_pipeline_sorted(&parsed_commands, |k| {
+                        active_db.shard_index(k)
+                    });
                     let cmd_count = parsed_commands.len();
                     let mut response_slots: Vec<Vec<u8>> = vec![Vec::new(); cmd_count];
 
@@ -646,41 +647,70 @@ impl Server {
                                 // ACL pre-filtering: when security is enabled, check
                                 // permissions before batch execution and produce error
                                 // responses for denied commands.
-                                let (batch_cmds, batch_indices): (Vec<&Command>, Vec<usize>) = if let Some(ref sec_mgr) = security {
-                                    let mut cmds = Vec::with_capacity(group.commands.len());
-                                    let mut idxs = Vec::with_capacity(group.commands.len());
-                                    for (ci, &cmd) in group.commands.iter().enumerate() {
-                                        let orig_idx = sorted_entry.original_indices[ci];
-                                        let cmd_lower = cmd.name.to_lowercase();
-                                        if !sec_mgr.check_command_permission(&client_addr_str, &cmd_lower) {
-                                            let username = sec_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                            sec_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, "command");
-                                            let error = format!("NOPERM this user has no permissions to run the '{}' command", cmd_lower);
-                                            if let Ok(bytes) = RespValue::Error(error).serialize() {
+                                let (batch_cmds, batch_indices): (Vec<&Command>, Vec<usize>) =
+                                    if let Some(ref sec_mgr) = security {
+                                        let mut cmds = Vec::with_capacity(group.commands.len());
+                                        let mut idxs = Vec::with_capacity(group.commands.len());
+                                        for (ci, &cmd) in group.commands.iter().enumerate() {
+                                            let orig_idx = sorted_entry.original_indices[ci];
+                                            let cmd_lower = cmd.name.to_lowercase();
+                                            if !sec_mgr.check_command_permission(
+                                                &client_addr_str,
+                                                &cmd_lower,
+                                            ) {
+                                                let username = sec_mgr
+                                                    .acl()
+                                                    .get_username(&client_addr_str)
+                                                    .unwrap_or_else(|| "default".to_string());
+                                                sec_mgr.acl().log_denial(
+                                                    &client_addr_str,
+                                                    &username,
+                                                    &cmd_lower,
+                                                    "command",
+                                                );
+                                                let error = format!(
+                                                    "NOPERM this user has no permissions to run the '{}' command",
+                                                    cmd_lower
+                                                );
+                                                if let Ok(bytes) =
+                                                    RespValue::Error(error).serialize()
+                                                {
+                                                    response_slots[orig_idx] = bytes;
+                                                }
+                                                commands_processed += 1;
+                                                continue;
+                                            }
+                                            if let Some(key) = cmd.args.first()
+                                                && !sec_mgr
+                                                    .check_key_permission(&client_addr_str, key)
+                                            {
+                                                let username = sec_mgr
+                                                    .acl()
+                                                    .get_username(&client_addr_str)
+                                                    .unwrap_or_else(|| "default".to_string());
+                                                let key_str = String::from_utf8_lossy(key);
+                                                sec_mgr.acl().log_denial(
+                                                    &client_addr_str,
+                                                    &username,
+                                                    &cmd_lower,
+                                                    &format!("key '{}'", key_str),
+                                                );
+                                                if let Ok(bytes) = RespValue::Error("NOPERM this user has no permissions to access one of the keys used as arguments".to_string()).serialize() {
                                                 response_slots[orig_idx] = bytes;
                                             }
-                                            commands_processed += 1;
-                                            continue;
-                                        }
-                                        if let Some(key) = cmd.args.first()
-                                            && !sec_mgr.check_key_permission(&client_addr_str, key)
-                                        {
-                                            let username = sec_mgr.acl().get_username(&client_addr_str).unwrap_or_else(|| "default".to_string());
-                                            let key_str = String::from_utf8_lossy(key);
-                                            sec_mgr.acl().log_denial(&client_addr_str, &username, &cmd_lower, &format!("key '{}'", key_str));
-                                            if let Ok(bytes) = RespValue::Error("NOPERM this user has no permissions to access one of the keys used as arguments".to_string()).serialize() {
-                                                response_slots[orig_idx] = bytes;
+                                                commands_processed += 1;
+                                                continue;
                                             }
-                                            commands_processed += 1;
-                                            continue;
+                                            cmds.push(cmd);
+                                            idxs.push(orig_idx);
                                         }
-                                        cmds.push(cmd);
-                                        idxs.push(orig_idx);
-                                    }
-                                    (cmds, idxs)
-                                } else {
-                                    (group.commands.clone(), sorted_entry.original_indices.clone())
-                                };
+                                        (cmds, idxs)
+                                    } else {
+                                        (
+                                            group.commands.clone(),
+                                            sorted_entry.original_indices.clone(),
+                                        )
+                                    };
 
                                 if batch_cmds.is_empty() {
                                     continue;
@@ -688,10 +718,10 @@ impl Server {
 
                                 if group.is_read_only {
                                     // Read batch: single shard read lock
-                                    let (results, expired_keys) = active_db.execute_on_shard_ref(
-                                        group.shard_idx,
-                                        |map| batch::execute_read_batch(map, &batch_cmds),
-                                    );
+                                    let (results, expired_keys) = active_db
+                                        .execute_on_shard_ref(group.shard_idx, |map| {
+                                            batch::execute_read_batch(map, &batch_cmds)
+                                        });
                                     for (ri, result) in results.into_iter().enumerate() {
                                         let resp = match result {
                                             Ok(r) => r,
@@ -699,7 +729,10 @@ impl Server {
                                         };
                                         let resp = if protocol_version == ProtocolVersion::RESP3 {
                                             let cmd_lower = batch_cmds[ri].name.to_lowercase();
-                                            let resp3_cmd = Self::build_resp3_command_name(&cmd_lower, &batch_cmds[ri].args);
+                                            let resp3_cmd = Self::build_resp3_command_name(
+                                                &cmd_lower,
+                                                &batch_cmds[ri].args,
+                                            );
                                             resp.convert_for_resp3(&resp3_cmd)
                                         } else {
                                             resp
@@ -712,7 +745,10 @@ impl Server {
                                     // Deferred lazy-expire: clean up expired keys found during
                                     // the read batch (outside the shard lock).
                                     for key in expired_keys {
-                                        command_handler.storage().lazy_expire_for_db(&key, db_index).await;
+                                        command_handler
+                                            .storage()
+                                            .lazy_expire_for_db(&key, db_index)
+                                            .await;
                                     }
                                 } else {
                                     // Write batch: check read-only replica first
@@ -737,25 +773,37 @@ impl Server {
                                     // OOM rejection, allowing freeing commands like DEL/HDEL/SREM/ZREM
                                     // through even when over maxmemory.
                                     let estimated = batch::estimate_write_batch_memory(&batch_cmds);
-                                    let _ = command_handler.storage().check_write_memory(estimated).await;
+                                    let _ = command_handler
+                                        .storage()
+                                        .check_write_memory(estimated)
+                                        .await;
 
                                     // Write batch: single shard write lock
                                     let max_key_size = command_handler.storage().max_key_size();
                                     let max_value_size = command_handler.storage().max_value_size();
-                                    let memory_budget = command_handler.storage().remaining_memory_budget();
-                                    let (results, expired_replaced_keys) = active_db.execute_on_shard_mut(
-                                        group.shard_idx,
-                                        |map| batch::execute_write_batch(map, &batch_cmds, max_key_size, max_value_size, memory_budget),
-                                    );
+                                    let memory_budget =
+                                        command_handler.storage().remaining_memory_budget();
+                                    let (results, expired_replaced_keys) = active_db
+                                        .execute_on_shard_mut(group.shard_idx, |map| {
+                                            batch::execute_write_batch(
+                                                map,
+                                                &batch_cmds,
+                                                max_key_size,
+                                                max_value_size,
+                                                memory_budget,
+                                            )
+                                        });
                                     let mut batch_write_count: u64 = 0;
                                     let mut batch_key_created: u32 = 0;
                                     let mut batch_key_deleted: u32 = 0;
                                     // Collect prefix index updates to batch into a single lock acquisition
                                     let mut prefix_updates: Vec<(Vec<u8>, bool)> = Vec::new();
                                     // Collect AOF-eligible commands to batch into a single log call
-                                    let mut aof_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
+                                    let mut aof_batch: Vec<crate::networking::resp::RespCommand> =
+                                        Vec::new();
                                     // Collect replication commands to batch into a single propagation call
-                                    let mut repl_batch: Vec<crate::networking::resp::RespCommand> = Vec::new();
+                                    let mut repl_batch: Vec<crate::networking::resp::RespCommand> =
+                                        Vec::new();
                                     // Clean up stale expiration-heap entries for keys
                                     // that were lazily replaced by HSET/SADD/LPUSH/RPUSH
                                     // BEFORE the per-command loop so that a subsequent
@@ -764,20 +812,26 @@ impl Server {
                                     for key in &expired_replaced_keys {
                                         active_db.remove_expiration(key);
                                     }
-                                    for (i, (result, mem_delta, key_delta)) in results.iter().enumerate() {
+                                    for (i, (result, mem_delta, key_delta)) in
+                                        results.iter().enumerate()
+                                    {
                                         // Update per-shard and global memory counters
                                         if *mem_delta > 0 {
                                             active_db.add_memory_by_shard(
                                                 group.shard_idx,
                                                 *mem_delta as u64,
                                             );
-                                            command_handler.storage().adjust_global_memory(*mem_delta);
+                                            command_handler
+                                                .storage()
+                                                .adjust_global_memory(*mem_delta);
                                         } else if *mem_delta < 0 {
                                             active_db.sub_memory_by_shard(
                                                 group.shard_idx,
                                                 (-*mem_delta) as u64,
                                             );
-                                            command_handler.storage().adjust_global_memory(*mem_delta);
+                                            command_handler
+                                                .storage()
+                                                .adjust_global_memory(*mem_delta);
                                         }
 
                                         // Track key count changes and collect prefix index updates.
@@ -808,22 +862,39 @@ impl Server {
                                             // Expired-key cleanup (key_delta=-1 with zero-result)
                                             // is treated as a no-op, matching the non-batched
                                             // atomic_modify path which uses KeepUnchanged.
-                                            let is_no_op = match cmd_name_bytes.first().map(|b| b.to_ascii_uppercase()) {
-                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") =>
-                                                    matches!(result, Ok(RespValue::Integer(0))),
-                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") =>
-                                                    matches!(result, Ok(RespValue::Integer(0))),
-                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") =>
-                                                    matches!(result, Ok(RespValue::BulkString(None))),
-                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") =>
-                                                    matches!(result, Ok(RespValue::Integer(0))),
-                                                Some(b'P') =>
-                                                    (cmd_eq(cmd_name_bytes, b"PEXPIRE") || cmd_eq(cmd_name_bytes, b"PERSIST"))
-                                                    && matches!(result, Ok(RespValue::Integer(0))),
-                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") =>
-                                                    matches!(result, Ok(RespValue::Integer(0))),
-                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") =>
-                                                    matches!(result, Ok(RespValue::Integer(0))),
+                                            let is_no_op = match cmd_name_bytes
+                                                .first()
+                                                .map(|b| b.to_ascii_uppercase())
+                                            {
+                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") => {
+                                                    matches!(result, Ok(RespValue::Integer(0)))
+                                                }
+                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") => {
+                                                    matches!(result, Ok(RespValue::Integer(0)))
+                                                }
+                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") => {
+                                                    matches!(
+                                                        result,
+                                                        Ok(RespValue::BulkString(None))
+                                                    )
+                                                }
+                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") => {
+                                                    matches!(result, Ok(RespValue::Integer(0)))
+                                                }
+                                                Some(b'P') => {
+                                                    (cmd_eq(cmd_name_bytes, b"PEXPIRE")
+                                                        || cmd_eq(cmd_name_bytes, b"PERSIST"))
+                                                        && matches!(
+                                                            result,
+                                                            Ok(RespValue::Integer(0))
+                                                        )
+                                                }
+                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") => {
+                                                    matches!(result, Ok(RespValue::Integer(0)))
+                                                }
+                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") => {
+                                                    matches!(result, Ok(RespValue::Integer(0)))
+                                                }
                                                 _ => false,
                                             };
                                             if !is_no_op || *key_delta < 0 {
@@ -839,40 +910,64 @@ impl Server {
                                             // the integer result for those commands.
                                             // DEL, EXPIRE, PEXPIRE, PERSIST, and GETDEL
                                             // also only bump on actual mutation.
-                                            let should_bump = match cmd_name_bytes.first().map(|b| b.to_ascii_uppercase()) {
-                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") =>
-                                                    *key_delta != 0,
-                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'P') if cmd_eq(cmd_name_bytes, b"PEXPIRE") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'P') if cmd_eq(cmd_name_bytes, b"PERSIST") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
-                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") =>
-                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0) || *key_delta != 0,
+                                            let should_bump = match cmd_name_bytes
+                                                .first()
+                                                .map(|b| b.to_ascii_uppercase())
+                                            {
+                                                Some(b'D') if cmd_eq(cmd_name_bytes, b"DEL") => {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'E') if cmd_eq(cmd_name_bytes, b"EXPIRE") => {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'G') if cmd_eq(cmd_name_bytes, b"GETDEL") => {
+                                                    *key_delta != 0
+                                                }
+                                                Some(b'H') if cmd_eq(cmd_name_bytes, b"HDEL") => {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'P')
+                                                    if cmd_eq(cmd_name_bytes, b"PEXPIRE") =>
+                                                {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'P')
+                                                    if cmd_eq(cmd_name_bytes, b"PERSIST") =>
+                                                {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'S') if cmd_eq(cmd_name_bytes, b"SREM") => {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
+                                                Some(b'Z') if cmd_eq(cmd_name_bytes, b"ZREM") => {
+                                                    matches!(result, Ok(RespValue::Integer(n)) if *n > 0)
+                                                        || *key_delta != 0
+                                                }
                                                 _ => true,
                                             };
-                                            if should_bump
-                                                && let Some(key) = cmd.args.first()
-                                            {
-                                                command_handler.storage().bump_key_version_for_db(key, db_index);
+                                            if should_bump && let Some(key) = cmd.args.first() {
+                                                command_handler
+                                                    .storage()
+                                                    .bump_key_version_for_db(key, db_index);
                                             }
 
                                             // Notify blocking manager for LPUSH/RPUSH
-                                            if (cmd_eq(cmd_name_bytes, b"LPUSH") || cmd_eq(cmd_name_bytes, b"RPUSH"))
+                                            if (cmd_eq(cmd_name_bytes, b"LPUSH")
+                                                || cmd_eq(cmd_name_bytes, b"RPUSH"))
                                                 && let Some(key) = cmd.args.first()
                                             {
                                                 command_handler.blocking_mgr().notify_key(key);
                                             }
 
                                             // Add to expiration heap for EXPIRE/PEXPIRE, remove for PERSIST
-                                            if (cmd_eq(cmd_name_bytes, b"EXPIRE") || cmd_eq(cmd_name_bytes, b"PEXPIRE"))
+                                            if (cmd_eq(cmd_name_bytes, b"EXPIRE")
+                                                || cmd_eq(cmd_name_bytes, b"PEXPIRE"))
                                                 && matches!(result, Ok(RespValue::Integer(1)))
                                                 && let Some(key) = cmd.args.first()
                                                 && let Some(ttl_bytes) = cmd.args.get(1)
@@ -880,11 +975,18 @@ impl Server {
                                                 && let Ok(ttl) = ttl_str.parse::<i64>()
                                             {
                                                 if ttl > 0 {
-                                                    let expires_at = if cmd_eq(cmd_name_bytes, b"EXPIRE") {
-                                                        cached_now() + std::time::Duration::from_secs(ttl as u64)
-                                                    } else {
-                                                        cached_now() + std::time::Duration::from_millis(ttl as u64)
-                                                    };
+                                                    let expires_at =
+                                                        if cmd_eq(cmd_name_bytes, b"EXPIRE") {
+                                                            cached_now()
+                                                                + std::time::Duration::from_secs(
+                                                                    ttl as u64,
+                                                                )
+                                                        } else {
+                                                            cached_now()
+                                                                + std::time::Duration::from_millis(
+                                                                    ttl as u64,
+                                                                )
+                                                        };
                                                     active_db.add_expiration_by_shard(
                                                         group.shard_idx,
                                                         key.clone(),
@@ -922,7 +1024,9 @@ impl Server {
                                             // propagate a synthetic DEL so replicas/AOF stay
                                             // consistent (matching Redis lazy-expiry behaviour).
                                             let expired_key_removed = is_no_op && *key_delta < 0;
-                                            if persistence.is_some() && (!is_no_op || expired_key_removed) {
+                                            if persistence.is_some()
+                                                && (!is_no_op || expired_key_removed)
+                                            {
                                                 if expired_key_removed {
                                                     if let Some(key) = cmd.args.first() {
                                                         aof_batch.push(RespCommand {
@@ -939,14 +1043,19 @@ impl Server {
                                             }
                                             if replication.is_some()
                                                 && (!is_no_op || expired_key_removed)
-                                                && (expired_key_removed || ReplicationManager::is_write_command(cmd_lower))
+                                                && (expired_key_removed
+                                                    || ReplicationManager::is_write_command(
+                                                        cmd_lower,
+                                                    ))
                                             {
                                                 // Only emit SELECT once per batch group (db_index
                                                 // is constant within a group)
                                                 if repl_batch.is_empty() {
                                                     repl_batch.push(RespCommand {
                                                         name: b"SELECT".to_vec(),
-                                                        args: vec![db_index.to_string().into_bytes()],
+                                                        args: vec![
+                                                            db_index.to_string().into_bytes(),
+                                                        ],
                                                     });
                                                 }
                                                 if expired_key_removed {
@@ -970,7 +1079,10 @@ impl Server {
                                         };
                                         let resp = if protocol_version == ProtocolVersion::RESP3 {
                                             let cmd_lower = batch_cmds[i].name.to_lowercase();
-                                            let resp3_cmd = Self::build_resp3_command_name(&cmd_lower, &batch_cmds[i].args);
+                                            let resp3_cmd = Self::build_resp3_command_name(
+                                                &cmd_lower,
+                                                &batch_cmds[i].args,
+                                            );
                                             resp.convert_for_resp3(&resp3_cmd)
                                         } else {
                                             resp
@@ -982,15 +1094,30 @@ impl Server {
                                     }
                                     // Batch update prefix indices with a single lock acquisition
                                     if !prefix_updates.is_empty() {
-                                        let refs: Vec<(&[u8], bool)> = prefix_updates.iter().map(|(k, i)| (k.as_slice(), *i)).collect();
-                                        command_handler.storage().update_prefix_indices_batch_for_db(&refs, db_index).await;
+                                        let refs: Vec<(&[u8], bool)> = prefix_updates
+                                            .iter()
+                                            .map(|(k, i)| (k.as_slice(), *i))
+                                            .collect();
+                                        command_handler
+                                            .storage()
+                                            .update_prefix_indices_batch_for_db(&refs, db_index)
+                                            .await;
                                     }
                                     // Batch AOF logging with a single call
                                     if !aof_batch.is_empty()
                                         && let Some(ref pm) = persistence
-                                        && let Err(e) = pm.log_commands_batch_for_db(aof_batch, aof_sync_policy, db_index).await
+                                        && let Err(e) = pm
+                                            .log_commands_batch_for_db(
+                                                aof_batch,
+                                                aof_sync_policy,
+                                                db_index,
+                                            )
+                                            .await
                                     {
-                                        eprintln!("WARNING: Failed to log batch AOF for db {}: {}", db_index, e);
+                                        eprintln!(
+                                            "WARNING: Failed to log batch AOF for db {}: {}",
+                                            db_index, e
+                                        );
                                     }
                                     // Batch replication propagation with a single call
                                     if !repl_batch.is_empty()
@@ -1000,16 +1127,29 @@ impl Server {
                                     }
                                     // Update per-shard and global key counts
                                     if batch_key_created > 0 {
-                                        active_db.inc_key_count_by_shard(group.shard_idx, batch_key_created);
-                                        command_handler.storage().adjust_key_count(batch_key_created as i64);
+                                        active_db.inc_key_count_by_shard(
+                                            group.shard_idx,
+                                            batch_key_created,
+                                        );
+                                        command_handler
+                                            .storage()
+                                            .adjust_key_count(batch_key_created as i64);
                                     }
                                     if batch_key_deleted > 0 {
-                                        active_db.dec_key_count_by_shard(group.shard_idx, batch_key_deleted);
-                                        command_handler.storage().adjust_key_count(-(batch_key_deleted as i64));
+                                        active_db.dec_key_count_by_shard(
+                                            group.shard_idx,
+                                            batch_key_deleted,
+                                        );
+                                        command_handler
+                                            .storage()
+                                            .adjust_key_count(-(batch_key_deleted as i64));
                                     }
                                     // Increment write counters for RDB snapshot triggering
                                     if batch_write_count > 0 {
-                                        command_handler.storage().increment_write_counters_batch(batch_write_count).await;
+                                        command_handler
+                                            .storage()
+                                            .increment_write_counters_batch(batch_write_count)
+                                            .await;
                                     }
                                 }
                                 // (last_cmd_local already updated from group.commands above)
@@ -1053,7 +1193,8 @@ impl Server {
                                         // If SELECT changed the database, re-capture active_db
                                         // so subsequent batch groups target the correct DB
                                         if cmd_eq(cmd.name.as_bytes(), b"SELECT") {
-                                            active_db = command_handler.storage().get_db_by_index(db_index);
+                                            active_db =
+                                                command_handler.storage().get_db_by_index(db_index);
                                         }
                                     }
                                 }
@@ -1071,7 +1212,8 @@ impl Server {
                             // When close_connection is set (e.g. QUIT in pipeline),
                             // skip unpopulated trailing slots — those commands should
                             // produce no response since the connection is closing.
-                            response_buffer.extend_from_slice(b"-ERR internal serialization error\r\n");
+                            response_buffer
+                                .extend_from_slice(b"-ERR internal serialization error\r\n");
                         }
                     }
 
@@ -1099,8 +1241,7 @@ impl Server {
                         if err_idx < deferred_parse_errors.len()
                             && deferred_parse_errors[err_idx].0 == slot
                         {
-                            response_buffer
-                                .extend_from_slice(&deferred_parse_errors[err_idx].1);
+                            response_buffer.extend_from_slice(&deferred_parse_errors[err_idx].1);
                             err_idx += 1;
                             commands_processed += 1;
                         } else if cmd_idx < parsed_commands.len() {
@@ -1376,9 +1517,8 @@ impl Server {
                         response_buffer.extend_from_slice(&bytes);
                     }
                 } else {
-                    let response = RespValue::Error(
-                        "ERR SELECT is not allowed in cluster mode".to_string(),
-                    );
+                    let response =
+                        RespValue::Error("ERR SELECT is not allowed in cluster mode".to_string());
                     if let Ok(bytes) = response.serialize() {
                         response_buffer.extend_from_slice(&bytes);
                     }
@@ -1977,8 +2117,7 @@ impl Server {
                 };
 
                 if let Some(key) = first_key
-                    && let Some(redirect) =
-                        cluster_mgr.get_redirect(key, current_asking).await
+                    && let Some(redirect) = cluster_mgr.get_redirect(key, current_asking).await
                 {
                     let error_msg = redirect.to_string();
                     // Write to response_buffer (not directly to socket) to maintain
@@ -2412,7 +2551,10 @@ impl Server {
                         .log_commands_batch_for_db(batch, aof_sync_policy, db_index)
                         .await
                     {
-                        eprintln!("WARNING: Failed to log transaction AOF for db {}: {}", db_index, e);
+                        eprintln!(
+                            "WARNING: Failed to log transaction AOF for db {}: {}",
+                            db_index, e
+                        );
                     }
                 }
                 return Ok(result);
@@ -3769,14 +3911,16 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         // Spawn a client connection
-        let client = tokio::spawn(async move {
-            tokio::net::TcpStream::connect(addr).await.unwrap()
-        });
+        let client =
+            tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
 
         // Accept and set TCP_NODELAY (same as our server accept path)
         let (socket, _) = listener.accept().await.unwrap();
         socket.set_nodelay(true).unwrap();
-        assert!(socket.nodelay().unwrap(), "TCP_NODELAY should be enabled on accepted connections");
+        assert!(
+            socket.nodelay().unwrap(),
+            "TCP_NODELAY should be enabled on accepted connections"
+        );
 
         let _ = client.await;
     }
@@ -3785,11 +3929,17 @@ mod tests {
     fn test_created_at_uses_unix_timestamp() {
         let info = ClientInfo::new(1, "127.0.0.1:1234".to_string());
         // created_at should be a reasonable unix timestamp (after year 2020)
-        assert!(info.created_at > 1_577_836_800, "created_at should be a unix timestamp after 2020");
+        assert!(
+            info.created_at > 1_577_836_800,
+            "created_at should be a unix timestamp after 2020"
+        );
         // Age should be 0 or 1 second since we just created it
         let line = info.to_info_line();
-        assert!(line.contains("age=0") || line.contains("age=1"),
-            "Newly created connection should have age of 0 or 1, got: {}", line);
+        assert!(
+            line.contains("age=0") || line.contains("age=1"),
+            "Newly created connection should have age of 0 or 1, got: {}",
+            line
+        );
     }
 
     #[test]
@@ -3798,7 +3948,10 @@ mod tests {
         // (as it would be when synced from local tracking on CLIENT command)
         let connections = make_connections();
         let conn_id = 1;
-        connections.insert(conn_id, ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()));
+        connections.insert(
+            conn_id,
+            ClientInfo::new(conn_id, "127.0.0.1:1234".to_string()),
+        );
 
         // Simulate local last_cmd sync (as dispatch_command does before CLIENT)
         if let Some(mut info) = connections.get_mut(&conn_id) {
@@ -3807,7 +3960,8 @@ mod tests {
             info.multi = -1;
         }
 
-        let result = Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
+        let result =
+            Server::handle_client_command(&args(&["INFO"]), &connections, conn_id).unwrap();
         match result {
             RespValue::BulkString(Some(data)) => {
                 let output = String::from_utf8(data).unwrap();

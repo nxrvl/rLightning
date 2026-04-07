@@ -1068,7 +1068,7 @@ mod tests {
     use super::*;
     use crate::command::types::sorted_set::SortedSetData;
     use crate::storage::engine::StorageEngine;
-    use crate::storage::value::{StoreValue, NativeHashMap, NativeHashSet};
+    use crate::storage::value::{NativeHashMap, NativeHashSet, StoreValue};
     use std::collections::VecDeque;
 
     fn create_test_engine() -> Arc<StorageEngine> {
@@ -2245,7 +2245,11 @@ mod tests {
             .await
             .unwrap()
             .expect("stream should exist");
-        let stream = if let StoreValue::Stream(s) = &stream_item.value { s } else { panic!("Expected Stream StoreValue") };
+        let stream = if let StoreValue::Stream(s) = &stream_item.value {
+            s
+        } else {
+            panic!("Expected Stream StoreValue")
+        };
         assert_eq!(stream.entries.len(), 3, "should have 3 entries");
         assert!(
             stream.groups.contains_key("mygroup"),
@@ -2291,7 +2295,11 @@ mod tests {
             .await
             .unwrap()
             .expect("stream should exist after rewrite reload");
-        let stream2 = if let StoreValue::Stream(s) = &stream_item2.value { s } else { panic!("Expected Stream StoreValue") };
+        let stream2 = if let StoreValue::Stream(s) = &stream_item2.value {
+            s
+        } else {
+            panic!("Expected Stream StoreValue")
+        };
         assert_eq!(stream2.entries.len(), 3, "entries should survive rewrite");
         assert!(
             stream2.groups.contains_key("mygroup"),
@@ -2385,7 +2393,11 @@ mod tests {
             .await
             .unwrap()
             .expect("stream should exist");
-        let stream1 = if let StoreValue::Stream(s) = &item1.value { s } else { panic!("Expected Stream StoreValue") };
+        let stream1 = if let StoreValue::Stream(s) = &item1.value {
+            s
+        } else {
+            panic!("Expected Stream StoreValue")
+        };
         assert_eq!(stream1.entries.len(), 3, "should have 3 stream entries");
         let group1 = &stream1.groups["processors"];
         assert_eq!(
@@ -2414,7 +2426,11 @@ mod tests {
             .await
             .unwrap()
             .expect("stream should exist after reload");
-        let stream2 = if let StoreValue::Stream(s) = &item2.value { s } else { panic!("Expected Stream StoreValue") };
+        let stream2 = if let StoreValue::Stream(s) = &item2.value {
+            s
+        } else {
+            panic!("Expected Stream StoreValue")
+        };
         assert_eq!(stream2.entries.len(), 3, "entries survive reload");
         assert!(
             stream2.groups.contains_key("processors"),
