@@ -1055,11 +1055,7 @@ impl StorageEngine {
         }
 
         let mut item = Entry::new(value);
-        let expires_at = if let Some(ttl) = ttl {
-            Some(item.expire(ttl))
-        } else {
-            None
-        };
+        let expires_at = ttl.map(|ttl| item.expire(ttl));
 
         let is_new_key = match self.active_db().entry(key.clone()) {
             ShardEntry::Occupied(mut entry) => {
@@ -2719,11 +2715,7 @@ impl StorageEngine {
         self.maybe_evict(required_size).await?;
 
         let mut item = crate::storage::item::Entry::new(store_value);
-        let expires_at = if let Some(ttl) = ttl {
-            Some(item.expire(ttl))
-        } else {
-            None
-        };
+        let expires_at = ttl.map(|ttl| item.expire(ttl));
 
         // Capture version inside the entry match block while the shard lock
         // is still held. This prevents a concurrent SET from overwriting the key
@@ -2791,11 +2783,7 @@ impl StorageEngine {
         self.maybe_evict(required_size).await?;
 
         let mut item = crate::storage::item::Entry::new(store_value);
-        let expires_at = if let Some(ttl) = ttl {
-            Some(item.expire(ttl))
-        } else {
-            None
-        };
+        let expires_at = ttl.map(|ttl| item.expire(ttl));
 
         let updated = match self.active_db().entry(key.clone()) {
             ShardEntry::Occupied(mut occ) => {
@@ -2855,11 +2843,7 @@ impl StorageEngine {
         self.maybe_evict(required_size).await?;
 
         let mut item = crate::storage::item::Entry::new(store_value);
-        let new_expires_at = if let Some(ttl) = ttl {
-            Some(item.expire(ttl))
-        } else {
-            None
-        };
+        let new_expires_at = ttl.map(|ttl| item.expire(ttl));
 
         let (did_set, old_value, is_new_key, final_expires_at) =
             match self.active_db().entry(key.clone()) {
