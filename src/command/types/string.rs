@@ -32,7 +32,14 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     return Err(CommandError::WrongNumberOfArguments);
                 }
                 let seconds = parse_ttl(&args[i + 1])?;
-                ttl = seconds;
+                match seconds {
+                    Some(d) => ttl = Some(d),
+                    None => {
+                        return Err(CommandError::InvalidArgument(
+                            "invalid expire time in 'set' command".to_string(),
+                        ));
+                    }
+                }
                 i += 2;
             }
             "PX" => {
@@ -71,8 +78,9 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     .as_secs() as i64;
                 let diff = timestamp - now_secs;
                 if diff <= 0 {
-                    // Key would already be expired; set a minimal TTL
-                    ttl = Some(std::time::Duration::from_millis(1));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'set' command".to_string(),
+                    ));
                 } else {
                     ttl = Some(std::time::Duration::from_secs(diff as u64));
                 }
@@ -97,7 +105,9 @@ pub async fn set(engine: &StorageEngine, args: &[Vec<u8>]) -> CommandResult {
                     .as_millis() as i64;
                 let diff_ms = timestamp_ms - now_ms;
                 if diff_ms <= 0 {
-                    ttl = Some(std::time::Duration::from_millis(1));
+                    return Err(CommandError::InvalidArgument(
+                        "invalid expire time in 'set' command".to_string(),
+                    ));
                 } else {
                     ttl = Some(std::time::Duration::from_millis(diff_ms as u64));
                 }

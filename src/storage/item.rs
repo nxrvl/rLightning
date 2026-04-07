@@ -65,7 +65,7 @@ impl Entry {
             value,
             expires_at: None,
             lru_clock: lru_now(),
-            access_count: 0,
+            access_count: 5,
             cached_mem_size,
         }
     }
@@ -83,9 +83,11 @@ impl Entry {
 
     /// Check if this entry has expired.
     /// Uses cached clock (~1ms resolution) to avoid syscall overhead.
+    /// Uses `>=` to match Redis semantics and stay consistent with
+    /// expire_shard / lazy_expire which use `exp <= now`.
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
-            cached_now() > expires_at
+            cached_now() >= expires_at
         } else {
             false
         }
@@ -111,9 +113,13 @@ impl Entry {
     }
 
     /// Set a new expiration time.
-    /// Uses cached clock for consistency.
-    pub fn expire(&mut self, ttl: Duration) {
-        self.expires_at = Some(cached_now() + ttl);
+    /// Uses cached clock for consistency. Returns the computed expires_at
+    /// so callers can reuse it for the expiration heap without a second
+    /// `cached_now()` call.
+    pub fn expire(&mut self, ttl: Duration) -> Instant {
+        let expires_at = cached_now() + ttl;
+        self.expires_at = Some(expires_at);
+        expires_at
     }
 
     /// Remove the expiration time.

@@ -387,8 +387,8 @@ mod tests {
         if let RespValue::Array(Some(items)) = result {
             assert_eq!(items.len(), 2);
             assert_eq!(items[0], RespValue::BulkString(Some(b"maxmemory".to_vec())));
-            // Default StorageConfig has max_memory = 128 * 1024 * 1024 = 134217728
-            assert_eq!(items[1], RespValue::BulkString(Some(b"134217728".to_vec())));
+            // Default StorageConfig has max_memory = 0 (unlimited), matching Redis
+            assert_eq!(items[1], RespValue::BulkString(Some(b"0".to_vec())));
         } else {
             panic!("Expected array response from CONFIG GET");
         }

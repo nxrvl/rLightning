@@ -154,8 +154,9 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            // Default to 128MB
-            max_memory: 128 * 1024 * 1024,
+            // Default to no memory limit (0 = unlimited), matching Redis behavior.
+            // The engine normalizes 0 to usize::MAX at startup.
+            max_memory: 0,
             eviction_policy: EvictionPolicy::LRU,
             default_ttl: Duration::from_secs(0),
             max_key_size: 1024,
@@ -1048,8 +1049,7 @@ impl StorageEngine {
 
         let mut item = Entry::new(value);
         let expires_at = if let Some(ttl) = ttl {
-            item.expire(ttl);
-            Some(cached_now() + ttl)
+            Some(item.expire(ttl))
         } else {
             None
         };
@@ -1273,8 +1273,7 @@ impl StorageEngine {
                 if entry.is_expired() {
                     None // expired = not found
                 } else if let Some(ttl) = ttl {
-                    entry.expire(ttl);
-                    let expires_at = cached_now() + ttl;
+                    let expires_at = entry.expire(ttl);
                     Some(Some((true, expires_at)))
                 } else {
                     entry.remove_expiry();
@@ -2266,8 +2265,8 @@ impl StorageEngine {
             let now = cached_now();
             if expires_at > now {
                 let remaining = expires_at - now;
-                new_item.expire(remaining);
-                self.add_to_expiration_queue(dst.clone(), cached_now() + remaining)
+                let exp = new_item.expire(remaining);
+                self.add_to_expiration_queue(dst.clone(), exp)
                     .await;
             }
         }
@@ -2701,8 +2700,7 @@ impl StorageEngine {
 
         let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
-            item.expire(ttl);
-            Some(cached_now() + ttl)
+            Some(item.expire(ttl))
         } else {
             None
         };
@@ -2774,8 +2772,7 @@ impl StorageEngine {
 
         let mut item = crate::storage::item::Entry::new(store_value);
         let expires_at = if let Some(ttl) = ttl {
-            item.expire(ttl);
-            Some(cached_now() + ttl)
+            Some(item.expire(ttl))
         } else {
             None
         };
@@ -2839,8 +2836,7 @@ impl StorageEngine {
 
         let mut item = crate::storage::item::Entry::new(store_value);
         let new_expires_at = if let Some(ttl) = ttl {
-            item.expire(ttl);
-            Some(cached_now() + ttl)
+            Some(item.expire(ttl))
         } else {
             None
         };
@@ -3320,8 +3316,7 @@ impl StorageEngine {
                             (None, true)
                         }
                         Some(Some(duration)) => {
-                            item.expire(duration);
-                            let expires_at = cached_now() + duration;
+                            let expires_at = item.expire(duration);
                             (Some(expires_at), true)
                         }
                     };
