@@ -69,6 +69,13 @@ COPY --from=builder /usr/src/rlightning/target/release/rlightning /usr/local/bin
 
 # Set up a non-root user for better security
 RUN groupadd -r rlightning && useradd -r -g rlightning rlightning
+
+# Create data directory with correct ownership before switching user.
+# This ensures volumes mounted at /data inherit usable permissions.
+RUN mkdir -p /data && chown rlightning:rlightning /data
+VOLUME /data
+WORKDIR /data
+
 USER rlightning
 
 # Expose the Redis-compatible port
