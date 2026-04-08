@@ -431,10 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fmt::Subscriber::builder().with_env_filter(filter).init();
 
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "rLightning starting"
-    );
+    info!(version = env!("CARGO_PKG_VERSION"), "rLightning starting");
 
     // Parse command line arguments
     let args = Args::parse();
